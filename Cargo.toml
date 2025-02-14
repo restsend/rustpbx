@@ -1,0 +1,14 @@
+[package]
+name = "rustpbx"
+version = "0.1.0"
+edition = "2021"
+description = "A PBX system written in Rust"
+license = "MIT"
+repository = "https://github.com/restsend/rustpbx"
+readme = "README.md"
+keywords = ["sip", "voip", "telephony", "pbx"]
+authors = ["kui<kui@fourz.cn>"]
+categories = ["network-programming", "multimedia"]
+
+
+[dependencies]
