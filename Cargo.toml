@@ -2,13 +2,28 @@
 name = "rustpbx"
 version = "0.1.0"
 edition = "2021"
-description = "A PBX system written in Rust"
+authors = ["Your Name <your.email@example.com>"]
+description = "A SIP PBX implementation in Rust"
 license = "MIT"
 repository = "https://github.com/restsend/rustpbx"
 readme = "README.md"
 keywords = ["sip", "voip", "telephony", "pbx"]
-authors = ["kui<kui@fourz.cn>"]
 categories = ["network-programming", "multimedia"]
 
 
 [dependencies]
+tokio = { version = "1.43.0", features = ["full"] }
+clap = { version = "4.5.0", features = ["derive"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.2", features = ["trace"] }
+axum = "0.8.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+thiserror = "2.0"
+anyhow = "1.0"
+futures = "0.3"
+bytes = "1.0"
+toml = "0.8.20"
