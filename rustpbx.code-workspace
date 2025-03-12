@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../src/silero-rs"
+		},
+		{
+			"path": "../../src/nnnoiseless"
+		},
+		{
+			"path": "../rsipstack"
+		},
+		{
+			"path": "../../src/ezk"
+		}
+	],
+	"settings": {}
+}

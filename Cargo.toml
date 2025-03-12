@@ -12,7 +12,7 @@ categories = ["network-programming", "multimedia"]
 
 
 [dependencies]
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.44.0", features = ["full"] }
 clap = { version = "4.5.0", features = ["derive"] }
 tower = "0.5.2"
 tower-http = { version = "0.6.2", features = ["trace"] }
@@ -27,3 +27,10 @@ anyhow = "1.0"
 futures = "0.3"
 bytes = "1.0"
 toml = "0.8.20"
+tracing-appender = "0.2.3"
+rand = "0.9.0"
+hound = "3.5.1"
+
+[dev-dependencies]
+tokio-test = "0.4.4"
+tokio = { version = "1.44.0", features = ["full", "test-util"] }
