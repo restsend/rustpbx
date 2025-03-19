@@ -1,82 +1,136 @@
-# RustPBX
+# RustPBX Media Processing System
 
-A SIP PBX implementation in Rust.
+A robust media processing system for handling WebRTC/RTP audio streams, with support for various audio codecs, voice activity detection, noise reduction, and speech recognition.
 
 ## Features
 
-- **Media Stream Processing**: Process WebRTC and RTP media streams with support for:
-  - DTMF detection
-  - Voice Activity Detection (VAD)
-  - Noise reduction
-  - PCM recording
-  - Multiple input/output formats (WebRTC, RTP, WAV, PCM, TTS)
+- **Audio Codecs**
+  - G.711 μ-law (PCMU)
+  - G.711 A-law (PCMA)
+  - G.722
+
+- **Voice Activity Detection (VAD)**
+  - WebRTC VAD implementation
+  - Voice Activity Detector implementation
+  - Configurable VAD type selection
+
+- **Noise Reduction**
+  - RNNoise-based noise suppression
+  - Frame-based processing
+  - Support for different sample rates and channels
+
+- **Speech Recognition**
+  - QCloud ASR integration
+  - Real-time transcription
+  - Support for word-level and segment-level results
+
+- **Media Stream Management**
+  - Track-based architecture
+  - Event-driven design
+  - Support for multiple concurrent tracks
+  - Recording capability
+
+## Requirements
+
+- Rust 1.75 or later
+- Cargo package manager
+
+## Installation
+
+Add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rustpbx = "0.1"
+```
 
 ## Usage
 
-### Media Stream Example
+### Basic Media Stream Setup
 
 ```rust
 use rustpbx::media::{
-    MediaStream, MediaStreamConfig, MediaSourceConfig, MediaSinkConfig,
-    EventType, EventData, source::Codec,
+    MediaStream,
+    MediaStreamBuilder,
+    track::Track,
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create a configuration for the media stream
-    let config = MediaStreamConfig {
-        input: MediaSourceConfig::RTP {
-            bind_address: "127.0.0.1:5000".parse()?,
-            codec: Codec::Opus,
-        },
-        output: MediaSinkConfig::WAVFile {
-            path: "output.wav".to_string(),
-            sample_rate: 48000,
-            channels: 1,
-        },
-        record_pcm: Some(rustpbx::media::PCMRecorderConfig {
-            path: "recording.pcm".to_string(),
-        }),
-        enable_vad: true,
-        enable_dtmf_detection: true,
-    };
-    
-    // Create the media stream
-    let mut stream = MediaStream::new(config)?;
-    
-    // Register event handlers
-    stream.on(EventType::DTMFDetected, Box::new(|event| {
-        if let EventData::DTMF { digit, .. } = event.data {
-            println!("DTMF detected: {}", digit);
+async fn main() {
+    // Create a media stream
+    let stream = MediaStreamBuilder::new()
+        .event_buf_size(32)
+        .build();
+
+    // Subscribe to stream events
+    let mut events = stream.subscribe();
+
+    // Start serving the stream
+    tokio::spawn(async move {
+        stream.serve().await.unwrap();
+    });
+
+    // Handle events
+    while let Ok(event) = events.recv().await {
+        match event {
+            MediaStreamEvent::StartSpeaking(track_id, ssrc) => {
+                println!("Track {} (SSRC: {}) started speaking", track_id, ssrc);
+            }
+            MediaStreamEvent::Silence(track_id, ssrc) => {
+                println!("Track {} (SSRC: {}) is silent", track_id, ssrc);
+            }
+            MediaStreamEvent::Transcription(track_id, ssrc, text) => {
+                println!("Track {} (SSRC: {}): {}", track_id, ssrc, text);
+            }
+            _ => {}
         }
-    }));
-    
-    // Start the media stream
-    stream.start().await?;
-    
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
-    
-    // Stop the media stream
-    stream.stop().await?;
-    
-    Ok(())
+    }
 }
 ```
 
-## Building and Testing
+### Adding Processors to a Track
+
+```rust
+use rustpbx::media::{
+    noise::NoiseReducer,
+    vad::{VadProcessor, VadType},
+    asr::qcloud::{QCloudAsr, QCloudAsrConfig},
+};
+
+// Create processors
+let noise_reducer = NoiseReducer::new();
+let vad = VadProcessor::new(track_id.clone(), ssrc, VadType::WebRTC, event_sender.clone());
+let asr = QCloudAsr::new(
+    track_id.clone(),
+    ssrc,
+    QCloudAsrConfig::default(),
+    event_sender.clone(),
+);
+
+// Add processors to track
+track.with_processors(vec![
+    Box::new(noise_reducer),
+    Box::new(vad),
+    Box::new(asr),
+]);
+```
+
+## Testing
+
+Run the test suite:
 
 ```bash
-# Build the project
-cargo build
-
-# Run tests
 cargo test
+```
 
-# Run the media stream example
-cargo run --example media_stream_example
+Run specific test categories:
+
+```bash
+cargo test --test codecs    # Run codec tests
+cargo test --test vad       # Run VAD tests
+cargo test --test noise     # Run noise reduction tests
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT License
