@@ -1,0 +1,84 @@
+use anyhow::Result;
+use std::time::{Duration, Instant};
+use webrtc_vad::{SampleRate, Vad, VadMode};
+
+use super::VADConfig;
+use crate::media::processor::AudioFrame;
+use crate::media::utils;
+
+// Thread-safe wrapper for Vad
+struct ThreadSafeVad(Vad);
+unsafe impl Send for ThreadSafeVad {}
+unsafe impl Sync for ThreadSafeVad {}
+
+pub struct VoiceActivityVad {
+    detector: ThreadSafeVad,
+    config: VADConfig,
+    buffer: Vec<i16>,
+    last_speech_time: Option<Instant>,
+    is_speaking: bool,
+    speech_start_time: Option<u64>,
+}
+
+impl VoiceActivityVad {
+    pub fn new() -> Self {
+        Self {
+            detector: ThreadSafeVad(Vad::new_with_rate_and_mode(
+                SampleRate::Rate16kHz,
+                VadMode::Quality,
+            )),
+            config: VADConfig::default(),
+            buffer: Vec::new(),
+            last_speech_time: None,
+            is_speaking: false,
+            speech_start_time: None,
+        }
+    }
+}
+
+impl super::VadEngine for VoiceActivityVad {
+    fn process(&mut self, frame: &AudioFrame) -> Result<bool> {
+        // Convert f32 samples to i16
+        let i16_samples = utils::convert_f32_to_pcm(&frame.samples);
+
+        // Add current frame to buffer
+        self.buffer.extend_from_slice(&i16_samples);
+
+        // Process in chunks of 30ms (480 samples at 16kHz)
+        let chunk_size = (16000 * 30) / 1000;
+        let mut is_speaking = self.is_speaking;
+
+        while self.buffer.len() >= chunk_size {
+            let chunk = self.buffer[..chunk_size].to_vec();
+            let is_voice = self.detector.0.is_voice_segment(&chunk).unwrap_or(false);
+
+            // Remove processed samples
+            self.buffer.drain(..chunk_size);
+
+            // Calculate timestamp in milliseconds
+            let timestamp = (self.buffer.len() as u64 * 1000) / frame.sample_rate as u64;
+
+            if is_voice {
+                self.last_speech_time = Some(Instant::now());
+                if !self.is_speaking {
+                    self.is_speaking = true;
+                    self.speech_start_time = Some(timestamp);
+                    is_speaking = true;
+                }
+            } else if self.is_speaking {
+                if let Some(last_time) = self.last_speech_time {
+                    let silence_duration = Instant::now().duration_since(last_time);
+                    if silence_duration
+                        > Duration::from_millis(self.config.silence_duration_threshold)
+                    {
+                        self.is_speaking = false;
+                        self.speech_start_time = None;
+                        is_speaking = false;
+                    }
+                }
+            }
+        }
+
+        Ok(is_speaking)
+    }
+}
