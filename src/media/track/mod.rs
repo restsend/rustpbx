@@ -1,26 +1,38 @@
-use super::{processor::Processor, stream::EventSender};
-use ::webrtc::rtp::packet::Packet;
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-mod file;
-mod rtp;
-mod tts;
-mod webrtc;
 
-pub type TrackId = String;
+use crate::media::processor::Processor;
+
+use super::stream::EventSender;
+
+#[derive(Debug, Clone)]
+pub enum TrackPayload {
+    PCM(Vec<f32>),
+    RTP(u8, Vec<u8>),
+}
+#[derive(Debug, Clone)]
 pub struct TrackPacket {
     pub track_id: TrackId,
-    pub packet: Packet,
+    pub timestamp: u64,
+    pub payload: TrackPayload,
 }
+
 pub type TrackPacketSender = mpsc::UnboundedSender<TrackPacket>;
 pub type TrackPacketReceiver = mpsc::UnboundedReceiver<TrackPacket>;
+
+pub mod file;
+pub mod rtp;
+pub mod tts;
+pub mod webrtc;
+
+pub type TrackId = String;
 
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &TrackId;
-    fn with_processors(&self, processors: Vec<Box<dyn Processor>>);
+    fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>);
     async fn start(
         &self,
         token: CancellationToken,

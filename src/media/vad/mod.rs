@@ -1,6 +1,21 @@
-pub mod silero;
-pub mod webrtc;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use webrtc_vad::Vad;
 
+use crate::media::{
+    processor::{AudioFrame, Processor},
+    stream::{EventSender, MediaStreamEvent},
+};
+
+mod voice_activity;
+mod webrtc;
+
+// Thread-safe wrapper for Vad
+pub(crate) struct ThreadSafeVad(Vad);
+unsafe impl Send for ThreadSafeVad {}
+unsafe impl Sync for ThreadSafeVad {}
+
+#[derive(Clone)]
 pub struct VADConfig {
     /// Minimum duration of silence to consider speech ended (in milliseconds)
     pub silence_duration_threshold: u64,
@@ -23,10 +38,51 @@ pub struct VADConfig {
 impl Default for VADConfig {
     fn default() -> Self {
         Self {
-            silence_duration_threshold: 800, // Longer pause detection (800ms)
-            pre_speech_padding: 150,         // Keep 150ms before speech
-            post_speech_padding: 200,        // Keep 200ms after speech
+            silence_duration_threshold: 500,
+            pre_speech_padding: 150,  // Keep 150ms before speech
+            post_speech_padding: 200, // Keep 200ms after speech
             voice_threshold: 0.5,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VadType {
+    WebRTC,
+    VoiceActivity,
+}
+
+pub struct VadProcessor {
+    vad: Box<dyn VadEngine>,
+    event_sender: EventSender,
+}
+
+pub trait VadEngine: Send + Sync {
+    fn process(&mut self, frame: &AudioFrame) -> Result<bool>;
+}
+
+impl VadProcessor {
+    pub fn new(track_id: String, vad_type: VadType, event_sender: EventSender) -> Self {
+        let vad: Box<dyn VadEngine> = match vad_type {
+            VadType::WebRTC => Box::new(webrtc::WebRtcVad::new()),
+            VadType::VoiceActivity => Box::new(voice_activity::VoiceActivityVad::new()),
+        };
+
+        Self { vad, event_sender }
+    }
+}
+
+impl Processor for VadProcessor {
+    fn process_frame(&mut self, frame: AudioFrame) -> Result<AudioFrame> {
+        let is_speech = self.vad.process(&frame)?;
+
+        // Send VAD events
+        let event = if is_speech {
+            MediaStreamEvent::StartSpeaking(frame.track_id.clone(), frame.timestamp)
+        } else {
+            MediaStreamEvent::Silence(frame.track_id.clone(), frame.timestamp)
+        };
+        self.event_sender.send(event).ok();
+        Ok(frame)
     }
 }
