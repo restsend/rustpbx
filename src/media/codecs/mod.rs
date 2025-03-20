@@ -41,7 +41,7 @@ pub fn create_decoder(codec: CodecType) -> Result<Box<dyn Decoder>> {
     match codec {
         CodecType::PCMU => Ok(Box::new(pcmu::PcmuDecoder::new())),
         CodecType::PCMA => Ok(Box::new(pcma::PcmaDecoder::new())),
-        CodecType::G722 => Ok(Box::new(g722::G722Decoder::new(64000))),
+        CodecType::G722 => Ok(Box::new(g722::G722Decoder::new())),
     }
 }
 
@@ -49,6 +49,6 @@ pub fn create_encoder(codec: CodecType) -> Result<Box<dyn Encoder>> {
     match codec {
         CodecType::PCMU => Ok(Box::new(pcmu::PcmuEncoder::new())),
         CodecType::PCMA => Ok(Box::new(pcma::PcmaEncoder::new())),
-        CodecType::G722 => Ok(Box::new(g722::G722Encoder::new(64000))),
+        CodecType::G722 => Ok(Box::new(g722::G722Encoder::new())),
     }
 }
