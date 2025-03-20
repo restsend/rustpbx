@@ -51,14 +51,14 @@ mod tests {
     async fn test_stream_add_track() {
         let stream = MediaStreamBuilder::new().build();
         let track = Box::new(TestTrack::new("test1".to_string()));
-        stream.update_track(track);
+        stream.update_track(track).await;
     }
 
     #[tokio::test]
     async fn test_stream_remove_track() {
         let stream = MediaStreamBuilder::new().build();
         let track = Box::new(TestTrack::new("test1".to_string()));
-        stream.update_track(track);
+        stream.update_track(track).await;
         stream.remove_track(&"test1".to_string()).await;
     }
 }
@@ -70,7 +70,7 @@ async fn test_media_stream_basic() -> Result<()> {
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));
 
-    stream.update_track(track);
+    stream.update_track(track).await;
 
     // Start the stream
     let handle = tokio::spawn(async move {
@@ -90,12 +90,12 @@ async fn test_media_stream_basic() -> Result<()> {
 async fn test_media_stream_events() -> Result<()> {
     let stream = MediaStreamBuilder::new().event_buf_size(32).build();
 
-    let mut events = stream.subscribe();
+    let events = stream.subscribe();
 
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));
 
-    stream.update_track(track);
+    stream.update_track(track).await;
 
     // Start the stream
     let handle = tokio::spawn(async move {

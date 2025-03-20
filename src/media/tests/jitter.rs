@@ -1,60 +1,43 @@
 use crate::media::{jitter::JitterBuffer, processor::AudioFrame};
-use std::time::Duration;
 
 #[test]
 fn test_jitter_buffer_in_order_packets() {
     let mut buffer = JitterBuffer::new(16000); // 16kHz sample rate
 
     // Add packets in order
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        20,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![4.0, 5.0, 6.0],
-            timestamp: 20,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        40,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![7.0, 8.0, 9.0],
-            timestamp: 40,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        samples: vec![1, 2, 3],
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![4, 5, 6],
+        timestamp: 20,
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![7, 8, 9],
+        timestamp: 40,
+        ..Default::default()
+    });
 
     // Check packets come out in order
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 0);
-    assert_eq!(frame.samples, vec![1.0, 2.0, 3.0]);
+    assert_eq!(frame.samples, vec![1, 2, 3]);
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 20);
-    assert_eq!(frame.samples, vec![4.0, 5.0, 6.0]);
+    assert_eq!(frame.samples, vec![4, 5, 6]);
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 40);
-    assert_eq!(frame.samples, vec![7.0, 8.0, 9.0]);
+    assert_eq!(frame.samples, vec![7, 8, 9]);
 }
 
 #[test]
@@ -62,55 +45,40 @@ fn test_jitter_buffer_out_of_order_packets() {
     let mut buffer = JitterBuffer::new(16000);
 
     // Add packets out of order
-    buffer.push(
-        20,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![4.0, 5.0, 6.0],
-            timestamp: 20,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        40,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![7.0, 8.0, 9.0],
-            timestamp: 40,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        samples: vec![4, 5, 6],
+        timestamp: 20,
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![1, 2, 3],
+        timestamp: 0,
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![7, 8, 9],
+        timestamp: 40,
+        ..Default::default()
+    });
 
     // Check packets come out in order
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 0);
-    assert_eq!(frame.samples, vec![1.0, 2.0, 3.0]);
+    assert_eq!(frame.samples, vec![1, 2, 3]);
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 20);
-    assert_eq!(frame.samples, vec![4.0, 5.0, 6.0]);
+    assert_eq!(frame.samples, vec![4, 5, 6]);
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 40);
-    assert_eq!(frame.samples, vec![7.0, 8.0, 9.0]);
+    assert_eq!(frame.samples, vec![7, 8, 9]);
 }
 
 #[test]
@@ -118,26 +86,16 @@ fn test_jitter_buffer_late_packets() {
     let mut buffer = JitterBuffer::new(16000);
 
     // Add some packets
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        20,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![4.0, 5.0, 6.0],
-            timestamp: 20,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        samples: vec![1, 2, 3],
+        timestamp: 0,
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![4, 5, 6],
+        timestamp: 20,
+        ..Default::default()
+    });
 
     // Pop first packet
     let packet = buffer.pop();
@@ -146,16 +104,11 @@ fn test_jitter_buffer_late_packets() {
     assert_eq!(frame.timestamp, 0);
 
     // Add a late packet (timestamp 0 again) - should be ignored
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        timestamp: 0,
+        samples: vec![1, 2, 3],
+        ..Default::default()
+    });
 
     // Check buffer length
     assert_eq!(buffer.len(), 1);
@@ -172,26 +125,14 @@ fn test_jitter_buffer_missing_packets() {
     let mut buffer = JitterBuffer::new(16000);
 
     // Add packets with a gap
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        40,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![7.0, 8.0, 9.0],
-            timestamp: 40,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        samples: vec![1, 2, 3],
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![7, 8, 9],
+        ..Default::default()
+    });
 
     // First packet should come out
     let packet = buffer.pop();
@@ -212,17 +153,12 @@ fn test_jitter_buffer_overflow() {
 
     // Fill buffer with many packets
     for i in 0..1000 {
-        let ts = (i * 20) as u64;
-        buffer.push(
-            ts,
-            AudioFrame {
-                track_id: "test".to_string(),
-                samples: vec![1.0, 2.0, 3.0],
-                timestamp: ts as u32,
-                sample_rate: 16000,
-                channels: 1,
-            },
-        );
+        let ts = (i * 20) as u32;
+        buffer.push(AudioFrame {
+            samples: vec![1, 2, 3],
+            timestamp: ts,
+            ..Default::default()
+        });
     }
 
     // Buffer should not be empty
@@ -240,26 +176,14 @@ fn test_jitter_buffer_clear() {
     let mut buffer = JitterBuffer::new(16000);
 
     // Add some packets
-    buffer.push(
-        0,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![1.0, 2.0, 3.0],
-            timestamp: 0,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
-    buffer.push(
-        20,
-        AudioFrame {
-            track_id: "test".to_string(),
-            samples: vec![4.0, 5.0, 6.0],
-            timestamp: 20,
-            sample_rate: 16000,
-            channels: 1,
-        },
-    );
+    buffer.push(AudioFrame {
+        samples: vec![1, 2, 3],
+        ..Default::default()
+    });
+    buffer.push(AudioFrame {
+        samples: vec![4, 5, 6],
+        ..Default::default()
+    });
 
     // Clear buffer
     buffer.clear();

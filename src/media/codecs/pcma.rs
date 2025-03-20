@@ -3,9 +3,11 @@ use bytes::{Bytes, BytesMut};
 
 use super::{Decoder, Encoder};
 
-const CLIP: i16 = 32767;
-const A_LAW_COMPRESS_THRESHOLD: i16 = 128;
+const SEG_SHIFT: i16 = 4;
+const QUANT_MASK: i16 = 0x0F;
+static SEG_END: [i16; 8] = [0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 0x3FFF, 0x7FFF];
 
+// A-law decode table (same as Go's alaw2lpcm)
 static ALAW_DECODE_TABLE: [i16; 256] = [
     -5504, -5248, -6016, -5760, -4480, -4224, -4992, -4736, -7552, -7296, -8064, -7808, -6528,
     -6272, -7040, -6784, -2752, -2624, -3008, -2880, -2240, -2112, -2496, -2368, -3776, -3648,
@@ -72,21 +74,51 @@ impl PcmaEncoder {
         }
     }
 
-    fn linear2alaw(&self, sample: i16) -> u8 {
-        let sign = if sample < 0 { 0x80_u8 } else { 0_u8 };
-        let mut abs_sample = sample.abs().min(CLIP) as i16;
-
-        if abs_sample > A_LAW_COMPRESS_THRESHOLD {
-            let mut exponent = 7;
-            let mut mask = 0x4000;
-            while (abs_sample & mask) == 0 && exponent > 0 {
-                exponent -= 1;
-                mask >>= 1;
+    fn search(&self, val: i16, table: &[i16], size: usize) -> usize {
+        for i in 0..size {
+            if val <= table[i] {
+                return i;
             }
-            let mantissa = ((abs_sample >> ((exponent == 0) as usize + 3)) & 0x0F) as u8;
-            (sign | ((exponent << 4) as u8) | mantissa) ^ 0x55
+        }
+        size
+    }
+
+    fn linear2alaw(&self, mut pcm_val: i16) -> u8 {
+        let mask: i16;
+        let seg: usize;
+        let aval: i16;
+
+        if pcm_val >= 0 {
+            mask = 0xD5; /* sign (7th) bit = 1 */
+        } else if pcm_val < -8 {
+            mask = 0x55; /* sign bit = 0 */
+            pcm_val = -pcm_val - 8;
         } else {
-            (sign | ((abs_sample >> 4) & 0x0F) as u8) ^ 0x55
+            // For all values in range [-7; -1] end result will be 0^0xD5,
+            // so we may just return it from here.
+            // NOTE: This is not just optimization! For values in that range
+            //       expression (-pcm_val - 8) will return negative result,
+            //       messing all following calculations. This is old bug,
+            //       coming from original code from Sun Microsystems, Inc.
+            // Btw, seems there is no code for 0, value after decoding will be
+            // either 8 (if we return 0xD5 here) or -8 (if we return 0x55 here).
+            return 0xD5;
+        }
+
+        /* Convert the scaled magnitude to segment number. */
+        seg = self.search(pcm_val, &SEG_END, 8);
+
+        /* Combine the sign, segment, and quantization bits. */
+        if seg >= 8 {
+            /* out of range, return maximum value. */
+            (0x7F ^ mask) as u8
+        } else {
+            aval = (seg as i16) << SEG_SHIFT;
+            if seg < 2 {
+                ((aval | ((pcm_val >> 4) & QUANT_MASK)) ^ mask) as u8
+            } else {
+                ((aval | ((pcm_val >> (seg + 3)) & QUANT_MASK)) ^ mask) as u8
+            }
         }
     }
 }

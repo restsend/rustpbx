@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use webrtc_vad::Vad;
@@ -53,12 +55,12 @@ pub enum VadType {
 }
 
 pub struct VadProcessor {
-    vad: Box<dyn VadEngine>,
+    vad: Mutex<Box<dyn VadEngine>>,
     event_sender: EventSender,
 }
 
 pub trait VadEngine: Send + Sync {
-    fn process(&mut self, frame: &AudioFrame) -> Result<bool>;
+    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool>;
 }
 
 impl VadProcessor {
@@ -68,13 +70,16 @@ impl VadProcessor {
             VadType::VoiceActivity => Box::new(voice_activity::VoiceActivityVad::new()),
         };
 
-        Self { vad, event_sender }
+        Self {
+            vad: Mutex::new(vad),
+            event_sender,
+        }
     }
 }
 
 impl Processor for VadProcessor {
-    fn process_frame(&mut self, frame: AudioFrame) -> Result<AudioFrame> {
-        let is_speech = self.vad.process(&frame)?;
+    fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
+        let is_speech = self.vad.lock().unwrap().as_mut().process(frame)?;
 
         // Send VAD events
         let event = if is_speech {
@@ -83,6 +88,6 @@ impl Processor for VadProcessor {
             MediaStreamEvent::Silence(frame.track_id.clone(), frame.timestamp)
         };
         self.event_sender.send(event).ok();
-        Ok(frame)
+        Ok(())
     }
 }

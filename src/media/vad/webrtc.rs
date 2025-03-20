@@ -20,21 +20,18 @@ impl WebRtcVad {
 }
 
 impl VadEngine for WebRtcVad {
-    fn process(&mut self, frame: &AudioFrame) -> Result<bool> {
-        // Convert f32 samples to i16 for WebRTC VAD
-        let pcm = utils::convert_f32_to_pcm(&frame.samples);
-
+    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
         // WebRTC VAD expects 10, 20, or 30ms frames
         // For 16kHz, that's 160, 320, or 480 samples
-        let frame_size = match pcm.len() {
-            160 | 320 | 480 => pcm.len(),
+        let frame_size = match frame.samples.len() {
+            160 | 320 | 480 => frame.samples.len(),
             _ => return Ok(false), // Invalid frame size
         };
 
         Ok(self
             .vad
             .0
-            .is_voice_segment(&pcm[..frame_size])
+            .is_voice_segment(&frame.samples[..frame_size])
             .unwrap_or(false))
     }
 }

@@ -37,12 +37,9 @@ impl VoiceActivityVad {
 }
 
 impl super::VadEngine for VoiceActivityVad {
-    fn process(&mut self, frame: &AudioFrame) -> Result<bool> {
-        // Convert f32 samples to i16
-        let i16_samples = utils::convert_f32_to_pcm(&frame.samples);
-
+    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
         // Add current frame to buffer
-        self.buffer.extend_from_slice(&i16_samples);
+        self.buffer.extend_from_slice(&frame.samples);
 
         // Process in chunks of 30ms (480 samples at 16kHz)
         let chunk_size = (16000 * 30) / 1000;
