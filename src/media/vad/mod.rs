@@ -9,6 +9,8 @@ use crate::media::{
     stream::{EventSender, MediaStreamEvent},
 };
 
+#[cfg(test)]
+mod tests;
 mod voice_activity;
 mod webrtc;
 

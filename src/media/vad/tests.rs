@@ -1,47 +1,47 @@
 use super::*;
 use crate::media::processor::{AudioFrame, Processor};
-use crate::media::stream::{EventSender, MediaStreamEvent};
+use crate::media::stream::MediaStreamEvent;
 use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn test_webrtc_vad() {
     let (event_sender, mut event_receiver) = broadcast::channel(16);
     let track_id = "test_track".to_string();
-    let ssrc = 12345;
 
-    let mut vad = VadProcessor::new(track_id.clone(), ssrc, VadType::WebRTC, event_sender);
-
-    // Initialize VAD
-    vad.init().await.unwrap();
+    let vad = VadProcessor::new(track_id.clone(), VadType::WebRTC, event_sender);
 
     // Test with silence (all zeros)
-    let silence_frame = AudioFrame {
-        samples: vec![0.0; 480], // 30ms at 16kHz
+    let mut silence_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: vec![0; 480], // 30ms at 16kHz
         sample_rate: 16000,
-        channels: 1,
+        timestamp: 0,
     };
-    vad.process_frame(silence_frame).await.unwrap();
+    vad.process_frame(&mut silence_frame).unwrap();
 
     // Should receive silence event
-    if let Ok(MediaStreamEvent::Silence(id, s)) = event_receiver.try_recv() {
+    if let Ok(MediaStreamEvent::Silence(id, ts)) = event_receiver.try_recv() {
         assert_eq!(id, track_id);
-        assert_eq!(s, ssrc);
+        assert_eq!(ts, 0);
     } else {
         panic!("Expected silence event");
     }
 
     // Test with speech (sine wave)
-    let speech_frame = AudioFrame {
-        samples: (0..480).map(|i| (i as f32 * 0.1).sin() * 0.5).collect(),
+    let mut speech_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: (0..480)
+            .map(|i| ((i as f32 * 0.1).sin() * 16000.0) as i16)
+            .collect(),
         sample_rate: 16000,
-        channels: 1,
+        timestamp: 1,
     };
-    vad.process_frame(speech_frame).await.unwrap();
+    vad.process_frame(&mut speech_frame).unwrap();
 
     // Should receive speech event
-    if let Ok(MediaStreamEvent::StartSpeaking(id, s)) = event_receiver.try_recv() {
+    if let Ok(MediaStreamEvent::StartSpeaking(id, ts)) = event_receiver.try_recv() {
         assert_eq!(id, track_id);
-        assert_eq!(s, ssrc);
+        assert_eq!(ts, 1);
     } else {
         panic!("Expected speech event");
     }
@@ -51,41 +51,41 @@ async fn test_webrtc_vad() {
 async fn test_voice_activity_vad() {
     let (event_sender, mut event_receiver) = broadcast::channel(16);
     let track_id = "test_track".to_string();
-    let ssrc = 12345;
 
-    let mut vad = VadProcessor::new(track_id.clone(), ssrc, VadType::VoiceActivity, event_sender);
-
-    // Initialize VAD
-    vad.init().await.unwrap();
+    let vad = VadProcessor::new(track_id.clone(), VadType::VoiceActivity, event_sender);
 
     // Test with silence (all zeros)
-    let silence_frame = AudioFrame {
-        samples: vec![0.0; 480], // 30ms at 16kHz
+    let mut silence_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: vec![0; 480], // 30ms at 16kHz
         sample_rate: 16000,
-        channels: 1,
+        timestamp: 0,
     };
-    vad.process_frame(silence_frame).await.unwrap();
+    vad.process_frame(&mut silence_frame).unwrap();
 
     // Should receive silence event
-    if let Ok(MediaStreamEvent::Silence(id, s)) = event_receiver.try_recv() {
+    if let Ok(MediaStreamEvent::Silence(id, ts)) = event_receiver.try_recv() {
         assert_eq!(id, track_id);
-        assert_eq!(s, ssrc);
+        assert_eq!(ts, 0);
     } else {
         panic!("Expected silence event");
     }
 
     // Test with speech (sine wave)
-    let speech_frame = AudioFrame {
-        samples: (0..480).map(|i| (i as f32 * 0.1).sin() * 0.5).collect(),
+    let mut speech_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: (0..480)
+            .map(|i| ((i as f32 * 0.1).sin() * 16000.0) as i16)
+            .collect(),
         sample_rate: 16000,
-        channels: 1,
+        timestamp: 1,
     };
-    vad.process_frame(speech_frame).await.unwrap();
+    vad.process_frame(&mut speech_frame).unwrap();
 
     // Should receive speech event
-    if let Ok(MediaStreamEvent::StartSpeaking(id, s)) = event_receiver.try_recv() {
+    if let Ok(MediaStreamEvent::StartSpeaking(id, ts)) = event_receiver.try_recv() {
         assert_eq!(id, track_id);
-        assert_eq!(s, ssrc);
+        assert_eq!(ts, 1);
     } else {
         panic!("Expected speech event");
     }
@@ -95,28 +95,24 @@ async fn test_voice_activity_vad() {
 async fn test_vad_type_switching() {
     let (event_sender, _) = broadcast::channel(16);
     let track_id = "test_track".to_string();
-    let ssrc = 12345;
 
     // Create VAD with WebRTC type
-    let mut vad = VadProcessor::new(
-        track_id.clone(),
-        ssrc,
-        VadType::WebRTC,
-        event_sender.clone(),
-    );
-    vad.init().await.unwrap();
+    let vad = VadProcessor::new(track_id.clone(), VadType::WebRTC, event_sender.clone());
 
     // Create VAD with VoiceActivity type
-    let mut vad2 = VadProcessor::new(track_id, ssrc, VadType::VoiceActivity, event_sender);
-    vad2.init().await.unwrap();
+    let vad2 = VadProcessor::new(track_id.clone(), VadType::VoiceActivity, event_sender);
 
     // Test that both can process frames
-    let frame = AudioFrame {
-        samples: vec![0.0; 480],
+    let mut frame = AudioFrame {
+        track_id,
+        samples: vec![0; 480],
         sample_rate: 16000,
-        channels: 1,
+        timestamp: 0,
     };
 
-    vad.process_frame(frame.clone()).await.unwrap();
-    vad2.process_frame(frame).await.unwrap();
+    vad.process_frame(&mut frame).unwrap();
+
+    // Clone the frame for the second processor
+    let mut frame2 = frame.clone();
+    vad2.process_frame(&mut frame2).unwrap();
 }
