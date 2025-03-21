@@ -44,21 +44,29 @@ impl PcmaDecoder {
 }
 
 impl Decoder for PcmaDecoder {
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
         let mut output = Vec::with_capacity(data.len());
-        for &byte in data {
-            output.push(ALAW_DECODE_TABLE[byte as usize]);
+
+        for &sample in data {
+            let pcm = decode_a_law(sample);
+            output.push(pcm);
         }
+
         Ok(output)
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        8000
     }
 
     fn channels(&self) -> u16 {
-        self.channels
+        1
     }
+}
+
+// Function to decode A-law encoded audio
+fn decode_a_law(a_law_sample: u8) -> i16 {
+    ALAW_DECODE_TABLE[a_law_sample as usize]
 }
 
 pub struct PcmaEncoder {

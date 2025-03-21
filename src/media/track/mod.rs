@@ -9,7 +9,7 @@ use super::stream::EventSender;
 
 #[derive(Debug, Clone)]
 pub enum TrackPayload {
-    PCM(Vec<f32>),
+    PCM(Vec<i16>),
     RTP(u8, Vec<u8>),
 }
 #[derive(Debug, Clone)]
@@ -33,6 +33,9 @@ pub type TrackId = String;
 pub trait Track: Send + Sync {
     fn id(&self) -> &TrackId;
     fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>);
+    fn processors(&self) -> Vec<&dyn Processor> {
+        Vec::new()
+    }
     async fn start(
         &self,
         token: CancellationToken,
@@ -41,4 +44,5 @@ pub trait Track: Send + Sync {
     ) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn send_packet(&self, packet: &TrackPacket) -> Result<()>;
+    async fn recv_packet(&self) -> Option<TrackPacket>;
 }

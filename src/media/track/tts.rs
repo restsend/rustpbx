@@ -32,6 +32,13 @@ impl Track for TtsTrack {
         self.processors.extend(processors);
     }
 
+    fn processors(&self) -> Vec<&dyn Processor> {
+        self.processors
+            .iter()
+            .map(|p| p.as_ref() as &dyn Processor)
+            .collect()
+    }
+
     async fn start(
         &self,
         _token: CancellationToken,
@@ -47,5 +54,8 @@ impl Track for TtsTrack {
 
     async fn send_packet(&self, _packet: &TrackPacket) -> Result<()> {
         Ok(())
+    }
+    async fn recv_packet(&self) -> Option<TrackPacket> {
+        None
     }
 }

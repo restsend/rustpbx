@@ -2,7 +2,7 @@ use anyhow::Result;
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use super::{ThreadSafeVad, VadEngine};
-use crate::media::{processor::AudioFrame, utils};
+use crate::media::processor::AudioFrame;
 
 pub struct WebRtcVad {
     vad: ThreadSafeVad,

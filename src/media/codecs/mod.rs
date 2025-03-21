@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
+use std::sync::Arc;
 
 pub mod g722;
 pub mod pcma;
@@ -17,7 +18,7 @@ pub enum CodecType {
 
 pub trait Decoder: Send + Sync {
     /// Decode encoded audio data into PCM samples
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>>;
+    fn decode(&self, data: &[u8]) -> Result<Vec<i16>>;
 
     /// Get the sample rate of the decoded audio
     fn sample_rate(&self) -> u32;
@@ -50,5 +51,17 @@ pub fn create_encoder(codec: CodecType) -> Result<Box<dyn Encoder>> {
         CodecType::PCMU => Ok(Box::new(pcmu::PcmuEncoder::new())),
         CodecType::PCMA => Ok(Box::new(pcma::PcmaEncoder::new())),
         CodecType::G722 => Ok(Box::new(g722::G722Encoder::new())),
+    }
+}
+
+pub struct DecoderFactory {}
+
+impl DecoderFactory {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn create_decoder(&self, codec: CodecType) -> Result<Box<dyn Decoder>> {
+        create_decoder(codec)
     }
 }

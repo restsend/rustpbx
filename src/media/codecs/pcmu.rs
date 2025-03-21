@@ -26,6 +26,11 @@ static MULAW_DECODE_TABLE: [i16; 256] = [
     196, 180, 164, 148, 132, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0,
 ];
 
+// Function to decode μ-law encoded audio
+fn decode_mu_law(mu_law_sample: u8) -> i16 {
+    MULAW_DECODE_TABLE[mu_law_sample as usize]
+}
+
 pub struct PcmuDecoder {
     sample_rate: u32,
     channels: u16,
@@ -41,20 +46,23 @@ impl PcmuDecoder {
 }
 
 impl Decoder for PcmuDecoder {
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
         let mut output = Vec::with_capacity(data.len());
-        for &byte in data {
-            output.push(MULAW_DECODE_TABLE[byte as usize]);
+
+        for &sample in data {
+            let pcm = decode_mu_law(sample);
+            output.push(pcm);
         }
+
         Ok(output)
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        8000
     }
 
     fn channels(&self) -> u16 {
-        self.channels
+        1
     }
 }
 
