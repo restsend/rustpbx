@@ -1,8 +1,22 @@
-# RustPBX Media Processing System
+# RustPBX
 
-A robust media processing system for handling WebRTC/RTP audio streams, with support for various audio codecs, voice activity detection, noise reduction, and speech recognition.
+RustPBX is a high-performance, secure PBX (Private Branch Exchange) system implemented in Rust, designed to support AI-powered communication pipelines. This project is currently a work in progress (WIP).
 
-## Features
+## Overview
+
+RustPBX aims to revolutionize voice communication systems by integrating modern AI capabilities with traditional PBX functionality, all while leveraging Rust's safety and performance benefits.
+
+### Key Features
+
+- **AI Pipeline Integration**: Support for speech recognition, transcription, and natural language processing
+- **High Performance**: Built with Rust for optimal speed and resource efficiency
+- **Enhanced Security**: Memory-safe design to minimize security vulnerabilities
+- **Media Processing**: Robust audio processing with support for various codecs
+- **Extensible Architecture**: Modular design for easy integration of new capabilities
+
+## Media Processing System
+
+The core of RustPBX includes a robust media processing system for handling WebRTC/RTP audio streams, with support for:
 
 - **Audio Codecs**
   - G.711 μ-law (PCMU)
@@ -20,7 +34,7 @@ A robust media processing system for handling WebRTC/RTP audio streams, with sup
   - Support for different sample rates and channels
 
 - **Speech Recognition**
-  - QCloud ASR integration
+  - ASR integration
   - Real-time transcription
   - Support for word-level and segment-level results
 
@@ -35,101 +49,9 @@ A robust media processing system for handling WebRTC/RTP audio streams, with sup
 - Rust 1.75 or later
 - Cargo package manager
 
-## Installation
+## Project Status
 
-Add the following to your `Cargo.toml`:
-
-```toml
-[dependencies]
-rustpbx = "0.1"
-```
-
-## Usage
-
-### Basic Media Stream Setup
-
-```rust
-use rustpbx::media::{
-    MediaStream,
-    MediaStreamBuilder,
-    track::Track,
-};
-
-#[tokio::main]
-async fn main() {
-    // Create a media stream
-    let stream = MediaStreamBuilder::new()
-        .event_buf_size(32)
-        .build();
-
-    // Subscribe to stream events
-    let mut events = stream.subscribe();
-
-    // Start serving the stream
-    tokio::spawn(async move {
-        stream.serve().await.unwrap();
-    });
-
-    // Handle events
-    while let Ok(event) = events.recv().await {
-        match event {
-            MediaStreamEvent::StartSpeaking(track_id, ssrc) => {
-                println!("Track {} (SSRC: {}) started speaking", track_id, ssrc);
-            }
-            MediaStreamEvent::Silence(track_id, ssrc) => {
-                println!("Track {} (SSRC: {}) is silent", track_id, ssrc);
-            }
-            MediaStreamEvent::Transcription(track_id, ssrc, text) => {
-                println!("Track {} (SSRC: {}): {}", track_id, ssrc, text);
-            }
-            _ => {}
-        }
-    }
-}
-```
-
-### Adding Processors to a Track
-
-```rust
-use rustpbx::media::{
-    noise::NoiseReducer,
-    vad::{VadProcessor, VadType},
-    asr::qcloud::{QCloudAsr, QCloudAsrConfig},
-};
-
-// Create processors
-let noise_reducer = NoiseReducer::new();
-let vad = VadProcessor::new(track_id.clone(), ssrc, VadType::WebRTC, event_sender.clone());
-let asr = QCloudAsr::new(
-    track_id.clone(),
-    ssrc,
-    QCloudAsrConfig::default(),
-    event_sender.clone(),
-);
-
-// Add processors to track
-track.with_processors(vec![
-    Box::new(noise_reducer),
-    Box::new(vad),
-    Box::new(asr),
-]);
-```
-
-## Testing
-
-Run the test suite:
-
-```bash
-cargo test
-```
-
-Run specific test categories:
-
-```bash
-cargo test --test codecs    # Run codec tests
-cargo test --test vad       # Run VAD tests
-cargo test --test noise     # Run noise reduction tests
-```
+This project is currently in active development (WIP). The core functionality is being implemented and refined. We welcome contributions and feedback from the community.
 
 ## License
 

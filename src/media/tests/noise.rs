@@ -10,9 +10,7 @@ fn test_noise_reducer_frame_sizes() {
     // Test different frame sizes
     for size in [160, 320, 480, 960] {
         let mut frame = AudioFrame {
-            track_id: "test".to_string(),
             samples: vec![0; size],
-            timestamp: 0,
             ..Default::default()
         };
         reducer.process_frame(&mut frame).unwrap();

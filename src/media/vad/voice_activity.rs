@@ -4,7 +4,6 @@ use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use super::VADConfig;
 use crate::media::processor::AudioFrame;
-use crate::media::utils;
 
 // Thread-safe wrapper for Vad
 struct ThreadSafeVad(Vad);

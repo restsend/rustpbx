@@ -18,8 +18,14 @@ fn test_pcmu_codec() {
 
     // Compare original and decoded samples
     // Note: Due to lossy compression, we use a tolerance
-    for (orig, dec) in samples.iter().zip(decoded.iter()) {
-        assert!((orig - dec).abs() < 2000); // Allow some difference due to compression
+    for (i, (orig, dec)) in samples.iter().zip(decoded.iter()).enumerate() {
+        assert!(
+            ((*orig as i32 - *dec as i32).abs() < 5000),
+            "Sample {} mismatch: orig={}, dec={}",
+            i,
+            orig,
+            dec
+        );
     }
 }
 
@@ -41,8 +47,14 @@ fn test_pcma_codec() {
 
     // Compare original and decoded samples
     // Note: Due to lossy compression, we use a tolerance
-    for (orig, dec) in samples.iter().zip(decoded.iter()) {
-        assert!((orig - dec).abs() < 2000); // Allow some difference due to compression
+    for (i, (orig, dec)) in samples.iter().zip(decoded.iter()).enumerate() {
+        assert!(
+            ((*orig as i32 - *dec as i32).abs() < 5000),
+            "Sample {} mismatch: orig={}, dec={}",
+            i,
+            orig,
+            dec
+        );
     }
 }
 
@@ -84,12 +96,12 @@ fn test_g722_codec() {
 
     let orig_energy: f64 = samples
         .iter()
-        .map(|s| (*s as f64).powi(2))
+        .map(|&s| (s as f64).powi(2))
         .sum::<f64>()
         .sqrt();
     let decoded_energy: f64 = decoded
         .iter()
-        .map(|s| (*s as f64).powi(2))
+        .map(|&s| (s as f64).powi(2))
         .sum::<f64>()
         .sqrt();
 

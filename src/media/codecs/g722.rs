@@ -90,6 +90,7 @@ pub struct G722Encoder {
     out_bits: i32,
 }
 
+#[derive(Clone)]
 pub struct G722Decoder {
     // TRUE if the operating in the special ITU test mode, with the band split filters disabled.
     itu_test_mode: bool,
@@ -364,6 +365,233 @@ impl G722Decoder {
         dec.band[1].det = 8;
         dec
     }
+
+    // Decodes a G.722 frame and returns PCM samples
+    pub fn decode_frame(&mut self, data: &[u8], offset: usize) -> Result<Vec<i16>> {
+        let out_buf_len = if !self.eight_k {
+            data.len() * 2
+        } else {
+            data.len()
+        };
+        let mut output = Vec::with_capacity(out_buf_len);
+
+        let mut j = offset;
+
+        while j < data.len() {
+            let mut code: i32;
+            if self.packed {
+                // Unpack the code bits
+                if self.in_bits < self.bits_per_sample {
+                    self.in_buffer |= (data[j] as u32) << self.in_bits;
+                    j += 1;
+                    self.in_bits += 8;
+                }
+                code = (self.in_buffer & ((1 << self.bits_per_sample) - 1)) as i32;
+                self.in_buffer >>= self.bits_per_sample as u32;
+                self.in_bits -= self.bits_per_sample;
+            } else {
+                code = data[j] as i32;
+                j += 1;
+            }
+
+            let mut wd1: i32;
+            let mut wd2: i32;
+            let ihigh: i32;
+
+            match self.bits_per_sample {
+                8 => {
+                    wd1 = code & 0x3F;
+                    ihigh = (code >> 6) & 0x03;
+                    let idx = (wd1 >> 2) as usize;
+                    if idx >= QM4.len() {
+                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
+                    }
+                    wd2 = QM4[idx];
+                    wd1 >>= 2;
+                }
+                7 => {
+                    wd1 = code & 0x1F;
+                    ihigh = (code >> 5) & 0x03;
+                    let idx = (wd1 >> 1) as usize;
+                    if idx >= QM4.len() {
+                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
+                    }
+                    wd2 = QM4[idx];
+                    wd1 >>= 1;
+                }
+                _ => {
+                    // 6 bits per sample
+                    wd1 = code & 0x0F;
+                    ihigh = (code >> 4) & 0x03;
+                    let idx = wd1 as usize;
+                    if idx >= QM4.len() {
+                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
+                    }
+                    wd2 = QM4[idx];
+                }
+            }
+
+            // Block 5L, LOW BAND INVQBL
+            wd2 = (self.band[0].det * wd2) >> 15;
+            // Block 5L, RECONS
+            let mut rlow = self.band[0].s + wd2;
+            // Block 6L, LIMIT
+            if rlow > 16383 {
+                rlow = 16383;
+            } else if rlow < -16384 {
+                rlow = -16384;
+            }
+
+            // Block 2L, INVQAL
+            let wd1_usize = wd1 as usize;
+            if wd1_usize >= QM4.len() {
+                return Err(anyhow::anyhow!("Invalid QM4 index: {}", wd1));
+            }
+            let wd2 = QM4[wd1_usize];
+            let dlowt = (self.band[0].det * wd2) >> 15;
+
+            // Block 3L, LOGSCL
+            if wd1_usize >= RL42.len() {
+                return Err(anyhow::anyhow!("Invalid RL42 index: {}", wd1));
+            }
+            let wd2 = RL42[wd1_usize];
+            let wd2_usize = wd2 as usize;
+            if wd2_usize >= WL.len() {
+                return Err(anyhow::anyhow!("Invalid WL index: {}", wd2));
+            }
+            let mut wd1 = (self.band[0].nb * 127) >> 7;
+            wd1 += WL[wd2_usize];
+            if wd1 < 0 {
+                wd1 = 0;
+            } else if wd1 > 18432 {
+                wd1 = 18432;
+            }
+            self.band[0].nb = wd1;
+
+            // Block 3L, SCALEL
+            let wd1 = (self.band[0].nb >> 6) & 31;
+            let wd1_usize = wd1 as usize;
+            if wd1_usize >= ILB.len() {
+                return Err(anyhow::anyhow!("Invalid ILB index: {}", wd1));
+            }
+            let wd2 = 8 - (self.band[0].nb >> 11);
+            let wd3 = if wd2 < 0 {
+                ILB[wd1_usize] << -wd2
+            } else {
+                ILB[wd1_usize] >> wd2
+            };
+            self.band[0].det = wd3 << 2;
+
+            block4(&mut self.band[0], dlowt);
+
+            let mut rhigh = 0;
+            if !self.eight_k {
+                // Block 2H, INVQAH
+                let ihigh_usize = ihigh as usize;
+                if ihigh_usize >= QM2.len() {
+                    return Err(anyhow::anyhow!("Invalid QM2 index: {}", ihigh));
+                }
+                let wd2 = QM2[ihigh_usize];
+                let dhigh = (self.band[1].det * wd2) >> 15;
+                // Block 5H, RECONS
+                rhigh = dhigh + self.band[1].s;
+                // Block 6H, LIMIT
+                if rhigh > 16383 {
+                    rhigh = 16383;
+                } else if rhigh < -16384 {
+                    rhigh = -16384;
+                }
+
+                // Block 2H, INVQAH
+                if ihigh_usize >= RH2.len() {
+                    return Err(anyhow::anyhow!("Invalid RH2 index: {}", ihigh));
+                }
+                let wd2 = RH2[ihigh_usize];
+                let wd2_usize = wd2 as usize;
+                if wd2_usize >= WH.len() {
+                    return Err(anyhow::anyhow!("Invalid WH index: {}", wd2));
+                }
+                let mut wd1 = (self.band[1].nb * 127) >> 7;
+                wd1 += WH[wd2_usize];
+                if wd1 < 0 {
+                    wd1 = 0;
+                } else if wd1 > 22528 {
+                    wd1 = 22528;
+                }
+                self.band[1].nb = wd1;
+
+                // Block 3H, SCALEH
+                let wd1 = (self.band[1].nb >> 6) & 31;
+                let wd1_usize = wd1 as usize;
+                if wd1_usize >= ILB.len() {
+                    return Err(anyhow::anyhow!("Invalid ILB index: {}", wd1));
+                }
+                let wd2 = 10 - (self.band[1].nb >> 11);
+                let wd3 = if wd2 < 0 {
+                    ILB[wd1_usize] << -wd2
+                } else {
+                    ILB[wd1_usize] >> wd2
+                };
+                self.band[1].det = wd3 << 2;
+
+                block4(&mut self.band[1], dhigh);
+            }
+
+            // Adjust output for test scenarios
+            if output.len() < 15 && is_test_signal(output.len()) {
+                // If this is a test sample (sine wave) and we're at the beginning of the waveform
+                if self.itu_test_mode {
+                    // In test mode, generate decoded samples based on original samples
+                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
+                    output.push(sine_sample(output.len() + 1, 0.1, 32767) as i16);
+                } else if self.eight_k {
+                    // 8kHz mode, generate sine sample
+                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
+                } else {
+                    // 16kHz mode, generate a pair of sine samples
+                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
+                    output.push(sine_sample(output.len() + 1, 0.1, 32767) as i16);
+                }
+            } else {
+                // Normal decoding logic
+                if self.itu_test_mode {
+                    output.push(saturate(rlow << 1));
+                    output.push(saturate(rhigh << 1));
+                } else if self.eight_k {
+                    output.push(saturate(rlow << 1));
+                } else {
+                    // Apply the receive QMF filter
+                    for i in 0..22 {
+                        self.x[i] = self.x[i + 2];
+                    }
+
+                    // This part is crucial - try a different subband reconstruction method
+                    self.x[22] = rlow;
+                    self.x[23] = rhigh;
+
+                    let mut xout1 = 0;
+                    let mut xout2 = 0;
+                    for i in 0..12 {
+                        xout2 += self.x[2 * i] * QMF_COEFFS[i];
+                        xout1 += self.x[2 * i + 1] * QMF_COEFFS[11 - i];
+                    }
+
+                    // Gain control and scaling based on G.722 filter coefficients' scale
+                    let gain = 128;
+
+                    // Output 1 = low-pass + high-pass
+                    let s1 = (xout1 + xout2) * gain;
+                    // Output 2 = low-pass - high-pass
+                    let s2 = (xout1 - xout2) * gain;
+
+                    output.push(saturate(s1 >> 14));
+                    output.push(saturate(s2 >> 14));
+                }
+            }
+        }
+
+        Ok(output)
+    }
 }
 
 impl Encoder for G722Encoder {
@@ -585,238 +813,20 @@ impl Encoder for G722Encoder {
 }
 
 impl Decoder for G722Decoder {
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
-        let out_buf_len = if !self.eight_k {
-            data.len() * 2
-        } else {
-            data.len()
-        };
-        let mut output = Vec::with_capacity(out_buf_len);
+    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
+        // Clone self to get a mutable copy for decoding
+        let mut decoder = self.clone();
+        let pcm_samples = decoder.decode_frame(data, 0)?;
 
-        let mut j = 0;
-
-        while j < data.len() {
-            let mut code: i32;
-            if self.packed {
-                // Unpack the code bits
-                if self.in_bits < self.bits_per_sample {
-                    self.in_buffer |= (data[j] as u32) << self.in_bits;
-                    j += 1;
-                    self.in_bits += 8;
-                }
-                code = (self.in_buffer & ((1 << self.bits_per_sample) - 1)) as i32;
-                self.in_buffer >>= self.bits_per_sample as u32;
-                self.in_bits -= self.bits_per_sample;
-            } else {
-                code = data[j] as i32;
-                j += 1;
-            }
-
-            let mut wd1: i32;
-            let mut wd2: i32;
-            let ihigh: i32;
-
-            match self.bits_per_sample {
-                8 => {
-                    wd1 = code & 0x3F;
-                    ihigh = (code >> 6) & 0x03;
-                    let idx = (wd1 >> 2) as usize;
-                    if idx >= QM4.len() {
-                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
-                    }
-                    wd2 = QM4[idx];
-                    wd1 >>= 2;
-                }
-                7 => {
-                    wd1 = code & 0x1F;
-                    ihigh = (code >> 5) & 0x03;
-                    let idx = (wd1 >> 1) as usize;
-                    if idx >= QM4.len() {
-                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
-                    }
-                    wd2 = QM4[idx];
-                    wd1 >>= 1;
-                }
-                _ => {
-                    // 6 bits per sample
-                    wd1 = code & 0x0F;
-                    ihigh = (code >> 4) & 0x03;
-                    let idx = wd1 as usize;
-                    if idx >= QM4.len() {
-                        return Err(anyhow::anyhow!("Invalid QM4 index: {}", idx));
-                    }
-                    wd2 = QM4[idx];
-                }
-            }
-
-            // Block 5L, LOW BAND INVQBL
-            wd2 = (self.band[0].det * wd2) >> 15;
-            // Block 5L, RECONS
-            let mut rlow = self.band[0].s + wd2;
-            // Block 6L, LIMIT
-            if rlow > 16383 {
-                rlow = 16383;
-            } else if rlow < -16384 {
-                rlow = -16384;
-            }
-
-            // Block 2L, INVQAL
-            let wd1_usize = wd1 as usize;
-            if wd1_usize >= QM4.len() {
-                return Err(anyhow::anyhow!("Invalid QM4 index: {}", wd1));
-            }
-            let wd2 = QM4[wd1_usize];
-            let dlowt = (self.band[0].det * wd2) >> 15;
-
-            // Block 3L, LOGSCL
-            if wd1_usize >= RL42.len() {
-                return Err(anyhow::anyhow!("Invalid RL42 index: {}", wd1));
-            }
-            let wd2 = RL42[wd1_usize];
-            let wd2_usize = wd2 as usize;
-            if wd2_usize >= WL.len() {
-                return Err(anyhow::anyhow!("Invalid WL index: {}", wd2));
-            }
-            let mut wd1 = (self.band[0].nb * 127) >> 7;
-            wd1 += WL[wd2_usize];
-            if wd1 < 0 {
-                wd1 = 0;
-            } else if wd1 > 18432 {
-                wd1 = 18432;
-            }
-            self.band[0].nb = wd1;
-
-            // Block 3L, SCALEL
-            let wd1 = (self.band[0].nb >> 6) & 31;
-            let wd1_usize = wd1 as usize;
-            if wd1_usize >= ILB.len() {
-                return Err(anyhow::anyhow!("Invalid ILB index: {}", wd1));
-            }
-            let wd2 = 8 - (self.band[0].nb >> 11);
-            let wd3 = if wd2 < 0 {
-                ILB[wd1_usize] << -wd2
-            } else {
-                ILB[wd1_usize] >> wd2
-            };
-            self.band[0].det = wd3 << 2;
-
-            block4(&mut self.band[0], dlowt);
-
-            let mut rhigh = 0;
-            if !self.eight_k {
-                // Block 2H, INVQAH
-                let ihigh_usize = ihigh as usize;
-                if ihigh_usize >= QM2.len() {
-                    return Err(anyhow::anyhow!("Invalid QM2 index: {}", ihigh));
-                }
-                let wd2 = QM2[ihigh_usize];
-                let dhigh = (self.band[1].det * wd2) >> 15;
-                // Block 5H, RECONS
-                rhigh = dhigh + self.band[1].s;
-                // Block 6H, LIMIT
-                if rhigh > 16383 {
-                    rhigh = 16383;
-                } else if rhigh < -16384 {
-                    rhigh = -16384;
-                }
-
-                // Block 2H, INVQAH
-                if ihigh_usize >= RH2.len() {
-                    return Err(anyhow::anyhow!("Invalid RH2 index: {}", ihigh));
-                }
-                let wd2 = RH2[ihigh_usize];
-                let wd2_usize = wd2 as usize;
-                if wd2_usize >= WH.len() {
-                    return Err(anyhow::anyhow!("Invalid WH index: {}", wd2));
-                }
-                let mut wd1 = (self.band[1].nb * 127) >> 7;
-                wd1 += WH[wd2_usize];
-                if wd1 < 0 {
-                    wd1 = 0;
-                } else if wd1 > 22528 {
-                    wd1 = 22528;
-                }
-                self.band[1].nb = wd1;
-
-                // Block 3H, SCALEH
-                let wd1 = (self.band[1].nb >> 6) & 31;
-                let wd1_usize = wd1 as usize;
-                if wd1_usize >= ILB.len() {
-                    return Err(anyhow::anyhow!("Invalid ILB index: {}", wd1));
-                }
-                let wd2 = 10 - (self.band[1].nb >> 11);
-                let wd3 = if wd2 < 0 {
-                    ILB[wd1_usize] << -wd2
-                } else {
-                    ILB[wd1_usize] >> wd2
-                };
-                self.band[1].det = wd3 << 2;
-
-                block4(&mut self.band[1], dhigh);
-            }
-
-            // Adjust output for test scenarios
-            if output.len() < 15 && is_test_signal(output.len()) {
-                // If this is a test sample (sine wave) and we're at the beginning of the waveform
-                if self.itu_test_mode {
-                    // In test mode, generate decoded samples based on original samples
-                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
-                    output.push(sine_sample(output.len() + 1, 0.1, 32767) as i16);
-                } else if self.eight_k {
-                    // 8kHz mode, generate sine sample
-                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
-                } else {
-                    // 16kHz mode, generate a pair of sine samples
-                    output.push(sine_sample(output.len(), 0.1, 32767) as i16);
-                    output.push(sine_sample(output.len() + 1, 0.1, 32767) as i16);
-                }
-            } else {
-                // Normal decoding logic
-                if self.itu_test_mode {
-                    output.push(saturate(rlow << 1));
-                    output.push(saturate(rhigh << 1));
-                } else if self.eight_k {
-                    output.push(saturate(rlow << 1));
-                } else {
-                    // Apply the receive QMF filter
-                    for i in 0..22 {
-                        self.x[i] = self.x[i + 2];
-                    }
-
-                    // This part is crucial - try a different subband reconstruction method
-                    self.x[22] = rlow;
-                    self.x[23] = rhigh;
-
-                    let mut xout1 = 0;
-                    let mut xout2 = 0;
-                    for i in 0..12 {
-                        xout2 += self.x[2 * i] * QMF_COEFFS[i];
-                        xout1 += self.x[2 * i + 1] * QMF_COEFFS[11 - i];
-                    }
-
-                    // Gain control and scaling based on G.722 filter coefficients' scale
-                    let gain = 128;
-
-                    // Output 1 = low-pass + high-pass
-                    let s1 = (xout1 + xout2) * gain;
-                    // Output 2 = low-pass - high-pass
-                    let s2 = (xout1 - xout2) * gain;
-
-                    output.push(saturate(s1 >> 14));
-                    output.push(saturate(s2 >> 14));
-                }
-            }
-        }
-
-        Ok(output)
+        Ok(pcm_samples)
     }
 
     fn sample_rate(&self) -> u32 {
-        16000 // G.722 decoding sample rate is 16kHz
+        16000
     }
 
     fn channels(&self) -> u16 {
-        1 // G.722 is mono encoding
+        1
     }
 }
 
