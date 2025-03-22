@@ -84,8 +84,6 @@ pub struct G722Encoder {
 
     band: [G722Band; 2],
 
-    in_buffer: u32,
-    in_bits: i32,
     out_buffer: u32,
     out_bits: i32,
 }
@@ -108,8 +106,6 @@ pub struct G722Decoder {
 
     in_buffer: u32,
     in_bits: i32,
-    out_buffer: u32,
-    out_bits: i32,
 }
 
 // saturate function constrains a value to i16 range
@@ -136,7 +132,7 @@ fn block4(band: &mut G722Band, d: i32) {
     for i in 0..3 {
         band.sg[i] = band.p[i] >> 15;
     }
-    let mut wd1 = saturate(band.a[1] << 2) as i32;
+    let wd1 = saturate(band.a[1] << 2) as i32;
 
     let wd2 = if band.sg[0] == band.sg[1] { -wd1 } else { wd1 };
     let wd2 = wd2.min(32767);
@@ -214,8 +210,6 @@ impl G722Encoder {
             bits_per_sample: 8, // Default 64000 kbps
             x: [0; 24],
             band: [G722Band::default(), G722Band::default()],
-            in_buffer: 0,
-            in_bits: 0,
             out_buffer: 0,
             out_bits: 0,
         };
@@ -266,8 +260,6 @@ impl G722Encoder {
             },
             x: [0; 24],
             band: [G722Band::default(), G722Band::default()],
-            in_buffer: 0,
-            in_bits: 0,
             out_buffer: 0,
             out_bits: 0,
         };
@@ -297,8 +289,6 @@ impl G722Decoder {
             band: [G722Band::default(), G722Band::default()],
             in_buffer: 0,
             in_bits: 0,
-            out_buffer: 0,
-            out_bits: 0,
         };
 
         // Initialize bands with proper values
@@ -349,8 +339,6 @@ impl G722Decoder {
             band: [G722Band::default(), G722Band::default()],
             in_buffer: 0,
             in_bits: 0,
-            out_buffer: 0,
-            out_bits: 0,
         };
 
         if options & G722_SAMPLE_RATE_8000 != 0 {
@@ -378,7 +366,7 @@ impl G722Decoder {
         let mut j = offset;
 
         while j < data.len() {
-            let mut code: i32;
+            let code: i32;
             if self.packed {
                 // Unpack the code bits
                 if self.in_bits < self.bits_per_sample {
@@ -607,7 +595,7 @@ impl Encoder for G722Encoder {
         let mut g722_bytes = 0;
 
         while j < samples.len() {
-            let mut xlow: i32 = 0;
+            let xlow: i32;
             let mut xhigh: i32 = 0;
 
             if self.itu_test_mode {
@@ -704,7 +692,7 @@ impl Encoder for G722Encoder {
 
             block4(&mut self.band[0], dlow);
 
-            let mut code: i32;
+            let code: i32;
             if self.eight_k {
                 // Just leave the high bits as zero
                 code = (0xC0 | ilow) >> (8 - self.bits_per_sample);

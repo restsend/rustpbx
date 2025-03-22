@@ -51,11 +51,6 @@ impl DTMFDetector {
         }
     }
 
-    // Detect DTMF tones from PCM samples (kept for compatibility)
-    pub fn detect(&self, _samples: &[i16]) -> Option<String> {
-        None
-    }
-
     // Detect DTMF events from RTP payload as specified in RFC 4733
     pub fn detect_rtp(
         &mut self,
@@ -68,7 +63,9 @@ impl DTMFDetector {
         if payload.len() < 4 {
             return None;
         }
-
+        if payload_type < 96 || payload_type > 127 {
+            return None;
+        }
         // Extract the event code (first byte)
         let event = payload[0];
 
