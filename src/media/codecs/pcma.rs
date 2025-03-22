@@ -29,17 +29,11 @@ static ALAW_DECODE_TABLE: [i16; 256] = [
     784, 880, 848,
 ];
 
-pub struct PcmaDecoder {
-    sample_rate: u32,
-    channels: u16,
-}
+pub struct PcmaDecoder {}
 
 impl PcmaDecoder {
     pub fn new() -> Self {
-        Self {
-            sample_rate: 8000,
-            channels: 1,
-        }
+        Self {}
     }
 }
 
@@ -69,17 +63,11 @@ fn decode_a_law(a_law_sample: u8) -> i16 {
     ALAW_DECODE_TABLE[a_law_sample as usize]
 }
 
-pub struct PcmaEncoder {
-    sample_rate: u32,
-    channels: u16,
-}
+pub struct PcmaEncoder {}
 
 impl PcmaEncoder {
     pub fn new() -> Self {
-        Self {
-            sample_rate: 8000,
-            channels: 1,
-        }
+        Self {}
     }
 
     fn search(&self, val: i16, table: &[i16], size: usize) -> usize {
@@ -141,10 +129,10 @@ impl Encoder for PcmaEncoder {
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        8000
     }
 
     fn channels(&self) -> u16 {
-        self.channels
+        1
     }
 }

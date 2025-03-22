@@ -241,28 +241,6 @@ impl MediaStream {
 
     async fn process_dtmf(&self, packet: &TrackPacket) {
         match &packet.payload {
-            // Check if the packet contains PCM data
-            TrackPayload::PCM(samples) => {
-                // Create an audio frame from the PCM data
-                let audio_frame = AudioFrame {
-                    track_id: packet.track_id.clone(),
-                    samples: samples.clone(),
-                    timestamp: packet.timestamp as u32,
-                    sample_rate: 16000,
-                };
-
-                // Check for DTMF tones in PCM data (though not our focus)
-                let mut dtmf_detector = self.dtmf_detector.lock().await;
-                if let Some(digit) = dtmf_detector.detect(&audio_frame.samples) {
-                    self.event_sender
-                        .send(MediaStreamEvent::DTMF(
-                            packet.track_id.clone(),
-                            packet.timestamp as u32,
-                            digit.clone(),
-                        ))
-                        .ok();
-                }
-            }
             // Check if the packet contains RTP data (our focus for DTMF detection)
             TrackPayload::RTP(payload_type, payload) => {
                 // Check for DTMF events in RTP payload
@@ -278,37 +256,9 @@ impl MediaStream {
                             digit.clone(),
                         ))
                         .ok();
-
-                    // Generate DTMF tone for the recorder
-                    // We'll use a standard duration of 200ms for DTMF tones
-                    let tone_samples = DTMFDetector::generate_tone(&digit, 16000, 200);
-
-                    // Create an audio frame with the DTMF tone
-                    let dtmf_frame = AudioFrame {
-                        track_id: format!("dtmf:{}", packet.track_id.clone()),
-                        samples: tone_samples,
-                        timestamp: packet.timestamp as u32,
-                        sample_rate: 16000,
-                    };
-
-                    // Forward this frame to all processors that handle recording
-                    let mut tracks = self.tracks.lock().await;
-                    for track in tracks.values_mut() {
-                        // We need to iterate through processors directly
-                        if let Some(this) =
-                            unsafe { (track as *const _ as *mut Box<dyn Track>).as_mut() }
-                        {
-                            // Create a temporary vector to hold the frame
-                            let mut frame = dtmf_frame.clone();
-
-                            // Apply processors
-                            for processor in this.processors() {
-                                let _ = processor.process_frame(&mut frame);
-                            }
-                        }
-                    }
                 }
             }
+            _ => {}
         }
     }
 }

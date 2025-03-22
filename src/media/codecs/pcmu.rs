@@ -31,17 +31,11 @@ fn decode_mu_law(mu_law_sample: u8) -> i16 {
     MULAW_DECODE_TABLE[mu_law_sample as usize]
 }
 
-pub struct PcmuDecoder {
-    sample_rate: u32,
-    channels: u16,
-}
+pub struct PcmuDecoder {}
 
 impl PcmuDecoder {
     pub fn new() -> Self {
-        Self {
-            sample_rate: 8000,
-            channels: 1,
-        }
+        Self {}
     }
 }
 
@@ -66,17 +60,11 @@ impl Decoder for PcmuDecoder {
     }
 }
 
-pub struct PcmuEncoder {
-    sample_rate: u32,
-    channels: u16,
-}
+pub struct PcmuEncoder {}
 
 impl PcmuEncoder {
     pub fn new() -> Self {
-        Self {
-            sample_rate: 8000,
-            channels: 1,
-        }
+        Self {}
     }
 
     fn linear2ulaw(&self, sample: i16) -> u8 {
@@ -129,10 +117,10 @@ impl Encoder for PcmuEncoder {
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        8000
     }
 
     fn channels(&self) -> u16 {
-        self.channels
+        1
     }
 }
