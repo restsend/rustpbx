@@ -152,4 +152,23 @@ impl JitterBuffer {
     pub fn is_empty(&self) -> bool {
         self.packets.is_empty()
     }
+
+    pub fn pull_frames(&mut self, duration_ms: u32, sample_rate: u32) -> Vec<AudioFrame> {
+        let mut frames = Vec::new();
+
+        // Determine how many frames to pull based on duration and sample rate
+        // This is a simplified approach assuming 20ms frames at the given sample rate
+        let frames_to_pull = (duration_ms / 20).max(1) as usize;
+
+        // Pull frames from the buffer
+        for _ in 0..frames_to_pull {
+            if let Some(frame) = self.pop() {
+                frames.push(frame);
+            } else {
+                break; // No more frames available
+            }
+        }
+
+        frames
+    }
 }
