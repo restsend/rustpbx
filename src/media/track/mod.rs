@@ -65,9 +65,15 @@ impl TrackConfig {
         self.channels = channels;
         self
     }
+
+    pub fn with_max_pcm_chunk_size(mut self, max_pcm_chunk_size: usize) -> Self {
+        self.max_pcm_chunk_size = max_pcm_chunk_size;
+        self
+    }
 }
 
 pub mod file;
+pub mod rtcconn;
 pub mod rtp;
 pub mod tts;
 pub mod webrtc;
