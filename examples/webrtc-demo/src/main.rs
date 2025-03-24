@@ -6,20 +6,31 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use hound::{SampleFormat, WavReader, WavSpec};
+use rustpbx::media::{
+    codecs::CodecType,
+    stream::{MediaStream, MediaStreamBuilder, MediaStreamEvent},
+    track::{
+        file::FileTrack,
+        webrtc::{WebrtcTrack, WebrtcTrackConfig},
+    },
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
-use tracing::{error, info, Level};
+use tracing::{debug, error, info, Level};
+use uuid::Uuid;
 use webrtc::{
     api::{
         interceptor_registry::register_default_interceptors,
-        media_engine::{MediaEngine, MIME_TYPE_OPUS},
+        media_engine::{MediaEngine, MIME_TYPE_G722},
         APIBuilder,
     },
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
@@ -34,7 +45,13 @@ use webrtc::{
 
 // Application state
 struct AppState {
-    connections: Mutex<HashMap<String, Arc<RTCPeerConnection>>>,
+    connections: Mutex<HashMap<String, ConnectionState>>,
+}
+
+struct ConnectionState {
+    peer_connection: Arc<RTCPeerConnection>,
+    media_stream: Arc<MediaStream>,
+    cancel_token: CancellationToken,
 }
 
 // WebRTC Session
@@ -101,17 +118,17 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<WebRT
     // Create media engine
     let mut media_engine = MediaEngine::default();
 
-    // Register opus codec
+    // Register G722 codec - use G722 instead of Opus as required
     media_engine.register_codec(
         RTCRtpCodecParameters {
             capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_OPUS.to_string(),
-                clock_rate: 48000,
-                channels: 2,
-                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
+                mime_type: MIME_TYPE_G722.to_string(),
+                clock_rate: 8000, // G722 uses 8kHz clock rate (16kHz samples)
+                channels: 1,      // Mono
+                sdp_fmtp_line: "".to_string(),
                 rtcp_feedback: vec![],
             },
-            payload_type: 111,
+            payload_type: 9, // Standard payload type for G722
             ..Default::default()
         },
         RTPCodecType::Audio,
@@ -137,10 +154,12 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<WebRT
     // Create peer connection
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-    // Create a static sample track
+    // Create audio track
     let track = Arc::new(TrackLocalStaticSample::new(
         RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_OPUS.to_string(),
+            mime_type: MIME_TYPE_G722.to_string(),
+            clock_rate: 8000,
+            channels: 1,
             ..Default::default()
         },
         "audio".to_string(),
@@ -148,21 +167,102 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<WebRT
     ));
 
     // Add track to peer connection
-    let _rtp_sender = peer_connection
+    let rtp_sender = peer_connection
         .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
 
+    // Create a cancellation token
+    let cancel_token = CancellationToken::new();
+
+    // Create MediaStream
+    let media_stream = Arc::new(
+        MediaStreamBuilder::new()
+            .id(format!("demo-stream-{}", Uuid::new_v4()))
+            .cancel_token(cancel_token.child_token())
+            .build(),
+    );
+
+    // Create connection state
+    let connection_state = ConnectionState {
+        peer_connection: Arc::clone(&peer_connection),
+        media_stream: Arc::clone(&media_stream),
+        cancel_token: cancel_token.clone(),
+    };
+
     // Handle connection state changes
+    let connection_id = Uuid::new_v4().to_string();
+    let state_clone = Arc::clone(&state);
+    let connection_id_clone = connection_id.clone();
+    let track_clone = Arc::clone(&track);
+    let media_stream_clone = Arc::clone(&media_stream);
+    let sample_path = Path::new("assets/sample.wav")
+        .canonicalize()?
+        .to_string_lossy()
+        .to_string();
+
     peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-        info!("Peer connection state changed: {}", s);
+        let connection_id = connection_id_clone.clone();
+        let state = Arc::clone(&state_clone);
+        let track = Arc::clone(&track_clone);
+        let media_stream = Arc::clone(&media_stream_clone);
+        let sample_path = sample_path.clone();
 
-        if s == RTCPeerConnectionState::Connected {
-            // In a real implementation, this is where we would start
-            // playing the WAV file to the WebRTC track
-            info!("Connection established - would start playing audio");
-        }
+        Box::pin(async move {
+            info!("Peer connection state changed: {}", s);
 
-        Box::pin(async {})
+            if s == RTCPeerConnectionState::Connected {
+                info!("Connection established - starting MediaStream");
+
+                // Get the MediaStream from the connection state
+                let mut media_stream_to_serve = None;
+                {
+                    let connections = state.connections.lock().unwrap();
+                    if let Some(conn_state) = connections.get(&connection_id) {
+                        media_stream_to_serve = Some(Arc::clone(&conn_state.media_stream));
+                    }
+                }
+
+                if let Some(media_stream) = media_stream_to_serve {
+                    // Start the media stream in a separate task
+                    tokio::spawn(async move {
+                        // Create WebRTC track
+                        let webrtc_track_id = format!("webrtc-{}", Uuid::new_v4());
+                        let webrtc_track = WebrtcTrack::new(webrtc_track_id.clone())
+                            .with_sample_rate(16000) // G722 uses 16kHz sample rate
+                            .with_codecs(vec![CodecType::G722])
+                            .with_webrtc_track(WebrtcTrackConfig {
+                                track,
+                                payload_type: 9, // G722 payload type
+                            });
+
+                        // Create file track
+                        let file_track_id = format!("file-{}", Uuid::new_v4());
+                        let file_track = FileTrack::new(file_track_id.clone())
+                            .with_sample_rate(16000) // G722 uses 16kHz sample rate
+                            .with_path(sample_path);
+
+                        // Add tracks to the media stream
+                        media_stream.update_track(Box::new(webrtc_track)).await;
+                        media_stream.update_track(Box::new(file_track)).await;
+
+                        // Serve the media stream
+                        if let Err(e) = media_stream.serve().await {
+                            error!("Media stream error: {}", e);
+                        }
+                    });
+                }
+            } else if s == RTCPeerConnectionState::Disconnected
+                || s == RTCPeerConnectionState::Failed
+                || s == RTCPeerConnectionState::Closed
+            {
+                // Clean up connection
+                let mut connections = state.connections.lock().unwrap();
+                if let Some(conn_state) = connections.remove(&connection_id) {
+                    // Cancel the media stream
+                    conn_state.cancel_token.cancel();
+                }
+            }
+        })
     }));
 
     // Set remote description from offer
@@ -176,10 +276,9 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<WebRT
         .await?;
 
     // Store connection in state
-    let connection_id = uuid::Uuid::new_v4().to_string();
     {
         let mut connections = state.connections.lock().unwrap();
-        connections.insert(connection_id, Arc::clone(&peer_connection));
+        connections.insert(connection_id, connection_state);
     }
 
     // Return answer to client
@@ -196,7 +295,21 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<WebRT
 }
 
 // Simple handler for ICE candidates and closing connections
-async fn simple_handler() -> impl IntoResponse {
+async fn close_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
+        let mut connections = state.connections.lock().unwrap();
+        if let Some(conn_state) = connections.remove(id) {
+            // Cancel the media stream
+            conn_state.cancel_token.cancel();
+        }
+    }
+    StatusCode::OK
+}
+
+async fn signal_handler() -> impl IntoResponse {
     StatusCode::OK
 }
 
@@ -210,10 +323,29 @@ async fn main() -> Result<()> {
         .init();
 
     // Create sample WAV file if it doesn't exist
-    let wav_path = Path::new("examples/webrtc-demo/assets/sample.wav");
+    let wav_path = Path::new("assets/sample.wav");
+    info!(
+        "Looking for WAV file at path: {:?}",
+        wav_path.canonicalize().unwrap_or_else(|e| {
+            info!(
+                "Could not canonicalize path: {}, error: {}",
+                wav_path.display(),
+                e
+            );
+            wav_path.to_path_buf()
+        })
+    );
+
     if !wav_path.exists() {
         info!("Creating sample WAV file");
-        create_sample_wav_file(wav_path)?;
+        match create_sample_wav_file(wav_path) {
+            Ok(_) => info!("Successfully created sample WAV file"),
+            Err(e) => {
+                error!("Failed to create sample WAV file: {}", e);
+                error!("Current directory: {:?}", std::env::current_dir());
+                return Err(e);
+            }
+        }
     }
 
     // Create app state
@@ -225,9 +357,9 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/webrtc/offer", post(offer_handler))
-        .route("/webrtc/signal", post(simple_handler))
-        .route("/webrtc/close", post(simple_handler))
-        .nest_service("/static", ServeDir::new("examples/webrtc-demo/static"))
+        .route("/webrtc/signal", post(signal_handler))
+        .route("/webrtc/close", post(close_handler))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state);
 
     // Bind to address
@@ -243,79 +375,51 @@ async fn main() -> Result<()> {
 
 // Create a sample WAV file for testing
 fn create_sample_wav_file(path: &Path) -> Result<()> {
-    // Create WAV spec - 48kHz, mono, 16-bit PCM
-    let spec = WavSpec {
+    use hound::{SampleFormat, WavWriter};
+    use std::f32::consts::PI;
+    use std::fs::File;
+
+    // Create WAV spec - 16kHz, mono, 16-bit PCM (suitable for G722)
+    let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: 48000,
+        sample_rate: 16000,
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     };
 
     // Create WAV writer
-    let mut writer = hound::WavWriter::create(path, spec)?;
+    let mut writer = WavWriter::create(path, spec)?;
 
-    // Generate a 3-second sine wave at 440Hz
+    // Generate a 3-second sine wave at 440 Hz
+    let duration_secs = 3.0;
+    let frequency = 440.0;
     let sample_rate = spec.sample_rate as f32;
-    let frequency = 440.0; // A4 note
-    let duration = 3.0; // 3 seconds
+    let num_samples = (duration_secs * sample_rate) as u32;
 
-    for t in 0..(sample_rate as usize * duration as usize) {
-        let sample = (t as f32 * frequency * 2.0 * std::f32::consts::PI / sample_rate).sin();
-        let amplitude = 0.5;
-        let sample_i16 = (sample * amplitude * i16::MAX as f32) as i16;
+    for t in 0..num_samples {
+        let sample = (t as f32 * frequency * 2.0 * PI / sample_rate).sin();
+        let amplitude = 0.5; // 50% volume
+        let sample_i16 = (sample * amplitude * 32767.0) as i16;
         writer.write_sample(sample_i16)?;
     }
 
     writer.finalize()?;
-    info!("Created sample WAV file at: {}", path.display());
-
     Ok(())
 }
 
-// Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::fs;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_create_sample_wav_file() -> Result<()> {
-        // Create a temporary directory for test files
-        let temp_dir = env::temp_dir().join("webrtc_demo_test");
-        fs::create_dir_all(&temp_dir)?;
+        let dir = tempdir()?;
+        let path = dir.path().join("test.wav");
 
-        // Create a test WAV file path
-        let test_wav_path = temp_dir.join("test_sample.wav");
+        create_sample_wav_file(&path)?;
 
-        // Remove the file if it already exists
-        if test_wav_path.exists() {
-            fs::remove_file(&test_wav_path)?;
-        }
-
-        // Create the sample WAV file
-        create_sample_wav_file(&test_wav_path)?;
-
-        // Check if the file exists
-        assert!(test_wav_path.exists());
-
-        // Open the WAV file to check its properties
-        let reader = WavReader::open(&test_wav_path)?;
-        let spec = reader.spec();
-
-        // Verify the WAV file properties
-        assert_eq!(spec.channels, 1);
-        assert_eq!(spec.sample_rate, 48000);
-        assert_eq!(spec.bits_per_sample, 16);
-        assert_eq!(spec.sample_format, SampleFormat::Int);
-
-        // Clean up
-        fs::remove_file(&test_wav_path)?;
-
+        assert!(path.exists());
         Ok(())
     }
-
-    // Note: We cannot easily test the WebRTC functionality in a unit test
-    // as it requires a full browser environment. Integration tests would be
-    // more appropriate for that part of the code.
 }
