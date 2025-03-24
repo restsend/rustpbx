@@ -2,14 +2,19 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use rtp_rs::RtpReader;
+use rtp_rs::{RtpPacketBuilder, RtpReader};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
+use webrtc::media::Sample;
+use webrtc::rtp::{self, packet::Packet as RtpPacket};
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::track::track_local::TrackLocal;
 
 use crate::media::{
     codecs::{CodecType, Decoder, DecoderFactory, Encoder},
@@ -18,6 +23,13 @@ use crate::media::{
     stream::EventSender,
     track::{Track, TrackConfig, TrackId, TrackPacket, TrackPacketSender, TrackPayload},
 };
+
+// Configuration for integrating a webrtc crate track with our WebrtcTrack
+#[derive(Clone)]
+pub struct WebrtcTrackConfig {
+    pub track: Arc<TrackLocalStaticSample>,
+    pub payload_type: u8,
+}
 
 pub struct WebrtcTrack {
     id: TrackId,
@@ -28,6 +40,7 @@ pub struct WebrtcTrack {
     receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<TrackPacket>>>>,
     packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
     cancel_token: CancellationToken,
+    webrtc_track: Option<WebrtcTrackConfig>,
 }
 
 impl WebrtcTrack {
@@ -43,6 +56,7 @@ impl WebrtcTrack {
             receiver: Arc::new(Mutex::new(None)),
             packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
+            webrtc_track: None,
         }
     }
 
@@ -72,6 +86,11 @@ impl WebrtcTrack {
             *jitter_buffer = JitterBuffer::new(sample_rate);
         }
 
+        self
+    }
+
+    pub fn with_webrtc_track(mut self, webrtc_track_config: WebrtcTrackConfig) -> Self {
+        self.webrtc_track = Some(webrtc_track_config);
         self
     }
 
@@ -249,7 +268,7 @@ impl CountingProcessor {
         let count = Arc::new(Mutex::new(0));
         (
             Self {
-                count: count.clone(),
+                count: Arc::clone(&count),
             },
             count,
         )
@@ -358,12 +377,68 @@ impl Track for WebrtcTrack {
                 // Add processed frame to jitter buffer
                 {
                     let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
-                    jitter_buffer.push(frame);
+                    jitter_buffer.push(frame.clone());
+                }
+
+                // If we have a webrtc track, send the PCM samples to it
+                if let Some(webrtc_track_config) = &self.webrtc_track {
+                    // First we need to encode the samples to our codec format
+                    let codec_type = match webrtc_track_config.payload_type {
+                        0 => CodecType::PCMU,
+                        8 => CodecType::PCMA,
+                        9 => CodecType::G722,
+                        _ => return Ok(()),
+                    };
+
+                    // Create an encoder
+                    if let Ok(mut encoder) = crate::media::codecs::create_encoder(codec_type) {
+                        // Encode the samples
+                        if let Ok(encoded_data) = encoder.encode(&frame.samples) {
+                            // Create a Sample that the WebRTC track can use
+                            let sample = Sample {
+                                data: Bytes::from(encoded_data),
+                                duration: std::time::Duration::from_millis(20),
+                                timestamp: std::time::SystemTime::now(),
+                                packet_timestamp: packet.timestamp as u32,
+                                prev_dropped_packets: 0,
+                                prev_padding_packets: 0,
+                            };
+
+                            // Try to write the sample to the track
+                            if let Err(e) = webrtc_track_config.track.write_sample(&sample).await {
+                                error!("Failed to write sample to WebRTC track: {}", e);
+                            }
+                        }
+                    }
                 }
             }
-            TrackPayload::RTP(_, _) => {
+            TrackPayload::RTP(payload_type, payload) => {
                 // Process RTP packet
                 self.process_rtp_packet(packet)?;
+
+                // If we have a webrtc track and this packet's payload type matches,
+                // forward it to the WebRTC track
+                if let Some(webrtc_track_config) = &self.webrtc_track {
+                    if *payload_type == webrtc_track_config.payload_type {
+                        // Convert to Bytes
+                        let data = Bytes::from(payload.clone());
+
+                        // Create a Sample that the WebRTC track can use
+                        let sample = Sample {
+                            data,
+                            duration: std::time::Duration::from_millis(20),
+                            timestamp: std::time::SystemTime::now(),
+                            packet_timestamp: packet.timestamp as u32,
+                            prev_dropped_packets: 0,
+                            prev_padding_packets: 0,
+                        };
+
+                        // Try to write the sample to the track
+                        if let Err(e) = webrtc_track_config.track.write_sample(&sample).await {
+                            error!("Failed to write RTP sample to WebRTC track: {}", e);
+                        }
+                    }
+                }
             }
         }
 
@@ -373,23 +448,24 @@ impl Track for WebrtcTrack {
     async fn recv_packet(&self) -> Option<TrackPacket> {
         let mut receiver_opt: Option<mpsc::UnboundedReceiver<TrackPacket>> = None;
 
-        // Take ownership of the receiver
+        // Use a block to limit the mutex lock duration
         {
             let mut receiver_guard = self.receiver.lock().unwrap();
-            if let Some(receiver) = receiver_guard.take() {
-                receiver_opt = Some(receiver);
+            if let Some(rec) = receiver_guard.as_mut() {
+                // Try to receive a packet without blocking
+                match rec.try_recv() {
+                    Ok(packet) => return Some(packet),
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        *receiver_guard = None;
+                    }
+                }
             }
         }
 
-        // Receive a packet
+        // If we didn't get a packet immediately, try with await
         if let Some(mut receiver) = receiver_opt {
-            let packet_opt = receiver.recv().await;
-
-            // Put the receiver back
-            let mut receiver_guard = self.receiver.lock().unwrap();
-            *receiver_guard = Some(receiver);
-
-            return packet_opt;
+            return receiver.recv().await;
         }
 
         None
