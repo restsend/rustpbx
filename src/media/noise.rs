@@ -3,6 +3,8 @@ use nnnoiseless::DenoiseState;
 
 use crate::media::processor::{AudioFrame, Processor};
 
+use super::processor::AudioPayload;
+
 pub struct NoiseReducer {
     // We use the default built-in model for the denoiser
     frame_size: usize,
@@ -22,10 +24,13 @@ impl Processor for NoiseReducer {
         if frame.samples.is_empty() {
             return Ok(());
         }
-
+        let samples = match &frame.samples {
+            AudioPayload::PCM(samples) => samples,
+            _ => return Ok(()),
+        };
         // Convert i16 samples to f32 (required by nnnoiseless)
         // Note: nnnoiseless expects values in i16 range (-32768.0 to 32767.0)
-        let input_f32: Vec<f32> = frame.samples.iter().map(|&s| s as f32).collect();
+        let input_f32: Vec<f32> = samples.iter().map(|&s| s as f32).collect();
 
         // Original frame length
         let original_len = input_f32.len();
@@ -75,10 +80,12 @@ impl Processor for NoiseReducer {
         }
 
         // Convert f32 samples back to i16
-        frame.samples = output_f32
-            .iter()
-            .map(|&s| s.clamp(-32768.0, 32767.0) as i16)
-            .collect();
+        frame.samples = AudioPayload::PCM(
+            output_f32
+                .iter()
+                .map(|&s| s.clamp(-32768.0, 32767.0) as i16)
+                .collect(),
+        );
 
         Ok(())
     }
@@ -96,7 +103,7 @@ mod tests {
         for size in &[160, 320, 480, 960] {
             // Create a sample frame with test data
             let mut frame = AudioFrame {
-                samples: vec![100; *size],
+                samples: AudioPayload::PCM(vec![100; *size]),
                 sample_rate: 16000,
                 ..Default::default()
             };
@@ -105,7 +112,11 @@ mod tests {
             reducer.process_frame(&mut frame).unwrap();
 
             // Should maintain the same number of samples
-            assert_eq!(frame.samples.len(), *size);
+            let samples = match frame.samples {
+                AudioPayload::PCM(samples) => samples,
+                _ => panic!("Expected PCM samples"),
+            };
+            assert_eq!(samples.len(), *size);
         }
     }
 }

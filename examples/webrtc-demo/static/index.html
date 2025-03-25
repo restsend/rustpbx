@@ -54,6 +54,15 @@
 
 <body>
     <h1>WebRTC Audio Demo</h1>
+    <p>
+        <audio id="audio-player" autoplay></audio>
+    </p>
+    <p>
+        <label for="use-audio">Use audio</label>
+        <select id="audio-input">
+            <option value="" selected>Default device</option>
+        </select>
+    </p>
     <div class="control-panel">
         <button id="start">Start Audio Connection</button>
         <button id="stop" disabled>Stop Audio Connection</button>

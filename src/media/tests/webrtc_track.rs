@@ -4,11 +4,11 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::media::codecs::pcmu;
 use crate::media::codecs::Encoder;
-use crate::media::codecs::{pcmu, CodecType};
-use crate::media::processor::{AudioFrame, Processor};
+use crate::media::processor::{AudioFrame, AudioPayload, Processor};
 use crate::media::track::webrtc::WebrtcTrack;
-use crate::media::track::{Track, TrackPacket, TrackPayload};
+use crate::media::track::Track;
 
 // Simple test processor that counts frames
 struct CountingProcessor {
@@ -41,12 +41,13 @@ fn create_simple_rtp_packet(
     timestamp: u32,
     payload_type: u8,
     payload: Vec<u8>,
-) -> TrackPacket {
+) -> AudioFrame {
     // Create basic RTP packet
-    TrackPacket {
+    AudioFrame {
         track_id: track_id.to_string(),
-        timestamp: timestamp as u64,
-        payload: TrackPayload::RTP(payload_type, payload),
+        timestamp: timestamp as u32,
+        samples: AudioPayload::RTP(payload_type, payload),
+        sample_rate: 16000,
     }
 }
 
@@ -74,10 +75,11 @@ async fn test_webrtc_track_pcm() -> Result<()> {
     let pcm_data: Vec<i16> = (0..320)
         .map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16)
         .collect();
-    let pcm_packet = TrackPacket {
+    let pcm_packet = AudioFrame {
         track_id: track_id.clone(),
         timestamp: 1000,
-        payload: TrackPayload::PCM(pcm_data),
+        samples: AudioPayload::PCM(pcm_data),
+        sample_rate: 16000,
     };
 
     // Send the packet to the track
@@ -105,7 +107,7 @@ async fn test_webrtc_track_pcm() -> Result<()> {
 async fn test_webrtc_track_rtp() -> Result<()> {
     // Create an WebrtcTrack with PCMU codec
     let track_id = "test_webrtc_track".to_string();
-    let mut webrtc_track = WebrtcTrack::new(track_id.clone()).with_codecs(vec![CodecType::PCMU]);
+    let webrtc_track = WebrtcTrack::new(track_id.clone());
 
     // Create channels
     let (event_sender, _event_receiver) = broadcast::channel(16);

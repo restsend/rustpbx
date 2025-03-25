@@ -1,27 +1,27 @@
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use hound::{WavReader, WavSpec};
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
-
+use super::TrackPacketReceiver;
+use crate::media::codecs::resample;
+use crate::media::processor::AudioPayload;
 use crate::media::{
     processor::{AudioFrame, Processor},
     stream::EventSender,
-    track::{Track, TrackConfig, TrackId, TrackPacket, TrackPacketSender, TrackPayload},
+    track::{Track, TrackConfig, TrackId, TrackPacketSender},
 };
-
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use hound::WavReader;
+use std::fs::File;
+use std::io::BufReader;
+use std::sync::{Arc, Mutex};
+use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 pub struct FileTrack {
     id: TrackId,
     config: TrackConfig,
     cancel_token: CancellationToken,
     processors: Vec<Box<dyn Processor>>,
     path: Option<String>,
-    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<TrackPacket>>>>,
+    receiver: Arc<Mutex<Option<TrackPacketReceiver>>>,
 }
 
 impl FileTrack {
@@ -85,42 +85,41 @@ impl Track for FileTrack {
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
-        // Create a channel for receiving packets
-        let (sender, receiver) = mpsc::unbounded_channel();
+        match &self.path {
+            Some(path) => {
+                let path = path.clone();
+                let id = self.id.clone();
+                let sample_rate = self.config.sample_rate;
+                let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
 
-        // Store the receiver in self (thread-safe)
-        {
-            let mut receiver_guard = self.receiver.lock().unwrap();
-            *receiver_guard = Some(receiver);
+                tokio::spawn(async move {
+                    let stream_result = stream_wav_file(
+                        &path,
+                        &id,
+                        sample_rate,
+                        max_pcm_chunk_size,
+                        token.clone(),
+                        packet_sender,
+                    )
+                    .await;
+                    if let Err(e) = stream_result {
+                        tracing::error!("Error streaming WAV file: {}", e);
+                    }
+                    // Signal the end of the file
+                    event_sender
+                        .send(crate::media::stream::MediaStreamEvent::TrackStop(id))
+                        .ok();
+                });
+            }
+            None => {
+                tracing::error!("No path provided for FileTrack");
+                event_sender
+                    .send(crate::media::stream::MediaStreamEvent::TrackStop(
+                        self.id.clone(),
+                    ))
+                    .ok();
+            }
         }
-
-        // If we have a path, start streaming the WAV file
-        if let Some(path) = &self.path {
-            let path = path.clone();
-            let id = self.id.clone();
-            let sample_rate = self.config.sample_rate;
-            let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
-
-            tokio::spawn(async move {
-                let stream_result = stream_wav_file(
-                    &path,
-                    &id,
-                    sample_rate,
-                    max_pcm_chunk_size,
-                    token.clone(),
-                    packet_sender,
-                )
-                .await;
-
-                if let Err(e) = stream_result {
-                    tracing::error!("Error streaming WAV file: {}", e);
-                }
-
-                // Signal the end of the file
-                let _ = event_sender.send(crate::media::stream::MediaStreamEvent::TrackStop(id));
-            });
-        }
-
         Ok(())
     }
 
@@ -130,47 +129,9 @@ impl Track for FileTrack {
         Ok(())
     }
 
-    async fn send_packet(&self, packet: &TrackPacket) -> Result<()> {
-        if let TrackPayload::PCM(samples) = &packet.payload {
-            let mut frame = AudioFrame {
-                track_id: packet.track_id.clone(),
-                samples: samples.clone(),
-                timestamp: packet.timestamp as u32,
-                sample_rate: self.config.sample_rate as u16,
-            };
-
-            // Apply processors to the frame
-            for processor in &self.processors {
-                let _ = processor.process_frame(&mut frame);
-            }
-        }
+    // Do nothing as we are not sending packets
+    async fn send_packet(&self, _packet: &AudioFrame) -> Result<()> {
         Ok(())
-    }
-
-    async fn recv_packet(&self) -> Option<TrackPacket> {
-        let mut receiver_opt: Option<mpsc::UnboundedReceiver<TrackPacket>> = None;
-
-        // Use a block to limit the mutex lock duration
-        {
-            let mut receiver_guard = self.receiver.lock().unwrap();
-            if let Some(rec) = receiver_guard.as_mut() {
-                // Try to receive a packet without blocking
-                match rec.try_recv() {
-                    Ok(packet) => return Some(packet),
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        *receiver_guard = None;
-                    }
-                }
-            }
-        }
-
-        // If we didn't get a packet immediately, try with await
-        if let Some(mut receiver) = receiver_opt {
-            return receiver.recv().await;
-        }
-
-        None
     }
 }
 
@@ -186,61 +147,46 @@ async fn stream_wav_file(
     // Open the WAV file
     let reader = BufReader::new(File::open(path)?);
     let mut wav_reader = WavReader::new(reader)?;
-
     let spec = wav_reader.spec();
-    let duration_per_sample = 1.0 / spec.sample_rate as f64;
-
-    // Calculate resampling ratio if needed
-    let resample_ratio = target_sample_rate as f64 / spec.sample_rate as f64;
-
-    // Read all samples (we'll do this in a blocking task since hound is not async)
-    let samples_result = tokio::task::spawn_blocking(move || {
-        let mut all_samples = Vec::new();
-
-        match spec.sample_format {
-            hound::SampleFormat::Int => {
-                match spec.bits_per_sample {
-                    16 => {
-                        for sample in wav_reader.samples::<i16>() {
-                            all_samples.push(sample.unwrap_or(0));
-                        }
-                    }
-                    8 => {
-                        for sample in wav_reader.samples::<i8>() {
-                            all_samples.push(sample.unwrap_or(0) as i16);
-                        }
-                    }
-                    24 => {
-                        // Handle 24-bit as i32 but scale appropriately
-                        for sample in wav_reader.samples::<i32>() {
-                            all_samples.push((sample.unwrap_or(0) >> 16) as i16);
-                        }
-                    }
-                    32 => {
-                        for sample in wav_reader.samples::<i32>() {
-                            all_samples.push((sample.unwrap_or(0) >> 16) as i16);
-                        }
-                    }
-                    _ => {
-                        return Err(anyhow!(
-                            "Unsupported bits per sample: {}",
-                            spec.bits_per_sample
-                        ))
+    let mut all_samples = Vec::new();
+    match spec.sample_format {
+        hound::SampleFormat::Int => {
+            match spec.bits_per_sample {
+                16 => {
+                    for sample in wav_reader.samples::<i16>() {
+                        all_samples.push(sample.unwrap_or(0));
                     }
                 }
-            }
-            hound::SampleFormat::Float => {
-                for sample in wav_reader.samples::<f32>() {
-                    all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
+                8 => {
+                    for sample in wav_reader.samples::<i8>() {
+                        all_samples.push(sample.unwrap_or(0) as i16);
+                    }
+                }
+                24 => {
+                    // Handle 24-bit as i32 but scale appropriately
+                    for sample in wav_reader.samples::<i32>() {
+                        all_samples.push((sample.unwrap_or(0) >> 16) as i16);
+                    }
+                }
+                32 => {
+                    for sample in wav_reader.samples::<i32>() {
+                        all_samples.push((sample.unwrap_or(0) >> 16) as i16);
+                    }
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Unsupported bits per sample: {}",
+                        spec.bits_per_sample
+                    ))
                 }
             }
         }
-
-        Ok((all_samples, spec))
-    })
-    .await??;
-
-    let (mut all_samples, spec) = samples_result;
+        hound::SampleFormat::Float => {
+            for sample in wav_reader.samples::<f32>() {
+                all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
+            }
+        }
+    }
 
     // If stereo, convert to mono by averaging channels
     if spec.channels == 2 {
@@ -252,23 +198,8 @@ async fn stream_wav_file(
     }
 
     // Resample if needed
-    if (resample_ratio - 1.0).abs() > 0.01 {
-        // Simple linear resampling
-        let orig_len = all_samples.len();
-        let new_len = (orig_len as f64 * resample_ratio) as usize;
-        let mut resampled = vec![0; new_len];
-
-        for i in 0..new_len {
-            let src_idx = i as f64 / resample_ratio;
-            let src_idx_floor = src_idx.floor() as usize;
-            let src_idx_ceil = (src_idx_floor + 1).min(orig_len - 1);
-            let t = src_idx - src_idx_floor as f64;
-
-            resampled[i] = (all_samples[src_idx_floor] as f64 * (1.0 - t)
-                + all_samples[src_idx_ceil] as f64 * t) as i16;
-        }
-
-        all_samples = resampled;
+    if spec.sample_rate != target_sample_rate {
+        all_samples = resample::resample_mono(&all_samples, spec.sample_rate, target_sample_rate);
     }
 
     // Send PCM data in chunks
@@ -276,6 +207,13 @@ async fn stream_wav_file(
     let packet_duration = 1000.0 / target_sample_rate as f64 * max_pcm_chunk_size as f64;
     let packet_duration_ms = packet_duration as u64;
 
+    info!(
+        "Streaming WAV file with {} samples, packet_duration_ms: {} target_sample_rate: {} spec.sample_rate: {}",
+        all_samples.len(),
+        packet_duration_ms,
+        target_sample_rate,
+        spec.sample_rate
+    );
     // Stream the audio data
     for chunk in all_samples.chunks(max_pcm_chunk_size) {
         // Check if we should stop
@@ -284,12 +222,12 @@ async fn stream_wav_file(
         }
 
         // Create a TrackPacket with PCM data
-        let packet = TrackPacket {
+        let packet = AudioFrame {
             track_id: track_id.to_string(),
-            timestamp,
-            payload: TrackPayload::PCM(chunk.to_vec()),
+            timestamp: timestamp as u32,
+            samples: AudioPayload::PCM(chunk.to_vec()),
+            sample_rate: target_sample_rate as u16,
         };
-
         // Send the packet
         if let Err(e) = packet_sender.send(packet) {
             tracing::error!("Failed to send audio packet: {}", e);
@@ -298,9 +236,8 @@ async fn stream_wav_file(
 
         // Update timestamp for next packet
         timestamp += packet_duration_ms;
-
         // Sleep for the duration of the packet to simulate real-time streaming
-        tokio::time::sleep(Duration::from_millis(packet_duration_ms / 2)).await;
+        tokio::time::sleep(Duration::from_millis(packet_duration_ms)).await;
     }
 
     Ok(())

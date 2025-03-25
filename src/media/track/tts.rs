@@ -1,12 +1,11 @@
+use crate::media::{
+    processor::{AudioFrame, Processor},
+    stream::EventSender,
+    track::{Track, TrackId, TrackPacketSender},
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-
-use crate::media::{
-    processor::Processor,
-    stream::EventSender,
-    track::{Track, TrackId, TrackPacket, TrackPacketSender},
-};
 
 pub struct TtsTrack {
     id: TrackId,
@@ -52,10 +51,7 @@ impl Track for TtsTrack {
         Ok(())
     }
 
-    async fn send_packet(&self, _packet: &TrackPacket) -> Result<()> {
+    async fn send_packet(&self, _packet: &AudioFrame) -> Result<()> {
         Ok(())
-    }
-    async fn recv_packet(&self) -> Option<TrackPacket> {
-        None
     }
 }

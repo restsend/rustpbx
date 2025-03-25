@@ -1,9 +1,14 @@
 use super::*;
+use hound::WavReader;
+use std::{
+    fs::File,
+    io::{BufReader, Write},
+};
 
 #[test]
 fn test_pcmu_codec() {
     let mut encoder = pcmu::PcmuEncoder::new();
-    let mut decoder = pcmu::PcmuDecoder::new();
+    let decoder = pcmu::PcmuDecoder::new();
 
     // Test with a simple sine wave
     let samples: Vec<i16> = (0..160)
@@ -32,7 +37,7 @@ fn test_pcmu_codec() {
 #[test]
 fn test_pcma_codec() {
     let mut encoder = pcma::PcmaEncoder::new();
-    let mut decoder = pcma::PcmaDecoder::new();
+    let decoder = pcma::PcmaDecoder::new();
 
     // Test with a simple sine wave
     let samples: Vec<i16> = (0..160)
@@ -61,7 +66,7 @@ fn test_pcma_codec() {
 #[test]
 fn test_g722_codec() {
     let mut encoder = g722::G722Encoder::new();
-    let mut decoder = g722::G722Decoder::new();
+    let decoder = g722::G722Decoder::new();
 
     // Test with a simple sine wave at 16kHz
     let samples: Vec<i16> = (0..320)
@@ -188,4 +193,107 @@ fn test_codec_factory() {
     let encoder = create_encoder(CodecType::G722).unwrap();
     assert_eq!(encoder.sample_rate(), 16000);
     assert_eq!(encoder.channels(), 1);
+}
+
+#[test]
+fn test_g722_encode() {
+    let reader = BufReader::new(File::open("testdata/sample.wav").expect("Failed to open file"));
+    let mut wav_reader = WavReader::new(reader).expect("Failed to read wav file");
+    let mut all_samples = Vec::new();
+    for sample in wav_reader.samples::<i16>() {
+        all_samples.push(sample.unwrap_or(0));
+    }
+    let max_pcm_chunk_size = 320;
+
+    let mut file =
+        File::create("testdata/sample.g722.chunk.encoded").expect("Failed to create file");
+    let mut encoder = g722::G722Encoder::new();
+    for chunk in all_samples.chunks(max_pcm_chunk_size) {
+        let encoded = encoder.encode(&chunk).unwrap();
+        file.write_all(&encoded).expect("Failed to write file");
+    }
+    println!("ffplay -f g722 -ar 16000 -i testdata/sample.g722.chunk.encoded");
+}
+#[test]
+fn test_codec_encode_decode() {
+    let reader = BufReader::new(File::open("testdata/sample.wav").expect("Failed to open file"));
+    let mut wav_reader = WavReader::new(reader).expect("Failed to read wav file");
+    let mut all_samples = Vec::new();
+    for sample in wav_reader.samples::<i16>() {
+        all_samples.push(sample.unwrap_or(0));
+    }
+    let resampled_8k = resample::resample_mono(&all_samples, 16000, 8000);
+
+    {
+        let mut encoder = g722::G722Encoder::new();
+        let encoded = encoder.encode(&all_samples).unwrap();
+        println!(
+            "G722 encoded {} samples to {} bytes ",
+            all_samples.len(),
+            encoded.len()
+        );
+        let mut file = File::create("testdata/sample.g722.encoded").expect("Failed to create file");
+        file.write_all(&encoded).expect("Failed to write file");
+        println!("ffplay -f g722 -ar 16000 -i testdata/sample.g722.encoded");
+
+        let decoder = g722::G722Decoder::new();
+        let decoded = decoder.decode(&encoded).unwrap();
+        println!(
+            "G722 decoded {} samples to {} bytes ",
+            decoded.len(),
+            decoded.len()
+        );
+        let mut file = File::create("testdata/sample.g722.decoded").expect("Failed to create file");
+        file.write_all(&convert_s16_to_u8(&decoded))
+            .expect("Failed to write file");
+        println!("ffplay -f s16le -ar 16000  -i testdata/sample.g722.decoded");
+    }
+    {
+        let mut encoder = pcmu::PcmuEncoder::new();
+        let encoded = encoder.encode(&resampled_8k).unwrap();
+        println!(
+            "PCMU encoded {} samples to {} bytes ",
+            resampled_8k.len(),
+            encoded.len()
+        );
+        let mut file = File::create("testdata/sample.pcmu.encoded").expect("Failed to create file");
+        file.write_all(&encoded).expect("Failed to write file");
+        println!("ffplay -f mulaw -ar 8000 -i testdata/sample.pcmu.encoded");
+
+        let decoder = pcmu::PcmuDecoder::new();
+        let decoded = decoder.decode(&encoded).unwrap();
+        println!(
+            "PCMU decoded {} samples to {} bytes ",
+            decoded.len(),
+            decoded.len()
+        );
+        let mut file = File::create("testdata/sample.pcmu.decoded").expect("Failed to create file");
+        file.write_all(&convert_s16_to_u8(&decoded))
+            .expect("Failed to write file");
+        println!("ffplay -f s16le -ar 8000 -i testdata/sample.pcmu.decoded");
+    }
+    {
+        let mut encoder = pcma::PcmaEncoder::new();
+        let encoded = encoder.encode(&resampled_8k).unwrap();
+        println!(
+            "PCMA encoded {} samples to {} bytes ",
+            all_samples.len(),
+            encoded.len()
+        );
+        let mut file = File::create("testdata/sample.pcma.encoded").expect("Failed to create file");
+        file.write_all(&encoded).expect("Failed to write file");
+        println!("ffplay -f alaw -ar 8000 -i testdata/sample.pcma.encoded");
+
+        let decoder = pcma::PcmaDecoder::new();
+        let decoded = decoder.decode(&encoded).unwrap();
+        println!(
+            "PCMA decoded {} samples to {} bytes ",
+            decoded.len(),
+            decoded.len()
+        );
+        let mut file = File::create("testdata/sample.pcma.decoded").expect("Failed to create file");
+        file.write_all(&convert_s16_to_u8(&decoded))
+            .expect("Failed to write file");
+        println!("ffplay -f s16le -ar 8000 -i testdata/sample.pcma.decoded");
+    }
 }

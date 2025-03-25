@@ -1,28 +1,22 @@
+use crate::media::{
+    jitter::JitterBuffer,
+    processor::{AudioFrame, AudioPayload, Processor},
+    stream::EventSender,
+    track::{Track, TrackConfig, TrackId, TrackPacketSender},
+};
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::StreamExt;
-use rtp_rs::{RtpPacketBuilder, RtpReader};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 use webrtc::media::Sample;
-use webrtc::rtp::{self, packet::Packet as RtpPacket};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use webrtc::track::track_local::TrackLocal;
 
-use crate::media::{
-    codecs::{CodecType, Decoder, DecoderFactory, Encoder},
-    jitter::JitterBuffer,
-    processor::{AudioFrame, Processor},
-    stream::EventSender,
-    track::{Track, TrackConfig, TrackId, TrackPacket, TrackPacketSender, TrackPayload},
-};
+use super::{track_codec::TrackCodec, TrackPacketReceiver};
 
 // Configuration for integrating a webrtc crate track with our WebrtcTrack
 #[derive(Clone)]
@@ -35,9 +29,8 @@ pub struct WebrtcTrack {
     id: TrackId,
     config: TrackConfig,
     processors: Vec<Box<dyn Processor>>,
-    decoders: HashMap<u8, Box<dyn Decoder>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
-    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<TrackPacket>>>>,
+    receiver: Arc<Mutex<Option<TrackPacketReceiver>>>,
     packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
     cancel_token: CancellationToken,
     webrtc_track: Option<WebrtcTrackConfig>,
@@ -51,7 +44,6 @@ impl WebrtcTrack {
             id,
             config: config.clone(),
             processors: Vec::new(),
-            decoders: HashMap::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
             receiver: Arc::new(Mutex::new(None)),
             packet_sender: Arc::new(Mutex::new(None)),
@@ -94,191 +86,77 @@ impl WebrtcTrack {
         self
     }
 
-    pub fn with_codecs(mut self, codec_types: Vec<CodecType>) -> Self {
-        // Create decoders for each codec type
-        let decoder_factory = DecoderFactory::new();
-
-        for codec_type in codec_types {
-            if let Ok(decoder) = decoder_factory.create_decoder(codec_type) {
-                let payload_type = match codec_type {
-                    CodecType::PCMU => 0, // PCMU is payload type 0
-                    CodecType::PCMA => 8, // PCMA is payload type 8
-                    CodecType::G722 => 9, // G722 is payload type 9
-                };
-
-                self.decoders.insert(payload_type, decoder);
-            }
-        }
-
-        self
-    }
-
-    // Process WebRTC RTP packet
-    fn process_rtp_packet(&self, packet: &TrackPacket) -> Result<()> {
-        if let TrackPayload::RTP(payload_type, payload) = &packet.payload {
-            let packet_sender = {
-                let guard = self.packet_sender.lock().unwrap();
-                match &*guard {
-                    Some(sender) => sender.clone(),
-                    None => return Ok(()),
-                }
-            };
-
-            // Try to parse the RTP packet using rtp-rs
-            let reader = match RtpReader::new(payload) {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("Failed to create RTP reader: {:?}", e);
-                    return Ok(());
-                }
-            };
-
-            // Get the timestamp and payload from the reader
-            let timestamp = reader.timestamp();
-            let payload_data = reader.payload();
-
-            // Try to decode RTP payload if we have a decoder for this payload type
-            let decoders = &self.decoders;
-            if let Some(decoder) = decoders.get(payload_type) {
-                if let Ok(pcm_samples) = decoder.decode(payload_data) {
-                    // Create a PCM packet
-                    let pcm_packet = TrackPacket {
-                        track_id: packet.track_id.clone(),
-                        timestamp: timestamp as u64,
-                        payload: TrackPayload::PCM(pcm_samples),
-                    };
-
-                    // Convert to AudioFrame and add to jitter buffer
-                    if let TrackPayload::PCM(samples) = &pcm_packet.payload {
-                        let frame = AudioFrame {
-                            track_id: pcm_packet.track_id.clone(),
-                            samples: samples.clone(),
-                            timestamp,
-                            sample_rate: self.config.sample_rate as u16,
-                        };
-
-                        // Add to jitter buffer
-                        {
-                            let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
-                            jitter_buffer.push(frame);
-                        }
-                    }
-                }
-            }
-
-            // Forward the original RTP packet as well
-            let _ = packet_sender.send(packet.clone());
-        }
-
-        Ok(())
-    }
-
-    async fn start_jitter_processing(
-        &self,
-        token: CancellationToken,
-        packet_sender: TrackPacketSender,
-    ) -> Result<()> {
+    async fn start_jitter_processing(&self, token: CancellationToken) -> Result<()> {
         // Create a task to process frames from the jitter buffer
         let jitter_buffer = self.jitter_buffer.clone();
-        let track_id = self.id.clone();
         let sample_rate = self.config.sample_rate;
+        let webrtc_track_config = self.webrtc_track.clone();
+        let ptime_ms = self.config.ptime.as_millis() as u32;
 
-        // Copy processor logic - we can't easily clone Vec<Box<dyn Processor>>
-        // Instead copy each processor's process_frame implementation and make this
-        // a standalone task without lifetime dependencies
-        let mut processor_fns = Vec::new();
-        for processor in &self.processors {
-            if let Ok(dummy_frame) = process_dummy_frame(processor.as_ref()) {
-                processor_fns.push(dummy_frame);
-            }
-        }
-
-        let interval_ms = 20; // 20ms interval for processing
-        let interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        // Use ptime from config for the processing interval
+        let interval = tokio::time::interval(self.config.ptime);
         let mut interval_stream = IntervalStream::new(interval);
 
         tokio::spawn(async move {
+            debug!(
+                "Started jitter buffer processing with ptime: {}ms",
+                ptime_ms
+            );
+
+            // Create a new codec instance for this task
+            let codecs = TrackCodec::new();
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
+                        debug!("Jitter processing task cancelled");
                         break;
                     }
                     _ = interval_stream.next() => {
                         // Get frames from jitter buffer
                         let frames = {
                             let mut jitter = jitter_buffer.lock().unwrap();
-                            jitter.pull_frames(interval_ms as u32, sample_rate)
+                            jitter.pull_frames(ptime_ms, sample_rate)
                         };
+                        let webrtc_track_config = match &webrtc_track_config {
+                            Some(config) => config,
+                            None => {
+                                continue;
+                            }
+                        };
+                        for frame in frames {
+                            // If we have a webrtc track, encode and send the samples
+                            let payload_type = webrtc_track_config.payload_type;
+                            let packet_timestamp = frame.timestamp;
+                            // Encode PCM to codec format
+                            if let Ok(encoded_data) = codecs.encode(payload_type, frame) {
+                                // Create a Sample that the WebRTC track can use
+                                let sample = Sample {
+                                    data: encoded_data,
+                                    duration: Duration::from_millis(ptime_ms as u64),
+                                    timestamp: std::time::SystemTime::now(),
+                                    packet_timestamp,
+                                    prev_dropped_packets: 0,
+                                    prev_padding_packets: 0,
+                                };
 
-                        for mut frame in frames {
-                            // Process frame with processors
-                            for process_fn in &processor_fns {
-                                if let Err(e) = process_fn(&mut frame) {
-                                    error!("Error processing frame: {:?}", e);
+                                debug!(
+                                    "Sending jitter buffer samples to WebRTC track, payload type: {}, packet size: {}, timestamp: {}",
+                                    payload_type,
+                                    sample.data.len(),
+                                    sample.packet_timestamp
+                                );
+
+                                // Try to write the sample to the track
+                                if let Err(e) = webrtc_track_config.track.write_sample(&sample).await {
+                                    error!("Failed to write jitter buffer sample to WebRTC track: {}", e);
                                 }
                             }
-
-                            // Convert to PCM packet and send
-                            let packet = TrackPacket {
-                                track_id: track_id.clone(),
-                                timestamp: frame.timestamp as u64,
-                                payload: TrackPayload::PCM(frame.samples.clone()),
-                            };
-
-                            let _ = packet_sender.send(packet);
                         }
                     }
                 }
             }
         });
 
-        Ok(())
-    }
-}
-
-// Helper function to get a function pointer from a processor
-fn process_dummy_frame(
-    processor: &dyn Processor,
-) -> Result<Box<dyn Fn(&mut AudioFrame) -> Result<()> + Send + Sync>> {
-    // Create a simple processor to use inside our closure
-    struct LocalProcessor;
-
-    impl Processor for LocalProcessor {
-        fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-            // Simple no-op processor
-            Ok(())
-        }
-    }
-
-    // Create a boxed function that captures the processor's behavior
-    Ok(Box::new(move |frame: &mut AudioFrame| -> Result<()> {
-        // This is a simplified version that doesn't actually call the original processor
-        // In a real implementation, you would need to clone the processor or its state
-        LocalProcessor.process_frame(frame)
-    }))
-}
-
-// Helper processor for testing - keep a static version here for the dummy function
-struct CountingProcessor {
-    count: Arc<Mutex<usize>>,
-}
-
-impl CountingProcessor {
-    fn new() -> (Self, Arc<Mutex<usize>>) {
-        let count = Arc::new(Mutex::new(0));
-        (
-            Self {
-                count: Arc::clone(&count),
-            },
-            count,
-        )
-    }
-}
-
-impl Processor for CountingProcessor {
-    fn process_frame(&self, _frame: &mut AudioFrame) -> Result<()> {
-        let mut count = self.count.lock().unwrap();
-        *count += 1;
         Ok(())
     }
 }
@@ -327,8 +205,7 @@ impl Track for WebrtcTrack {
         ));
 
         // Start jitter buffer processing
-        self.start_jitter_processing(token.clone(), packet_sender.clone())
-            .await?;
+        self.start_jitter_processing(token.clone()).await?;
 
         // Clone token for the task
         let token_clone = token.clone();
@@ -348,126 +225,17 @@ impl Track for WebrtcTrack {
     async fn stop(&self) -> Result<()> {
         // Cancel all processing
         self.cancel_token.cancel();
-
-        // Clear jitter buffer
-        {
-            let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
-            jitter_buffer.clear();
-        }
-
         Ok(())
     }
 
-    async fn send_packet(&self, packet: &TrackPacket) -> Result<()> {
-        match &packet.payload {
-            TrackPayload::PCM(samples) => {
-                // Process PCM directly with processors
-                let mut frame = AudioFrame {
-                    track_id: packet.track_id.clone(),
-                    samples: samples.clone(),
-                    timestamp: packet.timestamp as u32,
-                    sample_rate: self.config.sample_rate as u16,
-                };
-
-                // Process the frame with all processors
-                for processor in &self.processors {
-                    let _ = processor.process_frame(&mut frame);
-                }
-
-                // Add processed frame to jitter buffer
-                {
-                    let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
-                    jitter_buffer.push(frame.clone());
-                }
-
-                // If we have a webrtc track, send the PCM samples to it
-                if let Some(webrtc_track_config) = &self.webrtc_track {
-                    // First we need to encode the samples to our codec format
-                    let codec_type = match webrtc_track_config.payload_type {
-                        0 => CodecType::PCMU,
-                        8 => CodecType::PCMA,
-                        9 => CodecType::G722,
-                        _ => return Ok(()),
-                    };
-
-                    // Create an encoder
-                    if let Ok(mut encoder) = crate::media::codecs::create_encoder(codec_type) {
-                        // Encode the samples
-                        if let Ok(encoded_data) = encoder.encode(&frame.samples) {
-                            // Create a Sample that the WebRTC track can use
-                            let sample = Sample {
-                                data: Bytes::from(encoded_data),
-                                duration: std::time::Duration::from_millis(20),
-                                timestamp: std::time::SystemTime::now(),
-                                packet_timestamp: packet.timestamp as u32,
-                                prev_dropped_packets: 0,
-                                prev_padding_packets: 0,
-                            };
-
-                            // Try to write the sample to the track
-                            if let Err(e) = webrtc_track_config.track.write_sample(&sample).await {
-                                error!("Failed to write sample to WebRTC track: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            TrackPayload::RTP(payload_type, payload) => {
-                // Process RTP packet
-                self.process_rtp_packet(packet)?;
-
-                // If we have a webrtc track and this packet's payload type matches,
-                // forward it to the WebRTC track
-                if let Some(webrtc_track_config) = &self.webrtc_track {
-                    if *payload_type == webrtc_track_config.payload_type {
-                        // Convert to Bytes
-                        let data = Bytes::from(payload.clone());
-
-                        // Create a Sample that the WebRTC track can use
-                        let sample = Sample {
-                            data,
-                            duration: std::time::Duration::from_millis(20),
-                            timestamp: std::time::SystemTime::now(),
-                            packet_timestamp: packet.timestamp as u32,
-                            prev_dropped_packets: 0,
-                            prev_padding_packets: 0,
-                        };
-
-                        // Try to write the sample to the track
-                        if let Err(e) = webrtc_track_config.track.write_sample(&sample).await {
-                            error!("Failed to write RTP sample to WebRTC track: {}", e);
-                        }
-                    }
-                }
-            }
+    async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
+        let mut frame = packet.clone();
+        // Process the frame with all processors
+        for processor in &self.processors {
+            let _ = processor.process_frame(&mut frame);
         }
-
+        let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
+        jitter_buffer.push(frame);
         Ok(())
-    }
-
-    async fn recv_packet(&self) -> Option<TrackPacket> {
-        let mut receiver_opt: Option<mpsc::UnboundedReceiver<TrackPacket>> = None;
-
-        // Use a block to limit the mutex lock duration
-        {
-            let mut receiver_guard = self.receiver.lock().unwrap();
-            if let Some(rec) = receiver_guard.as_mut() {
-                // Try to receive a packet without blocking
-                match rec.try_recv() {
-                    Ok(packet) => return Some(packet),
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        *receiver_guard = None;
-                    }
-                }
-            }
-        }
-
-        // If we didn't get a packet immediately, try with await
-        if let Some(mut receiver) = receiver_opt {
-            return receiver.recv().await;
-        }
-
-        None
     }
 }
