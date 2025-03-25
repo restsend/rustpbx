@@ -1,11 +1,10 @@
 use anyhow::Result;
 use bytes::Bytes;
-use std::sync::Arc;
 
 pub mod g722;
 pub mod pcma;
 pub mod pcmu;
-
+pub mod resample;
 #[cfg(test)]
 mod tests;
 
@@ -64,4 +63,13 @@ impl DecoderFactory {
     pub fn create_decoder(&self, codec: CodecType) -> Result<Box<dyn Decoder>> {
         create_decoder(codec)
     }
+}
+
+pub fn convert_s16_to_u8(s16_data: &[i16]) -> Vec<u8> {
+    let mut u8_data = Vec::with_capacity(s16_data.len() * 2);
+    for &s in s16_data {
+        u8_data.push((s & 0xFF) as u8);
+        u8_data.push((s >> 8) as u8);
+    }
+    u8_data
 }

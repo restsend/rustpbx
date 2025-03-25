@@ -4,24 +4,12 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use super::processor::AudioFrame;
+use super::stream::EventSender;
 use crate::media::processor::Processor;
 
-use super::stream::EventSender;
-
-#[derive(Debug, Clone)]
-pub enum TrackPayload {
-    PCM(Vec<i16>),
-    RTP(u8, Vec<u8>),
-}
-#[derive(Debug, Clone)]
-pub struct TrackPacket {
-    pub track_id: TrackId,
-    pub timestamp: u64,
-    pub payload: TrackPayload,
-}
-
-pub type TrackPacketSender = mpsc::UnboundedSender<TrackPacket>;
-pub type TrackPacketReceiver = mpsc::UnboundedReceiver<TrackPacket>;
+pub type TrackPacketSender = mpsc::UnboundedSender<AudioFrame>;
+pub type TrackPacketReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 
 // New shared track configuration struct
 #[derive(Debug, Clone)]
@@ -73,11 +61,10 @@ impl TrackConfig {
 }
 
 pub mod file;
-pub mod rtcconn;
 pub mod rtp;
+pub mod track_codec;
 pub mod tts;
 pub mod webrtc;
-
 pub type TrackId = String;
 
 #[async_trait]
@@ -94,6 +81,5 @@ pub trait Track: Send + Sync {
         packet_sender: TrackPacketSender,
     ) -> Result<()>;
     async fn stop(&self) -> Result<()>;
-    async fn send_packet(&self, packet: &TrackPacket) -> Result<()>;
-    async fn recv_packet(&self) -> Option<TrackPacket>;
+    async fn send_packet(&self, packet: &AudioFrame) -> Result<()>;
 }

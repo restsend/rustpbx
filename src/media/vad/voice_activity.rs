@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use super::VADConfig;
-use crate::media::processor::AudioFrame;
+use crate::media::processor::{AudioFrame, AudioPayload};
 
 // Thread-safe wrapper for Vad
 struct ThreadSafeVad(Vad);
@@ -38,7 +38,11 @@ impl VoiceActivityVad {
 impl super::VadEngine for VoiceActivityVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
         // Add current frame to buffer
-        self.buffer.extend_from_slice(&frame.samples);
+        let samples = match &frame.samples {
+            AudioPayload::PCM(samples) => samples,
+            _ => return Ok(false),
+        };
+        self.buffer.extend_from_slice(samples);
 
         // Process in chunks of 30ms (480 samples at 16kHz)
         let chunk_size = (16000 * 30) / 1000;

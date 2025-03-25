@@ -1,23 +1,21 @@
+use crate::media::{
+    processor::{AudioFrame, AudioPayload, Processor},
+    stream::{EventSender, MediaStreamBuilder},
+    track::{Track, TrackId, TrackPacketReceiver, TrackPacketSender},
+};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::media::{
-    processor::{AudioFrame, Processor},
-    stream::{EventSender, MediaStreamBuilder, MediaStreamEvent},
-    track::{Track, TrackId, TrackPacket, TrackPacketSender, TrackPayload},
-};
-
 pub struct TestTrack {
     id: TrackId,
     sender: Option<TrackPacketSender>,
-    receivers: Vec<mpsc::UnboundedReceiver<TrackPacket>>,
+    receivers: Vec<TrackPacketReceiver>,
     processors: Vec<Box<dyn Processor>>,
-    received_packets: Arc<Mutex<Vec<TrackPacket>>>,
+    received_packets: Arc<Mutex<Vec<AudioFrame>>>,
 }
 
 impl TestTrack {
@@ -32,11 +30,12 @@ impl TestTrack {
     }
 
     // Helper method to create a PCM packet
-    pub fn create_pcm_packet(&self, samples: Vec<i16>, timestamp: u64) -> TrackPacket {
-        TrackPacket {
+    pub fn create_pcm_packet(&self, samples: Vec<i16>, timestamp: u64) -> AudioFrame {
+        AudioFrame {
             track_id: self.id.clone(),
-            timestamp,
-            payload: TrackPayload::PCM(samples),
+            timestamp: timestamp as u32,
+            samples: AudioPayload::PCM(samples),
+            sample_rate: 16000,
         }
     }
 
@@ -46,11 +45,12 @@ impl TestTrack {
         payload_type: u8,
         payload: Vec<u8>,
         timestamp: u64,
-    ) -> TrackPacket {
-        TrackPacket {
+    ) -> AudioFrame {
+        AudioFrame {
             track_id: self.id.clone(),
-            timestamp,
-            payload: TrackPayload::RTP(payload_type, payload),
+            timestamp: timestamp as u32,
+            samples: AudioPayload::RTP(payload_type, payload),
+            sample_rate: 16000,
         }
     }
 
@@ -73,7 +73,7 @@ impl TestTrack {
     }
 
     // Method to get received packets
-    pub async fn get_received_packets(&self) -> Vec<TrackPacket> {
+    pub async fn get_received_packets(&self) -> Vec<AudioFrame> {
         self.received_packets.lock().await.clone()
     }
 }
@@ -115,17 +115,17 @@ impl Track for TestTrack {
         Ok(())
     }
 
-    async fn send_packet(&self, packet: &TrackPacket) -> Result<()> {
+    async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
         // Store the received packet
         let mut packets = self.received_packets.lock().await;
         packets.push(packet.clone());
 
         // Process the packet with processors before sending
         if !self.processors.is_empty() {
-            if let TrackPayload::PCM(samples) = &packet.payload {
+            if let AudioPayload::PCM(samples) = &packet.samples {
                 let mut frame = AudioFrame {
                     track_id: packet.track_id.clone(),
-                    samples: samples.clone(),
+                    samples: AudioPayload::PCM(samples.clone()),
                     timestamp: packet.timestamp as u32,
                     sample_rate: 16000,
                 };
@@ -138,24 +138,19 @@ impl Track for TestTrack {
 
         // Forward to all receivers
         for receiver in &self.receivers {
-            if let Some(sender) = unsafe {
-                (receiver as *const _ as *mut mpsc::UnboundedSender<TrackPacket>).as_mut()
-            } {
+            if let Some(sender) =
+                unsafe { (receiver as *const _ as *mut mpsc::UnboundedSender<AudioFrame>).as_mut() }
+            {
                 let _ = sender.send(packet.clone());
             }
         }
         Ok(())
-    }
-
-    async fn recv_packet(&self) -> Option<TrackPacket> {
-        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_stream_add_track() {
@@ -253,10 +248,11 @@ async fn test_stream_forward_packets() -> Result<()> {
 
     // Send PCM data through the sender
     let samples = vec![16000, 8000, 12000, 4000];
-    let packet = TrackPacket {
+    let packet = AudioFrame {
         track_id: track2_id.clone(),
         timestamp: 1000,
-        payload: TrackPayload::PCM(samples),
+        samples: AudioPayload::PCM(samples),
+        sample_rate: 16000,
     };
     packet_sender.send(packet).unwrap();
 
@@ -309,16 +305,18 @@ async fn test_stream_recorder() -> Result<()> {
     let samples2 = vec![15000, 18000, 21000, 24000];
 
     // Create the packets
-    let packet1 = TrackPacket {
+    let packet1 = AudioFrame {
         track_id: track2_id.clone(),
         timestamp: 1000,
-        payload: TrackPayload::PCM(samples1),
+        samples: AudioPayload::PCM(samples1),
+        sample_rate: 16000,
     };
 
-    let packet2 = TrackPacket {
+    let packet2 = AudioFrame {
         track_id: track2_id,
         timestamp: 1020,
-        payload: TrackPayload::PCM(samples2),
+        samples: AudioPayload::PCM(samples2),
+        sample_rate: 16000,
     };
 
     // Send the packets directly to the packet sender
@@ -362,20 +360,22 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
     let packet_sender = stream.packet_sender.clone();
 
     // Create an RTP packet from track2
-    let rtp_packet = TrackPacket {
+    let rtp_packet = AudioFrame {
         track_id: "track2".to_string(),
         timestamp: 1000,
-        payload: TrackPayload::RTP(0, vec![1, 2, 3, 4]), // Simple payload for testing
+        samples: AudioPayload::RTP(0, vec![1, 2, 3, 4]), // Simple payload for testing
+        sample_rate: 16000,
     };
 
     // Send the RTP packet
     packet_sender.send(rtp_packet).unwrap();
 
     // Create a PCM packet from track1
-    let pcm_packet = TrackPacket {
+    let pcm_packet = AudioFrame {
         track_id: "track1".to_string(),
         timestamp: 2000,
-        payload: TrackPayload::PCM(vec![3000, 6000, 9000, 12000]),
+        samples: AudioPayload::PCM(vec![3000, 6000, 9000, 12000]),
+        sample_rate: 16000,
     };
 
     // Send the PCM packet

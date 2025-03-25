@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let peerConnection = null;
     let audioElement = null;
+    let mediaStream = null;
 
     function addStatusMessage(message) {
         const messageElement = document.createElement('p');
@@ -12,28 +13,62 @@ document.addEventListener('DOMContentLoaded', () => {
         statusDiv.appendChild(messageElement);
         statusDiv.scrollTop = statusDiv.scrollHeight;
     }
+    function enumerateInputDevices() {
+        const populateSelect = (select, devices) => {
+            let counter = 1;
+            devices.forEach((device) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || ('Device #' + counter);
+                select.appendChild(option);
+                counter += 1;
+            });
+        };
 
+        navigator.mediaDevices.enumerateDevices().then((devices) => {
+            populateSelect(
+                document.getElementById('audio-input'),
+                devices.filter((device) => device.kind == 'audioinput')
+            );
+        }).catch((e) => {
+            addStatusMessage('Error: ' + e);
+        });
+    }
     async function startConnection() {
         try {
+            audioElement = document.getElementById('audio-player');
+            if (!audioElement) {
+                addStatusMessage('Audio element not found');
+                return;
+            }
             if (peerConnection) {
                 addStatusMessage('Connection already exists, stopping it first');
                 await stopConnection();
             }
 
-            addStatusMessage('Starting WebRTC connection...');
-
-            // Create an audio element for output
-            audioElement = new Audio();
-            audioElement.autoplay = true;
-
-            // Initialize peer connection
-            const configuration = {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' }
-                ]
+            const audioConstraints = {
+                video: false,
+                audio: {
+                    noiseSuppression: true,
+                    echoCancellation: true
+                }
             };
+            const audioInput = document.getElementById('audio-input').value;
+            if (audioInput) {
+                audioConstraints.audio.deviceId = audioInput;
+            }
+
+            mediaStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+            addStatusMessage('Starting WebRTC connection...');
+            // Initialize peer connection
+            const configuration = {};
 
             peerConnection = new RTCPeerConnection(configuration);
+
+            mediaStream.getTracks().forEach(track => {
+                addStatusMessage('Adding track to peer connection: ' + track.id);
+                peerConnection.addTrack(track, mediaStream);
+            });
 
             // When we get a track from the server, add it to our audio element
             peerConnection.ontrack = (event) => {
@@ -41,6 +76,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 audioElement.srcObject = event.streams[0];
             };
 
+            peerConnection.onconnectionstatechange = () => {
+                addStatusMessage('Connection state: ' + peerConnection.connectionState);
+            };
             // Handle ICE connection state changes
             peerConnection.oniceconnectionstatechange = () => {
                 addStatusMessage('ICE connection state: ' + peerConnection.iceConnectionState);
@@ -52,45 +90,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Handle ICE candidate events
             peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    // Send ICE candidate to server
-                    sendSignal({
-                        type: 'ice-candidate',
-                        candidate: event.candidate
-                    });
+                if (!event.candidate) {
+                    handshake().then()
+                    return
                 }
             };
-
             // Create SDP offer
             const offer = await peerConnection.createOffer({
                 offerToReceiveAudio: true,
                 offerToReceiveVideo: false
             });
-
             await peerConnection.setLocalDescription(offer);
-
-            // Send the offer to the server
-            addStatusMessage('Sending SDP offer to server');
-            const response = await fetch('/webrtc/offer', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    sdp: peerConnection.localDescription
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error('Server error: ' + response.status);
-            }
-
-            // Get SDP answer from server
-            const answerData = await response.json();
-            addStatusMessage('Received SDP answer from server');
-
-            // Set remote description
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(answerData.sdp));
 
         } catch (error) {
             addStatusMessage('Error: ' + error.message);
@@ -98,7 +108,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    async function handshake() {
+        // Send the offer to the server
+        addStatusMessage('Sending SDP offer to server');
+        const response = await fetch('/webrtc/offer', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                sdp: peerConnection.localDescription
+            })
+        });
+        if (!response.ok) {
+            addStatusMessage('Sending SDP offer to server failed');
+            await stopConnection();
+            return
+        }
+
+        // Get SDP answer from server
+        const { id, answer } = await response.json();
+        addStatusMessage('Received SDP answer from server: ' + id);
+        addStatusMessage('Setting remote description ');
+        // Set remote description
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer.sdp));
+        peerConnection.id = id;
+        stopButton.disabled = false;
+        startButton.disabled = true;
+    }
     async function stopConnection() {
+        let id = peerConnection.id;
         if (peerConnection) {
             peerConnection.close();
             peerConnection = null;
@@ -107,6 +146,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (audioElement) {
             audioElement.srcObject = null;
             audioElement = null;
+        }
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => {
+                track.stop();
+            });
+            mediaStream = null;
         }
 
         stopButton.disabled = true;
@@ -117,7 +162,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // Notify server
         try {
             await fetch('/webrtc/close', {
-                method: 'POST'
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    id
+                })
             });
         } catch (error) {
             addStatusMessage('Error notifying server: ' + error.message);
@@ -144,4 +195,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Setup initial page state
     addStatusMessage('WebRTC Audio Demo initialized. Click "Start Audio Connection" to begin.');
+
+    enumerateInputDevices();
 }); 

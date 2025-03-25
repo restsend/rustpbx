@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::{
     select,
@@ -14,8 +13,10 @@ use crate::media::{
     dtmf::DTMFDetector,
     processor::{AudioFrame, Processor},
     recorder::{Recorder, RecorderConfig},
-    track::{Track, TrackId, TrackPacket, TrackPacketReceiver, TrackPacketSender, TrackPayload},
+    track::{Track, TrackId, TrackPacketReceiver, TrackPacketSender},
 };
+
+use super::processor::AudioPayload;
 
 pub type EventSender = broadcast::Sender<MediaStreamEvent>;
 pub type EventReceiver = broadcast::Receiver<MediaStreamEvent>;
@@ -226,7 +227,6 @@ impl MediaStream {
         while let Some(track_packet) = packet_receiver.recv().await {
             // Process the packet - Check for DTMF first
             self.process_dtmf(&track_packet).await;
-
             // Forward packet to all other tracks
             let tracks = self.tracks.lock().await;
             for track in tracks.values() {
@@ -239,10 +239,10 @@ impl MediaStream {
         }
     }
 
-    async fn process_dtmf(&self, packet: &TrackPacket) {
-        match &packet.payload {
+    async fn process_dtmf(&self, packet: &AudioFrame) {
+        match &packet.samples {
             // Check if the packet contains RTP data (our focus for DTMF detection)
-            TrackPayload::RTP(payload_type, payload) => {
+            AudioPayload::RTP(payload_type, payload) => {
                 // Check for DTMF events in RTP payload
                 let mut dtmf_detector = self.dtmf_detector.lock().await;
                 if let Some(digit) =
