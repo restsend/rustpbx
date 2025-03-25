@@ -1,4 +1,3 @@
-use super::TrackPacketReceiver;
 use crate::media::codecs::resample;
 use crate::media::processor::AudioPayload;
 use crate::media::{
@@ -11,7 +10,6 @@ use async_trait::async_trait;
 use hound::WavReader;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -21,7 +19,6 @@ pub struct FileTrack {
     cancel_token: CancellationToken,
     processors: Vec<Box<dyn Processor>>,
     path: Option<String>,
-    receiver: Arc<Mutex<Option<TrackPacketReceiver>>>,
 }
 
 impl FileTrack {
@@ -32,7 +29,6 @@ impl FileTrack {
             cancel_token: CancellationToken::new(),
             processors: Vec::new(),
             path: None,
-            receiver: Arc::new(Mutex::new(None)),
         }
     }
 
