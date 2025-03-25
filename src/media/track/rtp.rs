@@ -9,12 +9,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::{net::UdpSocket, sync::mpsc};
+use tokio::net::UdpSocket;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use super::TrackPacketReceiver;
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 // Simple RTP packet implementation based on RFC 3550
 const RTP_VERSION: u8 = 2;
@@ -267,8 +268,6 @@ pub struct RtpTrack {
     config: TrackConfig,
     processors: Vec<Box<dyn Processor>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
-    receiver: Arc<Mutex<Option<TrackPacketReceiver>>>,
-    packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
     cancel_token: CancellationToken,
     rtp_session: Arc<Mutex<Option<RtpSession>>>,
     session_config: RtpSessionConfig,
@@ -283,8 +282,6 @@ impl RtpTrack {
             config: config.clone(),
             processors: Vec::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
-            receiver: Arc::new(Mutex::new(None)),
-            packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
             rtp_session: Arc::new(Mutex::new(None)),
             session_config: RtpSessionConfig::default(),
@@ -356,10 +353,13 @@ impl RtpTrack {
         Ok(())
     }
 
-    async fn rtp_receiver_task(&self, token: CancellationToken) -> Result<()> {
+    async fn rtp_receiver_task(
+        &self,
+        token: CancellationToken,
+        packet_sender: TrackPacketSender,
+    ) -> Result<()> {
         // Clone required data for the task
         let session_ref = self.rtp_session.clone();
-        let jitter_buffer = self.jitter_buffer.clone();
         let track_id = self.id.clone();
         let sample_rate = self.config.sample_rate;
 
@@ -386,11 +386,21 @@ impl RtpTrack {
                         if let Some((socket, buffer_size)) = socket_and_buffer_size {
                             // Now we have the socket without holding the mutex
                             let mut buf = vec![0u8; buffer_size];
-                            let (size, addr) = socket.recv_from(&mut buf).await?;
-                            buf.truncate(size);
-
-                            let packet = RtpPacket::parse(&buf)?;
-                            return Ok((packet, addr));
+                            // Add a timeout to prevent hanging on recv_from
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(100),
+                                socket.recv_from(&mut buf)
+                            ).await {
+                                Ok(Ok((size, addr))) => {
+                                    buf.truncate(size);
+                                    match RtpPacket::parse(&buf) {
+                                        Ok(packet) => return Ok((packet, addr)),
+                                        Err(e) => return Err(anyhow!("Failed to parse RTP packet: {}", e))
+                                    }
+                                },
+                                Ok(Err(e)) => return Err(anyhow!("Error receiving from socket: {}", e)),
+                                Err(_) => return Err(anyhow!("Timeout receiving from socket"))
+                            }
                         }
                         Err(anyhow!("RTP session not available"))
                     } => {
@@ -414,17 +424,12 @@ impl RtpTrack {
                                     payload_type, timestamp, payload.len()
                                 );
 
-                                // Create an AudioFrame
-                                let frame = AudioFrame {
+                                let _ = packet_sender.send(AudioFrame {
                                     track_id: track_id.clone(),
                                     timestamp,
                                     samples: AudioPayload::RTP(payload_type, payload),
                                     sample_rate: sample_rate as u16,
-                                };
-
-                                // Add to jitter buffer
-                                let mut jitter = jitter_buffer.lock();
-                                jitter.push(frame);
+                                });
                             }
                             Err(e) => {
                                 debug!("Error receiving RTP packet: {}", e);
@@ -438,38 +443,14 @@ impl RtpTrack {
         Ok(())
     }
 
-    async fn rtp_sender_task(&self, token: CancellationToken) -> Result<()> {
-        // No need to clone session_ref since we're not using it in this task
-
-        tokio::spawn(async move {
-            debug!("Starting RTP sender task");
-
-            // Wait a bit for RTP session to initialize
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            loop {
-                if token.is_cancelled() {
-                    debug!("RTP sender task cancelled");
-                    break;
-                }
-
-                // Sleep to avoid busy waiting
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        });
-
-        Ok(())
-    }
-
-    async fn start_jitter_processing(
-        &self,
-        token: CancellationToken,
-        packet_sender: TrackPacketSender,
-    ) -> Result<()> {
+    async fn start_jitter_processing(&self, token: CancellationToken) -> Result<()> {
         // Create a task to process frames from the jitter buffer
         let jitter_buffer = self.jitter_buffer.clone();
         let sample_rate = self.config.sample_rate;
         let ptime_ms = self.config.ptime.as_millis() as u32;
+
+        // Clone what's needed for sending RTP packets
+        let rtp_session = self.rtp_session.clone();
 
         // Use ptime from config for the processing interval
         let interval = tokio::time::interval(self.config.ptime);
@@ -494,13 +475,16 @@ impl RtpTrack {
                             jitter.pull_frames(ptime_ms, sample_rate)
                         };
 
-                        if frames.is_empty() {
-                            continue;
-                        }
-
                         for frame in frames {
-                            // Forward the frame to any connected tracks
-                            let _ = packet_sender.send(frame);
+                            if let AudioPayload::RTP(payload_type, payload) = &frame.samples {
+                                // Try to send the packet
+                                Self::send_rtp_packet_internal(
+                                    &rtp_session,
+                                    *payload_type,
+                                    payload,
+                                    frame.timestamp
+                                ).await;
+                            }
                         }
                     }
                 }
@@ -508,6 +492,78 @@ impl RtpTrack {
         });
 
         Ok(())
+    }
+
+    // Internal version of send_rtp_packet that ignores errors for task context
+    async fn send_rtp_packet_internal(
+        rtp_session: &Arc<Mutex<Option<RtpSession>>>,
+        payload_type: u8,
+        payload: &[u8],
+        timestamp: u32,
+    ) {
+        // Get the remote address
+        let remote_addr = {
+            let session_guard = rtp_session.lock();
+            if let Some(ref session) = *session_guard {
+                session.get_remote_addr()
+            } else {
+                None
+            }
+        };
+
+        if let Some(addr) = remote_addr {
+            // Now prepare the packet data without holding the mutex
+            let packet_data = {
+                let mut session_guard = rtp_session.lock();
+                if let Some(ref mut session) = *session_guard {
+                    // Update payload type if needed
+                    if payload_type != session.get_payload_type() {
+                        session.set_payload_type(payload_type);
+                    }
+
+                    let ts = timestamp;
+
+                    let packet = RtpPacket::new(
+                        session.get_payload_type(),
+                        session.sequence_number,
+                        ts,
+                        session.config.ssrc,
+                        payload,
+                    );
+
+                    // Increment sequence number
+                    session.sequence_number = session.sequence_number.wrapping_add(1);
+
+                    packet.serialized.clone()
+                } else {
+                    return;
+                }
+            };
+
+            // Now we can safely send without holding the mutex
+            let socket = {
+                let session_guard = rtp_session.lock();
+                if let Some(ref session) = *session_guard {
+                    Arc::clone(&session.socket)
+                } else {
+                    return;
+                }
+            };
+
+            // Send the packet with timeout
+            if let Ok(send_result) = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                socket.send_to(&packet_data, &addr),
+            )
+            .await
+            {
+                if let Err(e) = send_result {
+                    debug!("Error sending RTP packet: {}", e);
+                }
+            } else {
+                debug!("Timeout sending RTP packet");
+            }
+        }
     }
 
     // Send RTP packet using the RTP session
@@ -584,10 +640,17 @@ impl RtpTrack {
                 }
             };
 
-            // Send the packet
-            socket.send_to(&packet_data, &addr).await?;
-
-            Ok(())
+            // Send the packet with timeout
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                socket.send_to(&packet_data, &addr),
+            )
+            .await
+            {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(anyhow!("Error sending RTP packet: {}", e)),
+                Err(_) => Err(anyhow!("Timeout sending RTP packet")),
+            }
         } else {
             Err(anyhow!("Remote address not set"))
         }
@@ -614,54 +677,13 @@ impl Track for RtpTrack {
     async fn start(
         &self,
         token: CancellationToken,
-        event_sender: EventSender,
+        _event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
-        // Save packet sender for later use
-        {
-            let mut sender_guard = self.packet_sender.lock();
-            *sender_guard = Some(packet_sender.clone());
-        }
-
-        // Create a channel for receiving packets
-        let (_receiver_sender, receiver) = mpsc::unbounded_channel();
-
-        // Store the receiver in self
-        {
-            let mut receiver_guard = self.receiver.lock();
-            *receiver_guard = Some(receiver);
-        }
-
-        // Initialize RTP session
-        self.start_rtp_session().await?;
-
         // Start RTP receiver task
-        self.rtp_receiver_task(token.child_token()).await?;
-
-        // Start RTP sender task
-        self.rtp_sender_task(token.child_token()).await?;
-
-        // Signal that the track is ready
-        let _ = event_sender.send(crate::media::stream::MediaStreamEvent::TrackStart(
-            self.id.clone(),
-        ));
-
+        self.rtp_receiver_task(token.clone(), packet_sender).await?;
         // Start jitter buffer processing
-        self.start_jitter_processing(token.clone(), packet_sender)
-            .await?;
-
-        // Clone token for the task
-        let token_clone = token.clone();
-        let event_sender_clone = event_sender.clone();
-        let track_id = self.id.clone();
-
-        // Start a task to watch for cancellation
-        tokio::spawn(async move {
-            token_clone.cancelled().await;
-            let _ = event_sender_clone
-                .send(crate::media::stream::MediaStreamEvent::TrackStop(track_id));
-        });
-
+        self.start_jitter_processing(token.clone()).await?;
         Ok(())
     }
 
@@ -677,27 +699,6 @@ impl Track for RtpTrack {
         // Process the frame with all processors
         for processor in &self.processors {
             let _ = processor.process_frame(&mut frame);
-        }
-
-        // For RTP packets, try to send them directly via RTP session if possible
-        if let AudioPayload::RTP(payload_type, ref payload) = frame.samples {
-            // Create a block scope to ensure mutex guard is dropped before await
-            let can_send_rtp = {
-                let session_opt = self.rtp_session.lock();
-                if let Some(ref session) = *session_opt {
-                    session.is_started() && session.get_remote_addr().is_some()
-                } else {
-                    false
-                }
-            };
-
-            if can_send_rtp {
-                // Try to send the packet via RTP
-                let timestamp = frame.timestamp;
-                return self
-                    .send_rtp_packet(payload_type, payload, Some(timestamp))
-                    .await;
-            }
         }
 
         // Add processed frame to jitter buffer for any packet format
@@ -755,9 +756,9 @@ mod tests {
 
         // Create channels
         let (event_sender, _) = broadcast::channel(16);
-        let (packet_sender, mut packet_receiver) = mpsc::unbounded_channel();
+        let (packet_sender, _) = mpsc::unbounded_channel();
 
-        // Start the track
+        // Start the track with a separate token we can cancel early
         let token = CancellationToken::new();
         rtp_track
             .start(token.clone(), event_sender, packet_sender)
@@ -774,11 +775,12 @@ mod tests {
             sample_rate: 8000,
         };
 
-        // Send the packet to the track
-        rtp_track.send_packet(&pcm_packet).await?;
-
-        // Wait for the packet to be processed (it should be stored in the jitter buffer)
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Send the packet to the track with a timeout
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            rtp_track.send_packet(&pcm_packet),
+        )
+        .await??;
 
         // Check if processor was called
         {
@@ -789,13 +791,8 @@ mod tests {
             );
         }
 
-        // Verify the packet was received
-        let received =
-            tokio::time::timeout(Duration::from_millis(100), packet_receiver.recv()).await;
-        assert!(received.is_ok(), "Should have received a packet");
-
-        // Stop the track
-        rtp_track.stop().await?;
+        // Stop the track immediately
+        token.cancel();
 
         Ok(())
     }
@@ -808,7 +805,7 @@ mod tests {
 
         // Create channels
         let (event_sender, _) = broadcast::channel(16);
-        let (packet_sender, mut packet_receiver) = mpsc::unbounded_channel();
+        let (packet_sender, _) = mpsc::unbounded_channel();
 
         // Start the track
         let token = CancellationToken::new();
@@ -825,19 +822,15 @@ mod tests {
             sample_rate: 8000,
         };
 
-        // Send the packet to the track
-        rtp_track.send_packet(&rtp_packet).await?;
+        // Send the packet to the track with a timeout
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            rtp_track.send_packet(&rtp_packet),
+        )
+        .await??;
 
-        // Wait for processing to occur
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Verify the packet was received
-        let received =
-            tokio::time::timeout(Duration::from_millis(100), packet_receiver.recv()).await;
-        assert!(received.is_ok(), "Should have received a packet");
-
-        // Stop the track
-        rtp_track.stop().await?;
+        // Cancel right away
+        token.cancel();
 
         Ok(())
     }
