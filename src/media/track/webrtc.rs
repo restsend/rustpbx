@@ -30,8 +30,8 @@ pub struct WebrtcTrack {
     config: TrackConfig,
     processors: Vec<Box<dyn Processor>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
-    receiver: Arc<Mutex<Option<TrackPacketReceiver>>>,
-    packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
+    receiver: Mutex<Option<TrackPacketReceiver>>,
+    packet_sender: Mutex<Option<TrackPacketSender>>,
     cancel_token: CancellationToken,
     webrtc_track: Option<WebrtcTrackConfig>,
 }
@@ -45,8 +45,8 @@ impl WebrtcTrack {
             config: config.clone(),
             processors: Vec::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
-            receiver: Arc::new(Mutex::new(None)),
-            packet_sender: Arc::new(Mutex::new(None)),
+            receiver: Mutex::new(None),
+            packet_sender: Mutex::new(None),
             cancel_token: CancellationToken::new(),
             webrtc_track: None,
         }

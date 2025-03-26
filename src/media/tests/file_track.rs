@@ -1,5 +1,6 @@
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -11,12 +12,12 @@ use crate::media::track::Track;
 
 // Simple test processor that counts frames
 struct CountingProcessor {
-    count: Arc<Mutex<usize>>,
+    count: Arc<AtomicUsize>,
 }
 
 impl CountingProcessor {
-    fn new() -> (Self, Arc<Mutex<usize>>) {
-        let count = Arc::new(Mutex::new(0));
+    fn new() -> (Self, Arc<AtomicUsize>) {
+        let count = Arc::new(AtomicUsize::new(0));
         (
             Self {
                 count: count.clone(),
@@ -28,8 +29,7 @@ impl CountingProcessor {
 
 impl Processor for CountingProcessor {
     fn process_frame(&self, _frame: &mut AudioFrame) -> Result<()> {
-        let mut count = self.count.lock().unwrap();
-        *count += 1;
+        self.count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -145,7 +145,7 @@ async fn test_file_track_wav() -> Result<()> {
 
     // Check if processor was called
     {
-        let processor_count = *count.lock().unwrap();
+        let processor_count = count.load(Ordering::Relaxed);
         println!("Processor was called {} times", processor_count);
         assert_eq!(
             processor_count, received_packets,

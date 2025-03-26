@@ -40,7 +40,7 @@ pub struct MediaStream {
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
-    dtmf_detector: Arc<Mutex<DTMFDetector>>,
+    dtmf_detector: Mutex<DTMFDetector>,
 }
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
@@ -95,7 +95,7 @@ impl MediaStreamBuilder {
             event_sender,
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
-            dtmf_detector: Arc::new(Mutex::new(DTMFDetector::new())),
+            dtmf_detector: Mutex::new(DTMFDetector::new()),
         }
     }
 }

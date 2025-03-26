@@ -9,27 +9,27 @@ use crate::media::{
 };
 use anyhow::Result;
 use bytes::Bytes;
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 pub struct TrackCodec {
-    pub pcmu_encoder: Mutex<PcmuEncoder>,
-    pub pcmu_decoder: Mutex<PcmuDecoder>,
-    pub pcma_encoder: Mutex<PcmaEncoder>,
-    pub pcma_decoder: Mutex<PcmaDecoder>,
+    pub pcmu_encoder: RefCell<PcmuEncoder>,
+    pub pcmu_decoder: RefCell<PcmuDecoder>,
+    pub pcma_encoder: RefCell<PcmaEncoder>,
+    pub pcma_decoder: RefCell<PcmaDecoder>,
 
-    pub g722_encoder: Mutex<G722Encoder>,
-    pub g722_decoder: Mutex<G722Decoder>,
+    pub g722_encoder: RefCell<G722Encoder>,
+    pub g722_decoder: RefCell<G722Decoder>,
 }
 
 impl TrackCodec {
     pub fn new() -> Self {
         Self {
-            pcmu_encoder: Mutex::new(PcmuEncoder::new()),
-            pcmu_decoder: Mutex::new(PcmuDecoder::new()),
-            pcma_encoder: Mutex::new(PcmaEncoder::new()),
-            pcma_decoder: Mutex::new(PcmaDecoder::new()),
-            g722_encoder: Mutex::new(G722Encoder::new()),
-            g722_decoder: Mutex::new(G722Decoder::new()),
+            pcmu_encoder: RefCell::new(PcmuEncoder::new()),
+            pcmu_decoder: RefCell::new(PcmuDecoder::new()),
+            pcma_encoder: RefCell::new(PcmaEncoder::new()),
+            pcma_decoder: RefCell::new(PcmaDecoder::new()),
+            g722_encoder: RefCell::new(G722Encoder::new()),
+            g722_decoder: RefCell::new(G722Decoder::new()),
         }
     }
 
@@ -41,9 +41,9 @@ impl TrackCodec {
         };
 
         match payload_type {
-            0 => self.pcmu_encoder.lock().unwrap().encode(&payload),
-            8 => self.pcma_encoder.lock().unwrap().encode(&payload),
-            9 => self.g722_encoder.lock().unwrap().encode(&payload),
+            0 => self.pcmu_encoder.borrow_mut().encode(&payload),
+            8 => self.pcma_encoder.borrow_mut().encode(&payload),
+            9 => self.g722_encoder.borrow_mut().encode(&payload),
             _ => Err(anyhow::anyhow!(
                 "Unsupported payload type: {}",
                 payload_type

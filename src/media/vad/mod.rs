@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use webrtc_vad::Vad;
+use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use crate::media::{
     processor::{AudioFrame, Processor},
@@ -15,7 +15,7 @@ mod voice_activity;
 mod webrtc;
 
 // Thread-safe wrapper for Vad
-pub(crate) struct ThreadSafeVad(Vad);
+pub(crate) struct ThreadSafeVad(Mutex<Vad>);
 unsafe impl Send for ThreadSafeVad {}
 unsafe impl Sync for ThreadSafeVad {}
 
