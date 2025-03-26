@@ -1,13 +1,12 @@
-use std::sync::Mutex;
-
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use webrtc_vad::{SampleRate, Vad, VadMode};
-
 use crate::media::{
     processor::{AudioFrame, Processor},
     stream::{EventSender, MediaStreamEvent},
 };
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::sync::Mutex;
+use webrtc_vad::Vad;
 
 #[cfg(test)]
 mod tests;
@@ -61,8 +60,11 @@ pub struct VadProcessor {
     event_sender: EventSender,
 }
 
-pub trait VadEngine: Send + Sync {
+pub trait VadEngine: Send + Sync + Any {
     fn process(&mut self, frame: &mut AudioFrame) -> Result<bool>;
+
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 impl VadProcessor {
@@ -75,6 +77,19 @@ impl VadProcessor {
         Self {
             vad: Mutex::new(vad),
             event_sender,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_test_mode(&self, vad_type: &VadType, is_speech: bool) {
+        if let VadType::VoiceActivity = vad_type {
+            let mut vad = self.vad.lock().unwrap();
+            let vad_any = vad.as_any_mut();
+            if let Some(voice_activity_vad) =
+                vad_any.downcast_mut::<voice_activity::VoiceActivityVad>()
+            {
+                voice_activity_vad.set_test_mode(is_speech);
+            }
         }
     }
 }
