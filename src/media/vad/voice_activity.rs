@@ -1,14 +1,10 @@
 use anyhow::Result;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
-use super::VADConfig;
+use super::{ThreadSafeVad, VADConfig};
 use crate::media::processor::{AudioFrame, AudioPayload};
-
-// Thread-safe wrapper for Vad
-struct ThreadSafeVad(Vad);
-unsafe impl Send for ThreadSafeVad {}
-unsafe impl Sync for ThreadSafeVad {}
 
 pub struct VoiceActivityVad {
     detector: ThreadSafeVad,
@@ -22,10 +18,10 @@ pub struct VoiceActivityVad {
 impl VoiceActivityVad {
     pub fn new() -> Self {
         Self {
-            detector: ThreadSafeVad(Vad::new_with_rate_and_mode(
+            detector: ThreadSafeVad(Mutex::new(Vad::new_with_rate_and_mode(
                 SampleRate::Rate16kHz,
                 VadMode::Quality,
-            )),
+            ))),
             config: VADConfig::default(),
             buffer: Vec::new(),
             last_speech_time: None,
@@ -50,7 +46,13 @@ impl super::VadEngine for VoiceActivityVad {
 
         while self.buffer.len() >= chunk_size {
             let chunk = self.buffer[..chunk_size].to_vec();
-            let is_voice = self.detector.0.is_voice_segment(&chunk).unwrap_or(false);
+            let is_voice = self
+                .detector
+                .0
+                .lock()
+                .unwrap()
+                .is_voice_segment(&chunk)
+                .unwrap_or(false);
 
             // Remove processed samples
             self.buffer.drain(..chunk_size);
