@@ -7,8 +7,11 @@ use crate::media::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use tokio::net::UdpSocket;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
@@ -290,13 +293,7 @@ impl RtpTrack {
 
     pub fn with_config(mut self, config: TrackConfig) -> Self {
         self.config = config.clone();
-
-        // Update jitter buffer with new sample rate
-        {
-            let mut jitter_buffer = self.jitter_buffer.lock();
-            *jitter_buffer = JitterBuffer::new(config.sample_rate);
-        }
-
+        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate)));
         self
     }
 
@@ -307,13 +304,7 @@ impl RtpTrack {
 
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.config = self.config.with_sample_rate(sample_rate);
-
-        // Update jitter buffer with new sample rate
-        {
-            let mut jitter_buffer = self.jitter_buffer.lock();
-            *jitter_buffer = JitterBuffer::new(sample_rate);
-        }
-
+        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new(sample_rate)));
         self
     }
 
@@ -323,7 +314,8 @@ impl RtpTrack {
     }
 
     pub async fn get_local_addr(&self) -> Result<Option<SocketAddr>> {
-        if let Some(session) = self.rtp_session.lock().as_ref() {
+        let rtp_session = self.rtp_session.lock().unwrap();
+        if let Some(session) = rtp_session.as_ref() {
             Ok(Some(session.get_local_addr()?))
         } else {
             Ok(None)
@@ -331,12 +323,11 @@ impl RtpTrack {
     }
 
     pub fn set_remote_addr(&self, addr: SocketAddr) -> Result<()> {
-        if let Some(ref mut session) = *self.rtp_session.lock() {
+        let mut session = self.rtp_session.lock().unwrap();
+        if let Some(session) = session.as_mut() {
             session.set_remote_addr(addr);
-            Ok(())
-        } else {
-            Err(anyhow!("RTP session not initialized"))
         }
+        Ok(())
     }
 
     async fn start_rtp_session(&self) -> Result<()> {
@@ -344,12 +335,8 @@ impl RtpTrack {
         let session = RtpSession::new(self.session_config.clone()).await?;
         let local_addr = session.get_local_addr()?;
         info!("RTP session started on {}", local_addr);
-
-        {
-            let mut session_guard = self.rtp_session.lock();
-            *session_guard = Some(session);
-        }
-
+        let mut session_guard = self.rtp_session.lock().unwrap();
+        *session_guard = Some(session);
         Ok(())
     }
 
@@ -375,7 +362,7 @@ impl RtpTrack {
                     result = async {
                         // Get a cloned socket from the session if available
                         let socket_and_buffer_size = {
-                            let session_opt = session_ref.lock();
+                            let session_opt = session_ref.lock().unwrap();
                             if let Some(ref session) = *session_opt {
                                 Some((Arc::clone(&session.socket), session.config.buffer_size))
                             } else {
@@ -408,7 +395,7 @@ impl RtpTrack {
                             Ok((packet, addr)) => {
                                 // Update remote address if needed
                                 {
-                                    let mut session_opt = session_ref.lock();
+                                    let mut session_opt = session_ref.lock().unwrap();
                                     if let Some(ref mut session) = *session_opt {
                                         session.update_remote_from_packet(addr);
                                     }
@@ -471,7 +458,7 @@ impl RtpTrack {
                     _ = interval_stream.next() => {
                         // Get frames from jitter buffer
                         let frames = {
-                            let mut jitter = jitter_buffer.lock();
+                            let mut jitter = jitter_buffer.lock().unwrap();
                             jitter.pull_frames(ptime_ms, sample_rate)
                         };
 
@@ -503,7 +490,7 @@ impl RtpTrack {
     ) {
         // Get the remote address
         let remote_addr = {
-            let session_guard = rtp_session.lock();
+            let session_guard = rtp_session.lock().unwrap();
             if let Some(ref session) = *session_guard {
                 session.get_remote_addr()
             } else {
@@ -514,7 +501,7 @@ impl RtpTrack {
         if let Some(addr) = remote_addr {
             // Now prepare the packet data without holding the mutex
             let packet_data = {
-                let mut session_guard = rtp_session.lock();
+                let mut session_guard = rtp_session.lock().unwrap();
                 if let Some(ref mut session) = *session_guard {
                     // Update payload type if needed
                     if payload_type != session.get_payload_type() {
@@ -542,7 +529,7 @@ impl RtpTrack {
 
             // Now we can safely send without holding the mutex
             let socket = {
-                let session_guard = rtp_session.lock();
+                let session_guard = rtp_session.lock().unwrap();
                 if let Some(ref session) = *session_guard {
                     Arc::clone(&session.socket)
                 } else {
@@ -575,7 +562,7 @@ impl RtpTrack {
     ) -> Result<()> {
         // Don't need to create a session_clone, just check if session exists
         {
-            let session_opt = self.rtp_session.lock();
+            let session_opt = self.rtp_session.lock().unwrap();
             if let Some(ref session) = *session_opt {
                 // Set payload type if different from the current one
                 if payload_type != session.get_payload_type() {
@@ -589,7 +576,7 @@ impl RtpTrack {
 
         // Get the remote address
         let remote_addr = {
-            let session_guard = self.rtp_session.lock();
+            let session_guard = self.rtp_session.lock().unwrap();
             if let Some(ref session) = *session_guard {
                 session.get_remote_addr()
             } else {
@@ -600,7 +587,7 @@ impl RtpTrack {
         if let Some(addr) = remote_addr {
             // Now prepare the packet data without holding the mutex
             let packet_data = {
-                let mut session_guard = self.rtp_session.lock();
+                let mut session_guard = self.rtp_session.lock().unwrap();
                 if let Some(ref mut session) = *session_guard {
                     // Now we can update the payload type
                     if payload_type != session.get_payload_type() {
@@ -632,7 +619,7 @@ impl RtpTrack {
 
             // Now we can safely send without holding the mutex
             let socket = {
-                let session_guard = self.rtp_session.lock();
+                let session_guard = self.rtp_session.lock().unwrap();
                 if let Some(ref session) = *session_guard {
                     Arc::clone(&session.socket)
                 } else {
@@ -702,7 +689,7 @@ impl Track for RtpTrack {
         }
 
         // Add processed frame to jitter buffer for any packet format
-        let mut jitter_buffer = self.jitter_buffer.lock();
+        let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
         jitter_buffer.push(frame);
 
         Ok(())
