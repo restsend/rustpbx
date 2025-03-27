@@ -14,7 +14,7 @@ categories = ["network-programming", "multimedia"]
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
-axum = "0.8.1"
+axum = { version = "0.8.1", features = ["ws"] }
 tower-http = { version = "0.6.2", features = ["fs", "cors"] }
 bytes = "1.5"
 futures = "0.3"
@@ -39,10 +39,19 @@ rand = "0.9.0"
 hound = "3.5.1"
 rtp-rs = "0.6.0"
 voice_activity_detector = "0.2.0"
+chrono = "0.4.40"
+rsipstack = "0.1.4"
+rsip = "0.4.0"
+reqwest = { version = "0.11", features = ["json"] }
+base64 = "0.21"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3.8"
 tokio-test = "0.4"
+mockall = "0.11"
 
 [[example]]
 name = "webrtc-demo"
