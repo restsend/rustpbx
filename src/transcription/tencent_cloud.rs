@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::AsrClient;
@@ -27,6 +28,11 @@ pub struct TencentCloudAsrResult {
     pub request_id: String,
 }
 
+/// Tencent Cloud ASR (Automatic Speech Recognition) Client
+///
+/// This implementation handles sending audio data to Tencent Cloud's ASR service
+/// and processing the results.
+#[derive(Debug)]
 pub struct TencentCloudAsrClient {
     http_client: HttpClient,
 }
@@ -122,6 +128,13 @@ impl AsrClient for TencentCloudAsrClient {
             .clone()
             .unwrap_or_else(|| "zh-CN".to_string());
 
+        // Log input
+        info!(
+            "ASR transcribe called with {} audio samples, sample rate: {}",
+            audio_data.len(),
+            sample_rate
+        );
+
         // Convert i16 audio samples to bytes
         let audio_bytes: Vec<u8> = audio_data
             .iter()
@@ -130,11 +143,16 @@ impl AsrClient for TencentCloudAsrClient {
 
         Box::pin(async move {
             if secret_id.is_empty() || secret_key.is_empty() || appid.is_empty() {
+                error!("Missing TencentCloud credentials");
                 return Err(anyhow::anyhow!("Missing TencentCloud credentials"));
             }
 
             // Base64 encode the audio data
             let base64_audio = BASE64_STANDARD.encode(&audio_bytes);
+            info!(
+                "Audio data encoded to {} bytes of Base64",
+                base64_audio.len()
+            );
 
             // Create session ID
             let session_id = Uuid::new_v4().to_string();
@@ -147,9 +165,9 @@ impl AsrClient for TencentCloudAsrClient {
             let request_data = json!({
                 "ProjectId": 0,
                 "SubServiceType": 2,
-                "EngSerViceType": config.engine_type,
+                "EngSerViceType": engine_type,
                 "VoiceFormat": "pcm",
-                "UsrAudioKey": "test",
+                "UsrAudioKey": session_id,
                 "Data": base64::encode(&audio_bytes),
                 "DataLen": audio_bytes.len(),
                 "SourceType": 1,
@@ -159,15 +177,26 @@ impl AsrClient for TencentCloudAsrClient {
                 "ConvertNumMode": 1
             });
 
+            debug!(
+                "ASR request data: {}",
+                serde_json::to_string_pretty(&request_data).unwrap_or_default()
+            );
+
             let host = "asr.tencentcloudapi.com";
-            let signature = self.generate_signature(
+            let signature = match self.generate_signature(
                 &secret_id,
                 &secret_key,
                 host,
                 "POST",
                 timestamp,
                 &request_data.to_string(),
-            )?;
+            ) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    error!("Failed to generate signature: {}", e);
+                    return Err(e);
+                }
+            };
 
             // Create authorization header
             let authorization = format!(
@@ -180,8 +209,10 @@ impl AsrClient for TencentCloudAsrClient {
             // Record request start time for TTFB measurement
             let request_start_time = std::time::Instant::now();
 
+            info!("Sending ASR request to TencentCloud API");
+
             // Send request to TencentCloud ASR API
-            let response = self
+            let response = match self
                 .http_client
                 .post(format!("https://{}", host))
                 .header("Content-Type", "application/json")
@@ -193,10 +224,18 @@ impl AsrClient for TencentCloudAsrClient {
                 .header("X-TC-Region", "ap-guangzhou")
                 .json(&request_data)
                 .send()
-                .await?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!("Failed to send request to TencentCloud ASR API: {}", e);
+                    return Err(anyhow::anyhow!("Failed to send request: {}", e));
+                }
+            };
 
             // Calculate TTFB
             let ttfb = request_start_time.elapsed().as_millis() as u64;
+            info!("ASR API response TTFB: {} ms", ttfb);
 
             // Store TTFB metrics for later use
             let timestamp = SystemTime::now()
@@ -216,11 +255,27 @@ impl AsrClient for TencentCloudAsrClient {
             });
 
             // Print the raw response for debugging
-            let response_text = response.text().await?;
-            println!("ASR API Response: {}", response_text);
+            let response_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    error!("Failed to get response text: {}", e);
+                    return Err(anyhow::anyhow!("Failed to get response text: {}", e));
+                }
+            };
+            info!("ASR API Response: {}", response_text);
 
             // Parse the response
-            let response: TencentCloudAsrResponse = serde_json::from_str(&response_text)?;
+            let response: TencentCloudAsrResponse = match serde_json::from_str(&response_text) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!("Failed to parse response: {}", e);
+                    return Err(anyhow::anyhow!("Failed to parse response: {}", e));
+                }
+            };
+
+            // Log the result
+            info!("ASR result: {}", response.response.result);
+
             Ok(response.response.result)
         })
     }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use rustpbx::{
-    event::{EventSender, SessionEvent},
-    llm::{LlmClient, LlmConfig, LlmProcessor, OpenAiClient},
+    event::SessionEvent,
+    llm::{LlmConfig, LlmProcessor, OpenAiClient},
 };
 
 use anyhow::Result;

@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 // Add imports for event system
 use crate::event::{EventSender, SessionEvent};
+use async_trait::async_trait;
 
 // Add provider modules
 mod tencent_cloud;
@@ -35,6 +36,49 @@ pub struct TtsConfig {
     pub volume: Option<i32>,
     pub speaker: Option<i32>,
     pub codec: Option<String>,
+}
+
+// Simplified synthesis client trait for pipeline usage
+#[async_trait]
+pub trait SynthesisClient: Send + Sync + std::fmt::Debug {
+    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>>;
+}
+
+// Pipeline-friendly configuration
+#[derive(Debug, Clone, Default)]
+pub struct SynthesisConfig {
+    pub url: String,
+    pub voice: Option<String>,
+    pub rate: Option<f32>,
+    pub appid: Option<String>,
+    pub secret_id: Option<String>,
+    pub secret_key: Option<String>,
+    pub volume: Option<i32>,
+    pub speaker: Option<i32>,
+    pub codec: Option<String>,
+}
+
+// Implement SynthesisClient for TencentCloudTtsClient
+#[async_trait]
+impl SynthesisClient for TencentCloudTtsClient {
+    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>> {
+        // Convert SynthesisConfig to TtsConfig
+        let tts_config = TtsConfig {
+            url: config.url.clone(),
+            voice: config.voice.clone(),
+            rate: config.rate,
+            appid: config.appid.clone(),
+            secret_id: config.secret_id.clone(),
+            secret_key: config.secret_key.clone(),
+            volume: config.volume,
+            speaker: config.speaker,
+            codec: config.codec.clone(),
+        };
+
+        // Use the TtsClient implementation
+        let future = <Self as TtsClient>::synthesize(self, text, &tts_config);
+        future.await
+    }
 }
 
 // TTS Events

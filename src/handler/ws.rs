@@ -168,56 +168,102 @@ async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text: Str
             match cmd {
                 WsCommand::PlayTts { text } => {
                     info!("Received TTS command: {}", text);
-
-                    // Send TTS event to indicate processing
-                    let tts_event = CallEvent::TtsEvent {
+                    let _ = call.events.send(CallEvent::TtsEvent {
                         timestamp: chrono::Utc::now().timestamp() as u32,
                         text: text.clone(),
-                    };
-
-                    let _ = call.events.send(tts_event);
-
-                    // Here you would implement TTS processing
-                    // For now we just acknowledge the command
+                    });
                 }
                 WsCommand::PlayWav { url } => {
                     info!("Received play WAV command: {}", url);
-
                     // Here you would implement WAV playback
                     // For now we just acknowledge the command
                 }
                 WsCommand::Hangup {} => {
                     info!("Received hangup command for session {}", session_id);
-
-                    // Send hangup event
-                    let hangup_event = CallEvent::HangupEvent {
+                    let _ = call.events.send(CallEvent::HangupEvent {
                         timestamp: chrono::Utc::now().timestamp() as u32,
                         reason: "User initiated hangup".to_string(),
-                    };
-
-                    let _ = call.events.send(hangup_event);
-
-                    // Clean up resources
-                    tokio::spawn(async move {
-                        call.media_stream.stop();
-                        let _ = call.peer_connection.close().await;
                     });
-
-                    // Remove from active calls
-                    state.active_calls.lock().await.remove(session_id);
                 }
                 WsCommand::Refer { target } => {
                     info!("Received refer command: {}", target);
-
-                    // Send refer event
-                    let refer_event = CallEvent::ReferEvent {
+                    let _ = call.events.send(CallEvent::ReferEvent {
                         timestamp: chrono::Utc::now().timestamp() as u32,
-                        target,
-                    };
+                        target: target.clone(),
+                    });
+                }
+                WsCommand::PipelineStart {
+                    pipeline_type,
+                    config,
+                } => {
+                    info!(
+                        "Received pipeline start command for {}: {}",
+                        session_id, pipeline_type
+                    );
+                    // Send as a generic message event
+                    let event_data = serde_json::json!({
+                        "action": "pipeline_start",
+                        "pipeline_type": pipeline_type,
+                        "config": config
+                    });
 
-                    let _ = call.events.send(refer_event);
+                    let _ = call.events.send(CallEvent::MetricsEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        metrics: event_data,
+                    });
+                }
+                WsCommand::PipelineStop { pipeline_id } => {
+                    info!(
+                        "Received pipeline stop command for {}: {}",
+                        session_id, pipeline_id
+                    );
+                    // Send as a generic message event
+                    let event_data = serde_json::json!({
+                        "action": "pipeline_stop",
+                        "pipeline_id": pipeline_id
+                    });
 
-                    // Here you would implement call transfer/refer
+                    let _ = call.events.send(CallEvent::MetricsEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        metrics: event_data,
+                    });
+                }
+                WsCommand::SendText { text } => {
+                    info!("Received send text command for {}: {}", session_id, text);
+                    // Use an LLM event to send the text
+                    let _ = call.events.send(CallEvent::LlmEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        text: text.clone(),
+                        is_final: true,
+                    });
+                }
+                WsCommand::Mute { track_id } => {
+                    let track = track_id.unwrap_or_else(|| "main".to_string());
+                    info!("Received mute command for {}: {}", session_id, track);
+                    // Send as a generic message event
+                    let event_data = serde_json::json!({
+                        "action": "mute",
+                        "track_id": track
+                    });
+
+                    let _ = call.events.send(CallEvent::MetricsEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        metrics: event_data,
+                    });
+                }
+                WsCommand::Unmute { track_id } => {
+                    let track = track_id.unwrap_or_else(|| "main".to_string());
+                    info!("Received unmute command for {}: {}", session_id, track);
+                    // Send as a generic message event
+                    let event_data = serde_json::json!({
+                        "action": "unmute",
+                        "track_id": track
+                    });
+
+                    let _ = call.events.send(CallEvent::MetricsEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        metrics: event_data,
+                    });
                 }
             }
         }
