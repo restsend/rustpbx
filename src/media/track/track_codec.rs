@@ -5,7 +5,7 @@ use crate::media::{
         pcmu::{PcmuDecoder, PcmuEncoder},
         Encoder,
     },
-    processor::{AudioFrame, AudioPayload},
+    processor::{AudioFrame, Samples},
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -35,9 +35,9 @@ impl TrackCodec {
 
     pub fn encode(&self, payload_type: u8, audio_frame: AudioFrame) -> Result<Bytes> {
         let payload = match audio_frame.samples {
-            AudioPayload::PCM(pcm) => pcm,
-            AudioPayload::RTP(_, payload) => return Ok(Bytes::from(payload)),
-            AudioPayload::Empty => return Err(anyhow::anyhow!("Empty payload")),
+            Samples::PCM(pcm) => pcm,
+            Samples::RTP(_, payload) => return Ok(Bytes::from(payload)),
+            Samples::Empty => return Err(anyhow::anyhow!("Empty payload")),
         };
 
         match payload_type {

@@ -1,6 +1,6 @@
 use crate::media::{
     jitter::JitterBuffer,
-    processor::{AudioFrame, AudioPayload, Processor},
+    processor::{AudioFrame, Samples, Processor},
     stream::EventSender,
     track::{Track, TrackConfig, TrackId, TrackPacketSender},
 };
@@ -414,7 +414,7 @@ impl RtpTrack {
                                 let _ = packet_sender.send(AudioFrame {
                                     track_id: track_id.clone(),
                                     timestamp,
-                                    samples: AudioPayload::RTP(payload_type, payload),
+                                    samples: Samples::RTP(payload_type, payload),
                                     sample_rate: sample_rate as u16,
                                 });
                             }
@@ -463,7 +463,7 @@ impl RtpTrack {
                         };
 
                         for frame in frames {
-                            if let AudioPayload::RTP(payload_type, payload) = &frame.samples {
+                            if let Samples::RTP(payload_type, payload) = &frame.samples {
                                 // Try to send the packet
                                 Self::send_rtp_packet_internal(
                                     &rtp_session,
@@ -699,7 +699,7 @@ impl Track for RtpTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::processor::{AudioFrame, AudioPayload};
+    use crate::media::processor::{AudioFrame, Samples};
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
@@ -758,7 +758,7 @@ mod tests {
         let pcm_packet = AudioFrame {
             track_id: track_id.clone(),
             timestamp: 1000,
-            samples: AudioPayload::PCM(pcm_data),
+            samples: Samples::PCM(pcm_data),
             sample_rate: 8000,
         };
 
@@ -805,7 +805,7 @@ mod tests {
         let rtp_packet = AudioFrame {
             track_id: track_id.clone(),
             timestamp: 1000,
-            samples: AudioPayload::RTP(0, rtp_data), // 0 is PCMU
+            samples: Samples::RTP(0, rtp_data), // 0 is PCMU
             sample_rate: 8000,
         };
 

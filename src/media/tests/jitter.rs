@@ -1,6 +1,6 @@
 use crate::media::{
     jitter::JitterBuffer,
-    processor::{AudioFrame, AudioPayload},
+    processor::{AudioFrame, Samples},
 };
 
 #[test]
@@ -9,16 +9,16 @@ fn test_jitter_buffer_in_order_packets() {
 
     // Add packets in order
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![4, 5, 6]),
+        samples: Samples::PCM(vec![4, 5, 6]),
         timestamp: 20,
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![7, 8, 9]),
+        samples: Samples::PCM(vec![7, 8, 9]),
         timestamp: 40,
         ..Default::default()
     });
@@ -29,7 +29,7 @@ fn test_jitter_buffer_in_order_packets() {
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 0);
     let samples = match frame.samples {
-        AudioPayload::PCM(samples) => samples,
+        Samples::PCM(samples) => samples,
         _ => panic!("Expected PCM samples"),
     };
     assert_eq!(samples, vec![1, 2, 3]);
@@ -38,13 +38,13 @@ fn test_jitter_buffer_in_order_packets() {
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 20);
-    assert!(matches!(frame.samples, AudioPayload::PCM(samples) if samples == vec![4, 5, 6]));
+    assert!(matches!(frame.samples, Samples::PCM(samples) if samples == vec![4, 5, 6]));
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 40);
-    assert!(matches!(frame.samples, AudioPayload::PCM(samples) if samples == vec![7, 8, 9]));
+    assert!(matches!(frame.samples, Samples::PCM(samples) if samples == vec![7, 8, 9]));
 }
 
 #[test]
@@ -53,17 +53,17 @@ fn test_jitter_buffer_out_of_order_packets() {
 
     // Add packets out of order
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![4, 5, 6]),
+        samples: Samples::PCM(vec![4, 5, 6]),
         timestamp: 20,
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         timestamp: 0,
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![7, 8, 9]),
+        samples: Samples::PCM(vec![7, 8, 9]),
         timestamp: 40,
         ..Default::default()
     });
@@ -73,19 +73,19 @@ fn test_jitter_buffer_out_of_order_packets() {
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 0);
-    assert!(matches!(frame.samples, AudioPayload::PCM(samples) if samples == vec![1, 2, 3]));
+    assert!(matches!(frame.samples, Samples::PCM(samples) if samples == vec![1, 2, 3]));
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 20);
-    assert!(matches!(frame.samples, AudioPayload::PCM(samples) if samples == vec![4, 5, 6]));
+    assert!(matches!(frame.samples, Samples::PCM(samples) if samples == vec![4, 5, 6]));
 
     let packet = buffer.pop();
     assert!(packet.is_some());
     let frame = packet.unwrap();
     assert_eq!(frame.timestamp, 40);
-    assert!(matches!(frame.samples, AudioPayload::PCM(samples) if samples == vec![7, 8, 9]));
+    assert!(matches!(frame.samples, Samples::PCM(samples) if samples == vec![7, 8, 9]));
 }
 
 #[test]
@@ -94,12 +94,12 @@ fn test_jitter_buffer_late_packets() {
 
     // Add some packets
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         timestamp: 0,
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![4, 5, 6]),
+        samples: Samples::PCM(vec![4, 5, 6]),
         timestamp: 20,
         ..Default::default()
     });
@@ -113,7 +113,7 @@ fn test_jitter_buffer_late_packets() {
     // Add a late packet (timestamp 0 again) - should be ignored
     buffer.push(AudioFrame {
         timestamp: 0,
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         ..Default::default()
     });
 
@@ -133,11 +133,11 @@ fn test_jitter_buffer_missing_packets() {
 
     // Add packets with a gap
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![7, 8, 9]),
+        samples: Samples::PCM(vec![7, 8, 9]),
         ..Default::default()
     });
 
@@ -162,7 +162,7 @@ fn test_jitter_buffer_overflow() {
     for i in 0..1000 {
         let ts = (i * 20) as u32;
         buffer.push(AudioFrame {
-            samples: AudioPayload::PCM(vec![1, 2, 3]),
+            samples: Samples::PCM(vec![1, 2, 3]),
             timestamp: ts,
             ..Default::default()
         });
@@ -184,11 +184,11 @@ fn test_jitter_buffer_clear() {
 
     // Add some packets
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![1, 2, 3]),
+        samples: Samples::PCM(vec![1, 2, 3]),
         ..Default::default()
     });
     buffer.push(AudioFrame {
-        samples: AudioPayload::PCM(vec![4, 5, 6]),
+        samples: Samples::PCM(vec![4, 5, 6]),
         ..Default::default()
     });
 

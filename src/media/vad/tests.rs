@@ -1,5 +1,5 @@
 use super::*;
-use crate::media::processor::{AudioFrame, AudioPayload, Processor};
+use crate::media::processor::{AudioFrame, Samples, Processor};
 use crate::media::stream::MediaStreamEvent;
 use tokio::sync::broadcast;
 
@@ -13,7 +13,7 @@ async fn test_webrtc_vad() {
     // Test with silence (all zeros)
     let mut silence_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: AudioPayload::PCM(vec![0; 480]), // 30ms at 16kHz
+        samples: Samples::PCM(vec![0; 480]), // 30ms at 16kHz
         sample_rate: 16000,
         timestamp: 0,
     };
@@ -30,7 +30,7 @@ async fn test_webrtc_vad() {
     // Test with speech (sine wave)
     let mut speech_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: AudioPayload::PCM(
+        samples: Samples::PCM(
             (0..480)
                 .map(|i| ((i as f32 * 0.1).sin() * 16000.0) as i16)
                 .collect(),
@@ -59,7 +59,7 @@ async fn test_voice_activity_vad() {
     // Test with silence (all zeros)
     let mut silence_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: AudioPayload::PCM(vec![0; 512]), // Use 512 samples for VoiceActivityVad (32ms at 16kHz)
+        samples: Samples::PCM(vec![0; 512]), // Use 512 samples for VoiceActivityVad (32ms at 16kHz)
         sample_rate: 16000,
         timestamp: 0,
     };
@@ -84,7 +84,7 @@ async fn test_voice_activity_vad() {
 
     let mut speech_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: AudioPayload::PCM(speech_samples),
+        samples: Samples::PCM(speech_samples),
         sample_rate: 16000,
         timestamp: 1,
     };
@@ -119,7 +119,7 @@ async fn test_vad_type_switching() {
     // Test that both can process frames
     let mut frame = AudioFrame {
         track_id,
-        samples: AudioPayload::PCM(vec![0; 512]), // Use 512 samples (32ms at 16kHz)
+        samples: Samples::PCM(vec![0; 512]), // Use 512 samples (32ms at 16kHz)
         sample_rate: 16000,
         timestamp: 0,
     };

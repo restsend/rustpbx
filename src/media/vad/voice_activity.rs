@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use voice_activity_detector::VoiceActivityDetector;
 
 use super::{VADConfig, VadEngine};
-use crate::media::processor::{AudioFrame, AudioPayload};
+use crate::media::processor::{AudioFrame, Samples};
 
 pub struct VoiceActivityVad {
     detector: Mutex<VoiceActivityDetector>,
@@ -65,7 +65,7 @@ impl VadEngine for VoiceActivityVad {
 
         // Add current frame to buffer
         let samples = match &frame.samples {
-            AudioPayload::PCM(samples) => samples,
+            Samples::PCM(samples) => samples,
             _ => return Ok(false),
         };
         self.buffer.extend_from_slice(samples);

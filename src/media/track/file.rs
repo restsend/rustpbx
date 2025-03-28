@@ -1,5 +1,5 @@
 use crate::media::codecs::resample;
-use crate::media::processor::AudioPayload;
+use crate::media::processor::Samples;
 use crate::media::{
     processor::{AudioFrame, Processor},
     stream::EventSender,
@@ -221,7 +221,7 @@ async fn stream_wav_file(
         let packet = AudioFrame {
             track_id: track_id.to_string(),
             timestamp: timestamp as u32,
-            samples: AudioPayload::PCM(chunk.to_vec()),
+            samples: Samples::PCM(chunk.to_vec()),
             sample_rate: target_sample_rate as u16,
         };
         // Send the packet

@@ -1,5 +1,5 @@
 use super::*;
-use crate::media::processor::AudioPayload;
+use crate::media::processor::Samples;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -106,7 +106,7 @@ async fn test_asr_processor_with_test_client() {
     // Create test audio frame
     let mut frame = AudioFrame {
         track_id: "test".to_string(),
-        samples: AudioPayload::PCM(vec![0i16; 8000]), // 500ms at 16kHz
+        samples: Samples::PCM(vec![0i16; 8000]), // 500ms at 16kHz
         timestamp: 3000,
         sample_rate: 16000,
     };
@@ -173,7 +173,7 @@ async fn test_audio_buffer_accumulation() {
     let samples_per_frame = 800; // 50ms of audio at 16kHz
     let mut frame = AudioFrame {
         track_id: "test".to_string(),
-        samples: AudioPayload::PCM(vec![0i16; samples_per_frame]),
+        samples: Samples::PCM(vec![0i16; samples_per_frame]),
         timestamp: 3000,
         sample_rate,
     };
