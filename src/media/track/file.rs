@@ -1,6 +1,7 @@
 use crate::media::codecs::resample;
 use crate::media::processor::Samples;
 use crate::media::{
+    cache,
     processor::{AudioFrame, Processor},
     stream::EventSender,
     track::{Track, TrackConfig, TrackId, TrackPacketSender},
@@ -8,17 +9,23 @@ use crate::media::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hound::WavReader;
+use hound::{SampleFormat, WavSpec, WavWriter};
+use reqwest::Client;
+use std::f32::consts::PI;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
+use std::path::Path;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info, warn};
+
 pub struct FileTrack {
     id: TrackId,
     config: TrackConfig,
     cancel_token: CancellationToken,
     processors: Vec<Box<dyn Processor>>,
     path: Option<String>,
+    use_cache: bool,
 }
 
 impl FileTrack {
@@ -29,6 +36,7 @@ impl FileTrack {
             cancel_token: CancellationToken::new(),
             processors: Vec::new(),
             path: None,
+            use_cache: true,
         }
     }
 
@@ -54,6 +62,11 @@ impl FileTrack {
 
     pub fn with_ptime(mut self, ptime: Duration) -> Self {
         self.config = self.config.with_ptime(ptime);
+        self
+    }
+
+    pub fn with_cache_enabled(mut self, use_cache: bool) -> Self {
+        self.use_cache = use_cache;
         self
     }
 }
@@ -87,19 +100,36 @@ impl Track for FileTrack {
                 let id = self.id.clone();
                 let sample_rate = self.config.sample_rate;
                 let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
+                let use_cache = self.use_cache;
 
                 tokio::spawn(async move {
-                    let stream_result = stream_wav_file(
-                        &path,
-                        &id,
-                        sample_rate,
-                        max_pcm_chunk_size,
-                        token.clone(),
-                        packet_sender,
-                    )
-                    .await;
+                    let stream_result =
+                        if path.starts_with("http://") || path.starts_with("https://") {
+                            stream_from_url(
+                                &path,
+                                &id,
+                                sample_rate,
+                                max_pcm_chunk_size,
+                                token.clone(),
+                                packet_sender,
+                                use_cache,
+                            )
+                            .await
+                        } else {
+                            stream_wav_file(
+                                &path,
+                                &id,
+                                sample_rate,
+                                max_pcm_chunk_size,
+                                token.clone(),
+                                packet_sender,
+                                use_cache,
+                            )
+                            .await
+                        };
+
                     if let Err(e) = stream_result {
-                        tracing::error!("Error streaming WAV file: {}", e);
+                        tracing::error!("Error streaming audio: {}", e);
                     }
                     // Signal the end of the file
                     event_sender
@@ -131,6 +161,94 @@ impl Track for FileTrack {
     }
 }
 
+// Helper function to download from URL and stream
+async fn stream_from_url(
+    url: &str,
+    track_id: &str,
+    target_sample_rate: u32,
+    max_pcm_chunk_size: usize,
+    token: CancellationToken,
+    packet_sender: TrackPacketSender,
+    use_cache: bool,
+) -> Result<()> {
+    // Generate cache key from URL
+    let cache_key = cache::generate_cache_key(url, target_sample_rate);
+
+    // Check if file is in cache and use_cache is enabled
+    if use_cache && cache::is_cached(&cache_key)? {
+        debug!("Using cached audio for URL: {}", url);
+        let cached_data = cache::retrieve_from_cache(&cache_key).await?;
+        return stream_from_memory(
+            &cached_data,
+            track_id,
+            target_sample_rate,
+            max_pcm_chunk_size,
+            token,
+            packet_sender,
+        )
+        .await;
+    }
+
+    // Download the file
+    debug!("Downloading audio from URL: {}", url);
+    let client = Client::new();
+    let response = client.get(url).send().await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Failed to download file, status code: {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response.bytes().await?;
+    let data = bytes.to_vec();
+
+    // Store in cache if enabled
+    if use_cache {
+        if let Err(e) = cache::store_in_cache(&cache_key, data.clone()).await {
+            warn!("Failed to store audio in cache: {}", e);
+        } else {
+            debug!("Stored audio in cache with key: {}", cache_key);
+        }
+    }
+
+    // Stream the downloaded file
+    stream_from_memory(
+        &data,
+        track_id,
+        target_sample_rate,
+        max_pcm_chunk_size,
+        token,
+        packet_sender,
+    )
+    .await
+}
+
+// Helper function to stream a WAV file from memory
+async fn stream_from_memory(
+    data: &[u8],
+    track_id: &str,
+    target_sample_rate: u32,
+    max_pcm_chunk_size: usize,
+    token: CancellationToken,
+    packet_sender: TrackPacketSender,
+) -> Result<()> {
+    let cursor = Cursor::new(data);
+    let mut wav_reader = WavReader::new(cursor)?;
+
+    // Process and stream the WAV data
+    process_wav_reader(
+        &mut wav_reader,
+        track_id,
+        target_sample_rate,
+        max_pcm_chunk_size,
+        token,
+        packet_sender,
+    )
+    .await
+}
+
 // Helper function to stream a WAV file
 async fn stream_wav_file(
     path: &str,
@@ -139,15 +257,38 @@ async fn stream_wav_file(
     max_pcm_chunk_size: usize,
     token: CancellationToken,
     packet_sender: TrackPacketSender,
+    use_cache: bool,
 ) -> Result<()> {
+    // Generate cache key from file path
+    let cache_key = cache::generate_cache_key(path, target_sample_rate);
+
+    // Check if file is in cache and use_cache is enabled
+    if use_cache && cache::is_cached(&cache_key)? {
+        debug!("Using cached audio for file: {}", path);
+        let cached_data = cache::retrieve_from_cache(&cache_key).await?;
+        return stream_from_memory(
+            &cached_data,
+            track_id,
+            target_sample_rate,
+            max_pcm_chunk_size,
+            token,
+            packet_sender,
+        )
+        .await;
+    }
+
     // Open the WAV file
     let reader = BufReader::new(File::open(path)?);
     let mut wav_reader = WavReader::new(reader)?;
-    let spec = wav_reader.spec();
-    let mut all_samples = Vec::new();
-    match spec.sample_format {
-        hound::SampleFormat::Int => {
-            match spec.bits_per_sample {
+
+    // If caching is enabled, first read the file into memory to cache it
+    if use_cache {
+        // Read the entire file into memory
+        let mut all_samples = Vec::new();
+        let spec = wav_reader.spec();
+
+        match spec.sample_format {
+            hound::SampleFormat::Int => match spec.bits_per_sample {
                 16 => {
                     for sample in wav_reader.samples::<i16>() {
                         all_samples.push(sample.unwrap_or(0));
@@ -158,13 +299,7 @@ async fn stream_wav_file(
                         all_samples.push(sample.unwrap_or(0) as i16);
                     }
                 }
-                24 => {
-                    // Handle 24-bit as i32 but scale appropriately
-                    for sample in wav_reader.samples::<i32>() {
-                        all_samples.push((sample.unwrap_or(0) >> 16) as i16);
-                    }
-                }
-                32 => {
+                24 | 32 => {
                     for sample in wav_reader.samples::<i32>() {
                         all_samples.push((sample.unwrap_or(0) >> 16) as i16);
                     }
@@ -173,10 +308,119 @@ async fn stream_wav_file(
                     return Err(anyhow!(
                         "Unsupported bits per sample: {}",
                         spec.bits_per_sample
-                    ))
+                    ));
+                }
+            },
+            hound::SampleFormat::Float => {
+                for sample in wav_reader.samples::<f32>() {
+                    all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
                 }
             }
         }
+
+        // If stereo, convert to mono
+        if spec.channels == 2 {
+            let mono_samples = all_samples
+                .chunks(2)
+                .map(|chunk| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
+                .collect();
+            all_samples = mono_samples;
+        }
+
+        // Resample if needed
+        if spec.sample_rate != target_sample_rate {
+            all_samples =
+                resample::resample_mono(&all_samples, spec.sample_rate, target_sample_rate);
+        }
+
+        // Create a new WAV file in memory for caching
+        let mut buffer = Vec::new();
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: target_sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::new(Cursor::new(&mut buffer), spec)?;
+
+            for sample in &all_samples {
+                writer.write_sample(*sample)?;
+            }
+            writer.finalize()?;
+        }
+
+        // Store in cache
+        if let Err(e) = cache::store_in_cache(&cache_key, buffer.clone()).await {
+            warn!("Failed to store audio in cache: {}", e);
+        } else {
+            debug!("Stored audio in cache with key: {}", cache_key);
+        }
+
+        // Open a new reader from the buffer
+        let cursor = Cursor::new(buffer);
+        let mut wav_reader = WavReader::new(cursor)?;
+
+        // Stream from the memory buffer
+        return process_wav_reader(
+            &mut wav_reader,
+            track_id,
+            target_sample_rate,
+            max_pcm_chunk_size,
+            token,
+            packet_sender,
+        )
+        .await;
+    }
+
+    // If not caching, just process the file directly
+    process_wav_reader(
+        &mut wav_reader,
+        track_id,
+        target_sample_rate,
+        max_pcm_chunk_size,
+        token,
+        packet_sender,
+    )
+    .await
+}
+
+// Helper function to process a WAV reader and stream audio
+async fn process_wav_reader<R: std::io::Read + Send>(
+    wav_reader: &mut WavReader<R>,
+    track_id: &str,
+    target_sample_rate: u32,
+    max_pcm_chunk_size: usize,
+    token: CancellationToken,
+    packet_sender: TrackPacketSender,
+) -> Result<()> {
+    let spec = wav_reader.spec();
+    let mut all_samples = Vec::new();
+
+    match spec.sample_format {
+        hound::SampleFormat::Int => match spec.bits_per_sample {
+            16 => {
+                for sample in wav_reader.samples::<i16>() {
+                    all_samples.push(sample.unwrap_or(0));
+                }
+            }
+            8 => {
+                for sample in wav_reader.samples::<i8>() {
+                    all_samples.push(sample.unwrap_or(0) as i16);
+                }
+            }
+            24 | 32 => {
+                for sample in wav_reader.samples::<i32>() {
+                    all_samples.push((sample.unwrap_or(0) >> 16) as i16);
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "Unsupported bits per sample: {}",
+                    spec.bits_per_sample
+                ));
+            }
+        },
         hound::SampleFormat::Float => {
             for sample in wav_reader.samples::<f32>() {
                 all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
@@ -204,12 +448,13 @@ async fn stream_wav_file(
     let packet_duration_ms = packet_duration as u64;
 
     info!(
-        "Streaming WAV file with {} samples, packet_duration_ms: {} target_sample_rate: {} spec.sample_rate: {}",
+        "Streaming WAV with {} samples, packet_duration_ms: {} target_sample_rate: {} spec.sample_rate: {}",
         all_samples.len(),
         packet_duration_ms,
         target_sample_rate,
         spec.sample_rate
     );
+
     // Stream the audio data
     for chunk in all_samples.chunks(max_pcm_chunk_size) {
         // Check if we should stop
@@ -224,6 +469,7 @@ async fn stream_wav_file(
             samples: Samples::PCM(chunk.to_vec()),
             sample_rate: target_sample_rate as u16,
         };
+
         // Send the packet
         if let Err(e) = packet_sender.send(packet) {
             tracing::error!("Failed to send audio packet: {}", e);
@@ -237,4 +483,115 @@ async fn stream_wav_file(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::stream::MediaStreamEvent;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::{broadcast, mpsc};
+
+    // Create a simple WAV file for testing
+    fn create_test_wav(sample_rate: u32, duration_ms: u32) -> Result<Vec<u8>> {
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+
+        let mut buffer = Vec::new();
+        {
+            let mut writer = WavWriter::new(Cursor::new(&mut buffer), spec)?;
+
+            // Generate a sine wave
+            let num_samples = (sample_rate * duration_ms) / 1000;
+            let frequency = 440.0; // A4 note
+
+            for t in 0..num_samples {
+                let sample = (t as f32 / sample_rate as f32 * frequency * 2.0 * PI).sin();
+                let amplitude = 0.5;
+                let sample_i16 = (sample * amplitude * 32767.0) as i16;
+                writer.write_sample(sample_i16)?;
+            }
+
+            writer.finalize()?;
+        }
+
+        Ok(buffer)
+    }
+
+    #[tokio::test]
+    async fn test_file_track_with_cache() -> Result<()> {
+        // Set up a temporary cache directory with a unique name for this test
+        let temp_dir = tempdir()?;
+        let cache_path = temp_dir.path().join("file_track_cache");
+        tokio::fs::create_dir_all(&cache_path).await?;
+        let cache_path_str = cache_path.to_str().unwrap();
+        cache::set_cache_dir(cache_path_str)?;
+
+        // Ensure cache directory exists
+        cache::ensure_cache_dir().await?;
+
+        // Create a temporary test file in fixtures directory
+        let fixtures_dir = temp_dir.path().join("fixtures");
+        tokio::fs::create_dir_all(&fixtures_dir).await?;
+        let wav_data = create_test_wav(16000, 1000)?;
+        let test_file_path = fixtures_dir.join("test_16k.wav");
+        tokio::fs::write(&test_file_path, &wav_data).await?;
+        let file_path = test_file_path.to_str().unwrap();
+
+        // Create a FileTrack instance
+        let track_id = "test_track".to_string();
+        let file_track = FileTrack::new(track_id.clone())
+            .with_path(file_path.to_string())
+            .with_sample_rate(16000)
+            .with_cache_enabled(true);
+
+        // Create channels for events and packets
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+
+        // Start the track
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+        file_track.start(token_clone, event_tx, packet_tx).await?;
+
+        // Receive some packets to verify it's working
+        let mut received_packet = false;
+        if let Some(_) = packet_rx.recv().await {
+            received_packet = true;
+        }
+
+        // Stop the track
+        file_track.stop().await?;
+
+        // Wait for the stop event
+        let mut received_stop = false;
+        while let Ok(event) = event_rx.recv().await {
+            if let MediaStreamEvent::TrackStop(id) = event {
+                if id == track_id {
+                    received_stop = true;
+                    break;
+                }
+            }
+        }
+
+        // Add a small delay to ensure the cache file is written
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Verify that the cache exists
+        let cache_key = cache::generate_cache_key(file_path, 16000);
+        assert!(cache::is_cached(&cache_key)?);
+
+        // Cleanup
+        cache::clean_cache().await?;
+
+        assert!(received_packet);
+        assert!(received_stop);
+
+        Ok(())
+    }
 }

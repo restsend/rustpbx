@@ -265,8 +265,13 @@ async fn test_real_tencent_tts_client() {
     let text = "集成测试";
     let result = client.synthesize(text, &config).await;
 
+    // Print detailed error information if the request fails
+    if let Err(ref e) = result {
+        println!("TTS request failed with error: {:?}", e);
+    }
+
     // Verify results
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "TTS request should succeed");
     let audio_data = result.unwrap();
     assert!(!audio_data.is_empty(), "Audio data should not be empty");
 }
