@@ -31,8 +31,14 @@ pub struct LlmConfig {
 
 impl Default for LlmConfig {
     fn default() -> Self {
+        // Try to load environment variables if not already done
+        let _ = dotenv();
+
+        // Get model from environment variable, or use default
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-3.5-turbo".to_string());
+
         Self {
-            model: "gpt-3.5-turbo".to_string(),
+            model,
             prompt: "You are a helpful assistant.".to_string(),
             temperature: Some(0.7),
             max_tokens: Some(1000),
@@ -198,7 +204,8 @@ impl OpenAiClientBuilder {
 
         let client = Client::with_config(config);
 
-        // Create default LlmConfig with model from env or default
+        // Use model from environment if provided, otherwise default to gpt-3.5-turbo
+        // This will be used as a fallback if LlmConfig has the default model value
         let model = self.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string());
 
         Ok(OpenAiClient {
@@ -265,10 +272,12 @@ impl OpenAiClient {
 
     // Method to get the model from config or default
     fn get_model(&self, config: &LlmConfig) -> String {
-        if config.model == "gpt-3.5-turbo" {
-            // Use default model from env if the config has the default value
+        // If config model is the default "gpt-3.5-turbo" and we have a different default_model,
+        // use the default_model from client which was set from environment in the builder
+        if config.model == "gpt-3.5-turbo" && self.default_model != "gpt-3.5-turbo" {
             self.default_model.clone()
         } else {
+            // Otherwise use the model specified in config (which might be from env)
             config.model.clone()
         }
     }

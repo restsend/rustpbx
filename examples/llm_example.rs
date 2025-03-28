@@ -47,10 +47,8 @@ async fn main() -> Result<()> {
     // Create an event channel to receive LLM responses
     let (event_sender, mut event_receiver) = broadcast::channel::<SessionEvent>(10);
 
-    // Configure LLM - use the default model string which will be replaced by the OpenAiClient
-    // with the one from the environment variables
+    // Use LlmConfig default which already reads from OPENAI_MODEL environment variable
     let llm_config = LlmConfig {
-        model: "gpt-3.5-turbo".to_string(), // This will be replaced if OPENAI_MODEL is set
         prompt: "You are a helpful assistant. Keep your responses brief and to the point."
             .to_string(),
         temperature: Some(0.7),
@@ -59,6 +57,7 @@ async fn main() -> Result<()> {
         base_url: None,
         tools: None,
         max_conversation_turns: Some(5),
+        ..LlmConfig::default() // Get default values including model from env
     };
 
     // Create processor
