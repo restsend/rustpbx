@@ -263,7 +263,23 @@ async fn test_real_tencent_tts_client() {
 
     // Synthesize using the real client (short text for quick test)
     let text = "集成测试";
-    let result = client.synthesize(text, &config).await;
+
+    // Convert TtsConfig to SynthesisConfig
+    let synthesis_config = SynthesisConfig {
+        url: config.url.clone(),
+        voice: config.voice.clone(),
+        rate: config.rate,
+        appid: config.appid.clone(),
+        secret_id: config.secret_id.clone(),
+        secret_key: config.secret_key.clone(),
+        volume: config.volume,
+        speaker: config.speaker,
+        codec: config.codec.clone(),
+    };
+
+    let result =
+        <TencentCloudTtsClient as SynthesisClient>::synthesize(&client, text, &synthesis_config)
+            .await;
 
     // Print detailed error information if the request fails
     if let Err(ref e) = result {

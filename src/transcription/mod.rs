@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 // Add imports for event system
 use crate::event::{EventSender, SessionEvent};
+use async_trait::async_trait;
 
 // Add provider modules
 mod default;
@@ -54,6 +55,55 @@ pub trait AsrClient: Send + Sync {
         sample_rate: u32,
         config: &'a AsrConfig,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
+}
+
+// Simplified transcription client trait for pipeline usage
+#[async_trait]
+pub trait TranscriptionClient: Send + Sync + std::fmt::Debug {
+    async fn transcribe(
+        &self,
+        audio_data: &[i16],
+        sample_rate: u32,
+        config: &TranscriptionConfig,
+    ) -> Result<String>;
+}
+
+// Pipeline-friendly configuration
+#[derive(Debug, Clone, Default)]
+pub struct TranscriptionConfig {
+    pub enabled: bool,
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub appid: Option<String>,
+    pub secret_id: Option<String>,
+    pub secret_key: Option<String>,
+    pub engine_type: Option<String>,
+}
+
+// Implement TranscriptionClient for TencentCloudAsrClient
+#[async_trait]
+impl TranscriptionClient for TencentCloudAsrClient {
+    async fn transcribe(
+        &self,
+        audio_data: &[i16],
+        sample_rate: u32,
+        config: &TranscriptionConfig,
+    ) -> Result<String> {
+        // Convert TranscriptionConfig to AsrConfig
+        let asr_config = AsrConfig {
+            enabled: config.enabled,
+            model: config.model.clone(),
+            language: config.language.clone(),
+            appid: config.appid.clone(),
+            secret_id: config.secret_id.clone(),
+            secret_key: config.secret_key.clone(),
+            engine_type: config.engine_type.clone(),
+        };
+
+        // Use the AsrClient implementation
+        let future = <Self as AsrClient>::transcribe(self, audio_data, sample_rate, &asr_config);
+        future.await
+    }
 }
 
 // ASR Processor that integrates with the media stream system

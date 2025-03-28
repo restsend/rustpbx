@@ -27,6 +27,7 @@ pub struct TencentCloudTtsResult {
     pub request_id: String,
 }
 
+#[derive(Debug)]
 pub struct TencentCloudTtsClient {
     http_client: HttpClient,
 }

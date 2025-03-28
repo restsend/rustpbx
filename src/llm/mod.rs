@@ -99,7 +99,7 @@ impl Message {
 }
 
 // LLM client trait - to be implemented with actual LLM integration
-pub trait LlmClient: Send + Sync {
+pub trait LlmClient: Send + Sync + std::fmt::Debug {
     fn generate_response<'a>(
         &'a self,
         input: &'a str,
@@ -204,20 +204,16 @@ impl OpenAiClientBuilder {
 
         let client = Client::with_config(config);
 
-        // Use model from environment if provided, otherwise default to gpt-3.5-turbo
-        // This will be used as a fallback if LlmConfig has the default model value
-        let model = self.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string());
-
         Ok(OpenAiClient {
             client,
             conversation: VecDeque::new(),
             max_conversation_turns: self.max_conversation_turns,
-            default_model: model,
+            default_model: self.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
         })
     }
 }
 
-// OpenAI LLM client implementation
+#[derive(Debug)]
 pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
     conversation: VecDeque<Message>,

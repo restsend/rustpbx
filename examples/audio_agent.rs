@@ -1,519 +1,303 @@
-use anyhow::{anyhow, Context, Result};
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    SampleFormat, SizedSample,
-};
-use rustpbx::{
-    event::{EventSender, SessionEvent},
-    llm::{LlmClient, LlmConfig, OpenAiClient, OpenAiClientBuilder},
-    media::{
-        noise::NoiseReducer,
-        processor::{AudioFrame, Processor, Samples},
-        stream::{MediaStream, MediaStreamBuilder, MediaStreamEvent},
-        track::{tts::TtsTrack, Track, TrackId},
-        vad::{VadProcessor, VadType},
-    },
-    synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig, TtsEvent, TtsProcessor},
-    transcription::{AsrConfig, AsrEvent, AsrProcessor, TencentCloudAsrClient},
-};
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
-use tokio::{
-    sync::{broadcast, mpsc},
-    time::Duration,
-};
+/// This is a demo application which reads wav file from command line
+/// and processes it with ASR, LLM and TTS.
+///
+/// ```bash
+/// cargo run --example audio_agent -- --input data/audio/sample.wav --output out.wav
+/// ```
+use std::env;
+
+use anyhow::Result;
+use clap::Parser;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+use tracing::{error, info};
+use tracing_subscriber;
 
-// Audio buffer to handle microphone input
-struct AudioBuffer {
-    buffer: Mutex<VecDeque<i16>>,
-    max_size: usize,
+use rustpbx::{
+    event::SessionEvent,
+    llm::{LlmClient, LlmConfig, OpenAiClientBuilder},
+    media::pipeline::{
+        llm::LlmPipeline, synthesis::SynthesisPipeline, transcription::TranscriptionPipeline,
+        PipelineManager, StreamState,
+    },
+    synthesis::{SynthesisClient, SynthesisConfig, TencentCloudTtsClient},
+    transcription::{TencentCloudAsrClient, TranscriptionClient, TranscriptionConfig},
+};
+
+/// Audio Agent
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+pub struct Args {
+    /// Appid, for TencentCloud
+    #[arg(short, long)]
+    appid: Option<String>,
+
+    /// Secret id, for TencentCloud
+    #[arg(long)]
+    secret_id: Option<String>,
+
+    /// Secret key, for TencentCloud
+    #[arg(long)]
+    secret_key: Option<String>,
+
+    /// OpenAI API Key
+    #[arg(long)]
+    api_key: Option<String>,
+
+    /// Input file (wav)
+    #[arg(short, long)]
+    input: String,
+
+    /// Output file path
+    #[arg(short, long)]
+    output: String,
+
+    /// Sample rate
+    #[arg(short = 'R', long, default_value = "16000")]
+    sample_rate: u32,
+
+    /// System prompt for LLM
+    #[arg(short = 'p', long, default_value = "You are a helpful assistant.")]
+    prompt: String,
 }
 
-impl AudioBuffer {
-    fn new(max_size: usize) -> Self {
-        Self {
-            buffer: Mutex::new(VecDeque::with_capacity(max_size)),
-            max_size,
-        }
+// Helper function to read samples from a wav file
+fn read_wav_file(path: &str) -> Result<(Vec<i16>, u32)> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<i16> = reader.samples().filter_map(Result::ok).collect();
+    Ok((samples, spec.sample_rate))
+}
+
+// Helper to write wav file
+struct WavWriter {
+    writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+}
+
+impl WavWriter {
+    fn new(path: &str, sample_rate: usize, channels: u16) -> Result<Self> {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate: sample_rate as u32,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let writer = hound::WavWriter::create(path, spec)?;
+        Ok(Self { writer })
     }
 
-    fn push(&self, samples: &[i16]) {
-        let mut buffer = self.buffer.lock().unwrap();
+    fn write_samples(&mut self, samples: &[i16]) -> Result<()> {
         for &sample in samples {
-            buffer.push_back(sample);
-        }
-        // Trim to max size if needed
-        while buffer.len() > self.max_size {
-            buffer.pop_front();
-        }
-    }
-
-    fn drain(&self, max_samples: usize) -> Vec<i16> {
-        let mut buffer = self.buffer.lock().unwrap();
-        let count = max_samples.min(buffer.len());
-        let mut result = Vec::with_capacity(count);
-        for _ in 0..count {
-            if let Some(sample) = buffer.pop_front() {
-                result.push(sample);
-            }
-        }
-        result
-    }
-}
-
-// Custom processor to handle microphone input
-struct MicrophoneProcessor {
-    audio_sender: mpsc::Sender<Vec<i16>>,
-}
-
-impl MicrophoneProcessor {
-    fn new(audio_sender: mpsc::Sender<Vec<i16>>) -> Self {
-        Self { audio_sender }
-    }
-}
-
-impl Processor for MicrophoneProcessor {
-    fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        if let Samples::PCM(samples) = &frame.samples {
-            let _ = self.audio_sender.try_send(samples.clone());
+            self.writer.write_sample(sample)?;
         }
         Ok(())
     }
-}
 
-// Convert MediaStream events to user-friendly status updates
-fn handle_media_event(event: MediaStreamEvent) -> Option<String> {
-    match event {
-        MediaStreamEvent::StartSpeaking(track_id, timestamp) => Some(format!(
-            "Started speaking on track {} at {}",
-            track_id, timestamp
-        )),
-        MediaStreamEvent::Silence(track_id, timestamp) => Some(format!(
-            "Silence detected on track {} at {}",
-            track_id, timestamp
-        )),
-        MediaStreamEvent::Transcription(track_id, timestamp, text) => {
-            Some(format!("Transcription on track {}: {}", track_id, text))
-        }
-        MediaStreamEvent::TranscriptionSegment(track_id, timestamp, text) => Some(format!(
-            "Interim transcription on track {}: {}",
-            track_id, text
-        )),
-        MediaStreamEvent::DTMF(track_id, timestamp, digit) => Some(format!(
-            "DTMF digit {} detected on track {}",
-            digit, track_id
-        )),
-        MediaStreamEvent::TrackStart(track_id) => Some(format!("Track {} started", track_id)),
-        MediaStreamEvent::TrackStop(track_id) => Some(format!("Track {} stopped", track_id)),
+    fn close(self) -> Result<()> {
+        self.writer.finalize()?;
+        Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up logging
+    // Initialize tracing for logging
     tracing_subscriber::fmt::init();
 
-    // Load .env file if it exists
-    dotenv::dotenv().ok();
+    // Parse arguments
+    let args = Args::parse();
 
-    // Get credentials from environment variables
-    let tencent_secret_id = match std::env::var("TENCENT_SECRET_ID") {
-        Ok(id) if !id.is_empty() => id,
-        _ => {
-            println!("TENCENT_SECRET_ID env var not set or empty. Please set it in .env file");
-            return Ok(());
-        }
-    };
+    // Get API key from args or environment
+    let api_key = args
+        .api_key
+        .clone()
+        .or_else(|| env::var("OPENAI_API_KEY").ok())
+        .unwrap_or_default();
 
-    let tencent_secret_key = match std::env::var("TENCENT_SECRET_KEY") {
-        Ok(key) if !key.is_empty() => key,
-        _ => {
-            println!("TENCENT_SECRET_KEY env var not set or empty. Please set it in .env file");
-            return Ok(());
-        }
-    };
+    // Get TencentCloud credentials from args or environment
+    let appid = args
+        .appid
+        .clone()
+        .or_else(|| env::var("TENCENT_APPID").ok())
+        .unwrap_or_default();
 
-    let tencent_appid = match std::env::var("TENCENT_APPID") {
-        Ok(id) if !id.is_empty() => id,
-        _ => {
-            println!("TENCENT_APPID env var not set or empty. Please set it in .env file");
-            return Ok(());
-        }
-    };
+    let secret_id = args
+        .secret_id
+        .clone()
+        .or_else(|| env::var("TENCENT_SECRET_ID").ok())
+        .unwrap_or_default();
 
-    // Create a cancellation token for clean shutdown
+    let secret_key = args
+        .secret_key
+        .clone()
+        .or_else(|| env::var("TENCENT_SECRET_KEY").ok())
+        .unwrap_or_default();
+
+    // Create cancellation token for pipeline
     let cancel_token = CancellationToken::new();
-    let cancel_token_clone = cancel_token.clone();
 
-    // Setup for media processing
-    let session_id = Uuid::new_v4().to_string();
-    info!("Starting audio agent with session ID: {}", session_id);
+    // Create event sender for pipeline events
+    let (event_sender, mut event_receiver) = broadcast::channel::<SessionEvent>(32);
 
-    // Create the media stream
-    let media_stream = Arc::new(
-        MediaStreamBuilder::new()
-            .id(format!("audio-agent-{}", session_id))
-            .cancel_token(cancel_token.clone())
-            .build(),
+    // Set up pipeline manager
+    let pipeline_manager = PipelineManager::new(
+        "audio_agent".to_string(),
+        event_sender.clone(),
+        cancel_token.clone(),
     );
 
-    // Set up microphone input
-    let host = cpal::default_host();
-    let input_device = host
-        .default_input_device()
-        .context("Failed to get default input device")?;
-
-    info!("Using input device: {}", input_device.name()?);
-
-    let output_device = host
-        .default_output_device()
-        .context("Failed to get default output device")?;
-
-    info!("Using output device: {}", output_device.name()?);
-
-    // Set up the audio buffer for storing audio samples
-    let audio_buffer = Arc::new(AudioBuffer::new(48000 * 10)); // 10 seconds at 48kHz
-
-    // Set up channels for audio processing
-    let (audio_sender, mut audio_receiver) = mpsc::channel::<Vec<i16>>(100);
-
-    // Create the ASR configuration
-    let asr_config = AsrConfig {
+    // Set up ASR pipeline
+    let transcription_config = TranscriptionConfig {
         enabled: true,
         model: None,
         language: Some("zh-CN".to_string()),
-        appid: Some(tencent_appid.clone()),
-        secret_id: Some(tencent_secret_id.clone()),
-        secret_key: Some(tencent_secret_key.clone()),
-        engine_type: Some("16k_zh".to_string()), // Chinese 16kHz model
+        appid: Some(appid.clone()),
+        secret_id: Some(secret_id.clone()),
+        secret_key: Some(secret_key.clone()),
+        engine_type: Some("16k_zh".to_string()),
     };
 
-    // Create the TTS configuration
-    let tts_config = TtsConfig {
-        url: "".to_string(),          // Not used with TencentCloud client
-        voice: Some("1".to_string()), // Voice type
-        rate: Some(1.0),              // Normal speed
-        appid: Some(tencent_appid),
-        secret_id: Some(tencent_secret_id.clone()),
-        secret_key: Some(tencent_secret_key.clone()),
-        volume: Some(5),                // Volume level (0-10)
-        speaker: Some(1),               // Speaker type
-        codec: Some("pcm".to_string()), // PCM format
-    };
+    let asr_client = TencentCloudAsrClient::new();
+    let transcription_pipeline = TranscriptionPipeline::new(
+        "transcription".to_string(),
+        Arc::new(asr_client) as Arc<dyn TranscriptionClient>,
+        transcription_config,
+    );
 
-    // Create LLM configuration and client
+    // Set up LLM pipeline
     let llm_config = LlmConfig {
-        prompt: "You are a helpful assistant. Keep your responses concise and to the point."
-            .to_string(),
+        model: "gpt-3.5-turbo".to_string(),
+        prompt: args.prompt.clone(),
         temperature: Some(0.7),
-        max_tokens: Some(100),
+        max_tokens: Some(1000),
         max_conversation_turns: Some(10),
-        stream: Some(true),
+        stream: Some(false),
         base_url: None,
         tools: None,
-        ..LlmConfig::default() // Get default values including model from env
     };
 
-    // Setup event channels
-    let (asr_sender, mut asr_receiver) = broadcast::channel::<AsrEvent>(10);
-    let (tts_sender, mut tts_receiver) = broadcast::channel::<TtsEvent>(10);
-    let (event_sender, _) = broadcast::channel::<SessionEvent>(10);
-    let (vad_sender, _) = broadcast::channel::<MediaStreamEvent>(10);
+    let openai_client = OpenAiClientBuilder::from_env()
+        .with_api_key(api_key)
+        .build()?;
 
-    // Create the ASR client and processor
-    let asr_client = Arc::new(TencentCloudAsrClient::new());
-    let asr_processor = AsrProcessor::new(asr_config, asr_client, asr_sender.clone())
-        .with_session_event_sender(event_sender.clone());
+    let llm_pipeline = LlmPipeline::new(
+        "llm".to_string(),
+        Arc::new(openai_client) as Arc<dyn LlmClient>,
+        llm_config,
+    );
 
-    // Create the TTS client and processor
-    let tts_client = Arc::new(TencentCloudTtsClient::new());
-    let tts_processor = TtsProcessor::new(tts_config, tts_client, tts_sender.clone())
-        .with_session_event_sender(event_sender.clone());
-
-    // Create the LLM client
-    let llm_client = match OpenAiClientBuilder::from_env().build() {
-        Ok(client) => Arc::new(client),
-        Err(e) => {
-            error!("Failed to create OpenAI client: {}", e);
-            return Err(anyhow!("Failed to create OpenAI client: {}", e));
-        }
+    // Set up TTS pipeline
+    let synthesis_config = SynthesisConfig {
+        url: "".to_string(),
+        voice: Some("1".to_string()),
+        rate: Some(1.0),
+        appid: Some(appid.clone()),
+        secret_id: Some(secret_id.clone()),
+        secret_key: Some(secret_key.clone()),
+        volume: Some(100),
+        speaker: Some(1),
+        codec: Some("wav".to_string()),
     };
 
-    // Create microphone track
-    let mic_track_id = format!("mic-{}", Uuid::new_v4());
-    let mut mic_track = TtsTrack::new(mic_track_id.clone());
+    let tts_client = TencentCloudTtsClient::new();
+    let synthesis_pipeline = SynthesisPipeline::new(
+        "synthesis".to_string(),
+        Arc::new(tts_client) as Arc<dyn SynthesisClient>,
+        synthesis_config,
+    );
 
-    // Create microphone processor
-    let mic_processor = MicrophoneProcessor::new(audio_sender.clone());
+    // Add all pipelines to the manager
+    pipeline_manager
+        .add_pipeline(Box::new(transcription_pipeline))
+        .await?;
+    pipeline_manager
+        .add_pipeline(Box::new(llm_pipeline))
+        .await?;
+    pipeline_manager
+        .add_pipeline(Box::new(synthesis_pipeline))
+        .await?;
 
-    // Create noise reducer processor
-    let noise_reducer = NoiseReducer::new();
+    // Subscribe to pipeline state changes
+    let mut state_receiver = pipeline_manager.subscribe();
 
-    // Create VAD processor
-    let vad_processor = VadProcessor::new(mic_track_id.clone(), VadType::WebRTC, vad_sender);
+    // Read the input WAV file
+    info!("Reading input file: {}", args.input);
+    let (samples, sample_rate) = read_wav_file(&args.input)?;
+    info!("Read {} samples at {} Hz", samples.len(), sample_rate);
 
-    // Add processors to the microphone track
-    mic_track.with_processors(vec![
-        Box::new(mic_processor),
-        Box::new(noise_reducer),
-        Box::new(vad_processor),
-        Box::new(asr_processor),
-    ]);
+    // Create output WAV writer
+    let mut wav_writer = WavWriter::new(&args.output, args.sample_rate as usize, 1)?;
 
-    // Add track to media stream
-    media_stream.update_track(Box::new(mic_track)).await;
+    // Process audio through the pipeline
+    info!("Processing audio through pipeline...");
+    pipeline_manager
+        .process_audio(samples, args.sample_rate)
+        .await?;
 
-    // Subscribe to media stream events for logging
-    let mut media_events = media_stream.subscribe();
+    // Process events from the pipeline
+    let mut final_audio: Option<Vec<i16>> = None;
 
-    // Task to forward microphone audio to the media stream
-    let mic_track_id_clone = mic_track_id.clone();
-    let media_stream_clone = media_stream.clone();
-    tokio::spawn(async move {
-        let mut timestamp = 0u32;
-        while let Some(samples) = audio_receiver.recv().await {
-            // Create audio frame from microphone samples
-            let frame = AudioFrame {
-                track_id: mic_track_id_clone.clone(),
-                samples: Samples::PCM(samples),
-                timestamp,
-                sample_rate: 16000,
-            };
-
-            // Send the frame through the track's packet sender
-            if let Err(e) = media_stream_clone.packet_sender.send(frame) {
-                error!("Failed to send audio frame: {}", e);
-            }
-
-            timestamp += 20; // Assuming 20ms frames
-        }
-    });
-
-    // Task to listen for media stream events and log them
-    tokio::spawn(async move {
-        while let Ok(event) = media_events.recv().await {
-            if let Some(msg) = handle_media_event(event) {
-                info!("{}", msg);
-            }
-        }
-    });
-
-    // Process ASR events and forward to LLM
-    tokio::spawn(async move {
-        while let Ok(event) = asr_receiver.recv().await {
-            if event.is_final {
-                info!("Final ASR result: {}", event.text);
-
-                // Send to LLM for processing
-                match llm_client.generate_response(&event.text, &llm_config).await {
-                    Ok(response) => {
-                        info!("LLM response: {}", response);
-
-                        // Send to TTS for synthesis
-                        match tts_processor.synthesize(&response).await {
-                            Ok(audio_data) => {
-                                info!("TTS generated {} bytes of audio", audio_data.len());
-
-                                // Convert bytes to i16 samples
-                                let samples: Vec<i16> = audio_data
-                                    .chunks_exact(2)
-                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                    .collect();
-
-                                // Feed samples to output device
-                                if let Err(e) = play_audio(&output_device, &samples) {
-                                    error!("Failed to play audio: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("TTS synthesis failed: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("LLM processing failed: {}", e);
-                    }
+    // Start a task to handle events
+    let event_task = tokio::spawn(async move {
+        while let Ok(event) = event_receiver.recv().await {
+            match &event {
+                SessionEvent::Transcription(track_id, timestamp, text) => {
+                    info!("Transcription from {}: {} at {}", track_id, text, timestamp);
                 }
+                SessionEvent::LLM(timestamp, text) => {
+                    info!("LLM response at {}: {}", timestamp, text);
+                }
+                SessionEvent::TTS(timestamp, text) => {
+                    info!("TTS event at {}: {}", timestamp, text);
+                }
+                SessionEvent::Error(timestamp, message) => {
+                    error!("Error event at {}: {}", timestamp, message);
+                }
+                _ => {}
             }
         }
     });
 
-    // Start the media stream
-    tokio::spawn(async move {
-        if let Err(e) = media_stream.serve().await {
-            error!("Media stream error: {}", e);
-        }
-    });
-
-    // Setup the input audio stream
-    let audio_buffer_clone = audio_buffer.clone();
-    let input_config = input_device.default_input_config()?;
-    info!("Input config: {:?}", input_config);
-
-    let input_stream = match input_config.sample_format() {
-        SampleFormat::I16 => build_input_stream::<i16>(
-            &input_device,
-            &input_config.into(),
-            audio_buffer_clone.clone(),
-            audio_sender.clone(),
-        )?,
-        SampleFormat::U16 => build_input_stream::<u16>(
-            &input_device,
-            &input_config.into(),
-            audio_buffer_clone.clone(),
-            audio_sender.clone(),
-        )?,
-        SampleFormat::F32 => build_input_stream::<f32>(
-            &input_device,
-            &input_config.into(),
-            audio_buffer_clone.clone(),
-            audio_sender.clone(),
-        )?,
-        sample_format => return Err(anyhow!("Unsupported sample format: {:?}", sample_format)),
-    };
-
-    // Start the audio input stream
-    input_stream.play()?;
-    info!("Input stream started");
-
-    // Run until user presses Enter
-    println!("Audio agent is running. Press Enter to stop...");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-
-    // Cleanup
-    info!("Stopping audio agent...");
-    cancel_token_clone.cancel();
-
-    // Give tasks a moment to clean up
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    Ok(())
-}
-
-// Helper function to build input stream for microphone
-fn build_input_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    audio_buffer: Arc<AudioBuffer>,
-    audio_sender: mpsc::Sender<Vec<i16>>,
-) -> Result<cpal::Stream>
-where
-    T: cpal::Sample + SizedSample + 'static,
-{
-    let err_fn = move |err| {
-        error!("Error on input stream: {}", err);
-    };
-
-    match std::any::type_name::<T>() {
-        "i16" => {
-            let stream = device.build_input_stream(
-                config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    // Already i16, just need to clone
-                    let samples_i16 = data.to_vec();
-                    audio_buffer.push(&samples_i16);
-                    let _ = audio_sender.try_send(samples_i16);
-                },
-                err_fn,
-                None,
-            )?;
-            Ok(stream)
-        }
-        "f32" => {
-            let stream = device.build_input_stream(
-                config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Convert f32 to i16
-                    let samples_i16: Vec<i16> = data
-                        .iter()
-                        .map(|&sample| (sample * 32767.0).round() as i16)
-                        .collect();
-                    audio_buffer.push(&samples_i16);
-                    let _ = audio_sender.try_send(samples_i16);
-                },
-                err_fn,
-                None,
-            )?;
-            Ok(stream)
-        }
-        _ => {
-            return Err(anyhow!(
-                "Unsupported sample format: {}",
-                std::any::type_name::<T>()
-            ));
+    // Process state updates from the pipeline
+    while let Ok(state) = state_receiver.recv().await {
+        match state {
+            StreamState::Transcription(track_id, text) => {
+                info!("Transcription from {}: {}", track_id, text);
+            }
+            StreamState::LlmResponse(text) => {
+                info!("LLM response: {}", text);
+            }
+            StreamState::TtsAudio(audio_data, _) => {
+                info!("Received synthesized audio: {} samples", audio_data.len());
+                final_audio = Some(audio_data);
+            }
+            StreamState::Error(err) => {
+                error!("Pipeline error: {}", err);
+            }
+            _ => {}
         }
     }
-}
 
-// Helper function to play audio through output device
-fn play_audio(device: &cpal::Device, samples: &[i16]) -> Result<()> {
-    let output_config = device.default_output_config()?;
-    let config: cpal::StreamConfig = output_config.clone().into();
+    // Wait for processing to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-    let samples = samples.to_vec();
-    let sample_mutex = Arc::new(Mutex::new((samples, 0)));
+    // Shut down the pipeline
+    pipeline_manager.stop().await?;
+    event_task.abort();
 
-    let stream = match output_config.sample_format() {
-        SampleFormat::I16 => {
-            let sample_mutex_clone = sample_mutex.clone();
-            device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    let mut guard = sample_mutex_clone.lock().unwrap();
-                    let (samples, position) = &mut *guard;
-
-                    for out_sample in data.iter_mut() {
-                        if *position < samples.len() {
-                            *out_sample = samples[*position];
-                            *position += 1;
-                        } else {
-                            *out_sample = 0;
-                        }
-                    }
-                },
-                |err| error!("Output error: {}", err),
-                None,
-            )?
-        }
-        SampleFormat::F32 => {
-            let sample_mutex_clone = sample_mutex.clone();
-            device.build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut guard = sample_mutex_clone.lock().unwrap();
-                    let (samples, position) = &mut *guard;
-
-                    for out_sample in data.iter_mut() {
-                        if *position < samples.len() {
-                            *out_sample = samples[*position] as f32 / 32767.0;
-                            *position += 1;
-                        } else {
-                            *out_sample = 0.0;
-                        }
-                    }
-                },
-                |err| error!("Output error: {}", err),
-                None,
-            )?
-        }
-        _ => return Err(anyhow!("Unsupported sample format")),
-    };
-
-    stream.play()?;
-
-    // Wait for all samples to be played
-    let mut done = false;
-    while !done {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let guard = sample_mutex.lock().unwrap();
-        done = guard.1 >= guard.0.len();
+    // Write the final audio to the output file
+    if let Some(audio) = final_audio {
+        wav_writer.write_samples(&audio)?;
+        info!("Wrote {} audio samples to {}", audio.len(), args.output);
+    } else {
+        error!("No audio was generated");
     }
+
+    // Close the wav writer
+    wav_writer.close()?;
+
+    info!("All processing complete");
 
     Ok(())
 }

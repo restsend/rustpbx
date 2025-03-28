@@ -1,0 +1,272 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use dotenv::dotenv;
+use hound::{SampleFormat, WavSpec, WavWriter};
+use regex::Regex;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::{debug, error, info};
+
+use rustpbx::synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig};
+
+const SAMPLE_RATE: u32 = 16000;
+
+/// Text segment with optional pause
+struct TextSegment {
+    text: String,
+    pause_ms: u32,
+}
+
+/// Convert text to WAV audio files using text-to-speech
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Input text to convert to speech
+    ///
+    /// Format: Normal text or with pauses using the format ":N text" where N is pause duration in seconds
+    /// Example: "Hello,:2 how are you?" (2 second pause between "Hello," and "how are you?")
+    #[arg(value_name = "TEXT")]
+    input_text: String,
+
+    /// Path to output WAV file
+    #[arg(value_name = "OUTPUT")]
+    output_file: PathBuf,
+
+    /// Voice ID to use (default: 1)
+    #[arg(short, long, default_value = "1")]
+    voice: String,
+
+    /// Speaker ID (default: 1)
+    #[arg(short, long, default_value = "1")]
+    speaker: i32,
+
+    /// Speech rate (0.5-2.0, default: 1.0)
+    #[arg(short, long, default_value = "1.0")]
+    rate: f32,
+
+    /// Volume level (0-10, default: 5)
+    #[arg(short, long, default_value = "5")]
+    volume: i32,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+/// Parse input text into segments with optional pauses
+///
+/// Format: Normal text or with pauses using the format ":N text" where N is pause duration in seconds
+/// Example: "Hello,:2 how are you?" (2 second pause between "Hello," and "how are you?")
+fn parse_input(input: &str) -> Vec<TextSegment> {
+    let mut segments = Vec::new();
+    let re = Regex::new(r":(\d+)([^:]+)").unwrap();
+
+    let mut last_pos = 0;
+    for cap in re.captures_iter(input) {
+        let pause_ms = cap[1].parse::<u32>().unwrap_or(0) * 1000; // Convert seconds to ms
+        let text = cap[2].trim().to_string();
+
+        let full_match = cap.get(0).unwrap();
+        if full_match.start() > last_pos {
+            // Add text before pattern as a segment with no pause
+            let prefix_text = input[last_pos..full_match.start()].trim();
+            if !prefix_text.is_empty() {
+                segments.push(TextSegment {
+                    text: prefix_text.to_string(),
+                    pause_ms: 0,
+                });
+            }
+        }
+
+        segments.push(TextSegment { text, pause_ms });
+        last_pos = full_match.end();
+    }
+
+    // Add any remaining text
+    if last_pos < input.len() {
+        let remaining = input[last_pos..].trim();
+        if !remaining.is_empty() {
+            segments.push(TextSegment {
+                text: remaining.to_string(),
+                pause_ms: 0,
+            });
+        }
+    }
+
+    segments
+}
+
+/// Generate silence samples for a specified duration
+fn generate_silence(duration_ms: u32) -> Vec<i16> {
+    let num_samples = (SAMPLE_RATE * duration_ms) / 1000;
+    vec![0; num_samples as usize]
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Set up logging
+    tracing_subscriber::fmt::init();
+
+    // Parse command line arguments
+    let args = Args::parse();
+
+    // Set log level based on verbose flag
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "debug");
+    } else {
+        std::env::set_var("RUST_LOG", "info");
+    }
+
+    // Display command information
+    info!("Converting text to speech: '{}'", args.input_text);
+    info!("Output file: {}", args.output_file.display());
+
+    // Load .env file if it exists
+    let env_result = dotenv().ok();
+    if env_result.is_some() {
+        debug!("Loaded environment variables from .env file");
+    } else {
+        debug!("No .env file found, using system environment variables");
+    }
+
+    // Get credentials from environment variables
+    let secret_id = match std::env::var("TENCENT_SECRET_ID") {
+        Ok(id) if !id.is_empty() => id,
+        _ => {
+            eprintln!("Error: TENCENT_SECRET_ID environment variable not set or empty.");
+            eprintln!("Please set it in .env file or in your environment.");
+            return Err(anyhow::anyhow!("Missing TENCENT_SECRET_ID"));
+        }
+    };
+    debug!("Found TENCENT_SECRET_ID in environment");
+
+    let secret_key = match std::env::var("TENCENT_SECRET_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            eprintln!("Error: TENCENT_SECRET_KEY environment variable not set or empty.");
+            eprintln!("Please set it in .env file or in your environment.");
+            return Err(anyhow::anyhow!("Missing TENCENT_SECRET_KEY"));
+        }
+    };
+    debug!("Found TENCENT_SECRET_KEY in environment");
+
+    let appid = match std::env::var("TENCENT_APPID") {
+        Ok(id) if !id.is_empty() => id,
+        _ => {
+            eprintln!("Error: TENCENT_APPID environment variable not set or empty.");
+            eprintln!("Please set it in .env file or in your environment.");
+            return Err(anyhow::anyhow!("Missing TENCENT_APPID"));
+        }
+    };
+    debug!("Found TENCENT_APPID in environment");
+
+    // Create TTS client and config
+    let tts_config = TtsConfig {
+        url: "".to_string(),     // Not used with TencentCloud client
+        voice: Some(args.voice), // Voice type
+        rate: Some(args.rate),   // Speech rate
+        appid: Some(appid),
+        secret_id: Some(secret_id),
+        secret_key: Some(secret_key),
+        volume: Some(args.volume),      // Volume level (0-10)
+        speaker: Some(args.speaker),    // Speaker type
+        codec: Some("pcm".to_string()), // PCM format
+    };
+    debug!("Created TTS configuration");
+
+    let tts_client = Arc::new(TencentCloudTtsClient::new());
+    debug!("Created TencentCloudTtsClient");
+
+    // Parse the input text into segments
+    let segments = parse_input(&args.input_text);
+    debug!("Parsed input into {} segments", segments.len());
+
+    // Prepare WAV file
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(&args.output_file, spec).with_context(|| {
+        format!(
+            "Failed to create output WAV file: {}",
+            args.output_file.display()
+        )
+    })?;
+    debug!(
+        "Created WAV file writer with spec: channels={}, sample_rate={}, bits_per_sample={}",
+        spec.channels, spec.sample_rate, spec.bits_per_sample
+    );
+
+    info!("Generating {} segments of audio...", segments.len());
+
+    // Process each segment
+    for (i, segment) in segments.iter().enumerate() {
+        info!(
+            "Segment {}: pause={}ms, text=\"{}\"",
+            i + 1,
+            segment.pause_ms,
+            segment.text
+        );
+
+        // Add silence if specified
+        if segment.pause_ms > 0 {
+            let silence = generate_silence(segment.pause_ms);
+            for &sample in &silence {
+                writer.write_sample(sample)?;
+            }
+            debug!(
+                "Added {}ms of silence ({} samples)",
+                segment.pause_ms,
+                silence.len()
+            );
+        }
+
+        // Generate speech for the segment text
+        if !segment.text.is_empty() {
+            info!("Synthesizing text: {}", segment.text);
+
+            match tts_client.synthesize(&segment.text, &tts_config).await {
+                Ok(audio_data) => {
+                    debug!("Received {} bytes of audio data", audio_data.len());
+
+                    // Convert PCM data to i16 samples
+                    let samples: Vec<i16> = audio_data
+                        .chunks_exact(2)
+                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                        .collect();
+
+                    debug!("Converted to {} i16 samples", samples.len());
+
+                    // Write the samples to WAV file
+                    for &sample in &samples {
+                        writer.write_sample(sample)?;
+                    }
+
+                    debug!("Added {} samples of speech", samples.len());
+                }
+                Err(e) => {
+                    error!("Failed to synthesize speech: {}", e);
+                    return Err(anyhow::anyhow!("TTS synthesis failed: {}", e));
+                }
+            }
+        }
+    }
+
+    match writer.finalize() {
+        Ok(_) => {
+            info!(
+                "WAV file created successfully: {}",
+                args.output_file.display()
+            );
+        }
+        Err(e) => {
+            error!("Failed to finalize WAV file: {}", e);
+            return Err(anyhow::anyhow!("Failed to finalize WAV file: {}", e));
+        }
+    }
+
+    Ok(())
+}
