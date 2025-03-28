@@ -77,9 +77,8 @@ tokio::spawn(async move {
     }
 });
 
-// Connect the ASR processor to your audio source
-// This will depend on your specific setup
-// The processor needs to be registered to handle audio frames
+// Process audio frames
+asr_processor.process_frame(&mut audio_frame)?;
 ```
 
 ## Using TTS
@@ -96,10 +95,36 @@ let tts_processor = TtsProcessor::new(tts_config, tts_client, event_sender);
 let text = "欢迎使用腾讯云语音服务";
 let audio_data = tts_processor.synthesize(text).await?;
 
-// Process the audio data as needed
-// The audio data is returned as PCM (by default) or MP3 bytes
-// depending on the configured codec
+// Use the audio data (e.g., save to file, play, etc.)
+std::fs::write("output.pcm", &audio_data)?;
 ```
+
+## Running Tests
+
+The integration tests for Tencent Cloud services will be skipped if no credentials are provided. To run these tests, you need to:
+
+1. Copy the `.env.example` file to `.env` in the project root:
+   ```
+   cp .env.example .env
+   ```
+
+2. Edit the `.env` file with your Tencent Cloud credentials:
+   ```
+   TENCENT_APPID=your_app_id
+   TENCENT_SECRET_ID=your_secret_id
+   TENCENT_SECRET_KEY=your_secret_key
+   ```
+
+3. Run the tests:
+   ```
+   cargo test
+   ```
+
+The tests will automatically read credentials from the `.env` file. If the credentials are not found or are empty, the tests requiring real Tencent Cloud API access will be skipped.
+
+## Examples
+
+See the `examples/tencent_asr_tts_example.rs` file for a complete example of using both ASR and TTS services.
 
 ## Error Handling
 
@@ -111,19 +136,6 @@ Both ASR and TTS clients will return detailed error messages in case of API fail
 - Network connectivity issues
 
 Make sure to implement appropriate error handling in your application.
-
-## Example
-
-See the example at `examples/tencent_asr_tts_example.rs` for a complete demonstration of using both ASR and TTS services.
-
-To run the example:
-
-```shell
-export TENCENT_APPID=your_app_id
-export TENCENT_SECRET_ID=your_secret_id
-export TENCENT_SECRET_KEY=your_secret_key
-cargo run --example tencent_asr_tts_example
-```
 
 ## Additional Resources
 

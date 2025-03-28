@@ -4,6 +4,7 @@ use rustpbx::synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig, TtsEvent, 
 use rustpbx::transcription::{AsrConfig, AsrEvent, AsrProcessor, TencentCloudAsrClient};
 
 use anyhow::Result;
+use dotenv::dotenv;
 use tokio::sync::broadcast;
 
 #[tokio::main]
@@ -11,11 +12,33 @@ async fn main() -> Result<()> {
     // Set up logging
     tracing_subscriber::fmt::init();
 
+    // Load .env file if it exists
+    dotenv().ok();
+
     // Get credentials from environment variables
-    let secret_id = std::env::var("TENCENT_SECRET_ID").expect("TENCENT_SECRET_ID env var not set");
-    let secret_key =
-        std::env::var("TENCENT_SECRET_KEY").expect("TENCENT_SECRET_KEY env var not set");
-    let appid = std::env::var("TENCENT_APPID").expect("TENCENT_APPID env var not set");
+    let secret_id = match std::env::var("TENCENT_SECRET_ID") {
+        Ok(id) if !id.is_empty() => id,
+        _ => {
+            println!("TENCENT_SECRET_ID env var not set or empty. Please set it in .env file");
+            return Ok(());
+        }
+    };
+
+    let secret_key = match std::env::var("TENCENT_SECRET_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => {
+            println!("TENCENT_SECRET_KEY env var not set or empty. Please set it in .env file");
+            return Ok(());
+        }
+    };
+
+    let appid = match std::env::var("TENCENT_APPID") {
+        Ok(id) if !id.is_empty() => id,
+        _ => {
+            println!("TENCENT_APPID env var not set or empty. Please set it in .env file");
+            return Ok(());
+        }
+    };
 
     // Create TTS client and processor
     println!("Initializing TTS client...");

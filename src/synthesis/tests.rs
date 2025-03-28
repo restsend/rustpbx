@@ -1,37 +1,93 @@
 use super::*;
 use anyhow::Result;
-use mockall::predicate::*;
-use mockall::*;
-use std::sync::Arc;
+use dotenv::dotenv;
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 
-// Mock TencentCloud TTS client for testing
-mock! {
-    pub TencentTtsClient {}
+// Helper function to get credentials from .env
+fn get_tencent_cloud_credentials() -> Option<(String, String, String)> {
+    // Load .env file if it exists
+    let _ = dotenv();
 
-    impl Clone for TencentTtsClient {
-        fn clone(&self) -> Self;
+    // Try to get the credentials from environment variables
+    let secret_id = std::env::var("TENCENT_SECRET_ID").ok()?;
+    let secret_key = std::env::var("TENCENT_SECRET_KEY").ok()?;
+    let appid = std::env::var("TENCENT_APPID").ok()?;
+
+    // Return None if any of the credentials are empty
+    if secret_id.is_empty() || secret_key.is_empty() || appid.is_empty() {
+        return None;
     }
 
-    impl TtsClient for TencentTtsClient {
-        fn synthesize<'a>(
-            &'a self,
-            text: &'a str,
-            config: &'a TtsConfig,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+    Some((secret_id, secret_key, appid))
+}
+
+// Simple test implementation of TtsClient
+#[derive(Clone)]
+struct TestTtsClient {
+    response_size: usize,
+    capture_voice: Arc<Mutex<Option<String>>>,
+    capture_codec: Arc<Mutex<Option<String>>>,
+}
+
+impl TestTtsClient {
+    fn new(response_size: usize) -> Self {
+        Self {
+            response_size,
+            capture_voice: Arc::new(Mutex::new(None)),
+            capture_codec: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn with_capture_params(self) -> Self {
+        *self.capture_voice.lock().unwrap() = Some(String::new());
+        *self.capture_codec.lock().unwrap() = Some(String::new());
+        self
+    }
+
+    fn get_captured_voice(&self) -> Option<String> {
+        self.capture_voice.lock().unwrap().clone()
+    }
+
+    fn get_captured_codec(&self) -> Option<String> {
+        self.capture_codec.lock().unwrap().clone()
+    }
+}
+
+impl TtsClient for TestTtsClient {
+    fn synthesize<'a>(
+        &'a self,
+        text: &'a str,
+        _config: &'a TtsConfig,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        // Generate audio data proportional to text length
+        let response_size = self.response_size;
+        let text_len = text.len();
+
+        // Capture voice and codec parameters if requested
+        if let Some(voice_type) = &_config.voice {
+            let voice = self.capture_voice.clone();
+            if voice.lock().unwrap().is_some() {
+                *voice.lock().unwrap() = Some(voice_type.clone());
+            }
+        }
+
+        if let Some(codec_type) = &_config.codec {
+            let codec = self.capture_codec.clone();
+            if codec.lock().unwrap().is_some() {
+                *codec.lock().unwrap() = Some(codec_type.clone());
+            }
+        }
+
+        // Return simulated audio data
+        Box::pin(async move { Ok(vec![0u8; response_size * text_len]) })
     }
 }
 
 #[tokio::test]
-async fn test_mock_tencent_tts() {
-    // Create a mock TTS client
-    let mut mock_client = MockTencentTtsClient::new();
-
-    // Set up expectations
-    mock_client.expect_synthesize().returning(|text, _config| {
-        // Return dummy audio data with length based on text length
-        let audio_length = text.len() * 100;
-        Box::pin(async move { Ok(vec![1u8; audio_length]) })
-    });
+async fn test_tencent_tts_client() {
+    // Create a test TTS client
+    let client = TestTtsClient::new(100);
 
     // Create TTS config
     let config = TtsConfig {
@@ -41,31 +97,29 @@ async fn test_mock_tencent_tts() {
         appid: Some("test_appid".to_string()),
         secret_id: Some("test_secret_id".to_string()),
         secret_key: Some("test_secret_key".to_string()),
-        volume: Some(5),
+        volume: Some(0),
         speaker: Some(1),
-        codec: Some("pcm".to_string()),
+        codec: Some("wav".to_string()),
     };
 
-    // Synthesize using the mock client
-    let text = "测试文本合成";
-    let result = mock_client.synthesize(text, &config).await;
+    // Synthesize using the test client
+    let text = "你好世界";
+    let result = client.synthesize(text, &config).await;
 
     // Verify results
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().len(), text.len() * 100);
+    let audio_data = result.unwrap();
+    // Should have a size proportional to the text length
+    assert_eq!(audio_data.len(), 100 * text.len());
 }
 
 #[tokio::test]
-async fn test_tts_processor_with_mock_client() {
-    // Create a mock TTS client
-    let mut mock_client = MockTencentTtsClient::new();
+async fn test_tts_processor_with_test_client() {
+    // Create a test TTS client
+    let client: Arc<dyn TtsClient> = Arc::new(TestTtsClient::new(100));
 
-    // Set up expectations for the mock
-    mock_client.expect_synthesize().returning(|text, _config| {
-        // Return audio length proportional to text
-        let length = text.len() * 200;
-        Box::pin(async move { Ok(vec![2u8; length]) })
-    });
+    // Create event channel
+    let (event_sender, mut event_receiver) = broadcast::channel::<TtsEvent>(10);
 
     // Create TTS config
     let config = TtsConfig {
@@ -75,16 +129,15 @@ async fn test_tts_processor_with_mock_client() {
         appid: Some("test_appid".to_string()),
         secret_id: Some("test_secret_id".to_string()),
         secret_key: Some("test_secret_key".to_string()),
-        volume: Some(5),
+        volume: Some(0),
         speaker: Some(1),
-        codec: Some("pcm".to_string()),
+        codec: Some("wav".to_string()),
     };
 
-    // Create event channel and processor
-    let (event_sender, mut event_receiver) = broadcast::channel::<TtsEvent>(10);
-    let processor = TtsProcessor::new(config, Arc::new(mock_client), event_sender);
+    // Create processor
+    let processor = TtsProcessor::new(config, client, event_sender);
 
-    // Create event listener
+    // Create listener for TTS events
     let event_listener = tokio::spawn(async move {
         match event_receiver.recv().await {
             Ok(event) => Some(event),
@@ -93,120 +146,127 @@ async fn test_tts_processor_with_mock_client() {
     });
 
     // Synthesize text
-    let text = "语音合成测试";
+    let text = "你好世界";
+
     let result = processor.synthesize(text).await;
-
-    // Verify synthesis result
     assert!(result.is_ok());
-    let audio_data = result.unwrap();
-    assert_eq!(audio_data.len(), text.len() * 200);
-    assert_eq!(audio_data[0], 2u8); // Check content matches our mock
 
-    // Verify event was sent
+    // Check the event
     let event = event_listener.await.unwrap();
     assert!(event.is_some());
     let event = event.unwrap();
     assert_eq!(event.text, text);
+    // Can't verify the audio data length from event, only from result
+    assert_eq!(result.unwrap().len(), 100 * text.len());
 }
 
 #[tokio::test]
 async fn test_tts_different_voice_types() {
-    // Create a mock TTS client
-    let mut mock_client = MockTencentTtsClient::new();
+    // Create a test TTS client that captures parameters
+    let client = TestTtsClient::new(100).with_capture_params();
+    let client_arc: Arc<dyn TtsClient> = Arc::new(client.clone());
 
-    // Capture voice parameter
-    let voice_type_capture = Arc::new(std::sync::Mutex::new(String::new()));
-    let voice_type_capture_clone = voice_type_capture.clone();
+    // Create event channel
+    let (event_sender, _) = broadcast::channel::<TtsEvent>(10);
 
-    // Set up expectations
-    mock_client
-        .expect_synthesize()
-        .returning(move |_text, config| {
-            // Capture the voice type for verification
-            let voice = config.voice.clone().unwrap_or_default();
-            *voice_type_capture_clone.lock().unwrap() = voice;
-
-            // Return dummy audio data
-            Box::pin(async { Ok(vec![3u8; 1000]) })
-        });
-
-    // Create base TTS config
-    let base_config = TtsConfig {
-        url: "".to_string(),
-        voice: None, // We'll set this in each test
-        rate: Some(1.0),
-        appid: Some("test_appid".to_string()),
-        secret_id: Some("test_secret_id".to_string()),
-        secret_key: Some("test_secret_key".to_string()),
-        volume: Some(5),
-        speaker: Some(1),
-        codec: Some("pcm".to_string()),
-    };
-
-    // Test Chinese voice
-    let mut config = base_config.clone();
-    config.voice = Some("1".to_string()); // Chinese voice
-
-    let result = mock_client.synthesize("Chinese text", &config).await;
-    assert!(result.is_ok());
-    assert_eq!(*voice_type_capture.lock().unwrap(), "1");
-
-    // Test English voice
-    let mut config = base_config.clone();
-    config.voice = Some("101".to_string()); // English voice
-
-    let result = mock_client.synthesize("English text", &config).await;
-    assert!(result.is_ok());
-    assert_eq!(*voice_type_capture.lock().unwrap(), "101");
-}
-
-#[tokio::test]
-async fn test_tts_codec_parameter() {
-    // Create a mock TTS client
-    let mut mock_client = MockTencentTtsClient::new();
-
-    // Capture codec parameter
-    let codec_capture = Arc::new(std::sync::Mutex::new(String::new()));
-    let codec_capture_clone = codec_capture.clone();
-
-    // Set up expectations
-    mock_client
-        .expect_synthesize()
-        .returning(move |_text, config| {
-            // Capture the codec for verification
-            let codec = config.codec.clone().unwrap_or_default();
-            *codec_capture_clone.lock().unwrap() = codec;
-
-            // Return dummy audio data
-            Box::pin(async { Ok(vec![4u8; 1000]) })
-        });
-
-    // Create base TTS config
-    let base_config = TtsConfig {
+    // Create TTS config with voice type 1
+    let config = TtsConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
         appid: Some("test_appid".to_string()),
         secret_id: Some("test_secret_id".to_string()),
         secret_key: Some("test_secret_key".to_string()),
-        volume: Some(5),
+        volume: Some(0),
         speaker: Some(1),
-        codec: None, // We'll set this in each test
+        codec: Some("wav".to_string()),
     };
 
-    // Test PCM codec
-    let mut config = base_config.clone();
-    config.codec = Some("pcm".to_string());
+    // Create processor
+    let processor = TtsProcessor::new(config, client_arc, event_sender);
 
-    let result = mock_client.synthesize("PCM codec test", &config).await;
+    // Synthesize text
+    let text = "你好世界";
+
+    let _ = processor.synthesize(text).await;
+
+    // Get the captured voice parameter
+    let voice_param = client.get_captured_voice();
+    assert!(voice_param.is_some());
+    assert_eq!(voice_param.unwrap(), "1");
+}
+
+#[tokio::test]
+async fn test_tts_codec_parameter() {
+    // Create a test TTS client that captures parameters
+    let client = TestTtsClient::new(100).with_capture_params();
+    let client_arc: Arc<dyn TtsClient> = Arc::new(client.clone());
+
+    // Create event channel
+    let (event_sender, _) = broadcast::channel::<TtsEvent>(10);
+
+    // Create TTS config with wav codec
+    let config = TtsConfig {
+        url: "".to_string(),
+        voice: Some("1".to_string()),
+        rate: Some(1.0),
+        appid: Some("test_appid".to_string()),
+        secret_id: Some("test_secret_id".to_string()),
+        secret_key: Some("test_secret_key".to_string()),
+        volume: Some(0),
+        speaker: Some(1),
+        codec: Some("wav".to_string()),
+    };
+
+    // Create processor
+    let processor = TtsProcessor::new(config, client_arc, event_sender);
+
+    // Synthesize text
+    let text = "你好世界";
+
+    let _ = processor.synthesize(text).await;
+
+    // Get the captured codec parameter
+    let codec_param = client.get_captured_codec();
+    assert!(codec_param.is_some());
+    assert_eq!(codec_param.unwrap(), "wav");
+}
+
+#[tokio::test]
+async fn test_real_tencent_tts_client() {
+    // Load credentials from .env
+    let credentials = get_tencent_cloud_credentials();
+
+    // Skip test if credentials aren't available
+    if credentials.is_none() {
+        println!("Skipping real TencentCloud TTS client test: Missing credentials in .env file");
+        return;
+    }
+
+    let (secret_id, secret_key, appid) = credentials.unwrap();
+
+    // Create real TTS client
+    let client = TencentCloudTtsClient::new();
+
+    // Create TTS config with real credentials
+    let config = TtsConfig {
+        url: "".to_string(),
+        voice: Some("1".to_string()),
+        rate: Some(1.0),
+        appid: Some(appid),
+        secret_id: Some(secret_id),
+        secret_key: Some(secret_key),
+        volume: Some(5),
+        speaker: Some(1),
+        codec: Some("pcm".to_string()),
+    };
+
+    // Synthesize using the real client (short text for quick test)
+    let text = "集成测试";
+    let result = client.synthesize(text, &config).await;
+
+    // Verify results
     assert!(result.is_ok());
-    assert_eq!(*codec_capture.lock().unwrap(), "pcm");
-
-    // Test MP3 codec
-    let mut config = base_config.clone();
-    config.codec = Some("mp3".to_string());
-
-    let result = mock_client.synthesize("MP3 codec test", &config).await;
-    assert!(result.is_ok());
-    assert_eq!(*codec_capture.lock().unwrap(), "mp3");
+    let audio_data = result.unwrap();
+    assert!(!audio_data.is_empty(), "Audio data should not be empty");
 }

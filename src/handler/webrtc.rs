@@ -23,7 +23,7 @@ use webrtc::{
 };
 
 use crate::media::{
-    processor::{AudioFrame, Samples, Processor},
+    processor::{AudioFrame, Processor, Samples},
     stream::{MediaStream, MediaStreamBuilder, MediaStreamEvent},
     track::{tts::TtsTrack, Track},
 };
