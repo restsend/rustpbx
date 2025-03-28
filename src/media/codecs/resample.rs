@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn test_resampler() {
         let reader =
-            BufReader::new(File::open("testdata/sample.wav").expect("Failed to open file"));
+            BufReader::new(File::open("fixtures/sample.wav").expect("Failed to open file"));
         let mut wav_reader = WavReader::new(reader).expect("Failed to read wav file");
         let spec = wav_reader.spec();
         let channels = spec.channels as usize;
@@ -91,7 +91,7 @@ mod tests {
 
         let resampled = resample(&all_samples, 16000, 8000, channels);
 
-        let mut file = File::create("testdata/sample.8k.decoded").expect("Failed to create file");
+        let mut file = File::create("fixtures/sample.8k.decoded").expect("Failed to create file");
         let decoded_bytes = convert_s16_to_u8(&resampled);
         file.write_all(&decoded_bytes)
             .expect("Failed to write file");
@@ -100,6 +100,6 @@ mod tests {
             all_samples.len(),
             resampled.len()
         );
-        println!("ffplay -f s16le -ar 8000 -i testdata/sample.8k.decoded");
+        println!("ffplay -f s16le -ar 8000 -i fixtures/sample.8k.decoded");
     }
 }

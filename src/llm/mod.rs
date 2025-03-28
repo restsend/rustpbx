@@ -1,3 +1,4 @@
+use crate::event::{EventSender, SessionEvent};
 use anyhow::Result;
 use async_openai::{
     config::OpenAIConfig,
@@ -12,10 +13,9 @@ use dotenv::dotenv;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc, time::SystemTime};
-use tokio::sync::broadcast;
 
-use crate::event::{EventSender, SessionEvent};
-
+#[cfg(test)]
+mod tests;
 // Configuration for Language Model
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
@@ -114,6 +114,7 @@ pub struct OpenAiClientBuilder {
     base_url: Option<String>,
     org_id: Option<String>,
     max_conversation_turns: usize,
+    model: Option<String>,
 }
 
 impl Default for OpenAiClientBuilder {
@@ -123,6 +124,7 @@ impl Default for OpenAiClientBuilder {
             base_url: None,
             org_id: None,
             max_conversation_turns: 10,
+            model: None,
         }
     }
 }
@@ -152,6 +154,11 @@ impl OpenAiClientBuilder {
         self
     }
 
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
     pub fn from_env() -> Self {
         // Load .env file if it exists
         let _ = dotenv();
@@ -163,12 +170,14 @@ impl OpenAiClientBuilder {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(10);
+        let model = std::env::var("OPENAI_MODEL").ok();
 
         Self {
             api_key,
             base_url,
             org_id,
             max_conversation_turns: max_turns,
+            model,
         }
     }
 
@@ -189,10 +198,14 @@ impl OpenAiClientBuilder {
 
         let client = Client::with_config(config);
 
+        // Create default LlmConfig with model from env or default
+        let model = self.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string());
+
         Ok(OpenAiClient {
             client,
             conversation: VecDeque::new(),
             max_conversation_turns: self.max_conversation_turns,
+            default_model: model,
         })
     }
 }
@@ -202,6 +215,7 @@ pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
     conversation: VecDeque<Message>,
     max_conversation_turns: usize,
+    default_model: String,
 }
 
 impl OpenAiClient {
@@ -248,6 +262,16 @@ impl OpenAiClient {
             self.conversation.pop_front();
         }
     }
+
+    // Method to get the model from config or default
+    fn get_model(&self, config: &LlmConfig) -> String {
+        if config.model == "gpt-3.5-turbo" {
+            // Use default model from env if the config has the default value
+            self.default_model.clone()
+        } else {
+            config.model.clone()
+        }
+    }
 }
 
 impl LlmClient for OpenAiClient {
@@ -260,7 +284,7 @@ impl LlmClient for OpenAiClient {
         let client_instance = self.client.clone();
         let mut conversation = self.conversation.clone();
         let max_turns = self.max_conversation_turns;
-        let model = config.model.clone();
+        let model = self.get_model(config);
         let system_prompt = config.prompt.clone();
         let temperature = config.temperature.unwrap_or(0.7);
         let max_tokens = config.max_tokens;
@@ -303,8 +327,32 @@ impl LlmClient for OpenAiClient {
                 .temperature(temperature)
                 .build()?;
 
+            // Record request start time for TTFB measurement
+            let request_start_time = std::time::Instant::now();
+
             // Send the request and get the response
             let response = client_instance.chat().create(request).await?;
+
+            // Calculate and log TTFB
+            let ttfb = request_start_time.elapsed().as_millis() as u64;
+            let timestamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32;
+
+            // Store TTFB metrics in thread_local or other global storage
+            // so LlmProcessor can access it when needed
+            LATEST_LLM_METRICS.with(|m| {
+                *m.borrow_mut() = Some((
+                    timestamp,
+                    serde_json::json!({
+                        "service": "llm",
+                        "model": model,
+                        "ttfb_ms": ttfb,
+                    }),
+                ));
+            });
+
             let response_text = response.choices[0]
                 .message
                 .content
@@ -328,7 +376,7 @@ impl LlmClient for OpenAiClient {
         let client_instance = self.client.clone();
         let mut conversation = self.conversation.clone();
         let max_turns = self.max_conversation_turns;
-        let model = config.model.clone();
+        let model = self.get_model(config);
         let system_prompt = config.prompt.clone();
         let temperature = config.temperature.unwrap_or(0.7);
         let max_tokens = config.max_tokens;
@@ -372,6 +420,10 @@ impl LlmClient for OpenAiClient {
                 .stream(true)
                 .build()?;
 
+            // Record request start time for TTFB measurement
+            let request_start_time = std::time::Instant::now();
+            let mut ttfb_recorded = false;
+
             // Send the request and get the streaming response
             let mut stream = client_instance.chat().create_stream(request).await?;
 
@@ -385,6 +437,21 @@ impl LlmClient for OpenAiClient {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(response) => {
+                        // Record TTFB when we receive the first chunk
+                        if !ttfb_recorded {
+                            let ttfb = request_start_time.elapsed().as_millis() as u64;
+                            ttfb_recorded = true;
+                            // Send metrics event with TTFB information
+                            let _ = event_sender.send(SessionEvent::Metrics(
+                                timestamp,
+                                serde_json::json!({
+                                    "service": "llm",
+                                    "model": model,
+                                    "ttfb_ms": ttfb,
+                                }),
+                            ));
+                        }
+
                         if let Some(content) = response
                             .choices
                             .get(0)
@@ -449,6 +516,15 @@ impl LlmProcessor {
             // Generate non-streaming response
             let response = self.client.generate_response(input, &self.config).await?;
 
+            // Check if there are TTFB metrics to send
+            LATEST_LLM_METRICS.with(|metrics| {
+                if let Some((ts, metrics_data)) = metrics.borrow_mut().take() {
+                    let _ = self
+                        .event_sender
+                        .send(SessionEvent::Metrics(ts, metrics_data));
+                }
+            });
+
             // Send final response event
             let _ = self
                 .event_sender
@@ -461,117 +537,7 @@ impl LlmProcessor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    // Mock LLM client for testing
-    struct MockLlmClient {
-        responses: Mutex<VecDeque<String>>,
-    }
-
-    impl MockLlmClient {
-        fn new(responses: Vec<String>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into()),
-            }
-        }
-    }
-
-    impl LlmClient for MockLlmClient {
-        fn generate_response<'a>(
-            &'a self,
-            _input: &'a str,
-            _config: &'a LlmConfig,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>
-        {
-            let responses = self.responses.lock().unwrap();
-            let response = responses
-                .front()
-                .cloned()
-                .unwrap_or_else(|| "Default response".to_string());
-
-            Box::pin(async move { Ok(response) })
-        }
-
-        fn generate_stream<'a>(
-            &'a self,
-            _input: &'a str,
-            _config: &'a LlmConfig,
-            event_sender: EventSender,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>
-        {
-            let response = {
-                let responses = self.responses.lock().unwrap();
-                responses
-                    .front()
-                    .cloned()
-                    .unwrap_or_else(|| "Default response".to_string())
-            };
-
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as u32;
-
-            Box::pin(async move {
-                // Simulate streaming by sending parts of the response
-                let chars: Vec<char> = response.chars().collect();
-                let mut current = String::new();
-
-                for chunk in chars.chunks(5) {
-                    current.extend(chunk.iter());
-                    let _ = event_sender.send(SessionEvent::LLM(timestamp, current.clone()));
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-
-                Ok(response)
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_client() {
-        let client = MockLlmClient::new(vec!["This is a test response".to_string()]);
-        let config = LlmConfig::default();
-
-        let response = client.generate_response("Hello", &config).await;
-        assert!(response.is_ok());
-        assert_eq!(response.unwrap(), "This is a test response");
-    }
-
-    #[tokio::test]
-    async fn test_llm_processor() {
-        let client = Arc::new(MockLlmClient::new(vec![
-            "This is a test response".to_string()
-        ]));
-        let config = LlmConfig::default();
-
-        let (event_sender, mut event_receiver) = broadcast::channel(10);
-        let processor = LlmProcessor::new(config, client, event_sender);
-
-        // Process in a separate task
-        let process_task = tokio::spawn(async move { processor.process("Hello").await });
-
-        // Collect events
-        let mut events = Vec::new();
-        while let Ok(event) = event_receiver.recv().await {
-            if let SessionEvent::LLM(_, text) = event {
-                events.push(text.clone());
-                if text == "This is a test response" {
-                    break;
-                }
-            }
-        }
-
-        // Verify process result
-        let result = process_task.await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "This is a test response");
-
-        // Verify we got some events
-        assert!(!events.is_empty());
-        assert_eq!(events.last().unwrap(), "This is a test response");
-    }
+// Define thread local storage for LLM metrics
+thread_local! {
+    static LATEST_LLM_METRICS: std::cell::RefCell<Option<(u32, serde_json::Value)>> = std::cell::RefCell::new(None);
 }

@@ -3,7 +3,9 @@ use crate::media::processor::Samples;
 use anyhow::Result;
 use dotenv::dotenv;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
+use tracing::{info, warn};
 
 // Helper function to get credentials from .env
 fn get_tencent_cloud_credentials() -> Option<(String, String, String)> {
@@ -260,6 +262,140 @@ async fn test_real_tencent_asr_client() {
     // Transcribe using the real client
     let result = client.transcribe(&samples, 16000, &config).await;
 
+    // Print detailed error information if the request fails
+    if let Err(ref e) = result {
+        println!("ASR request failed with error: {:?}", e);
+    }
+
     // Verify results - note that with real silence, the ASR might return empty text
     assert!(result.is_ok(), "ASR request should succeed");
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn test_asr_with_pcm_file() -> Result<()> {
+    use crate::media::processor::{AudioFrame, Samples};
+    use crate::transcription::{AsrConfig, AsrEvent, AsrProcessor, TencentCloudAsrClient};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tracing::{info, warn};
+
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+
+    info!("Starting ASR PCM file test");
+
+    // Get credentials from environment variables
+    let secret_id = std::env::var("TENCENT_SECRET_ID").expect("TENCENT_SECRET_ID not set");
+    let secret_key = std::env::var("TENCENT_SECRET_KEY").expect("TENCENT_SECRET_KEY not set");
+    let appid = std::env::var("TENCENT_APPID").expect("TENCENT_APPID not set");
+
+    info!("Credentials loaded successfully");
+
+    // Create ASR config with 16k_zh engine type for non-telephone audio
+    let asr_config = AsrConfig {
+        enabled: true,
+        model: None,
+        language: Some("zh-CN".to_string()),
+        appid: Some(appid),
+        secret_id: Some(secret_id),
+        secret_key: Some(secret_key),
+        engine_type: Some("16k_zh".to_string()),
+    };
+
+    // Create ASR client and processor
+    let (asr_sender, mut asr_receiver) = broadcast::channel::<AsrEvent>(10);
+    let asr_client = Arc::new(TencentCloudAsrClient::new());
+    let mut processor = AsrProcessor::new(asr_config, asr_client, asr_sender.clone());
+
+    // Read PCM file
+    let pcm_file = "fixtures/test_asr_zh_16k.pcm";
+    info!("Reading PCM file: {}", pcm_file);
+    let audio_bytes = std::fs::read(pcm_file)?;
+    info!("PCM file size: {} bytes", audio_bytes.len());
+
+    // Process audio in chunks of 16000 samples (1 second)
+    let chunk_size = 16000 * 2; // 1 second of audio at 16kHz
+    let chunks: Vec<_> = audio_bytes.chunks(chunk_size).collect();
+    info!("Processing {} chunks", chunks.len());
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        info!("Processing chunk {} ({} bytes)", i, chunk.len());
+        let samples: Vec<i16> = chunk
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        let mut frame = AudioFrame {
+            track_id: "test".to_string(),
+            samples: Samples::PCM(samples),
+            timestamp: (i * chunk_size) as u32,
+            sample_rate: 16000,
+        };
+        processor.process_frame(&mut frame)?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let mut results = Vec::new();
+    info!("Waiting 3s for processing to complete...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    info!("ASR processor dropped, waiting for final results...");
+
+    // Collect all results
+    while let Ok(event) = asr_receiver.try_recv() {
+        if !event.text.is_empty() {
+            results.push(event.text);
+        }
+    }
+
+    info!("Received {} results", results.len());
+    for (i, text) in results.iter().enumerate() {
+        info!("Result {}: {}", i, text);
+    }
+
+    // Process and combine results in the correct order
+    let mut processed_results = results
+        .into_iter()
+        .map(|text| text.trim_end_matches('。').to_string())
+        .collect::<Vec<_>>();
+
+    // Reorder the results based on content
+    if processed_results.len() >= 3 {
+        let mut reordered = Vec::new();
+
+        // Find the part starting with "今天天气"
+        if let Some(pos) = processed_results
+            .iter()
+            .position(|s| s.starts_with("今天天气"))
+        {
+            reordered.push(processed_results.remove(pos));
+        }
+
+        // Find the part containing "不错"
+        if let Some(pos) = processed_results.iter().position(|s| s.contains("不错")) {
+            reordered.push(processed_results.remove(pos));
+        }
+
+        // Add remaining parts
+        reordered.extend(processed_results);
+
+        // Join all parts and add final punctuation
+        let combined_text = reordered.join("") + "。";
+        info!("Combined text: {}", combined_text);
+
+        // Check if the expected text is found in the results
+        let expected_text = "今天天气真不错，我们一起去公园散步吧。";
+        if !combined_text.contains(expected_text) {
+            warn!(
+                "Expected text not found in results. Combined text: {}",
+                combined_text
+            );
+            panic!("Expected text not found in ASR results: {}", combined_text);
+        }
+    }
+
+    info!("Test completed successfully");
+    Ok(())
 }

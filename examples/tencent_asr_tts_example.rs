@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rustpbx::media::processor::{AudioFrame, Processor, Samples};
 use rustpbx::synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig, TtsEvent, TtsProcessor};
 use rustpbx::transcription::{AsrConfig, AsrEvent, AsrProcessor, TencentCloudAsrClient};
 
@@ -83,17 +84,45 @@ async fn main() -> Result<()> {
 
     // Synthesize text to speech
     println!("Synthesizing text to speech...");
-    let text = "欢迎使用腾讯云语音服务";
-    let result = tts_processor.synthesize(text).await?;
+    let test_text = "今天天气真不错，我们一起去公园散步吧";
+    println!("Original text: {}", test_text);
+    let result = tts_processor.synthesize(test_text).await?;
 
     // Save the audio to a file
-    std::fs::write("tts_output.pcm", &result)?;
-    println!(
-        "TTS output saved to tts_output.pcm ({} bytes)",
-        result.len()
-    );
+    let pcm_file = "test_tts_output.pcm";
+    std::fs::write(pcm_file, &result)?;
+    println!("TTS output saved to {} ({} bytes)", pcm_file, result.len());
 
-    // In a real application, you would connect the ASR processor to an audio source
+    // Now test ASR with the generated audio file
+    println!("\nTesting ASR with the generated audio file...");
+    let audio_data = std::fs::read(pcm_file)?;
+
+    // Create chunks to simulate streaming audio (16KB chunks)
+    const CHUNK_SIZE: usize = 16 * 1024;
+    let chunks: Vec<_> = audio_data.chunks(CHUNK_SIZE).collect();
+
+    // Process each chunk through ASR
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut frame = AudioFrame {
+            track_id: "test-track".to_string(),
+            samples: Samples::PCM(
+                chunk
+                    .chunks(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect(),
+            ),
+            timestamp: (i * CHUNK_SIZE) as u32,
+            sample_rate: 16000,
+        };
+
+        if let Err(e) = _asr_processor.process_frame(&mut frame) {
+            println!("Error processing frame: {}", e);
+        }
+    }
+
+    // Wait a moment for ASR processing to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
     println!("Example completed successfully.");
 
     Ok(())
