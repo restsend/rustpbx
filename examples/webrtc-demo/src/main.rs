@@ -340,6 +340,9 @@ async fn close_handler(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_file(true)

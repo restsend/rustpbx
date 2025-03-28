@@ -19,5 +19,5 @@ tower-http = { version = "0.5", features = ["fs", "cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1.7", features = ["v4", "serde"] }
-webrtc = "0.12.0"
+webrtc = { version = "0.12.0", features = ["native-tls"] }
 rustpbx = { path = "../.." }
