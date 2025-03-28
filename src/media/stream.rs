@@ -16,7 +16,7 @@ use crate::media::{
     track::{Track, TrackId, TrackPacketReceiver, TrackPacketSender},
 };
 
-use super::processor::AudioPayload;
+use super::processor::Samples;
 
 pub type EventSender = broadcast::Sender<MediaStreamEvent>;
 pub type EventReceiver = broadcast::Receiver<MediaStreamEvent>;
@@ -242,7 +242,7 @@ impl MediaStream {
     async fn process_dtmf(&self, packet: &AudioFrame) {
         match &packet.samples {
             // Check if the packet contains RTP data (our focus for DTMF detection)
-            AudioPayload::RTP(payload_type, payload) => {
+            Samples::RTP(payload_type, payload) => {
                 // Check for DTMF events in RTP payload
                 let mut dtmf_detector = self.dtmf_detector.lock().await;
                 if let Some(digit) =

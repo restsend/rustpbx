@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::media::codecs::pcmu;
 use crate::media::codecs::Encoder;
-use crate::media::processor::{AudioFrame, AudioPayload, Processor};
+use crate::media::processor::{AudioFrame, Samples, Processor};
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::media::track::Track;
 
@@ -46,7 +46,7 @@ fn create_simple_rtp_packet(
     AudioFrame {
         track_id: track_id.to_string(),
         timestamp: timestamp as u32,
-        samples: AudioPayload::RTP(payload_type, payload),
+        samples: Samples::RTP(payload_type, payload),
         sample_rate: 16000,
     }
 }
@@ -78,7 +78,7 @@ async fn test_webrtc_track_pcm() -> Result<()> {
     let pcm_packet = AudioFrame {
         track_id: track_id.clone(),
         timestamp: 1000,
-        samples: AudioPayload::PCM(pcm_data),
+        samples: Samples::PCM(pcm_data),
         sample_rate: 16000,
     };
 

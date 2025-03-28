@@ -20,7 +20,7 @@ use webrtc::{
 };
 
 use crate::media::{
-    processor::{AudioFrame, AudioPayload, Processor},
+    processor::{AudioFrame, Processor, Samples},
     stream::{MediaStream, MediaStreamBuilder, MediaStreamEvent},
     track::{tts::TtsTrack, Track},
 };
@@ -600,7 +600,7 @@ mod tests {
         // Create test audio frame
         let mut frame = AudioFrame {
             track_id: "test".to_string(),
-            samples: AudioPayload::PCM(vec![0; 160]),
+            samples: Samples::PCM(vec![0; 160]),
             timestamp: 3000,
             sample_rate: 16000,
         };

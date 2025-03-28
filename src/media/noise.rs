@@ -3,7 +3,7 @@ use nnnoiseless::DenoiseState;
 
 use crate::media::processor::{AudioFrame, Processor};
 
-use super::processor::AudioPayload;
+use super::processor::Samples;
 
 pub struct NoiseReducer {
     // We use the default built-in model for the denoiser
@@ -25,7 +25,7 @@ impl Processor for NoiseReducer {
             return Ok(());
         }
         let samples = match &frame.samples {
-            AudioPayload::PCM(samples) => samples,
+            Samples::PCM(samples) => samples,
             _ => return Ok(()),
         };
         // Convert i16 samples to f32 (required by nnnoiseless)
@@ -80,7 +80,7 @@ impl Processor for NoiseReducer {
         }
 
         // Convert f32 samples back to i16
-        frame.samples = AudioPayload::PCM(
+        frame.samples = Samples::PCM(
             output_f32
                 .iter()
                 .map(|&s| s.clamp(-32768.0, 32767.0) as i16)
@@ -103,7 +103,7 @@ mod tests {
         for size in &[160, 320, 480, 960] {
             // Create a sample frame with test data
             let mut frame = AudioFrame {
-                samples: AudioPayload::PCM(vec![100; *size]),
+                samples: Samples::PCM(vec![100; *size]),
                 sample_rate: 16000,
                 ..Default::default()
             };
@@ -113,7 +113,7 @@ mod tests {
 
             // Should maintain the same number of samples
             let samples = match frame.samples {
-                AudioPayload::PCM(samples) => samples,
+                Samples::PCM(samples) => samples,
                 _ => panic!("Expected PCM samples"),
             };
             assert_eq!(samples.len(), *size);

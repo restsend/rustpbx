@@ -9,7 +9,7 @@ use std::{
 
 use crate::media::processor::AudioFrame;
 
-use super::processor::AudioPayload;
+use super::processor::Samples;
 
 pub struct RecorderConfig {
     pub sample_rate: u32,
@@ -47,7 +47,7 @@ impl Recorder {
     pub async fn process_frame(&mut self, frame: AudioFrame) -> Result<()> {
         // Convert i16 samples to f32 for easier mixing
         let samples = match &frame.samples {
-            AudioPayload::PCM(samples) => samples,
+            Samples::PCM(samples) => samples,
             _ => return Ok(()),
         };
         let f32_samples: Vec<f32> = samples

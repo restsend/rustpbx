@@ -2,7 +2,7 @@ use super::track::TrackId;
 use anyhow::Result;
 
 #[derive(Clone)]
-pub enum AudioPayload {
+pub enum Samples {
     PCM(Vec<i16>),
     RTP(u8, Vec<u8>),
     Empty,
@@ -10,7 +10,7 @@ pub enum AudioPayload {
 #[derive(Clone)]
 pub struct AudioFrame {
     pub track_id: TrackId,
-    pub samples: AudioPayload,
+    pub samples: Samples,
     pub timestamp: u32,
     pub sample_rate: u16,
 }
@@ -22,19 +22,19 @@ impl Default for AudioFrame {
     fn default() -> Self {
         Self {
             track_id: "".to_string(),
-            samples: AudioPayload::Empty,
+            samples: Samples::Empty,
             timestamp: 0,
             sample_rate: 16000,
         }
     }
 }
 
-impl AudioPayload {
+impl Samples {
     pub fn is_empty(&self) -> bool {
         match self {
-            AudioPayload::PCM(samples) => samples.is_empty(),
-            AudioPayload::RTP(_, payload) => payload.is_empty(),
-            AudioPayload::Empty => true,
+            Samples::PCM(samples) => samples.is_empty(),
+            Samples::RTP(_, payload) => payload.is_empty(),
+            Samples::Empty => true,
         }
     }
 }

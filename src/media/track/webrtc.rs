@@ -1,6 +1,6 @@
 use crate::media::{
     jitter::JitterBuffer,
-    processor::{AudioFrame, AudioPayload, Processor},
+    processor::{AudioFrame, Samples, Processor},
     stream::EventSender,
     track::{Track, TrackConfig, TrackId, TrackPacketSender},
 };

@@ -327,7 +327,7 @@ impl Processor for AsrProcessor {
 
         // Extract PCM samples
         let samples = match &frame.samples {
-            crate::media::processor::AudioPayload::PCM(samples) => samples.clone(),
+            crate::media::processor::Samples::PCM(samples) => samples.clone(),
             _ => return Ok(()), // Skip non-PCM formats for simplicity
         };
 
@@ -445,7 +445,7 @@ mod tests {
         // Create test audio frame
         let mut frame = AudioFrame {
             track_id: "test".to_string(),
-            samples: crate::media::processor::AudioPayload::PCM(vec![0; 160]),
+            samples: crate::media::processor::Samples::PCM(vec![0; 160]),
             timestamp: 3000,
             sample_rate: 16000,
         };

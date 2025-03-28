@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use super::{ThreadSafeVad, VadEngine};
-use crate::media::processor::{AudioFrame, AudioPayload};
+use crate::media::processor::{AudioFrame, Samples};
 
 pub struct WebRtcVad {
     vad: ThreadSafeVad,
@@ -24,7 +24,7 @@ impl VadEngine for WebRtcVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
         // Process in chunks of 30ms (480 samples at 16kHz)
         let samples = match &frame.samples {
-            AudioPayload::PCM(samples) => samples,
+            Samples::PCM(samples) => samples,
             _ => return Ok(false),
         };
 
