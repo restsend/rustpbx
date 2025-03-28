@@ -274,10 +274,8 @@ async fn test_real_tencent_asr_client() {
 #[cfg(test)]
 #[tokio::test]
 async fn test_asr_with_pcm_file() -> Result<()> {
+    use super::*;
     use crate::media::processor::{AudioFrame, Samples};
-    use crate::transcription::{AsrConfig, AsrEvent, AsrProcessor, TencentCloudAsrClient};
-    use std::sync::Arc;
-    use tokio::sync::broadcast;
     use tracing::{info, warn};
 
     // Initialize logging

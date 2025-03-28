@@ -47,7 +47,6 @@ async fn test_openai_client_with_env() {
 
     // Configure LLM for test
     let llm_config = LlmConfig {
-        model: "gpt-3.5-turbo".to_string(), // Will be replaced by env if available
         prompt:
             "You are a test assistant. Always respond exactly as requested without additional text."
                 .to_string(),
@@ -57,6 +56,7 @@ async fn test_openai_client_with_env() {
         base_url: None,
         tools: None,
         max_conversation_turns: Some(1),
+        ..LlmConfig::default() // Use model from env
     };
 
     // Test non-streaming response
@@ -118,7 +118,6 @@ async fn test_openai_client_streaming() {
 
     // Configure LLM for streaming test
     let llm_config = LlmConfig {
-        model: "gpt-3.5-turbo".to_string(), // Will be replaced by env if available
         prompt: "You are a test assistant. Keep your response short and direct.".to_string(),
         temperature: Some(0.7),
         max_tokens: Some(50),
@@ -126,6 +125,7 @@ async fn test_openai_client_streaming() {
         base_url: None,
         tools: None,
         max_conversation_turns: Some(1),
+        ..LlmConfig::default() // Use model from env
     };
 
     // Create event channel to receive streaming responses
@@ -236,7 +236,6 @@ async fn test_openai_model_from_env() {
 
     // Create an LLM config with the default model
     let llm_config = LlmConfig {
-        model: "gpt-3.5-turbo".to_string(), // This should be replaced by the model from env
         prompt: "You are a test assistant. Please tell me what model you are.".to_string(),
         temperature: Some(0.7),
         max_tokens: Some(50),
@@ -244,6 +243,7 @@ async fn test_openai_model_from_env() {
         base_url: None,
         tools: None,
         max_conversation_turns: Some(1),
+        ..LlmConfig::default() // Use model from env
     };
 
     // Ask the model to identify itself (which can help verify the model was loaded from env)

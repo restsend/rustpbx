@@ -9,3 +9,4 @@ alwaysApply: true
 - All code comments should be in English.
 - Make sure that the unit tests run successfully after the modifications.
 - You can refer to the code implementation on GitHub.
+- Concise comments

@@ -41,15 +41,26 @@ You can create a `.env` file in your project root with these variables. See `.en
 The `LlmConfig` struct allows you to customize the behavior of the language model:
 
 ```rust
+// Default configuration reads model from OPENAI_MODEL environment variable
+let config = LlmConfig::default();
+
+// Or customize while keeping the model from environment
 let config = LlmConfig {
-    model: "gpt-3.5-turbo".to_string(),           // Model to use
     prompt: "You are a helpful assistant".to_string(), // System prompt
-    temperature: Some(0.7),                        // Creativity (0.0-1.0)
-    max_tokens: Some(500),                         // Max response length
-    max_conversation_turns: Some(5),               // Conversation context length
-    stream: Some(true),                            // Enable streaming responses
-    base_url: None,                                // Custom API endpoint
-    tools: None,                                   // Function calling (advanced)
+    temperature: Some(0.7),                            // Creativity (0.0-1.0)
+    max_tokens: Some(500),                             // Max response length
+    max_conversation_turns: Some(5),                   // Conversation context length
+    stream: Some(true),                                // Enable streaming responses
+    base_url: None,                                    // Custom API endpoint
+    tools: None,                                       // Function calling (advanced)
+    ..LlmConfig::default()                             // Get model from env
+};
+
+// Or specify the model explicitly (overrides environment variable)
+let config = LlmConfig {
+    model: "gpt-4o".to_string(),                       // Explicitly set model
+    prompt: "You are a helpful assistant".to_string(), // System prompt
+    // ... other settings
 };
 ```
 

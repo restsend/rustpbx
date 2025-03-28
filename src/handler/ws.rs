@@ -16,7 +16,7 @@ use crate::handler::call::{ActiveCall, CallEvent, CallHandlerState, WsCommand};
 
 // Configure WebSocket routes
 pub fn router() -> Router<CallHandlerState> {
-    Router::new().route("/ws/:session_id", get(ws_handler))
+    Router::new().route("/ws/{session_id}", get(ws_handler))
 }
 
 // WebSocket handler function

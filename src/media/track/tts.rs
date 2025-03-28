@@ -224,7 +224,7 @@ impl Track for TtsTrack {
                     let mut audio_data: Vec<u8> = Vec::new();
 
                     // Check if cached version exists
-                    if use_cache && cache::is_cached(&cache_key).unwrap_or(false) {
+                    if use_cache && cache::is_cached(&cache_key).await.unwrap_or(false) {
                         // Retrieve from cache
                         match cache::retrieve_from_cache(&cache_key).await {
                             Ok(data) => {
@@ -415,7 +415,7 @@ mod tests {
 
         // Verify cache exists
         assert!(
-            cache::is_cached(&cache_key)?,
+            cache::is_cached(&cache_key).await?,
             "Cache file not found for key: {}",
             cache_key
         );

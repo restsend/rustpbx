@@ -25,6 +25,9 @@ use crate::media::{
     track::{tts::TtsTrack, Track},
 };
 
+// Configuration for Language Model - use the one from llm module
+pub use crate::llm::LlmConfig;
+
 // Session state for active calls
 #[derive(Clone)]
 pub struct CallHandlerState {
@@ -46,16 +49,6 @@ pub struct AsrConfig {
     pub enabled: bool,
     pub model: Option<String>,
     pub language: Option<String>,
-}
-
-// Configuration for Language Model
-#[derive(Debug, Clone, Deserialize)]
-pub struct LlmConfig {
-    pub model: String,
-    pub prompt: String,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
-    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 // Configuration for Text-to-Speech

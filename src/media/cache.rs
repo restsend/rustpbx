@@ -69,9 +69,9 @@ pub fn get_cache_path(key: &str) -> Result<PathBuf> {
 }
 
 /// Check if a file exists in the cache
-pub fn is_cached(key: &str) -> Result<bool> {
+pub async fn is_cached(key: &str) -> Result<bool> {
     let path = get_cache_path(key)?;
-    Ok(path.exists())
+    Ok(tokio::fs::try_exists(&path).await?)
 }
 
 /// Store data in the cache
@@ -79,12 +79,7 @@ pub async fn store_in_cache(key: &str, data: Vec<u8>) -> Result<()> {
     ensure_cache_dir().await?;
     let path = get_cache_path(key)?;
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut file = File::create(path)?;
-        file.write_all(&data)?;
-        Ok(())
-    })
-    .await??;
+    tokio::fs::write(&path, &data).await?;
 
     debug!("Stored file in cache with key: {}", key);
     Ok(())
@@ -94,17 +89,11 @@ pub async fn store_in_cache(key: &str, data: Vec<u8>) -> Result<()> {
 pub async fn retrieve_from_cache(key: &str) -> Result<Vec<u8>> {
     let path = get_cache_path(key)?;
 
-    if !path.exists() {
+    if !tokio::fs::try_exists(&path).await? {
         return Err(anyhow!("Cache file not found for key: {}", key));
     }
 
-    let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-        let mut file = File::open(&path)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Ok(data)
-    })
-    .await??;
+    let data = tokio::fs::read(&path).await?;
 
     debug!("Retrieved file from cache with key: {}", key);
     Ok(data)
@@ -114,18 +103,15 @@ pub async fn retrieve_from_cache(key: &str) -> Result<Vec<u8>> {
 pub async fn clean_cache() -> Result<()> {
     let cache_dir = get_cache_dir()?;
 
-    if cache_dir.exists() {
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            for entry in fs::read_dir(&cache_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    fs::remove_file(path)?;
-                }
+    if tokio::fs::try_exists(&cache_dir).await? {
+        let mut dir_entries = tokio::fs::read_dir(&cache_dir).await?;
+        while let Some(entry) = dir_entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = tokio::fs::metadata(&path).await?;
+            if metadata.is_file() {
+                tokio::fs::remove_file(path).await?;
             }
-            Ok(())
-        })
-        .await??;
+        }
 
         info!("Cache cleaned successfully");
     }
@@ -137,13 +123,8 @@ pub async fn clean_cache() -> Result<()> {
 pub async fn delete_from_cache(key: &str) -> Result<()> {
     let path = get_cache_path(key)?;
 
-    if path.exists() {
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            fs::remove_file(path)?;
-            Ok(())
-        })
-        .await??;
-
+    if tokio::fs::try_exists(&path).await? {
+        tokio::fs::remove_file(path).await?;
         debug!("Deleted file from cache with key: {}", key);
     }
 
@@ -175,7 +156,7 @@ mod tests {
         store_in_cache(&key, test_data.clone()).await?;
 
         // Test if data is cached
-        assert!(is_cached(&key)?);
+        assert!(is_cached(&key).await?);
 
         // Test retrieving data from cache
         let retrieved_data = retrieve_from_cache(&key).await?;
@@ -183,13 +164,13 @@ mod tests {
 
         // Test deleting data from cache
         delete_from_cache(&key).await?;
-        assert!(!is_cached(&key)?);
+        assert!(!is_cached(&key).await?);
 
         // Test clean cache
         let key2 = generate_cache_key("test_data2", 16000);
         store_in_cache(&key2, test_data.clone()).await?;
         clean_cache().await?;
-        assert!(!is_cached(&key2)?);
+        assert!(!is_cached(&key2).await?);
 
         Ok(())
     }

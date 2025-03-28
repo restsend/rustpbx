@@ -83,15 +83,8 @@ pub struct AsrEvent {
     pub is_final: bool,
 }
 
-// Configuration for Language Model
-#[derive(Debug, Clone, Deserialize)]
-pub struct LlmConfig {
-    pub model: String,
-    pub prompt: String,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
-    pub tools: Option<Vec<serde_json::Value>>,
-}
+// Configuration for Language Model - use the one from llm module
+pub use crate::llm::LlmConfig;
 
 // LLM Events
 #[derive(Debug, Clone, Serialize)]
