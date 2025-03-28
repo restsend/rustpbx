@@ -65,13 +65,13 @@ name = "webrtc-demo"
 path = "examples/webrtc-demo/src/main.rs"
 
 [[example]]
-name = "llm-example"
-path = "examples/llm_example.rs"
+name = "llm-demo"
+path = "examples/llm_demo.rs"
 
 [[example]]
 name = "webrtc-call"
 path = "examples/webrtc-call/src/main.rs"
 
 [[example]]
-name = "audio-agent"
-path = "examples/audio_agent.rs"
+name = "voice-demo"
+path = "examples/voice_demo.rs"

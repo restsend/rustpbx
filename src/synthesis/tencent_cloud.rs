@@ -197,8 +197,6 @@ impl TtsClient for TencentCloudTtsClient {
 
             // Print the raw response for debugging
             let response_text = response.text().await?;
-            println!("TTS API Response: {}", response_text);
-
             // Parse the response
             let response: TencentCloudTtsResponse = serde_json::from_str(&response_text)?;
 
