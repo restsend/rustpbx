@@ -9,7 +9,6 @@ use hmac::{Hmac, Mac};
 use reqwest::Client as HttpClient;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 // Configuration for ASR (Automatic Speech Recognition)
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -374,112 +373,6 @@ impl Clone for AsrProcessor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_default_asr_client() {
-        let client = DefaultAsrClient::new();
-        let config = AsrConfig {
-            enabled: true,
-            model: Some("default".to_string()),
-            language: Some("en-US".to_string()),
-            appid: None,
-            secret_id: None,
-            secret_key: None,
-            engine_type: None,
-        };
-
-        let samples = vec![0i16; 1600]; // Mock audio data
-        let result = client.transcribe(&samples, 16000, &config).await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Sample transcription");
-    }
-
-    #[tokio::test]
-    async fn test_tencent_asr_client_missing_credentials() {
-        let client = TencentCloudAsrClient::new();
-        let config = AsrConfig {
-            enabled: true,
-            model: None,
-            language: Some("zh-CN".to_string()),
-            appid: None,
-            secret_id: None,
-            secret_key: None,
-            engine_type: Some("16k_zh".to_string()),
-        };
-
-        let samples = vec![0i16; 1600]; // Mock audio data
-        let result = client.transcribe(&samples, 16000, &config).await;
-
-        // Should fail due to missing credentials
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing TencentCloud credentials"));
-    }
-
-    #[tokio::test]
-    async fn test_asr_processor() {
-        // Create ASR client and event channel
-        let client: Arc<dyn AsrClient> = Arc::new(DefaultAsrClient::new());
-        let (event_sender, _) = broadcast::channel::<AsrEvent>(10);
-
-        // Create ASR config
-        let config = AsrConfig {
-            enabled: true,
-            model: Some("default".to_string()),
-            language: Some("en-US".to_string()),
-            appid: None,
-            secret_id: None,
-            secret_key: None,
-            engine_type: None,
-        };
-
-        // Create processor
-        let processor = AsrProcessor::new(config, client, event_sender);
-
-        // Create test audio frame
-        let mut frame = AudioFrame {
-            track_id: "test".to_string(),
-            samples: crate::media::processor::Samples::PCM(vec![0; 160]),
-            timestamp: 3000,
-            sample_rate: 16000,
-        };
-
-        // Process frame
-        let result = processor.process_frame(&mut frame);
-        assert!(result.is_ok());
-    }
-
-    // Mock test for TencentCloud ASR with fake credentials
-    // In a real scenario, you'd use environment variables or a test config
-    #[tokio::test]
-    #[ignore] // Ignore in CI since it needs real credentials
-    async fn test_tencent_asr_integration() {
-        let client = TencentCloudAsrClient::new();
-        let config = AsrConfig {
-            enabled: true,
-            model: None,
-            language: Some("zh-CN".to_string()),
-            appid: Some("test_appid".to_string()),
-            secret_id: Some("test_secret_id".to_string()),
-            secret_key: Some("test_secret_key".to_string()),
-            engine_type: Some("16k_zh".to_string()),
-        };
-
-        // Generate test audio data (silence)
-        let samples = vec![0i16; 16000]; // 1 second of silence at 16kHz
-
-        // This will fail with fake credentials but tests the interface
-        let result = client.transcribe(&samples, 16000, &config).await;
-        assert!(result.is_err()); // Expected since we're using fake credentials
-    }
-}
-
 // Include advanced tests in a separate module
 #[cfg(test)]
-mod advanced_tests;
+mod tests;

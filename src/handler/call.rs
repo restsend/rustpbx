@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 use webrtc::{
     api::{media_engine::MediaEngine, APIBuilder},
@@ -244,16 +244,297 @@ pub fn router() -> Router<CallHandlerState> {
     };
 
     Router::new()
-        .route("/call/webrtc", post(webrtc_call_handler))
-        .route("/call/sip", post(webrtc_call_sip_handler))
+        .route("/call/webrtc", get(webrtc_ws_handler))
+        .route("/call/sip", get(sip_ws_handler))
         .with_state(state)
 }
 
-// Handler for WebRTC call setup
-async fn webrtc_call_handler(
+// WebSocket handler for WebRTC calls
+async fn webrtc_ws_handler(
     State(state): State<CallHandlerState>,
-    Json(request): Json<WebRtcCallRequest>,
-) -> Result<Json<CallResponse>, String> {
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(|socket| handle_webrtc_ws(socket, state))
+}
+
+// WebSocket handler for SIP calls
+async fn sip_ws_handler(
+    State(state): State<CallHandlerState>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(|socket| handle_sip_ws(socket, state))
+}
+
+// Handler function for WebRTC WebSocket connections
+async fn handle_webrtc_ws(socket: axum::extract::ws::WebSocket, state: CallHandlerState) {
+    use axum::extract::ws::{Message, WebSocket};
+    use futures::{SinkExt, StreamExt};
+
+    let (mut sender, mut receiver) = socket.split();
+
+    // Wait for the initial WebRTC offer
+    let offer = match receiver.next().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<WebRtcCallRequest>(&text) {
+            Ok(request) => request,
+            Err(e) => {
+                let error_msg = format!(
+                    "{{\"type\":\"error\",\"error\":\"Invalid WebRTC offer: {}\"}}",
+                    e
+                );
+                let _ = sender.send(Message::Text(error_msg.into())).await;
+                return;
+            }
+        },
+        _ => {
+            let error_msg = "{\"type\":\"error\",\"error\":\"Expected WebRTC offer\"}".to_string();
+            let _ = sender.send(Message::Text(error_msg.into())).await;
+            return;
+        }
+    };
+
+    // Setup WebRTC connection
+    match setup_webrtc_connection(state.clone(), offer).await {
+        Ok((session_id, sdp, event_rx)) => {
+            // Send the SDP answer
+            let response = CallResponse {
+                session_id: session_id.clone(),
+                sdp,
+            };
+            let response_json = serde_json::to_string(&response).unwrap();
+            let _ = sender.send(Message::Text(response_json.into())).await;
+
+            // Handle the WebSocket session
+            handle_ws_session(session_id, sender, receiver, state, event_rx).await;
+        }
+        Err(e) => {
+            let error_msg = format!(
+                "{{\"type\":\"error\",\"error\":\"Failed to setup WebRTC connection: {}\"}}",
+                e
+            );
+            let _ = sender.send(Message::Text(error_msg.into())).await;
+        }
+    }
+}
+
+// Handler function for SIP WebSocket connections
+async fn handle_sip_ws(socket: axum::extract::ws::WebSocket, state: CallHandlerState) {
+    use axum::extract::ws::{Message, WebSocket};
+    use futures::{SinkExt, StreamExt};
+
+    let (mut sender, mut receiver) = socket.split();
+
+    // Wait for the initial WebRTC-SIP request
+    let request = match receiver.next().await {
+        Some(Ok(Message::Text(text))) => {
+            match serde_json::from_str::<WebRtcSipCallRequest>(&text) {
+                Ok(request) => request,
+                Err(e) => {
+                    let error_msg = format!(
+                        "{{\"type\":\"error\",\"error\":\"Invalid SIP call request: {}\"}}",
+                        e
+                    );
+                    let _ = sender.send(Message::Text(error_msg.into())).await;
+                    return;
+                }
+            }
+        }
+        _ => {
+            let error_msg =
+                "{\"type\":\"error\",\"error\":\"Expected SIP call request\"}".to_string();
+            let _ = sender.send(Message::Text(error_msg.into())).await;
+            return;
+        }
+    };
+
+    // Setup WebRTC-SIP connection
+    match setup_sip_connection(state.clone(), request).await {
+        Ok((session_id, sdp, event_rx)) => {
+            // Send the SDP answer
+            let response = CallResponse {
+                session_id: session_id.clone(),
+                sdp,
+            };
+            let response_json = serde_json::to_string(&response).unwrap();
+            let _ = sender.send(Message::Text(response_json.into())).await;
+
+            // Handle the WebSocket session
+            handle_ws_session(session_id, sender, receiver, state, event_rx).await;
+        }
+        Err(e) => {
+            let error_msg = format!(
+                "{{\"type\":\"error\",\"error\":\"Failed to setup SIP connection: {}\"}}",
+                e
+            );
+            let _ = sender.send(Message::Text(error_msg.into())).await;
+        }
+    }
+}
+
+// Common WebSocket session handler for both WebRTC and SIP calls
+async fn handle_ws_session(
+    session_id: String,
+    mut sender: futures::stream::SplitSink<
+        axum::extract::ws::WebSocket,
+        axum::extract::ws::Message,
+    >,
+    mut receiver: futures::stream::SplitStream<axum::extract::ws::WebSocket>,
+    state: CallHandlerState,
+    mut event_rx: tokio::sync::broadcast::Receiver<CallEvent>,
+) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+
+    // Send connected event
+    let connected_msg = serde_json::json!({
+        "type": "connected",
+        "timestamp": chrono::Utc::now().timestamp(),
+        "session_id": session_id
+    });
+    let connected_json = serde_json::to_string(&connected_msg).unwrap();
+    let _ = sender.send(Message::Text(connected_json.into())).await;
+
+    // Clone state for command handler
+    let state_for_commands = state.clone();
+    let session_id_for_commands = session_id.clone();
+
+    // Handle incoming commands
+    let command_handler = tokio::spawn(async move {
+        while let Some(msg) = receiver.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    let text_string = text.to_string();
+                    handle_ws_command(&state_for_commands, &session_id_for_commands, text_string)
+                        .await;
+                }
+                Ok(Message::Close(_)) => {
+                    info!("WebSocket closed by client");
+                    break;
+                }
+                Err(e) => {
+                    error!("WebSocket error: {}", e);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Send events
+    let event_sender = tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            match serde_json::to_string(&event) {
+                Ok(json) => {
+                    if let Err(e) = sender.send(Message::Text(json.into())).await {
+                        error!("Failed to send WebSocket message: {}", e);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to serialize event: {}", e);
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = command_handler => {
+            info!("Command handler finished");
+        }
+        _ = event_sender => {
+            info!("Event sender finished");
+        }
+    }
+
+    // Cleanup call if it still exists
+    if let Some(call) = state.active_calls.lock().await.remove(&session_id) {
+        info!("Cleaning up call {}", session_id);
+        call.media_stream.stop();
+        let _ = call.peer_connection.close().await;
+    }
+}
+
+// Process WebSocket commands
+async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text: String) {
+    let command: Result<WsCommand, _> = serde_json::from_str(&text);
+
+    match command {
+        Ok(cmd) => {
+            let call = match state.active_calls.lock().await.get(session_id).cloned() {
+                Some(call) => call,
+                None => {
+                    warn!("Session {} not found for command", session_id);
+                    return;
+                }
+            };
+
+            match cmd {
+                WsCommand::PlayTts { text } => {
+                    info!("Received TTS command: {}", text);
+
+                    // Send TTS event to indicate processing
+                    let tts_event = CallEvent::TtsEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        text: text.clone(),
+                    };
+
+                    let _ = call.events.send(tts_event);
+
+                    // Here you would implement TTS processing
+                    // For now we just acknowledge the command
+                }
+                WsCommand::PlayWav { url } => {
+                    info!("Received play WAV command: {}", url);
+
+                    // Here you would implement WAV playback
+                    // For now we just acknowledge the command
+                }
+                WsCommand::Hangup {} => {
+                    info!("Received hangup command for session {}", session_id);
+
+                    // Send hangup event
+                    let hangup_event = CallEvent::HangupEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        reason: "User initiated hangup".to_string(),
+                    };
+
+                    let _ = call.events.send(hangup_event);
+
+                    // Clean up resources
+                    tokio::spawn(async move {
+                        call.media_stream.stop();
+                        let _ = call.peer_connection.close().await;
+                    });
+
+                    // Remove from active calls
+                    state.active_calls.lock().await.remove(session_id);
+                }
+                WsCommand::Refer { target } => {
+                    info!("Received refer command: {}", target);
+
+                    // Send refer event
+                    let refer_event = CallEvent::ReferEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        target,
+                    };
+
+                    let _ = call.events.send(refer_event);
+
+                    // Here you would implement call transfer/refer
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse WebSocket command: {}", e);
+        }
+    }
+}
+
+// Helper function to setup WebRTC connection
+async fn setup_webrtc_connection(
+    state: CallHandlerState,
+    request: WebRtcCallRequest,
+) -> Result<(String, String, tokio::sync::broadcast::Receiver<CallEvent>), String> {
     // Generate session ID
     let session_id = Uuid::new_v4().to_string();
     info!("Starting WebRTC call with session ID: {}", session_id);
@@ -310,7 +591,7 @@ async fn webrtc_call_handler(
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     // Create event broadcaster
-    let (event_sender, _) = tokio::sync::broadcast::channel(100);
+    let (event_sender, event_receiver) = tokio::sync::broadcast::channel(100);
 
     // Build media stream
     let mut builder = MediaStreamBuilder::new()
@@ -411,18 +692,21 @@ async fn webrtc_call_handler(
         },
     ));
 
-    // Return the answer SDP
-    Ok(Json(CallResponse {
-        session_id,
-        sdp: answer.sdp,
-    }))
+    // Return the session ID, SDP, and event receiver
+    Ok((session_id, answer.sdp, event_receiver))
 }
 
-// Handler for WebRTC to SIP calls
-async fn webrtc_call_sip_handler(
-    State(state): State<CallHandlerState>,
-    Json(request): Json<WebRtcSipCallRequest>,
-) -> Result<Json<CallResponse>, String> {
+// Helper function to setup SIP connection
+async fn setup_sip_connection(
+    state: CallHandlerState,
+    request: WebRtcSipCallRequest,
+) -> Result<(String, String, tokio::sync::broadcast::Receiver<CallEvent>), String> {
+    use crate::useragent::client::SipClient;
+    use crate::useragent::config::SipConfig;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::time::sleep;
+
     // Generate a unique session ID
     let session_id = Uuid::new_v4().to_string();
     info!(
@@ -458,7 +742,7 @@ async fn webrtc_call_sip_handler(
     );
 
     // Create a broadcast channel for events
-    let (event_sender, _) = tokio::sync::broadcast::channel(100);
+    let (event_sender, event_receiver) = tokio::sync::broadcast::channel(100);
 
     // Create media stream for the connection
     let stream_id = format!("webrtc-sip-{}", session_id);
@@ -490,6 +774,68 @@ async fn webrtc_call_sip_handler(
         .lock()
         .await
         .insert(session_id.clone(), active_call);
+
+    // Set up SIP client
+    let sip_config = SipConfig {
+        local_uri: request
+            .sip
+            .local_uri
+            .unwrap_or_else(|| "sip:rustpbx@127.0.0.1".to_string()),
+        local_ip: request
+            .sip
+            .local_ip
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        local_port: request.sip.local_port.unwrap_or(5060),
+        display_name: request.sip.display_name,
+        proxy: request.sip.proxy,
+        ..Default::default()
+    };
+
+    let (mut sip_client, mut sip_event_receiver) = SipClient::new(sip_config);
+    if let Err(e) = sip_client.start().await {
+        return Err(format!("Failed to start SIP client: {}", e));
+    }
+
+    // Create a flag to track connection status
+    let call_established = Arc::new(AtomicBool::new(false));
+    let call_established_clone = call_established.clone();
+
+    // Get media stream from SIP client
+    let sip_media_stream = sip_client.media_stream();
+
+    // Handle SIP events
+    let event_sender_clone = event_sender.clone();
+
+    tokio::spawn(async move {
+        while let Some(event) = sip_event_receiver.recv().await {
+            match event {
+                crate::useragent::client::SipClientEvent::CallEstablished(dialog_id) => {
+                    info!("SIP call established: {}", dialog_id);
+                    call_established_clone.store(true, Ordering::SeqCst);
+
+                    let _ = event_sender_clone.send(CallEvent::LlmEvent {
+                        timestamp: chrono::Utc::now().timestamp() as u32,
+                        text: "Call established".to_string(),
+                        is_final: true,
+                    });
+                }
+                crate::useragent::client::SipClientEvent::MessageReceived(_, text) => {
+                    // Process received audio with ASR and pass to LLM
+                    if !text.is_empty() {
+                        // Simulate sending response
+                        let _ = event_sender_clone.send(CallEvent::LlmEvent {
+                            timestamp: chrono::Utc::now().timestamp() as u32,
+                            text: format!("Response to: {}", text),
+                            is_final: true,
+                        });
+                    }
+                }
+                _ => {
+                    info!("SIP event: {:?}", event);
+                }
+            }
+        }
+    });
 
     // Set up WebRTC session description
     let offer = webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(
@@ -530,19 +876,135 @@ async fn webrtc_call_sip_handler(
         timestamp: chrono::Utc::now().timestamp() as u32,
     });
 
-    // Return the session ID and SDP answer
-    Ok(Json(CallResponse {
-        session_id,
-        sdp: answer.sdp,
-    }))
+    // Return the session ID, SDP, and event receiver
+    Ok((session_id, answer.sdp, event_receiver))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::ws::{Message, WebSocket};
+    use futures::{stream::StreamExt, SinkExt};
     use tokio::sync::broadcast;
 
-    // Test CallEvent conversion from MediaStreamEvent
+    // Mock RTCPeerConnection for testing
+    #[derive(Clone)]
+    struct MockRTCPeerConnection;
+
+    impl MockRTCPeerConnection {
+        pub async fn close(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    // Test helper to create a test call
+    async fn create_test_call() -> (CallHandlerState, String, broadcast::Sender<CallEvent>) {
+        let state = CallHandlerState {
+            active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        };
+
+        let session_id = Uuid::new_v4().to_string();
+        let (event_sender, _) = broadcast::channel(10);
+
+        // Create a real RTCPeerConnection
+        let config = RTCConfiguration {
+            ice_servers: vec![],
+            ..Default::default()
+        };
+
+        let api = APIBuilder::new()
+            .with_media_engine(MediaEngine::default())
+            .with_interceptor_registry(Registry::new())
+            .build();
+
+        let peer_connection = Arc::new(api.new_peer_connection(config).await.unwrap());
+
+        let media_stream = Arc::new(
+            MediaStreamBuilder::new()
+                .id(format!("test-{}", session_id))
+                .build(),
+        );
+
+        let active_call = ActiveCall {
+            session_id: session_id.clone(),
+            media_stream,
+            peer_connection,
+            events: event_sender.clone(),
+        };
+
+        state
+            .active_calls
+            .lock()
+            .await
+            .insert(session_id.clone(), active_call);
+
+        (state, session_id, event_sender)
+    }
+
+    // Mock PeerConnection is no longer used
+    // We keep it for reference
+    #[derive(Clone)]
+    struct MockPeerConnection;
+
+    impl MockPeerConnection {
+        pub async fn close(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    // Test WsCommand serialization
+    #[test]
+    fn test_ws_command_serialization() {
+        // Test PlayTts command
+        let cmd = WsCommand::PlayTts {
+            text: "Hello, world!".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("play_tts"));
+        assert!(json.contains("Hello, world!"));
+
+        // Test PlayWav command
+        let cmd = WsCommand::PlayWav {
+            url: "https://example.com/audio.wav".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("play_wav"));
+        assert!(json.contains("https://example.com/audio.wav"));
+
+        // Test Hangup command
+        let cmd = WsCommand::Hangup {};
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("hangup"));
+
+        // Test deserialization
+        let json = r#"{"command":"play_tts","text":"Test TTS"}"#;
+        let cmd: WsCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            WsCommand::PlayTts { text } => {
+                assert_eq!(text, "Test TTS");
+            }
+            _ => panic!("Unexpected command type"),
+        }
+    }
+
+    // Test CallEvent serialization
+    #[test]
+    fn test_call_event_serialization() {
+        let event = CallEvent::AsrEvent {
+            track_id: "test-track".to_string(),
+            timestamp: 12345,
+            text: "Test ASR".to_string(),
+            is_final: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("asr"));
+        assert!(json.contains("test-track"));
+        assert!(json.contains("Test ASR"));
+        assert!(json.contains("12345"));
+        assert!(json.contains("true"));
+    }
+
+    // Test media event conversion
     #[test]
     fn test_convert_media_event() {
         // Test StartSpeaking event conversion
@@ -601,7 +1063,7 @@ mod tests {
         let mut frame = AudioFrame {
             track_id: "test".to_string(),
             samples: Samples::PCM(vec![0; 160]),
-            timestamp: 3000,
+            timestamp: 3000, // Choose a timestamp divisible by 3000
             sample_rate: 16000,
         };
 
@@ -610,10 +1072,40 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Test WebRTC call response structure
+    // Test handling web socket command
+    #[tokio::test]
+    async fn test_handle_ws_command() {
+        let (state, session_id, event_sender) = create_test_call().await;
+
+        // Test PlayTts command
+        let cmd = WsCommand::PlayTts {
+            text: "Test TTS".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+
+        // Create a receiver to check events
+        let mut receiver = event_sender.subscribe();
+
+        // Handle the command
+        handle_ws_command(&state, &session_id, json).await;
+
+        // Check if TTS event was sent
+        if let Ok(event) = receiver.try_recv() {
+            match event {
+                CallEvent::TtsEvent { text, .. } => {
+                    assert_eq!(text, "Test TTS");
+                }
+                _ => panic!("Expected TTS event"),
+            }
+        } else {
+            panic!("No event received");
+        }
+    }
+
+    // Test CallResponse structure
     #[test]
     fn test_call_response_structure() {
-        // Create a WebRTC call response
+        // Create a call response
         let response = CallResponse {
             session_id: "test-session-id".to_string(),
             sdp: "test-sdp-content".to_string(),
