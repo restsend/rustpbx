@@ -69,9 +69,5 @@ name = "llm-demo"
 path = "examples/llm_demo.rs"
 
 [[example]]
-name = "webrtc-call"
-path = "examples/webrtc-call/src/main.rs"
-
-[[example]]
 name = "voice-demo"
 path = "examples/voice_demo.rs"
