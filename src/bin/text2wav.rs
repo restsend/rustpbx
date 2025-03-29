@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-use rustpbx::synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig};
+use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
 
@@ -33,7 +33,7 @@ struct Args {
     output_file: PathBuf,
 
     /// Voice ID to use (default: 1)
-    #[arg(short, long, default_value = "1")]
+    #[arg(short = 'i', long, default_value = "1")]
     voice: String,
 
     /// Speaker ID (default: 1)
@@ -45,7 +45,7 @@ struct Args {
     rate: f32,
 
     /// Volume level (0-10, default: 5)
-    #[arg(short, long, default_value = "5")]
+    #[arg(short = 'l', long, default_value = "5")]
     volume: i32,
 
     /// Enable verbose logging
@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
     debug!("Found TENCENT_APPID in environment");
 
     // Create TTS client and config
-    let tts_config = TtsConfig {
+    let synthesis_config = SynthesisConfig {
         url: "".to_string(),     // Not used with TencentCloud client
         voice: Some(args.voice), // Voice type
         rate: Some(args.rate),   // Speech rate
@@ -228,7 +228,10 @@ async fn main() -> Result<()> {
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
 
-            match tts_client.synthesize(&segment.text, &tts_config).await {
+            match tts_client
+                .synthesize(&segment.text, &synthesis_config)
+                .await
+            {
                 Ok(audio_data) => {
                     debug!("Received {} bytes of audio data", audio_data.len());
 
@@ -248,25 +251,19 @@ async fn main() -> Result<()> {
                     debug!("Added {} samples of speech", samples.len());
                 }
                 Err(e) => {
-                    error!("Failed to synthesize speech: {}", e);
-                    return Err(anyhow::anyhow!("TTS synthesis failed: {}", e));
+                    error!("Failed to synthesize text: {}", e);
+                    return Err(anyhow::anyhow!("Failed to synthesize text: {}", e));
                 }
             }
         }
     }
 
-    match writer.finalize() {
-        Ok(_) => {
-            info!(
-                "WAV file created successfully: {}",
-                args.output_file.display()
-            );
-        }
-        Err(e) => {
-            error!("Failed to finalize WAV file: {}", e);
-            return Err(anyhow::anyhow!("Failed to finalize WAV file: {}", e));
-        }
-    }
+    // Finalize the WAV file
+    writer.finalize()?;
+    info!(
+        "Successfully created WAV file: {}",
+        args.output_file.display()
+    );
 
     Ok(())
 }

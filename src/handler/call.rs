@@ -40,7 +40,7 @@ pub struct AsrConfig {
 
 // Configuration for Text-to-Speech
 #[derive(Debug, Clone, Deserialize)]
-pub struct TtsConfig {
+pub struct SynthesisConfig {
     pub url: String,
     pub voice: Option<String>,
     pub rate: Option<f32>,

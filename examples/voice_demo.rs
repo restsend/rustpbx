@@ -16,8 +16,9 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SizedSample};
+use cpal::{BufferSize, SampleFormat, SampleRate, SizedSample, StreamConfig};
 use dotenv::dotenv;
+use rustpbx::media::track::file::read_wav_file;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::sync::{broadcast, mpsc};
@@ -123,45 +124,6 @@ pub struct Args {
     #[arg(long, default_value = "true")]
     ns: bool,
 }
-
-// Helper function to read samples from a wav file
-fn read_wav_file(path: &str) -> Result<(Vec<i16>, u32)> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let samples: Vec<i16> = reader.samples().filter_map(Result::ok).collect();
-    Ok((samples, spec.sample_rate))
-}
-
-// Helper to write wav file
-struct WavWriter {
-    writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
-}
-
-impl WavWriter {
-    fn new(path: &str, sample_rate: usize, channels: u16) -> Result<Self> {
-        let spec = hound::WavSpec {
-            channels,
-            sample_rate: sample_rate as u32,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let writer = hound::WavWriter::create(path, spec)?;
-        Ok(Self { writer })
-    }
-
-    fn write_samples(&mut self, samples: &[i16]) -> Result<()> {
-        for &sample in samples {
-            self.writer.write_sample(sample)?;
-        }
-        Ok(())
-    }
-
-    fn close(self) -> Result<()> {
-        self.writer.finalize()?;
-        Ok(())
-    }
-}
-
 // Build an input stream for capturing audio from a microphone
 fn build_input_stream<T>(
     device: &cpal::Device,
@@ -473,6 +435,7 @@ async fn main() -> Result<()> {
 
     // Set up microphone input if requested
     let mut input_stream = None;
+    let mut input_sample_rate = 16000;
     if args.input.is_none() {
         let host = cpal::default_host();
         let input_device = host
@@ -482,8 +445,7 @@ async fn main() -> Result<()> {
         info!("Using input device: {}", input_device.name()?);
 
         let input_config = input_device.default_input_config()?;
-        info!("Input config: {:?}", input_config);
-
+        input_sample_rate = input_config.sample_rate().0;
         let audio_buffer_clone = audio_buffer.clone();
         let audio_sender_clone = audio_sender.clone();
 
@@ -519,9 +481,6 @@ async fn main() -> Result<()> {
         info!("Microphone input started");
     }
 
-    // Set up speaker output if requested
-    let mut output_stream = None;
-
     let host = cpal::default_host();
     let output_device = host
         .default_output_device()
@@ -532,31 +491,34 @@ async fn main() -> Result<()> {
     let output_config = output_device.default_output_config()?;
     info!("Default output config: {:?}", output_config);
 
-    // 尝试设置输出采样率为16000Hz
-    let output_sample_rate = args.sample_rate; // 使用与输入相同的采样率
+    let output_sample_rate = args.sample_rate;
     info!(
         "Attempting to use output sample rate: {}Hz",
         output_sample_rate
     );
 
     let output_buffer_clone = output_buffer.clone();
-
-    output_stream = Some(match output_config.sample_format() {
+    let stream_config = StreamConfig {
+        channels: 1,
+        sample_rate: SampleRate(output_sample_rate),
+        buffer_size: BufferSize::Default,
+    };
+    let output_stream = Some(match output_config.sample_format() {
         SampleFormat::I16 => build_output_stream::<i16>(
             &output_device,
-            &output_config.into(),
+            &stream_config,
             output_buffer_clone.clone(),
             Some(output_sample_rate),
         )?,
         SampleFormat::U16 => build_output_stream::<u16>(
             &output_device,
-            &output_config.into(),
+            &stream_config,
             output_buffer_clone.clone(),
             Some(output_sample_rate),
         )?,
         SampleFormat::F32 => build_output_stream::<f32>(
             &output_device,
-            &output_config.into(),
+            &stream_config,
             output_buffer_clone.clone(),
             Some(output_sample_rate),
         )?,
@@ -580,7 +542,7 @@ async fn main() -> Result<()> {
         info!("Reading input file: {}", input_path);
         let (samples, sample_rate) = read_wav_file(input_path)?;
         info!("Read {} samples at {} Hz", samples.len(), sample_rate);
-
+        input_sample_rate = sample_rate;
         // Process audio through the pipeline
         info!("Processing audio through pipeline...");
         pipeline_manager
@@ -595,17 +557,21 @@ async fn main() -> Result<()> {
             info!("Processing microphone audio through pipeline...");
 
             // Process audio in chunks
-            let chunk_size = 4000; // 250ms at 16kHz
+            let chunk_size = 48000 / 1000 * 20; // 20ms at 48kHz
             let mut buffer = Vec::new();
 
             while let Some(samples) = audio_receiver.recv().await {
                 if cancel_token_clone.is_cancelled() {
                     break;
                 }
-
-                // Add samples to buffer
-                buffer.extend_from_slice(&samples);
-
+                if input_sample_rate != args.sample_rate {
+                    // resample to 16k
+                    let resampled_samples =
+                        resample::resample_mono(&samples, input_sample_rate, args.sample_rate);
+                    buffer.extend_from_slice(&resampled_samples);
+                } else {
+                    buffer.extend_from_slice(&samples);
+                }
                 // Process in complete chunks
                 if buffer.len() >= chunk_size {
                     let chunk: Vec<i16> = buffer.drain(..chunk_size).collect();

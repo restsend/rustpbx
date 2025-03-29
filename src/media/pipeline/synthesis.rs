@@ -1,14 +1,11 @@
+use super::{Pipeline, StreamState, StreamStateReceiver, StreamStateSender};
+use crate::event::{EventSender, SessionEvent};
+use crate::synthesis::{SynthesisClient, SynthesisConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-
-use crate::event::{EventSender, SessionEvent};
-use crate::media::processor::AudioFrame;
-use crate::synthesis::{SynthesisClient, SynthesisConfig};
-
-use super::{Pipeline, StreamState, StreamStateReceiver, StreamStateSender};
 
 /// Pipeline processor that handles text-to-speech synthesis
 #[derive(Debug)]

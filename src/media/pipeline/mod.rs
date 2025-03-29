@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::{error, info};
 
 use crate::event::{EventSender, SessionEvent};
@@ -140,7 +141,7 @@ impl PipelineManager {
 
     /// Sends a state update to all pipelines
     pub fn send_state(&self, state: StreamState) -> Result<()> {
-        info!(
+        debug!(
             "Sending state update to all pipelines in manager {}",
             self.id
         );
@@ -150,7 +151,7 @@ impl PipelineManager {
 
     /// Processes an audio frame and sends it to the pipeline
     pub async fn process_audio(&self, samples: Vec<i16>, sample_rate: u32) -> Result<()> {
-        info!(
+        debug!(
             "Processing audio in manager {}: {} samples at {}Hz",
             self.id,
             samples.len(),

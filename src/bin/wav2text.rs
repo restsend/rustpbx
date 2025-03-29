@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use hound::WavReader;
-use rustpbx::transcription::{AsrClient, AsrConfig, TencentCloudAsrClient};
+use rustpbx::transcription::{TencentCloudAsrClient, TranscriptionClient, TranscriptionConfig};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn, Level};
 
 /// Convert WAV audio files to text using speech recognition
 #[derive(Parser, Debug)]
@@ -169,10 +169,10 @@ async fn main() -> Result<()> {
     info!("Processing {} audio samples", all_samples.len());
 
     // Create ASR client
-    let asr_client = Arc::new(TencentCloudAsrClient::new());
+    let transcription_client = Arc::new(TencentCloudAsrClient::new());
 
-    // Create ASR config
-    let asr_config = AsrConfig {
+    // Create transcription config
+    let transcription_config = TranscriptionConfig {
         enabled: true,
         model: None,
         language: Some(args.language),
@@ -182,13 +182,13 @@ async fn main() -> Result<()> {
         engine_type: Some(args.engine),
     };
 
-    // Send the samples to the ASR client
-    info!("Sending samples to ASR client for transcription...");
-    match asr_client
-        .transcribe(&all_samples, 16000, &asr_config)
+    // Send the samples to the transcription client
+    info!("Sending samples to transcription client for processing...");
+    match transcription_client
+        .transcribe(&all_samples, 16000, &transcription_config)
         .await
     {
-        Ok(text) => {
+        Ok(Some(text)) => {
             if let Some(output_path) = args.output {
                 // Write to output file
                 std::fs::write(&output_path, &text).with_context(|| {
@@ -199,11 +199,14 @@ async fn main() -> Result<()> {
                 // Print to console
                 println!("{}", text);
             }
-            info!("ASR processing completed successfully");
+            info!("Transcription processing completed successfully");
+        }
+        Ok(None) => {
+            info!("No transcription result returned");
         }
         Err(e) => {
-            error!("ASR error: {}", e);
-            return Err(anyhow!("ASR processing failed: {}", e));
+            error!("Transcription error: {}", e);
+            return Err(anyhow!("Transcription processing failed: {}", e));
         }
     }
 

@@ -22,15 +22,15 @@ fn get_tencent_cloud_credentials() -> Option<(String, String, String)> {
     Some((secret_id, secret_key, appid))
 }
 
-// Simple test implementation of TtsClient
-#[derive(Clone)]
-struct TestTtsClient {
+// Simple test implementation of SynthesisClient
+#[derive(Clone, Debug)]
+struct TestSynthesisClient {
     response_size: usize,
     capture_voice: Arc<Mutex<Option<String>>>,
     capture_codec: Arc<Mutex<Option<String>>>,
 }
 
-impl TestTtsClient {
+impl TestSynthesisClient {
     fn new(response_size: usize) -> Self {
         Self {
             response_size,
@@ -54,25 +54,22 @@ impl TestTtsClient {
     }
 }
 
-impl TtsClient for TestTtsClient {
-    fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
-        _config: &'a TtsConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+#[async_trait]
+impl SynthesisClient for TestSynthesisClient {
+    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>> {
         // Generate audio data proportional to text length
         let response_size = self.response_size;
         let text_len = text.len();
 
         // Capture voice and codec parameters if requested
-        if let Some(voice_type) = &_config.voice {
+        if let Some(voice_type) = &config.voice {
             let voice = self.capture_voice.clone();
             if voice.lock().unwrap().is_some() {
                 *voice.lock().unwrap() = Some(voice_type.clone());
             }
         }
 
-        if let Some(codec_type) = &_config.codec {
+        if let Some(codec_type) = &config.codec {
             let codec = self.capture_codec.clone();
             if codec.lock().unwrap().is_some() {
                 *codec.lock().unwrap() = Some(codec_type.clone());
@@ -80,17 +77,17 @@ impl TtsClient for TestTtsClient {
         }
 
         // Return simulated audio data
-        Box::pin(async move { Ok(vec![0u8; response_size * text_len]) })
+        Ok(vec![0u8; response_size * text_len])
     }
 }
 
 #[tokio::test]
 async fn test_tencent_tts_client() {
     // Create a test TTS client
-    let client = TestTtsClient::new(100);
+    let client = TestSynthesisClient::new(100);
 
-    // Create TTS config
-    let config = TtsConfig {
+    // Create synthesis config
+    let config = SynthesisConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
@@ -116,13 +113,13 @@ async fn test_tencent_tts_client() {
 #[tokio::test]
 async fn test_tts_processor_with_test_client() {
     // Create a test TTS client
-    let client: Arc<dyn TtsClient> = Arc::new(TestTtsClient::new(100));
+    let client: Arc<dyn SynthesisClient> = Arc::new(TestSynthesisClient::new(100));
 
     // Create event channel
     let (event_sender, mut event_receiver) = broadcast::channel::<TtsEvent>(10);
 
-    // Create TTS config
-    let config = TtsConfig {
+    // Create synthesis config
+    let config = SynthesisConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
@@ -163,14 +160,14 @@ async fn test_tts_processor_with_test_client() {
 #[tokio::test]
 async fn test_tts_different_voice_types() {
     // Create a test TTS client that captures parameters
-    let client = TestTtsClient::new(100).with_capture_params();
-    let client_arc: Arc<dyn TtsClient> = Arc::new(client.clone());
+    let client = TestSynthesisClient::new(100).with_capture_params();
+    let client_arc: Arc<dyn SynthesisClient> = Arc::new(client.clone());
 
     // Create event channel
     let (event_sender, _) = broadcast::channel::<TtsEvent>(10);
 
-    // Create TTS config with voice type 1
-    let config = TtsConfig {
+    // Create synthesis config with voice type 1
+    let config = SynthesisConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
@@ -199,14 +196,14 @@ async fn test_tts_different_voice_types() {
 #[tokio::test]
 async fn test_tts_codec_parameter() {
     // Create a test TTS client that captures parameters
-    let client = TestTtsClient::new(100).with_capture_params();
-    let client_arc: Arc<dyn TtsClient> = Arc::new(client.clone());
+    let client = TestSynthesisClient::new(100).with_capture_params();
+    let client_arc: Arc<dyn SynthesisClient> = Arc::new(client.clone());
 
     // Create event channel
     let (event_sender, _) = broadcast::channel::<TtsEvent>(10);
 
-    // Create TTS config with wav codec
-    let config = TtsConfig {
+    // Create synthesis config with wav codec
+    let config = SynthesisConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
@@ -248,46 +245,27 @@ async fn test_real_tencent_tts_client() {
     // Create real TTS client
     let client = TencentCloudTtsClient::new();
 
-    // Create TTS config with real credentials
-    let config = TtsConfig {
+    // Create synthesis config
+    let config = SynthesisConfig {
         url: "".to_string(),
         voice: Some("1".to_string()),
         rate: Some(1.0),
         appid: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
-        volume: Some(5),
+        volume: Some(0),
         speaker: Some(1),
         codec: Some("pcm".to_string()),
     };
 
-    // Synthesize using the real client (short text for quick test)
-    let text = "集成测试";
+    // Test text to synthesize
+    let text = "这是一个测试句子";
 
-    // Convert TtsConfig to SynthesisConfig
-    let synthesis_config = SynthesisConfig {
-        url: config.url.clone(),
-        voice: config.voice.clone(),
-        rate: config.rate,
-        appid: config.appid.clone(),
-        secret_id: config.secret_id.clone(),
-        secret_key: config.secret_key.clone(),
-        volume: config.volume,
-        speaker: config.speaker,
-        codec: config.codec.clone(),
-    };
+    // Synthesize speech
+    let result = client.synthesize(text, &config).await;
+    assert!(result.is_ok());
 
-    let result =
-        <TencentCloudTtsClient as SynthesisClient>::synthesize(&client, text, &synthesis_config)
-            .await;
-
-    // Print detailed error information if the request fails
-    if let Err(ref e) = result {
-        println!("TTS request failed with error: {:?}", e);
-    }
-
-    // Verify results
-    assert!(result.is_ok(), "TTS request should succeed");
+    // Verify audio data is not empty
     let audio_data = result.unwrap();
-    assert!(!audio_data.is_empty(), "Audio data should not be empty");
+    assert!(!audio_data.is_empty());
 }

@@ -1,9 +1,11 @@
 use anyhow::Result;
+use async_trait::async_trait;
 
-use super::AsrClient;
-use super::AsrConfig;
+use super::TranscriptionClient;
+use super::TranscriptionConfig;
 
-// Default ASR client implementation (mock)
+// Default Transcription client implementation (mock)
+#[derive(Debug)]
 pub struct DefaultAsrClient {}
 
 impl DefaultAsrClient {
@@ -12,15 +14,14 @@ impl DefaultAsrClient {
     }
 }
 
-impl AsrClient for DefaultAsrClient {
-    fn transcribe<'a>(
-        &'a self,
-        _audio_data: &'a [i16],
+#[async_trait]
+impl TranscriptionClient for DefaultAsrClient {
+    async fn transcribe(
+        &self,
+        _audio_data: &[i16],
         _sample_rate: u32,
-        _config: &'a AsrConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
-        // In a production implementation, this would call the ASR service
-        // For demonstration purposes, we'll just simulate a response
-        Box::pin(async { Ok("Sample transcription".to_string()) })
+        _config: &TranscriptionConfig,
+    ) -> Result<Option<String>> {
+        Ok(None)
     }
 }

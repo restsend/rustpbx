@@ -26,8 +26,8 @@ use webrtc::{
 use crate::{
     event::{EventSender, SessionEvent},
     handler::call::{
-        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse, TtsConfig,
-        VadConfig, WsCommand,
+        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse,
+        SynthesisConfig, VadConfig, WsCommand,
     },
     media::{
         stream::{MediaStream, MediaStreamBuilder},
@@ -43,7 +43,7 @@ pub struct WebRtcCallRequest {
     pub vad: Option<VadConfig>,
     pub record: Option<bool>,
     pub llm: crate::llm::LlmConfig,
-    pub tts: TtsConfig,
+    pub tts: SynthesisConfig,
 }
 
 // Configure Router for WebRTC

@@ -12,13 +12,14 @@ mod webrtc_tests {
     use webrtc::peer_connection::configuration::RTCConfiguration;
 
     use crate::handler::call::{
-        ActiveCall, AsrConfig, CallEvent, CallHandlerState, TtsConfig, VadConfig, WsCommand,
+        ActiveCall, AsrConfig, CallEvent, CallHandlerState, SynthesisConfig, VadConfig, WsCommand,
     };
     use crate::handler::webrtc::{handle_ws_command, WebRtcCallRequest};
     use crate::llm::LlmConfig;
     use crate::media::pipeline::{PipelineManager, StreamState};
     use crate::media::processor::{AudioFrame, Processor, Samples};
     use crate::media::stream::MediaStreamBuilder;
+    use crate::media::track::file::read_wav_file;
     use crate::media::track::{tts::TtsTrack, Track};
 
     // Helper to setup test media stream
@@ -44,28 +45,6 @@ mod webrtc_tests {
             .build();
 
         Arc::new(api.new_peer_connection(config).await.unwrap())
-    }
-
-    // Read WAV file and convert to PCM samples
-    fn read_wav_file() -> Vec<i16> {
-        let wav_path = Path::new("fixtures/hello_book_course_zh_16k.wav");
-        let mut file = File::open(wav_path).expect("Failed to open WAV file");
-
-        // Read the entire file into a buffer
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .expect("Failed to read WAV file");
-
-        // Skip WAV header (44 bytes) and convert to i16 samples
-        let mut samples = Vec::with_capacity((buffer.len() - 44) / 2);
-        let mut i = 44; // Skip WAV header
-        while i < buffer.len() - 1 {
-            let sample = i16::from_le_bytes([buffer[i], buffer[i + 1]]);
-            samples.push(sample);
-            i += 2;
-        }
-
-        samples
     }
 
     // Test processing real audio file through the pipeline
@@ -140,11 +119,12 @@ mod webrtc_tests {
 
         if let Some(pipeline_manager) = &call.pipeline_manager {
             // Read real audio file
-            let pcm_samples = read_wav_file();
+            let (pcm_samples, _) = read_wav_file("fixtures/hello_book_course_zh_16k.wav")
+                .expect("Failed to read WAV file");
 
             // Create track and add to media stream
             let track_id = format!("audio-test-{}", Uuid::new_v4());
-            let mut audio_track = TtsTrack::new(track_id.clone());
+            let audio_track = TtsTrack::new(track_id.clone());
 
             // Add track to media stream
             media_stream.update_track(Box::new(audio_track)).await;
@@ -187,7 +167,8 @@ mod webrtc_tests {
     #[tokio::test]
     async fn test_audio_length() {
         // Read the real audio file
-        let pcm_samples = read_wav_file();
+        let (pcm_samples, _) = read_wav_file("fixtures/hello_book_course_zh_16k.wav")
+            .expect("Failed to read WAV file");
 
         // The file is 16kHz, check if the length is reasonable
         // Calculate the actual length and print it for inspection
