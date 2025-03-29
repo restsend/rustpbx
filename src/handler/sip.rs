@@ -28,8 +28,8 @@ use webrtc::{
 use crate::{
     event::{EventSender, SessionEvent},
     handler::call::{
-        ActiveCall, AsrConfig, CallEvent, CallHandlerState, CallResponse, TtsConfig, VadConfig,
-        WsCommand,
+        ActiveCall, AsrConfig, CallEvent, CallHandlerState, CallResponse, SynthesisConfig,
+        VadConfig, WsCommand,
     },
     media::stream::MediaStreamBuilder,
     useragent::{
@@ -56,7 +56,7 @@ pub struct WebRtcSipCallRequest {
     pub sip: SipCallConfig,
     pub asr: Option<AsrConfig>,
     pub llm: Option<crate::llm::LlmConfig>,
-    pub tts: Option<TtsConfig>,
+    pub tts: Option<SynthesisConfig>,
     pub vad: Option<VadConfig>,
     pub record: Option<bool>,
 }

@@ -23,41 +23,46 @@ mod tencent_cloud;
 pub use tencent_cloud::TencentCloudAsrClient;
 
 mod whisper;
-pub use whisper::WhisperAsrClient;
+pub use whisper::WhisperClient;
 
-// Configuration for ASR (Automatic Speech Recognition)
+// Configuration for Transcription services (formerly ASR)
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AsrConfig {
+pub struct TranscriptionConfig {
     pub enabled: bool,
     pub model: Option<String>,
     pub language: Option<String>,
-    // Add TencentCloud specific configuration
+    // TencentCloud specific configuration
     pub appid: Option<String>,
     pub secret_id: Option<String>,
     pub secret_key: Option<String>,
     pub engine_type: Option<String>,
 }
 
-// ASR Events
+// Default config for backward compatibility
+impl Default for TranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+            language: None,
+            appid: None,
+            secret_id: None,
+            secret_key: None,
+            engine_type: None,
+        }
+    }
+}
+
+// Transcription Events
 #[derive(Debug, Clone, Serialize)]
-pub struct AsrEvent {
+pub struct TranscriptionEvent {
     pub track_id: String,
     pub timestamp: u32,
     pub text: String,
     pub is_final: bool,
 }
 
-// ASR client trait - to be implemented with actual ASR integration
-pub trait AsrClient: Send + Sync {
-    fn transcribe<'a>(
-        &'a self,
-        audio_data: &'a [i16],
-        sample_rate: u32,
-        config: &'a AsrConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
-}
-
-// Simplified transcription client trait for pipeline usage
+// Unified transcription client trait with async_trait support
 #[async_trait]
 pub trait TranscriptionClient: Send + Sync + std::fmt::Debug {
     async fn transcribe(
@@ -65,66 +70,28 @@ pub trait TranscriptionClient: Send + Sync + std::fmt::Debug {
         audio_data: &[i16],
         sample_rate: u32,
         config: &TranscriptionConfig,
-    ) -> Result<String>;
+    ) -> Result<Option<String>>;
 }
 
-// Pipeline-friendly configuration
-#[derive(Debug, Clone, Default)]
-pub struct TranscriptionConfig {
-    pub enabled: bool,
-    pub model: Option<String>,
-    pub language: Option<String>,
-    pub appid: Option<String>,
-    pub secret_id: Option<String>,
-    pub secret_key: Option<String>,
-    pub engine_type: Option<String>,
-}
-
-// Implement TranscriptionClient for TencentCloudAsrClient
-#[async_trait]
-impl TranscriptionClient for TencentCloudAsrClient {
-    async fn transcribe(
-        &self,
-        audio_data: &[i16],
-        sample_rate: u32,
-        config: &TranscriptionConfig,
-    ) -> Result<String> {
-        // Convert TranscriptionConfig to AsrConfig
-        let asr_config = AsrConfig {
-            enabled: config.enabled,
-            model: config.model.clone(),
-            language: config.language.clone(),
-            appid: config.appid.clone(),
-            secret_id: config.secret_id.clone(),
-            secret_key: config.secret_key.clone(),
-            engine_type: config.engine_type.clone(),
-        };
-
-        // Use the AsrClient implementation
-        let future = <Self as AsrClient>::transcribe(self, audio_data, sample_rate, &asr_config);
-        future.await
-    }
-}
-
-// ASR Processor that integrates with the media stream system
-pub struct AsrProcessor {
-    config: AsrConfig,
-    client: Arc<dyn AsrClient>,
-    event_sender: broadcast::Sender<AsrEvent>,
+// Transcription Processor that integrates with the media stream system
+pub struct TranscriptionProcessor {
+    config: TranscriptionConfig,
+    client: Arc<dyn TranscriptionClient>,
+    event_sender: broadcast::Sender<TranscriptionEvent>,
     // Buffer for accumulating audio between processing
     buffer: Vec<i16>,
     // Buffer size in milliseconds
     buffer_duration_ms: u32,
     last_process_time: u64,
-    // Add Session Event Sender for sending metrics
+    // Session Event Sender for sending metrics
     session_event_sender: Option<EventSender>,
 }
 
-impl AsrProcessor {
+impl TranscriptionProcessor {
     pub fn new(
-        config: AsrConfig,
-        client: Arc<dyn AsrClient>,
-        event_sender: broadcast::Sender<AsrEvent>,
+        config: TranscriptionConfig,
+        client: Arc<dyn TranscriptionClient>,
+        event_sender: broadcast::Sender<TranscriptionEvent>,
     ) -> Self {
         Self {
             config,
@@ -163,39 +130,41 @@ impl AsrProcessor {
         // Make a copy of the buffer for processing and clear original
         let buffer_for_processing = std::mem::take(&mut self.buffer);
 
-        // Process with ASR client
+        // Process with transcription client
         let transcription = self
             .client
             .transcribe(&buffer_for_processing, sample_rate, &self.config)
             .await?;
 
-        // Check for ASR metrics and send if we have a session event sender
+        // Check for transcription metrics and send if we have a session event sender
         ASR_METRICS.with(|metrics| {
             if let Some((ts, metrics_data)) = metrics.borrow_mut().take() {
                 if let Some(sender) = &self.session_event_sender {
                     let _ = sender.send(SessionEvent::Metrics(ts, metrics_data.clone()));
                 } else {
                     // Log if no sender
-                    println!("ASR TTFB metrics: {:?}", metrics_data);
+                    println!("Transcription TTFB metrics: {:?}", metrics_data);
                 }
             }
         });
 
-        // Send ASR event
-        let _ = self.event_sender.send(AsrEvent {
-            track_id: track_id.to_string(),
-            timestamp,
-            text: transcription,
-            is_final: true,
-        });
+        // Send transcription event if we have a result
+        if let Some(text) = transcription {
+            let _ = self.event_sender.send(TranscriptionEvent {
+                track_id: track_id.to_string(),
+                timestamp,
+                text,
+                is_final: true,
+            });
+        }
 
         Ok(())
     }
 }
 
-impl Processor for AsrProcessor {
+impl Processor for TranscriptionProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        // If ASR is not enabled, do nothing
+        // If transcription is not enabled, do nothing
         if !self.config.enabled {
             return Ok(());
         }
@@ -228,7 +197,7 @@ impl Processor for AsrProcessor {
                     .process_buffer(&track_id, timestamp, sample_rate.into())
                     .await
                 {
-                    tracing::error!("ASR processing error: {}", e);
+                    tracing::error!("Transcription processing error: {}", e);
                 }
                 processor.last_process_time = timestamp as u64;
             }
@@ -238,8 +207,8 @@ impl Processor for AsrProcessor {
     }
 }
 
-// Clone implementation for ASR Processor
-impl Clone for AsrProcessor {
+// Clone implementation for Transcription Processor
+impl Clone for TranscriptionProcessor {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
@@ -257,7 +226,7 @@ impl Clone for AsrProcessor {
 #[cfg(test)]
 mod tests;
 
-// Thread local storage for ASR metrics
+// Thread local storage for Transcription metrics (renamed from ASR_METRICS but kept same name for backward compatibility)
 thread_local! {
     pub(crate) static ASR_METRICS: std::cell::RefCell<Option<(u32, serde_json::Value)>> = std::cell::RefCell::new(None);
 }

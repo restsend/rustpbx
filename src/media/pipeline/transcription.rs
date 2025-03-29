@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::event::EventSender;
 use crate::media::processor::AudioFrame;
@@ -66,9 +66,9 @@ impl TranscriptionPipeline {
                 _samples: &[i16],
                 _sample_rate: u32,
                 _config: &TranscriptionConfig,
-            ) -> Result<String> {
+            ) -> Result<Option<String>> {
                 // This is a mock that just returns a fixed response
-                Ok("This is a mock transcription".to_string())
+                Ok(Some("This is a mock transcription".to_string()))
             }
         }
 
@@ -120,8 +120,8 @@ impl Pipeline for TranscriptionPipeline {
                     StreamState::AudioInput(samples, sample_rate) => {
                         // Process audio through ASR
                         match client.transcribe(&samples, sample_rate, &config).await {
-                            Ok(transcription) => {
-                                info!("Transcription result: {}", transcription);
+                            Ok(Some(transcription)) => {
+                                debug!("Transcription result: {}", transcription);
 
                                 // Send the transcription to the pipeline
                                 if let Err(e) = state_sender_clone
@@ -129,6 +129,9 @@ impl Pipeline for TranscriptionPipeline {
                                 {
                                     error!("Failed to send transcription to pipeline: {}", e);
                                 }
+                            }
+                            Ok(None) => {
+                                debug!("No transcription result returned");
                             }
                             Err(e) => {
                                 error!("Transcription failed: {}", e);

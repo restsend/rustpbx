@@ -25,7 +25,7 @@ pub use http::HttpTtsClient;
 
 // Configuration for Text-to-Speech
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TtsConfig {
+pub struct SynthesisConfig {
     pub url: String,
     pub voice: Option<String>,
     pub rate: Option<f32>,
@@ -44,43 +44,6 @@ pub trait SynthesisClient: Send + Sync + std::fmt::Debug {
     async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>>;
 }
 
-// Pipeline-friendly configuration
-#[derive(Debug, Clone, Default)]
-pub struct SynthesisConfig {
-    pub url: String,
-    pub voice: Option<String>,
-    pub rate: Option<f32>,
-    pub appid: Option<String>,
-    pub secret_id: Option<String>,
-    pub secret_key: Option<String>,
-    pub volume: Option<i32>,
-    pub speaker: Option<i32>,
-    pub codec: Option<String>,
-}
-
-// Implement SynthesisClient for TencentCloudTtsClient
-#[async_trait]
-impl SynthesisClient for TencentCloudTtsClient {
-    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>> {
-        // Convert SynthesisConfig to TtsConfig
-        let tts_config = TtsConfig {
-            url: config.url.clone(),
-            voice: config.voice.clone(),
-            rate: config.rate,
-            appid: config.appid.clone(),
-            secret_id: config.secret_id.clone(),
-            secret_key: config.secret_key.clone(),
-            volume: config.volume,
-            speaker: config.speaker,
-            codec: config.codec.clone(),
-        };
-
-        // Use the TtsClient implementation
-        let future = <Self as TtsClient>::synthesize(self, text, &tts_config);
-        future.await
-    }
-}
-
 // TTS Events
 #[derive(Debug, Clone, Serialize)]
 pub struct TtsEvent {
@@ -88,19 +51,10 @@ pub struct TtsEvent {
     pub text: String,
 }
 
-// TTS client trait - to be implemented with actual TTS integration
-pub trait TtsClient: Send + Sync {
-    fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
-        config: &'a TtsConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>>;
-}
-
 // TTS Processor
 pub struct TtsProcessor {
-    config: TtsConfig,
-    client: Arc<dyn TtsClient>,
+    config: SynthesisConfig,
+    client: Arc<dyn SynthesisClient>,
     event_sender: broadcast::Sender<TtsEvent>,
     // Add Session Event Sender for sending metrics
     session_event_sender: Option<EventSender>,
@@ -108,8 +62,8 @@ pub struct TtsProcessor {
 
 impl TtsProcessor {
     pub fn new(
-        config: TtsConfig,
-        client: Arc<dyn TtsClient>,
+        config: SynthesisConfig,
+        client: Arc<dyn SynthesisClient>,
         event_sender: broadcast::Sender<TtsEvent>,
     ) -> Self {
         Self {

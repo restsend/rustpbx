@@ -52,9 +52,9 @@ impl TranscriptionClient for MockTranscriptionClient {
         _samples: &[i16],
         _sample_rate: u32,
         _config: &TranscriptionConfig,
-    ) -> Result<String> {
+    ) -> Result<Option<String>> {
         // Return a fixed transcription
-        Ok("This is a test transcription".to_string())
+        Ok(Some("This is a test transcription".to_string()))
     }
 }
 

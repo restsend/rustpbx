@@ -1,4 +1,5 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use hmac::{Hmac, Mac};
 use reqwest::Client as HttpClient;
@@ -7,8 +8,8 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use super::TtsClient;
-use super::TtsConfig;
+use super::SynthesisClient;
+use super::SynthesisConfig;
 
 // TencentCloud TTS Response structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,12 +104,9 @@ impl TencentCloudTtsClient {
     }
 }
 
-impl TtsClient for TencentCloudTtsClient {
-    fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
-        config: &'a TtsConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+#[async_trait]
+impl SynthesisClient for TencentCloudTtsClient {
+    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>> {
         // Clone values that we need in the async block
         let secret_id = config.secret_id.clone().unwrap_or_default();
         let secret_key = config.secret_key.clone().unwrap_or_default();
@@ -122,87 +120,84 @@ impl TtsClient for TencentCloudTtsClient {
         let volume = config.volume.unwrap_or(0);
         let speed = config.rate.unwrap_or(0.0);
         let codec = config.codec.clone().unwrap_or_else(|| "mp3".to_string());
-        let text = text.to_string();
 
-        Box::pin(async move {
-            if secret_id.is_empty() || secret_key.is_empty() {
-                return Err(anyhow::anyhow!("Missing TencentCloud credentials"));
-            }
+        if secret_id.is_empty() || secret_key.is_empty() {
+            return Err(anyhow::anyhow!("Missing TencentCloud credentials"));
+        }
 
-            // Create session ID
-            let session_id = Uuid::new_v4().to_string();
+        // Create session ID
+        let session_id = Uuid::new_v4().to_string();
 
-            // Create request parameters
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // Create request parameters
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-            // Create request body
-            let request_data = serde_json::json!({
-                "Text": text,
-                "SessionId": session_id,
-                "Volume": volume,
-                "Speed": speed,
-                "ProjectId": 0,
-                "ModelType": 1,
-                "VoiceType": speaker,
-                "PrimaryLanguage": 1,
-                "SampleRate": 16000,
-                "Codec": codec
-            });
+        // Create request body
+        let request_data = serde_json::json!({
+            "Text": text,
+            "SessionId": session_id,
+            "Volume": volume,
+            "Speed": speed,
+            "ProjectId": 0,
+            "ModelType": 1,
+            "VoiceType": speaker,
+            "PrimaryLanguage": 1,
+            "SampleRate": 16000,
+            "Codec": codec
+        });
 
-            let host = "tts.tencentcloudapi.com";
-            let signature = self.generate_signature(
-                &secret_id,
-                &secret_key,
-                host,
-                "POST",
-                timestamp,
-                &request_data.to_string(),
-            )?;
+        let host = "tts.tencentcloudapi.com";
+        let signature = self.generate_signature(
+            &secret_id,
+            &secret_key,
+            host,
+            "POST",
+            timestamp,
+            &request_data.to_string(),
+        )?;
 
-            // Create authorization header
-            let authorization = format!(
-                "TC3-HMAC-SHA256 Credential={}/{}/tts/tc3_request, SignedHeaders=content-type;host;x-tc-action, Signature={}",
-                secret_id,
-                date,
-                signature
-            );
+        // Create authorization header
+        let authorization = format!(
+            "TC3-HMAC-SHA256 Credential={}/{}/tts/tc3_request, SignedHeaders=content-type;host;x-tc-action, Signature={}",
+            secret_id,
+            date,
+            signature
+        );
 
-            // Record request start time for TTFB measurement
-            let request_start_time = std::time::Instant::now();
+        // Record request start time for TTFB measurement
+        let request_start_time = std::time::Instant::now();
 
-            // Send request to TencentCloud TTS API
-            let response = self
-                .http_client
-                .post(format!("https://{}", host))
-                .header("Content-Type", "application/json")
-                .header("Authorization", authorization)
-                .header("Host", host)
-                .header("X-TC-Action", "TextToVoice")
-                .header("X-TC-Version", "2019-08-23")
-                .header("X-TC-Timestamp", timestamp.to_string())
-                .header("X-TC-Region", "ap-guangzhou")
-                .json(&request_data)
-                .send()
-                .await?;
+        // Send request to TencentCloud TTS API
+        let response = self
+            .http_client
+            .post(format!("https://{}", host))
+            .header("Content-Type", "application/json")
+            .header("Authorization", authorization)
+            .header("Host", host)
+            .header("X-TC-Action", "TextToVoice")
+            .header("X-TC-Version", "2019-08-23")
+            .header("X-TC-Timestamp", timestamp.to_string())
+            .header("X-TC-Region", "ap-guangzhou")
+            .json(&request_data)
+            .send()
+            .await?;
 
-            // Calculate TTFB
-            let ttfb = request_start_time.elapsed().as_millis() as u64;
+        // Calculate TTFB
+        let ttfb = request_start_time.elapsed().as_millis() as u64;
 
-            // Store TTS metrics for monitoring
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as u32;
+        // Store TTS metrics for monitoring
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
 
-            // Print the raw response for debugging
-            let response_text = response.text().await?;
-            // Parse the response
-            let response: TencentCloudTtsResponse = serde_json::from_str(&response_text)?;
+        // Print the raw response for debugging
+        let response_text = response.text().await?;
+        // Parse the response
+        let response: TencentCloudTtsResponse = serde_json::from_str(&response_text)?;
 
-            // Decode base64 audio data
-            let audio_bytes = BASE64_STANDARD.decode(response.response.audio)?;
-            Ok(audio_bytes)
-        })
+        // Decode base64 audio data
+        let audio_bytes = BASE64_STANDARD.decode(response.response.audio)?;
+        Ok(audio_bytes)
     }
 }

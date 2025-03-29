@@ -1,9 +1,10 @@
 use anyhow::Result;
 use dotenv::dotenv;
-use rustpbx::synthesis::{TencentCloudTtsClient, TtsClient, TtsConfig};
-use rustpbx::transcription::{AsrClient, AsrConfig, TencentCloudAsrClient};
-use std::fs::File;
-use std::io::Write;
+use rustpbx::{
+    media::track::file::read_wav_file,
+    transcription::{TencentCloudAsrClient, TranscriptionClient, TranscriptionConfig},
+};
+use tracing::{error, info};
 
 // Helper function to get credentials from .env
 fn get_tencent_cloud_credentials() -> Option<(String, String, String)> {
@@ -24,73 +25,71 @@ fn get_tencent_cloud_credentials() -> Option<(String, String, String)> {
 }
 
 #[tokio::test]
-async fn test_tts_asr_integration() -> Result<()> {
+async fn test_asr_integration() -> Result<()> {
+    // Initialize tracing for better debug output
+    let _ = tracing_subscriber::fmt::try_init();
+
     // Get credentials
     let credentials =
         get_tencent_cloud_credentials().expect("Missing Tencent Cloud credentials in .env file");
     let (secret_id, secret_key, appid) = credentials;
+    println!(
+        "Using Tencent Cloud credentials with SecretID: {}",
+        secret_id
+    );
 
-    // Create TTS client and config
-    let tts_client = TencentCloudTtsClient::new();
-    let tts_config = TtsConfig {
-        url: "".to_string(),          // Not used for TencentCloud
-        voice: Some("1".to_string()), // 标准女声
-        rate: Some(1.0),
-        appid: Some(appid.clone()),
-        secret_id: Some(secret_id.clone()),
-        secret_key: Some(secret_key.clone()),
-        volume: Some(0),
-        speaker: Some(1),
-        codec: Some("pcm".to_string()),
-    };
+    // Path to the test audio file
+    let wav_path = "fixtures/hello_book_course_zh_16k.wav";
+    info!("Using test audio file: {}", wav_path);
 
-    // Test text to synthesize
-    let test_text = "这是一个测试音频文件";
-    println!("Synthesizing text: {}", test_text);
+    // Read the audio file
+    let (samples, _) = read_wav_file(wav_path)?;
+    info!("Loaded {} samples from audio file", samples.len());
 
-    // Generate audio using TTS
-    let audio_data = tts_client.synthesize(test_text, &tts_config).await?;
-    println!("Generated {} bytes of audio data", audio_data.len());
-
-    // Save the audio data to a temporary file
-    let temp_file = "test_audio.pcm";
-    let mut file = File::create(temp_file)?;
-    file.write_all(&audio_data)?;
-    println!("Saved audio data to {}", temp_file);
-
-    // Convert bytes to i16 samples
-    let samples: Vec<i16> = audio_data
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-
-    // Create ASR client and config
-    let asr_client = TencentCloudAsrClient::new();
-    let asr_config = AsrConfig {
+    // Create transcription client and config
+    let transcription_client = TencentCloudAsrClient::new();
+    let transcription_config = TranscriptionConfig {
         enabled: true,
         model: None,
-        language: Some("zh-CN".to_string()),
+        language: Some("zh-CN".to_string()), // Required in struct but not used by TencentCloud ASR
         appid: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
-        engine_type: Some("16k_zh".to_string()),
+        engine_type: Some("16k_zh".to_string()), // This is what controls the language for TencentCloud
     };
 
     // Transcribe the audio
-    println!("Transcribing audio...");
-    let transcription = asr_client.transcribe(&samples, 16000, &asr_config).await?;
-    println!("Transcription result: {}", transcription);
+    info!("Transcribing audio...");
 
-    // Clean up the temporary file
-    std::fs::remove_file(temp_file)?;
+    // Try to transcribe and handle any errors
+    match transcription_client
+        .transcribe(&samples, 16000, &transcription_config)
+        .await
+    {
+        Ok(transcription_result) => {
+            // Verify we got a result
+            match transcription_result {
+                Some(transcription) => {
+                    info!("Transcription result: {}", transcription);
 
-    // Verify the transcription contains the test text (allowing for some variation)
-    assert!(
-        transcription.contains("测试") || transcription.contains("音频"),
-        "Transcription '{}' should contain parts of the original text '{}'",
-        transcription,
-        test_text
-    );
+                    // Verify the transcription contains parts of the expected text
+                    assert!(
+                            transcription.contains("您好") || transcription.contains("预约") || transcription.contains("课程"),
+                            "Transcription '{}' should contain parts of the expected text '您好,请帮我预约课程'",
+                            transcription
+                        );
+                }
+                None => {
+                    error!("Transcription returned None");
+                    assert!(false, "Transcription should not return None");
+                }
+            }
+        }
+        Err(e) => {
+            error!("Error during transcription: {:?}", e);
+            panic!("Transcription failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
