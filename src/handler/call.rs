@@ -103,17 +103,23 @@ pub enum CallEvent {
 // WebSocket Commands
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "command")]
-pub enum WsCommand {
-    #[serde(rename = "play_tts")]
-    PlayTts { text: String },
-    #[serde(rename = "play_wav")]
-    PlayWav { url: String },
+pub enum Command {
+    /// Play a text to speech
+    #[serde(rename = "tts")]
+    Tts { text: String },
+    /// Play a wav file
+    #[serde(rename = "play")]
+    Play { url: String },
+    /// Hangup the call
     #[serde(rename = "hangup")]
     Hangup {},
+    /// Refer to a target
     #[serde(rename = "refer")]
     Refer { target: String },
+    /// Mute a track
     #[serde(rename = "mute")]
     Mute { track_id: Option<String> },
+    /// Unmute a track
     #[serde(rename = "unmute")]
     Unmute { track_id: Option<String> },
 }
@@ -157,23 +163,37 @@ impl Processor for AsrProcessor {
 // Adapt MediaStreamEvents to CallEvents
 pub fn convert_media_event(event: SessionEvent) -> Option<CallEvent> {
     match event {
-        SessionEvent::StartSpeaking(track_id, timestamp) => Some(CallEvent::VadEvent {
+        SessionEvent::StartSpeaking {
+            track_id,
+            timestamp,
+        } => Some(CallEvent::VadEvent {
             track_id,
             timestamp,
             is_speech: true,
         }),
-        SessionEvent::Silence(track_id, timestamp) => Some(CallEvent::VadEvent {
+        SessionEvent::Silence {
+            track_id,
+            timestamp,
+        } => Some(CallEvent::VadEvent {
             track_id,
             timestamp,
             is_speech: false,
         }),
-        SessionEvent::TranscriptionFinal(track_id, timestamp, text) => Some(CallEvent::AsrEvent {
+        SessionEvent::TranscriptionFinal {
+            track_id,
+            timestamp,
+            text,
+        } => Some(CallEvent::AsrEvent {
             track_id,
             timestamp,
             text,
             is_final: true,
         }),
-        SessionEvent::TranscriptionDelta(track_id, timestamp, text) => Some(CallEvent::AsrEvent {
+        SessionEvent::TranscriptionDelta {
+            track_id,
+            timestamp,
+            text,
+        } => Some(CallEvent::AsrEvent {
             track_id,
             timestamp,
             text,
@@ -211,7 +231,10 @@ mod tests {
         // Test StartSpeaking event conversion
         let track_id = "test-track".to_string();
         let timestamp = 12345u32;
-        let event = SessionEvent::StartSpeaking(track_id.clone(), timestamp);
+        let event = SessionEvent::StartSpeaking {
+            track_id: track_id.clone(),
+            timestamp,
+        };
 
         let converted = convert_media_event(event);
         assert!(converted.is_some());
@@ -230,7 +253,10 @@ mod tests {
         }
 
         // Test Silence event conversion
-        let event = SessionEvent::Silence(track_id.clone(), timestamp);
+        let event = SessionEvent::Silence {
+            track_id: track_id.clone(),
+            timestamp,
+        };
         let converted = convert_media_event(event);
         assert!(converted.is_some());
 

@@ -4,56 +4,71 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
     #[serde(rename = "audio")]
-    Audio(AudioFrame),
+    Audio { frame: AudioFrame },
     #[serde(rename = "start_speaking")]
-    StartSpeaking(String, u32),
+    StartSpeaking { track_id: String, timestamp: u32 },
     #[serde(rename = "silence")]
-    Silence(String, u32),
+    Silence { track_id: String, timestamp: u32 },
     #[serde(rename = "dtmf")]
-    DTMF(String, u32, String),
+    DTMF {
+        track_id: String,
+        timestamp: u32,
+        digit: String,
+    },
     #[serde(rename = "track_start")]
-    TrackStart(String, u32),
+    TrackStart { track_id: String, timestamp: u32 },
     #[serde(rename = "track_end")]
-    TrackEnd(String, u32),
+    TrackEnd { track_id: String, timestamp: u32 },
     /// track_id, timestamp, text
     #[serde(rename = "transcription_final")]
-    TranscriptionFinal(String, u32, String),
+    TranscriptionFinal {
+        track_id: String,
+        timestamp: u32,
+        text: String,
+    },
     /// track_id, timestamp, text
     #[serde(rename = "transcription_delta")]
-    TranscriptionDelta(String, u32, String),
+    TranscriptionDelta {
+        track_id: String,
+        timestamp: u32,
+        text: String,
+    },
     /// timestamp, text
     #[serde(rename = "llm_final")]
-    LLMFinal(u32, String),
+    LLMFinal { timestamp: u32, text: String },
     /// track_id, timestamp,  word
     #[serde(rename = "llm_delta")]
-    LLMDelta(u32, String),
+    LLMDelta { timestamp: u32, word: String },
     /// timestamp, audio
     #[serde(rename = "synthesis")]
-    Synthesis(u32, Vec<u8>),
+    Synthesis { timestamp: u32, audio: Vec<u8> },
     /// timestamp, metrics
     #[serde(rename = "metrics")]
-    Metrics(u32, serde_json::Value),
+    Metrics {
+        timestamp: u32,
+        metrics: serde_json::Value,
+    },
     /// timestamp, error message
     #[serde(rename = "error")]
-    Error(u32, String),
+    Error { timestamp: u32, error: String },
 }
 
 impl SessionEvent {
     pub fn timestamp(&self) -> u32 {
         match self {
-            SessionEvent::Audio(frame) => frame.timestamp,
-            SessionEvent::DTMF(_, timestamp, _) => *timestamp,
-            SessionEvent::TrackStart(_, timestamp) => *timestamp,
-            SessionEvent::TrackEnd(_, timestamp) => *timestamp,
-            SessionEvent::TranscriptionFinal(_, timestamp, _) => *timestamp,
-            SessionEvent::TranscriptionDelta(_, timestamp, _) => *timestamp,
-            SessionEvent::LLMDelta(timestamp, _) => *timestamp,
-            SessionEvent::LLMFinal(timestamp, _) => *timestamp,
-            SessionEvent::Metrics(timestamp, _) => *timestamp,
-            SessionEvent::Error(timestamp, _) => *timestamp,
-            SessionEvent::StartSpeaking(_, timestamp) => *timestamp,
-            SessionEvent::Silence(_, timestamp) => *timestamp,
-            SessionEvent::Synthesis(timestamp, _) => *timestamp,
+            SessionEvent::Audio { frame } => frame.timestamp,
+            SessionEvent::DTMF { timestamp, .. } => *timestamp,
+            SessionEvent::TrackStart { timestamp, .. } => *timestamp,
+            SessionEvent::TrackEnd { timestamp, .. } => *timestamp,
+            SessionEvent::TranscriptionFinal { timestamp, .. } => *timestamp,
+            SessionEvent::TranscriptionDelta { timestamp, .. } => *timestamp,
+            SessionEvent::LLMDelta { timestamp, .. } => *timestamp,
+            SessionEvent::LLMFinal { timestamp, .. } => *timestamp,
+            SessionEvent::Metrics { timestamp, .. } => *timestamp,
+            SessionEvent::Error { timestamp, .. } => *timestamp,
+            SessionEvent::StartSpeaking { timestamp, .. } => *timestamp,
+            SessionEvent::Silence { timestamp, .. } => *timestamp,
+            SessionEvent::Synthesis { timestamp, .. } => *timestamp,
         }
     }
 }

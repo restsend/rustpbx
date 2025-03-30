@@ -99,9 +99,15 @@ impl Processor for VadProcessor {
 
         // Send VAD events
         let event = if is_speech {
-            SessionEvent::StartSpeaking(frame.track_id.clone(), frame.timestamp)
+            SessionEvent::StartSpeaking {
+                track_id: frame.track_id.clone(),
+                timestamp: frame.timestamp,
+            }
         } else {
-            SessionEvent::Silence(frame.track_id.clone(), frame.timestamp)
+            SessionEvent::Silence {
+                track_id: frame.track_id.clone(),
+                timestamp: frame.timestamp,
+            }
         };
         self.event_sender.send(event).ok();
         Ok(())

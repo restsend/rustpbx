@@ -19,7 +19,11 @@ async fn test_webrtc_vad() {
     vad.process_frame(&mut silence_frame).unwrap();
 
     // Should receive silence event
-    if let Ok(SessionEvent::Silence(id, ts)) = event_receiver.try_recv() {
+    if let Ok(SessionEvent::Silence {
+        track_id: id,
+        timestamp: ts,
+    }) = event_receiver.try_recv()
+    {
         assert_eq!(id, track_id);
         assert_eq!(ts, 0);
     } else {
@@ -40,7 +44,11 @@ async fn test_webrtc_vad() {
     vad.process_frame(&mut speech_frame).unwrap();
 
     // Should receive speech event
-    if let Ok(SessionEvent::StartSpeaking(id, ts)) = event_receiver.try_recv() {
+    if let Ok(SessionEvent::StartSpeaking {
+        track_id: id,
+        timestamp: ts,
+    }) = event_receiver.try_recv()
+    {
         assert_eq!(id, track_id);
         assert_eq!(ts, 1);
     } else {
@@ -65,7 +73,11 @@ async fn test_voice_activity_vad() {
     vad.process_frame(&mut silence_frame).unwrap();
 
     // Should receive silence event
-    if let Ok(SessionEvent::Silence(id, ts)) = event_receiver.try_recv() {
+    if let Ok(SessionEvent::Silence {
+        track_id: id,
+        timestamp: ts,
+    }) = event_receiver.try_recv()
+    {
         assert_eq!(id, track_id);
         assert_eq!(ts, 0);
     } else {
@@ -91,7 +103,10 @@ async fn test_voice_activity_vad() {
 
     // Check what event we got
     match event_receiver.try_recv() {
-        Ok(SessionEvent::StartSpeaking(id, ts)) => {
+        Ok(SessionEvent::StartSpeaking {
+            track_id: id,
+            timestamp: ts,
+        }) => {
             assert_eq!(id, track_id);
             assert_eq!(ts, 1);
         }

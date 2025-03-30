@@ -29,8 +29,8 @@ use webrtc::{
 use crate::{
     event::{EventSender, SessionEvent},
     handler::call::{
-        ActiveCall, AsrConfig, CallEvent, CallHandlerState, CallResponse, SynthesisConfig,
-        VadConfig, WsCommand,
+        ActiveCall, AsrConfig, CallEvent, CallHandlerState, CallResponse, Command, SynthesisConfig,
+        VadConfig,
     },
     media::stream::MediaStreamBuilder,
     useragent::{
@@ -304,7 +304,11 @@ async fn setup_sip_connection(
         let mut receiver = session_event_receiver;
         while let Ok(event) = receiver.recv().await {
             match event {
-                SessionEvent::TranscriptionFinal(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionFinal {
+                    track_id,
+                    timestamp,
+                    text,
+                } => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
@@ -312,7 +316,11 @@ async fn setup_sip_connection(
                         is_final: true,
                     });
                 }
-                SessionEvent::TranscriptionDelta(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionDelta {
+                    track_id,
+                    timestamp,
+                    text,
+                } => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
