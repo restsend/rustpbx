@@ -7,8 +7,7 @@ use axum::{
     Json, Router,
 };
 use rustpbx::media::{
-    codecs::CodecType,
-    stream::{MediaStream, MediaStreamBuilder, MediaStreamEvent},
+    stream::{MediaStream, MediaStreamBuilder},
     track::{
         file::FileTrack,
         webrtc::{WebrtcTrack, WebrtcTrackConfig},
@@ -22,12 +21,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
-use tracing::{debug, error, info, Level};
+use tracing::{error, info, Level};
 use uuid::Uuid;
 use webrtc::{
     api::{

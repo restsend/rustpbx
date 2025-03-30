@@ -1,7 +1,8 @@
 use crate::config::Config;
-use crate::handler::{call, ws};
+use crate::handler::call;
 use anyhow::Result;
 use axum::Router;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -72,11 +73,9 @@ fn create_router() -> Router {
 
     // Merge call and WebSocket handlers
     let call_state = call::CallHandlerState {
-        active_calls: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_calls: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let call_routes = call::router().with_state(call_state.clone());
-    let ws_routes = ws::router().with_state(call_state);
-
-    router.merge(call_routes).merge(ws_routes)
+    router.merge(call_routes)
 }

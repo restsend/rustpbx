@@ -1,18 +1,22 @@
-use crate::event::{EventSender, SessionEvent};
 use anyhow::Result;
 use async_openai::{
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, Role,
+        CreateChatCompletionRequestArgs,
     },
     Client,
 };
+use async_trait::async_trait;
 use dotenv::dotenv;
-use futures::StreamExt;
+use futures::stream;
+use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, sync::Arc, time::SystemTime};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod tests;
@@ -98,20 +102,20 @@ impl Message {
     }
 }
 
-// LLM client trait - to be implemented with actual LLM integration
-pub trait LlmClient: Send + Sync + std::fmt::Debug {
-    fn generate_response<'a>(
-        &'a self,
-        input: &'a str,
-        config: &'a LlmConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
+// Content variants from LLM
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmContent {
+    Delta(String),
+    Final(String),
+}
 
-    fn generate_stream<'a>(
-        &'a self,
-        input: &'a str,
-        config: &'a LlmConfig,
-        event_sender: EventSender,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
+// Simplified LLM client trait
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    async fn generate(
+        &self,
+        prompt: &str,
+    ) -> Result<Box<dyn Stream<Item = Result<LlmContent>> + Send + Unpin + '_>>;
 }
 
 // Builder for OpenAI Client
@@ -208,7 +212,7 @@ impl OpenAiClientBuilder {
             client,
             conversation: VecDeque::new(),
             max_conversation_turns: self.max_conversation_turns,
-            default_model: self.model.unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
+            config: LlmConfig::default(),
         })
     }
 }
@@ -218,7 +222,7 @@ pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
     conversation: VecDeque<Message>,
     max_conversation_turns: usize,
-    default_model: String,
+    config: LlmConfig,
 }
 
 impl OpenAiClient {
@@ -228,6 +232,11 @@ impl OpenAiClient {
 
     pub fn from_env() -> Result<Self> {
         OpenAiClientBuilder::from_env().build()
+    }
+
+    pub fn with_config(mut self, config: LlmConfig) -> Self {
+        self.config = config;
+        self
     }
 
     fn prepare_messages(
@@ -266,283 +275,129 @@ impl OpenAiClient {
         }
     }
 
-    // Method to get the model from config or default
-    fn get_model(&self, config: &LlmConfig) -> String {
-        // If config model is the default "gpt-3.5-turbo" and we have a different default_model,
-        // use the default_model from client which was set from environment in the builder
-        if config.model == "gpt-3.5-turbo" && self.default_model != "gpt-3.5-turbo" {
-            self.default_model.clone()
-        } else {
-            // Otherwise use the model specified in config (which might be from env)
-            config.model.clone()
-        }
-    }
-}
+    pub async fn generate_completion(
+        &self,
+        input: &str,
+    ) -> Result<Box<dyn Stream<Item = Result<LlmContent>> + Send + Unpin + '_>> {
+        let system_prompt = self.config.prompt.clone();
+        let temperature = self.config.temperature.unwrap_or(0.7);
+        let max_tokens = self.config.max_tokens;
+        let stream = self.config.stream.unwrap_or(true);
 
-impl LlmClient for OpenAiClient {
-    fn generate_response<'a>(
-        &'a self,
-        input: &'a str,
-        config: &'a LlmConfig,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
-        // Clone necessary values for use in the async block
-        let client_instance = self.client.clone();
+        // Clone conversation for use in async block
         let mut conversation = self.conversation.clone();
-        let max_turns = self.max_conversation_turns;
-        let model = self.get_model(config);
-        let system_prompt = config.prompt.clone();
-        let temperature = config.temperature.unwrap_or(0.7);
-        let max_tokens = config.max_tokens;
-        let input = input.to_string();
 
-        Box::pin(async move {
-            // Add the new user message to the conversation
-            conversation.push_back(Message::user(&input));
+        // Add the new user message to the conversation
+        conversation.push_back(Message::user(input));
 
-            // Ensure we don't exceed max_conversation_turns
-            while conversation.len() > max_turns {
-                conversation.pop_front();
-            }
+        // Ensure we don't exceed max_conversation_turns
+        while conversation.len() > self.max_conversation_turns {
+            conversation.pop_front();
+        }
 
-            // Convert to OpenAI format
-            let mut messages = Vec::new();
+        // Convert to OpenAI format
+        let mut messages = Vec::new();
 
-            // Add system prompt
-            messages.push(
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(&*system_prompt)
-                    .build()?
-                    .into(),
-            );
+        // Add system prompt
+        messages.push(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(&*system_prompt)
+                .build()?
+                .into(),
+        );
 
-            // Add conversation history
-            for message in &conversation {
-                messages.push(message.to_openai_message()?);
-            }
+        // Add conversation history
+        for message in &conversation {
+            messages.push(message.to_openai_message()?);
+        }
 
-            // Create the request
-            let request = CreateChatCompletionRequestArgs::default()
-                .max_tokens(if let Some(max_tokens) = max_tokens {
-                    max_tokens as u32
-                } else {
-                    512u32
+        // Create the request
+        let request = CreateChatCompletionRequestArgs::default()
+            .max_tokens(if let Some(max_tokens) = max_tokens {
+                max_tokens as u32
+            } else {
+                512u32
+            })
+            .model(&self.config.model)
+            .messages(messages)
+            .temperature(temperature)
+            .stream(stream)
+            .build()?;
+
+        // Record request start time for TTFB measurement
+        let _request_start_time = std::time::Instant::now();
+
+        let client = self.client.clone();
+
+        if stream {
+            // Send the streaming request and return as a stream
+            let stream = client.chat().create_stream(request).await?;
+            let full_content = Arc::new(std::sync::Mutex::new(String::new()));
+            let full_content_clone = full_content.clone();
+            let content_stream = stream
+                .map(move |result| {
+                    result
+                        .map_err(|e| anyhow::anyhow!("Stream error: {}", e))
+                        .and_then(|response| {
+                            let content = response
+                                .choices
+                                .get(0)
+                                .and_then(|c| c.delta.content.as_ref())
+                                .map(|s| s.clone())
+                                .unwrap_or_default();
+
+                            if !content.is_empty() {
+                                full_content_clone.lock().unwrap().push_str(&content);
+                                Ok(LlmContent::Delta(content))
+                            } else {
+                                // Skip empty content
+                                Err(anyhow::anyhow!("Empty content"))
+                            }
+                        })
                 })
-                .model(&model)
-                .messages(messages)
-                .temperature(temperature)
-                .build()?;
+                .filter_map(|result| async move {
+                    match result {
+                        Ok(content) => Some(Ok(content)),
+                        Err(e) => {
+                            if e.to_string() == "Empty content" {
+                                None // Filter out empty content errors
+                            } else {
+                                Some(Err(e))
+                            }
+                        }
+                    }
+                });
 
-            // Record request start time for TTFB measurement
-            let request_start_time = std::time::Instant::now();
+            // Add the final message at the end
+            let final_stream = content_stream.chain(stream::once(async move {
+                Ok(LlmContent::Final(full_content.lock().unwrap().clone()))
+            }));
 
-            // Send the request and get the response
-            let response = client_instance.chat().create(request).await?;
-
-            // Calculate and log TTFB
-            let ttfb = request_start_time.elapsed().as_millis() as u64;
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as u32;
-
-            // Store TTFB metrics in thread_local or other global storage
-            // so LlmProcessor can access it when needed
-            LATEST_LLM_METRICS.with(|m| {
-                *m.borrow_mut() = Some((
-                    timestamp,
-                    serde_json::json!({
-                        "service": "llm",
-                        "model": model,
-                        "ttfb_ms": ttfb,
-                    }),
-                ));
-            });
-
-            let response_text = response.choices[0]
+            Ok(Box::new(Box::pin(final_stream)))
+        } else {
+            // Non-streaming mode - just return the final result
+            let response = client.chat().create(request).await?;
+            let content = response.choices[0]
                 .message
                 .content
                 .clone()
                 .unwrap_or_default();
 
-            // Add the assistant response to the conversation
-            conversation.push_back(Message::assistant(&response_text));
-
-            Ok(response_text)
-        })
-    }
-
-    fn generate_stream<'a>(
-        &'a self,
-        input: &'a str,
-        config: &'a LlmConfig,
-        event_sender: EventSender,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
-        // Clone necessary values for use in the async block
-        let client_instance = self.client.clone();
-        let mut conversation = self.conversation.clone();
-        let max_turns = self.max_conversation_turns;
-        let model = self.get_model(config);
-        let system_prompt = config.prompt.clone();
-        let temperature = config.temperature.unwrap_or(0.7);
-        let max_tokens = config.max_tokens;
-        let input = input.to_string();
-
-        Box::pin(async move {
-            // Add the new user message to the conversation
-            conversation.push_back(Message::user(&input));
-
-            // Ensure we don't exceed max_conversation_turns
-            while conversation.len() > max_turns {
-                conversation.pop_front();
-            }
-
-            // Convert to OpenAI format
-            let mut messages = Vec::new();
-
-            // Add system prompt
-            messages.push(
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(&*system_prompt)
-                    .build()?
-                    .into(),
-            );
-
-            // Add conversation history
-            for message in &conversation {
-                messages.push(message.to_openai_message()?);
-            }
-
-            // Create the request
-            let request = CreateChatCompletionRequestArgs::default()
-                .max_tokens(if let Some(max_tokens) = max_tokens {
-                    max_tokens as u32
-                } else {
-                    512u32
-                })
-                .model(&model)
-                .messages(messages)
-                .temperature(temperature)
-                .stream(true)
-                .build()?;
-
-            // Record request start time for TTFB measurement
-            let request_start_time = std::time::Instant::now();
-            let mut ttfb_recorded = false;
-
-            // Send the request and get the streaming response
-            let mut stream = client_instance.chat().create_stream(request).await?;
-
-            let mut full_text = String::new();
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as u32;
-
-            // Process the stream
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(response) => {
-                        // Record TTFB when we receive the first chunk
-                        if !ttfb_recorded {
-                            let ttfb = request_start_time.elapsed().as_millis() as u64;
-                            ttfb_recorded = true;
-                            // Send metrics event with TTFB information
-                            let _ = event_sender.send(SessionEvent::Metrics(
-                                timestamp,
-                                serde_json::json!({
-                                    "service": "llm",
-                                    "model": model,
-                                    "ttfb_ms": ttfb,
-                                }),
-                            ));
-                        }
-
-                        if let Some(content) = response
-                            .choices
-                            .get(0)
-                            .and_then(|c| c.delta.content.as_ref())
-                        {
-                            full_text.push_str(content);
-
-                            // Send the event
-                            let _ =
-                                event_sender.send(SessionEvent::LLM(timestamp, full_text.clone()));
-                        }
-                    }
-                    Err(err) => {
-                        return Err(anyhow::anyhow!("Stream error: {}", err));
-                    }
-                }
-            }
-
-            // Add the assistant response to the conversation
-            conversation.push_back(Message::assistant(&full_text));
-
-            Ok(full_text)
-        })
-    }
-}
-
-// LLM Processor to integrate with media stream processing
-pub struct LlmProcessor {
-    config: LlmConfig,
-    client: Arc<dyn LlmClient>,
-    event_sender: EventSender,
-}
-
-impl LlmProcessor {
-    pub fn new(config: LlmConfig, client: Arc<dyn LlmClient>, event_sender: EventSender) -> Self {
-        Self {
-            config,
-            client,
-            event_sender,
+            // Return a stream with just the final content
+            Ok(Box::new(Box::pin(stream::once(async move {
+                Ok(LlmContent::Final(content))
+            }))))
         }
     }
-
-    // Process text input and generate a response
-    pub async fn process(&self, input: &str) -> Result<String> {
-        // Generate response using the LLM client
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-
-        // Send initial processing event
-        let _ = self
-            .event_sender
-            .send(SessionEvent::LLM(timestamp, "Processing...".to_string()));
-
-        let response = if self.config.stream.unwrap_or(true) {
-            // Generate streaming response
-            self.client
-                .generate_stream(input, &self.config, self.event_sender.clone())
-                .await?
-        } else {
-            // Generate non-streaming response
-            let response = self.client.generate_response(input, &self.config).await?;
-
-            // Check if there are TTFB metrics to send
-            LATEST_LLM_METRICS.with(|metrics| {
-                if let Some((ts, metrics_data)) = metrics.borrow_mut().take() {
-                    let _ = self
-                        .event_sender
-                        .send(SessionEvent::Metrics(ts, metrics_data));
-                }
-            });
-
-            // Send final response event
-            let _ = self
-                .event_sender
-                .send(SessionEvent::LLM(timestamp, response.clone()));
-
-            response
-        };
-
-        Ok(response)
-    }
 }
 
-// Define thread local storage for LLM metrics
-thread_local! {
-    static LATEST_LLM_METRICS: std::cell::RefCell<Option<(u32, serde_json::Value)>> = std::cell::RefCell::new(None);
+#[async_trait]
+impl LlmClient for OpenAiClient {
+    async fn generate(
+        &self,
+        prompt: &str,
+    ) -> Result<Box<dyn Stream<Item = Result<LlmContent>> + Send + Unpin + '_>> {
+        let response = self.generate_completion(prompt).await?;
+        Ok(response)
+    }
 }

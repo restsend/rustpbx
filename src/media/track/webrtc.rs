@@ -1,13 +1,19 @@
-use crate::media::{
-    jitter::JitterBuffer,
-    processor::{AudioFrame, Samples, Processor},
-    stream::EventSender,
-    track::{Track, TrackConfig, TrackId, TrackPacketSender},
+use crate::{
+    event::{EventSender, SessionEvent},
+    media::{
+        jitter::JitterBuffer,
+        processor::Processor,
+        track::{Track, TrackConfig, TrackId, TrackPacketSender},
+    },
+    AudioFrame,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
@@ -199,10 +205,8 @@ impl Track for WebrtcTrack {
             *receiver_guard = Some(receiver);
         }
 
-        // Signal that the track is ready
-        let _ = event_sender.send(crate::media::stream::MediaStreamEvent::TrackStart(
-            self.id.clone(),
-        ));
+        let timestamp = Instant::now().elapsed().as_millis() as u32;
+        let _ = event_sender.send(SessionEvent::TrackStart(self.id.clone(), timestamp));
 
         // Start jitter buffer processing
         self.start_jitter_processing(token.clone()).await?;
@@ -215,8 +219,8 @@ impl Track for WebrtcTrack {
         // Start a task to watch for cancellation
         tokio::spawn(async move {
             token_clone.cancelled().await;
-            let _ = event_sender_clone
-                .send(crate::media::stream::MediaStreamEvent::TrackStop(track_id));
+            let timestamp = Instant::now().elapsed().as_millis() as u32;
+            let _ = event_sender_clone.send(SessionEvent::TrackEnd(track_id, timestamp));
         });
 
         Ok(())

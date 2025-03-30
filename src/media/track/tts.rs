@@ -1,13 +1,16 @@
-use crate::media::{
-    cache,
-    processor::{AudioFrame, Processor, Samples},
-    stream::EventSender,
-    track::{Track, TrackConfig, TrackId, TrackPacketSender},
+use crate::{
+    event::{EventSender, SessionEvent},
+    media::{
+        cache,
+        processor::Processor,
+        track::{Track, TrackConfig, TrackId, TrackPacketSender},
+    },
+    AudioFrame, Samples,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use std::io::Cursor;
+use std::{io::Cursor, time::Instant};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -238,12 +241,9 @@ impl Track for TtsTrack {
                                     Ok(data) => audio_data = data,
                                     Err(e) => {
                                         warn!("Failed to generate TTS audio: {}", e);
+                                        let timestamp = Instant::now().elapsed().as_millis() as u32;
                                         event_sender
-                                            .send(
-                                                crate::media::stream::MediaStreamEvent::TrackStop(
-                                                    id,
-                                                ),
-                                            )
+                                            .send(SessionEvent::TrackEnd(id, timestamp))
                                             .ok();
                                         return;
                                     }
@@ -280,8 +280,9 @@ impl Track for TtsTrack {
                             }
                             Err(e) => {
                                 warn!("Failed to generate TTS audio: {}", e);
+                                let timestamp = Instant::now().elapsed().as_millis() as u32;
                                 event_sender
-                                    .send(crate::media::stream::MediaStreamEvent::TrackStop(id))
+                                    .send(SessionEvent::TrackEnd(id, timestamp))
                                     .ok();
                                 return;
                             }
@@ -304,17 +305,17 @@ impl Track for TtsTrack {
                     }
 
                     // Signal track stop
+                    let timestamp = Instant::now().elapsed().as_millis() as u32;
                     event_sender
-                        .send(crate::media::stream::MediaStreamEvent::TrackStop(id))
+                        .send(SessionEvent::TrackEnd(id, timestamp))
                         .ok();
                 });
             }
             None => {
                 warn!("No text provided for TtsTrack");
+                let timestamp = Instant::now().elapsed().as_millis() as u32;
                 event_sender
-                    .send(crate::media::stream::MediaStreamEvent::TrackStop(
-                        self.id.clone(),
-                    ))
+                    .send(SessionEvent::TrackEnd(self.id.clone(), timestamp))
                     .ok();
             }
         }
@@ -347,7 +348,6 @@ impl Clone for TtsTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::stream::MediaStreamEvent;
     use tempfile::tempdir;
     use tokio::sync::{broadcast, mpsc};
 
@@ -390,7 +390,7 @@ mod tests {
         // Wait for stop event
         let mut received_stop = false;
         while let Ok(event) = event_rx.recv().await {
-            if let MediaStreamEvent::TrackStop(id) = event {
+            if let SessionEvent::TrackEnd(id, _) = event {
                 if id == track_id {
                     received_stop = true;
                     break;
@@ -439,7 +439,7 @@ mod tests {
         // Wait for stop event
         let mut received_stop2 = false;
         while let Ok(event) = event_rx2.recv().await {
-            if let MediaStreamEvent::TrackStop(id) = event {
+            if let SessionEvent::TrackEnd(id, _) = event {
                 if id == track_id2 {
                     received_stop2 = true;
                     break;

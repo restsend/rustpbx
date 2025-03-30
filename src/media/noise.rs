@@ -1,9 +1,6 @@
+use crate::{media::processor::Processor, AudioFrame, Samples};
 use anyhow::Result;
 use nnnoiseless::DenoiseState;
-
-use crate::media::processor::{AudioFrame, Processor};
-
-use super::processor::Samples;
 
 pub struct NoiseReducer {
     // We use the default built-in model for the denoiser

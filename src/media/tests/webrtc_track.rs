@@ -1,15 +1,16 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::media::codecs::pcmu;
 use crate::media::codecs::Encoder;
-use crate::media::processor::{AudioFrame, Samples, Processor};
+use crate::media::processor::Processor;
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::media::track::Track;
+use crate::{AudioFrame, Samples};
 
 // Simple test processor that counts frames
 struct CountingProcessor {

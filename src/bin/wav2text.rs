@@ -1,12 +1,15 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use hound::WavReader;
-use rustpbx::transcription::{TencentCloudAsrClient, TranscriptionClient, TranscriptionConfig};
+use rustpbx::{
+    media::track::file::read_wav_file,
+    transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig},
+};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{debug, error, info};
 
 /// Convert WAV audio files to text using speech recognition
 #[derive(Parser, Debug)]
@@ -87,128 +90,31 @@ async fn main() -> Result<()> {
         ));
     }
 
-    info!("Reading WAV file: {}", args.input_file.display());
-    let file = File::open(&args.input_file)
-        .with_context(|| format!("Failed to open input file: {}", args.input_file.display()))?;
-    let reader = BufReader::new(file);
-
-    let mut wav_reader = WavReader::new(reader)
-        .with_context(|| format!("Failed to parse WAV file: {}", args.input_file.display()))?;
-    let spec = wav_reader.spec();
-
-    info!(
-        "WAV file info: {} channels, {} Hz, {} bits per sample",
-        spec.channels, spec.sample_rate, spec.bits_per_sample
+    let (all_samples, sample_rate) = read_wav_file(args.input_file.to_str().unwrap())?;
+    debug!(
+        "Read {} samples, {}Hz from WAV file",
+        all_samples.len(),
+        sample_rate
     );
 
-    // Read all samples
-    let mut all_samples = Vec::new();
-
-    match spec.sample_format {
-        hound::SampleFormat::Int => match spec.bits_per_sample {
-            16 => {
-                for sample in wav_reader.samples::<i16>() {
-                    all_samples.push(sample.unwrap_or(0));
-                }
-            }
-            8 => {
-                for sample in wav_reader.samples::<i8>() {
-                    all_samples.push(sample.unwrap_or(0) as i16);
-                }
-            }
-            24 | 32 => {
-                for sample in wav_reader.samples::<i32>() {
-                    all_samples.push((sample.unwrap_or(0) >> 16) as i16);
-                }
-            }
-            _ => {
-                return Err(anyhow!(
-                    "Unsupported bits per sample: {}",
-                    spec.bits_per_sample
-                ));
-            }
-        },
-        hound::SampleFormat::Float => {
-            for sample in wav_reader.samples::<f32>() {
-                all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
-            }
-        }
-    }
-
-    debug!("Read {} raw samples from WAV file", all_samples.len());
-
-    // If stereo, convert to mono by averaging channels
-    if spec.channels == 2 {
-        info!("Converting stereo to mono");
-        let mono_samples: Vec<i16> = all_samples
-            .chunks(2)
-            .map(|chunk| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
-            .collect();
-        all_samples = mono_samples;
-        debug!("Converted to {} mono samples", all_samples.len());
-    }
-
-    // Resample to 16kHz if needed
-    if spec.sample_rate != 16000 {
-        info!("Resampling from {}Hz to 16000Hz", spec.sample_rate);
-        let ratio = 16000.0 / spec.sample_rate as f64;
-        let new_len = (all_samples.len() as f64 * ratio) as usize;
-        let mut resampled = vec![0i16; new_len];
-
-        for i in 0..new_len {
-            let src_idx = (i as f64 / ratio) as usize;
-            if src_idx < all_samples.len() {
-                resampled[i] = all_samples[src_idx];
-            }
-        }
-
-        all_samples = resampled;
-        debug!("Resampled to {} samples at 16kHz", all_samples.len());
-    }
-
-    info!("Processing {} audio samples", all_samples.len());
-
     // Create ASR client
-    let transcription_client = Arc::new(TencentCloudAsrClient::new());
-
-    // Create transcription config
-    let transcription_config = TranscriptionConfig {
-        enabled: true,
-        model: None,
+    let transcription_client = TencentCloudAsrClientBuilder::new(TranscriptionConfig {
         language: Some(args.language),
         appid: Some(tencent_appid),
         secret_id: Some(tencent_secret_id),
         secret_key: Some(tencent_secret_key),
-        engine_type: Some(args.engine),
-    };
-
+        engine_type: args.engine,
+        ..Default::default()
+    })
+    .build()
+    .await?;
     // Send the samples to the transcription client
     info!("Sending samples to transcription client for processing...");
-    match transcription_client
-        .transcribe(&all_samples, 16000, &transcription_config)
-        .await
-    {
-        Ok(Some(text)) => {
-            if let Some(output_path) = args.output {
-                // Write to output file
-                std::fs::write(&output_path, &text).with_context(|| {
-                    format!("Failed to write to output file: {}", output_path.display())
-                })?;
-                info!("Transcription saved to: {}", output_path.display());
-            } else {
-                // Print to console
-                println!("{}", text);
-            }
-            info!("Transcription processing completed successfully");
-        }
-        Ok(None) => {
-            info!("No transcription result returned");
-        }
-        Err(e) => {
-            error!("Transcription error: {}", e);
-            return Err(anyhow!("Transcription processing failed: {}", e));
-        }
-    }
+    transcription_client.send_audio(&all_samples).await?;
+
+    // Get the transcription result
+    let result = transcription_client.next().await.expect("No result");
+    println!("Transcription result: {}", result.text);
 
     Ok(())
 }

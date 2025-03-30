@@ -1,6 +1,6 @@
-use crate::media::{
-    noise::NoiseReducer,
-    processor::{AudioFrame, Samples, Processor},
+use crate::{
+    media::{noise::NoiseReducer, processor::Processor},
+    AudioFrame, Samples,
 };
 
 #[test]

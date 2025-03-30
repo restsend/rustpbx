@@ -1,7 +1,4 @@
-use crate::media::{
-    jitter::JitterBuffer,
-    processor::{AudioFrame, Samples},
-};
+use crate::{media::jitter::JitterBuffer, AudioFrame, Samples};
 
 #[test]
 fn test_jitter_buffer_in_order_packets() {

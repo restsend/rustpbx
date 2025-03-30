@@ -1,3 +1,14 @@
+use crate::{
+    event::SessionEvent,
+    handler::call::{
+        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse,
+        SynthesisConfig, VadConfig, WsCommand,
+    },
+    media::{
+        stream::MediaStreamBuilder,
+        track::{tts::TtsTrack, Track},
+    },
+};
 use anyhow::Result;
 use axum::{
     extract::{
@@ -19,19 +30,7 @@ use webrtc::{
     interceptor::registry::Registry,
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
-        sdp::session_description::RTCSessionDescription, RTCPeerConnection,
-    },
-};
-
-use crate::{
-    event::{EventSender, SessionEvent},
-    handler::call::{
-        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse,
-        SynthesisConfig, VadConfig, WsCommand,
-    },
-    media::{
-        stream::{MediaStream, MediaStreamBuilder},
-        track::{tts::TtsTrack, Track},
+        sdp::session_description::RTCSessionDescription,
     },
 };
 
@@ -210,16 +209,6 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
                     };
 
                     let _ = call.events.send(tts_event);
-
-                    // Use pipeline manager if available
-                    if let Some(pipeline_manager) = &call.pipeline_manager {
-                        match pipeline_manager
-                            .send_state(crate::media::pipeline::StreamState::LlmResponse(text))
-                        {
-                            Ok(_) => info!("TTS text sent to pipeline"),
-                            Err(e) => error!("Failed to send TTS text to pipeline: {}", e),
-                        }
-                    }
                 }
                 WsCommand::PlayWav { url } => {
                     info!("Received play WAV command: {}", url);
@@ -239,13 +228,6 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
 
                     // Clean up resources
                     tokio::spawn(async move {
-                        // Stop the pipeline manager if exists
-                        if let Some(pipeline_manager) = &call.pipeline_manager {
-                            if let Err(e) = pipeline_manager.stop().await {
-                                error!("Error stopping pipeline manager: {}", e);
-                            }
-                        }
-
                         call.media_stream.stop();
                         let _ = call.peer_connection.close().await;
                     });
@@ -263,139 +245,6 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
                     };
 
                     let _ = call.events.send(refer_event);
-                }
-                WsCommand::PipelineStart {
-                    pipeline_type,
-                    config,
-                } => {
-                    info!("Received pipeline start command: {}", pipeline_type);
-
-                    if let Some(pipeline_manager) = &call.pipeline_manager {
-                        match pipeline_type.as_str() {
-                            "transcription" => {
-                                let pipeline = Box::new(crate::media::pipeline::transcription::TranscriptionPipeline::from_config(
-                                    format!("transcription-{}", uuid::Uuid::new_v4()),
-                                    config,
-                                ));
-
-                                if let Err(e) = pipeline_manager.add_pipeline(pipeline).await {
-                                    error!("Failed to add transcription pipeline: {}", e);
-
-                                    // Send error event
-                                    let _ = call.events.send(CallEvent::ErrorEvent {
-                                        timestamp: chrono::Utc::now().timestamp() as u32,
-                                        error: format!(
-                                            "Failed to start transcription pipeline: {}",
-                                            e
-                                        ),
-                                    });
-                                }
-                            }
-                            "llm" => {
-                                let pipeline = Box::new(
-                                    crate::media::pipeline::llm::LlmPipeline::from_config(
-                                        format!("llm-{}", uuid::Uuid::new_v4()),
-                                        config,
-                                    ),
-                                );
-
-                                if let Err(e) = pipeline_manager.add_pipeline(pipeline).await {
-                                    error!("Failed to add LLM pipeline: {}", e);
-
-                                    // Send error event
-                                    let _ = call.events.send(CallEvent::ErrorEvent {
-                                        timestamp: chrono::Utc::now().timestamp() as u32,
-                                        error: format!("Failed to start LLM pipeline: {}", e),
-                                    });
-                                }
-                            }
-                            "synthesis" => {
-                                let pipeline = Box::new(crate::media::pipeline::synthesis::SynthesisPipeline::from_config(
-                                    format!("synthesis-{}", uuid::Uuid::new_v4()),
-                                    config,
-                                ));
-
-                                if let Err(e) = pipeline_manager.add_pipeline(pipeline).await {
-                                    error!("Failed to add synthesis pipeline: {}", e);
-
-                                    // Send error event
-                                    let _ = call.events.send(CallEvent::ErrorEvent {
-                                        timestamp: chrono::Utc::now().timestamp() as u32,
-                                        error: format!("Failed to start synthesis pipeline: {}", e),
-                                    });
-                                }
-                            }
-                            _ => {
-                                error!("Unknown pipeline type: {}", pipeline_type);
-
-                                // Send error event
-                                let _ = call.events.send(CallEvent::ErrorEvent {
-                                    timestamp: chrono::Utc::now().timestamp() as u32,
-                                    error: format!("Unknown pipeline type: {}", pipeline_type),
-                                });
-                            }
-                        }
-                    } else {
-                        error!("No pipeline manager available for session {}", session_id);
-
-                        // Send error event
-                        let _ = call.events.send(CallEvent::ErrorEvent {
-                            timestamp: chrono::Utc::now().timestamp() as u32,
-                            error: "No pipeline manager available".to_string(),
-                        });
-                    }
-                }
-                WsCommand::PipelineStop { pipeline_id } => {
-                    info!("Received pipeline stop command: {}", pipeline_id);
-
-                    if let Some(pipeline_manager) = &call.pipeline_manager {
-                        if let Err(e) = pipeline_manager.remove_pipeline(&pipeline_id).await {
-                            error!("Failed to remove pipeline {}: {}", pipeline_id, e);
-
-                            // Send error event
-                            let _ = call.events.send(CallEvent::ErrorEvent {
-                                timestamp: chrono::Utc::now().timestamp() as u32,
-                                error: format!("Failed to stop pipeline {}: {}", pipeline_id, e),
-                            });
-                        }
-                    } else {
-                        error!("No pipeline manager available for session {}", session_id);
-
-                        // Send error event
-                        let _ = call.events.send(CallEvent::ErrorEvent {
-                            timestamp: chrono::Utc::now().timestamp() as u32,
-                            error: "No pipeline manager available".to_string(),
-                        });
-                    }
-                }
-                WsCommand::SendText { text } => {
-                    info!("Received send text command: {}", text);
-
-                    if let Some(pipeline_manager) = &call.pipeline_manager {
-                        // Send text to LLM pipeline
-                        if let Err(e) = pipeline_manager.send_state(
-                            crate::media::pipeline::StreamState::Transcription(
-                                "user".to_string(),
-                                text,
-                            ),
-                        ) {
-                            error!("Failed to send text to pipeline: {}", e);
-
-                            // Send error event
-                            let _ = call.events.send(CallEvent::ErrorEvent {
-                                timestamp: chrono::Utc::now().timestamp() as u32,
-                                error: format!("Failed to send text to pipeline: {}", e),
-                            });
-                        }
-                    } else {
-                        error!("No pipeline manager available for session {}", session_id);
-
-                        // Send error event
-                        let _ = call.events.send(CallEvent::ErrorEvent {
-                            timestamp: chrono::Utc::now().timestamp() as u32,
-                            error: "No pipeline manager available".to_string(),
-                        });
-                    }
                 }
                 WsCommand::Mute { track_id } => {
                     let track = track_id.unwrap_or_else(|| "main".to_string());
@@ -519,7 +368,7 @@ pub async fn setup_webrtc_connection(
         let mut receiver = session_event_receiver;
         while let Ok(event) = receiver.recv().await {
             match event {
-                SessionEvent::Transcription(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionFinal(track_id, timestamp, text) => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
@@ -527,23 +376,13 @@ pub async fn setup_webrtc_connection(
                         is_final: true,
                     });
                 }
-                SessionEvent::TranscriptionSegment(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionDelta(track_id, timestamp, text) => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
                         text,
                         is_final: false,
                     });
-                }
-                SessionEvent::LLM(timestamp, text) => {
-                    let _ = event_sender_clone.send(CallEvent::LlmEvent {
-                        timestamp,
-                        text,
-                        is_final: true,
-                    });
-                }
-                SessionEvent::TTS(timestamp, text) => {
-                    let _ = event_sender_clone.send(CallEvent::TtsEvent { timestamp, text });
                 }
                 SessionEvent::Error(timestamp, error) => {
                     let _ = event_sender_clone.send(CallEvent::ErrorEvent { timestamp, error });
@@ -555,20 +394,12 @@ pub async fn setup_webrtc_connection(
         }
     });
 
-    // Create pipeline manager
-    let pipeline_manager = Arc::new(crate::media::pipeline::PipelineManager::new(
-        format!("call-{}", session_id),
-        session_event_sender,
-        cancel_token.clone(),
-    ));
-
     // Store active call
     let active_call = ActiveCall {
         session_id: session_id.clone(),
         media_stream: media_stream.clone(),
         peer_connection: peer_connection.clone(),
         events: event_sender.clone(),
-        pipeline_manager: Some(pipeline_manager.clone()),
     };
 
     state
@@ -610,183 +441,4 @@ pub async fn setup_webrtc_connection(
 
     // Return the session ID, SDP, and event receiver
     Ok((session_id, answer.sdp, event_receiver))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::handler::call::{CallEvent, WsCommand};
-    use crate::media::processor::{AudioFrame, Processor, Samples};
-    use crate::media::stream::MediaStreamBuilder;
-    use tokio::sync::broadcast;
-    use webrtc::api::{media_engine::MediaEngine, APIBuilder};
-    use webrtc::interceptor::registry::Registry;
-    use webrtc::peer_connection::configuration::RTCConfiguration;
-
-    // Test helper to create a test call
-    async fn create_test_call() -> (CallHandlerState, String, broadcast::Sender<CallEvent>) {
-        let state = CallHandlerState {
-            active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        };
-
-        let session_id = Uuid::new_v4().to_string();
-        let (event_sender, _) = broadcast::channel(10);
-
-        // Create a real RTCPeerConnection
-        let config = RTCConfiguration {
-            ice_servers: vec![],
-            ..Default::default()
-        };
-
-        let api = APIBuilder::new()
-            .with_media_engine(MediaEngine::default())
-            .with_interceptor_registry(Registry::new())
-            .build();
-
-        let peer_connection = Arc::new(api.new_peer_connection(config).await.unwrap());
-
-        let media_stream = Arc::new(
-            MediaStreamBuilder::new()
-                .id(format!("test-{}", session_id))
-                .build(),
-        );
-
-        let active_call = ActiveCall {
-            session_id: session_id.clone(),
-            media_stream,
-            peer_connection,
-            events: event_sender.clone(),
-            pipeline_manager: None,
-        };
-
-        state
-            .active_calls
-            .lock()
-            .await
-            .insert(session_id.clone(), active_call);
-
-        (state, session_id, event_sender)
-    }
-
-    // Test handling web socket command
-    #[tokio::test]
-    async fn test_handle_ws_command() {
-        let (state, session_id, event_sender) = create_test_call().await;
-
-        // Test PlayTts command
-        let cmd = WsCommand::PlayTts {
-            text: "Test TTS".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-
-        // Create a receiver to check events
-        let mut receiver = event_sender.subscribe();
-
-        // Handle the command
-        handle_ws_command(&state, &session_id, json).await;
-
-        // Check if TTS event was sent
-        if let Ok(event) = receiver.try_recv() {
-            match event {
-                CallEvent::TtsEvent { text, .. } => {
-                    assert_eq!(text, "Test TTS");
-                }
-                _ => panic!("Expected TTS event"),
-            }
-        } else {
-            panic!("No event received");
-        }
-    }
-
-    // Test pipeline control
-    #[tokio::test]
-    async fn test_pipeline_control() {
-        let state = CallHandlerState {
-            active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        };
-
-        let session_id = Uuid::new_v4().to_string();
-        let (event_sender, mut event_receiver) = broadcast::channel(10);
-
-        // Create a session event sender for pipeline manager
-        let (session_event_sender, _) = broadcast::channel::<SessionEvent>(10);
-
-        // Create a media engine and API
-        let me = MediaEngine::default();
-        let api = APIBuilder::new()
-            .with_media_engine(me)
-            .with_interceptor_registry(Registry::new())
-            .build();
-
-        // Create a peer connection
-        let peer_connection = Arc::new(
-            api.new_peer_connection(RTCConfiguration::default())
-                .await
-                .unwrap(),
-        );
-
-        // Create a media stream
-        let media_stream = Arc::new(
-            MediaStreamBuilder::new()
-                .id(format!("test-{}", session_id))
-                .build(),
-        );
-
-        // Create a cancellation token
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-
-        // Create a pipeline manager
-        let pipeline_manager = Arc::new(crate::media::pipeline::PipelineManager::new(
-            format!("test-{}", session_id),
-            session_event_sender,
-            cancel_token,
-        ));
-
-        // Create an active call
-        let active_call = ActiveCall {
-            session_id: session_id.clone(),
-            media_stream,
-            peer_connection,
-            events: event_sender.clone(),
-            pipeline_manager: Some(pipeline_manager),
-        };
-
-        // Store the active call
-        state
-            .active_calls
-            .lock()
-            .await
-            .insert(session_id.clone(), active_call);
-
-        // Create a PipelineStart command
-        let cmd = WsCommand::PipelineStart {
-            pipeline_type: "transcription".to_string(),
-            config: Some(serde_json::json!({ "model": "whisper" })),
-        };
-
-        // Convert command to JSON
-        let json = serde_json::to_string(&cmd).unwrap();
-
-        // Handle the command
-        handle_ws_command(&state, &session_id, json).await;
-
-        // Add a short delay to allow for async processing
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // Check if we get events back after starting the pipeline
-        let timeout = tokio::time::Duration::from_millis(100);
-        let _result = tokio::time::timeout(timeout, event_receiver.recv()).await;
-
-        // Clean up
-        let call = state
-            .active_calls
-            .lock()
-            .await
-            .get(&session_id)
-            .cloned()
-            .unwrap();
-        if let Some(manager) = &call.pipeline_manager {
-            manager.stop().await.unwrap();
-        }
-    }
 }

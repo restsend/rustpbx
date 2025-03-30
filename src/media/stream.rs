@@ -1,6 +1,15 @@
+use crate::event::{EventReceiver, EventSender, SessionEvent};
+use crate::media::{
+    dtmf::DTMFDetector,
+    processor::Processor,
+    recorder::{Recorder, RecorderConfig},
+    track::{Track, TrackPacketReceiver, TrackPacketSender},
+};
+use crate::{AudioFrame, Samples, TrackId};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::{
     select,
     sync::{broadcast, mpsc, Mutex},
@@ -8,76 +17,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 use uuid;
-
-use crate::event;
-use crate::media::{
-    dtmf::DTMFDetector,
-    pipeline::PipelineManager,
-    processor::{AudioFrame, Processor},
-    recorder::{Recorder, RecorderConfig},
-    track::{Track, TrackId, TrackPacketReceiver, TrackPacketSender},
-};
-
-use super::processor::Samples;
-
-pub type EventSender = broadcast::Sender<MediaStreamEvent>;
-pub type EventReceiver = broadcast::Receiver<MediaStreamEvent>;
-
-#[derive(Debug, Clone)]
-pub enum MediaStreamEvent {
-    DTMF(TrackId, u32, String),
-    StartSpeaking(TrackId, u32),
-    Silence(TrackId, u32),
-    Transcription(TrackId, u32, String),
-    TranscriptionSegment(TrackId, u32, String),
-    TrackStart(TrackId),
-    TrackStop(TrackId),
-}
-
-// Convert a MediaStream EventSender to a SessionEvent EventSender
-fn create_session_event_sender(media_sender: &EventSender) -> event::EventSender {
-    // Create a new event::EventSender that will forward SessionEvents from the MediaStreamEvents
-    let (session_sender, _) = broadcast::channel(32);
-
-    // Create a subscription to the media events
-    let mut media_receiver = media_sender.subscribe();
-
-    // Clone the sender for the spawned task
-    let session_sender_clone = session_sender.clone();
-
-    // Spawn a task to forward events
-    tokio::spawn(async move {
-        while let Ok(event) = media_receiver.recv().await {
-            match event {
-                MediaStreamEvent::DTMF(track_id, timestamp, digit) => {
-                    let _ = session_sender_clone
-                        .send(event::SessionEvent::DTMF(track_id, timestamp, digit));
-                }
-                MediaStreamEvent::Transcription(track_id, timestamp, text) => {
-                    let _ = session_sender_clone.send(event::SessionEvent::Transcription(
-                        track_id, timestamp, text,
-                    ));
-                }
-                MediaStreamEvent::TranscriptionSegment(track_id, timestamp, text) => {
-                    let _ = session_sender_clone.send(event::SessionEvent::TranscriptionSegment(
-                        track_id, timestamp, text,
-                    ));
-                }
-                MediaStreamEvent::TrackStart(track_id) => {
-                    let _ = session_sender_clone.send(event::SessionEvent::TrackStart(track_id));
-                }
-                MediaStreamEvent::TrackStop(track_id) => {
-                    let _ = session_sender_clone.send(event::SessionEvent::TrackEnd(track_id));
-                }
-                _ => {
-                    // Some events don't map directly
-                }
-            }
-        }
-    });
-
-    session_sender
-}
 
 pub struct MediaStream {
     id: String,
@@ -88,7 +27,6 @@ pub struct MediaStream {
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
     dtmf_detector: Mutex<DTMFDetector>,
-    pipeline_manager: Option<Arc<PipelineManager>>,
 }
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
@@ -142,19 +80,6 @@ impl MediaStreamBuilder {
         let (event_sender, _) = broadcast::channel(self.event_buf_size);
         let (track_packet_sender, track_packet_receiver) = mpsc::unbounded_channel();
 
-        let pipeline_manager = if self.use_pipeline {
-            let id = self.id.as_ref().unwrap_or(&String::from("unknown")).clone();
-            let pipeline_id = format!("pipeline:{}", id);
-            let session_event_sender = create_session_event_sender(&event_sender);
-            Some(Arc::new(PipelineManager::new(
-                pipeline_id,
-                session_event_sender,
-                cancel_token.clone(),
-            )))
-        } else {
-            None
-        };
-
         MediaStream {
             id: self.id.unwrap_or_default(),
             cancel_token,
@@ -164,7 +89,6 @@ impl MediaStreamBuilder {
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
             dtmf_detector: Mutex::new(DTMFDetector::new()),
-            pipeline_manager,
         }
     }
 }
@@ -182,13 +106,6 @@ impl MediaStream {
             }
         }
 
-        // Stop the pipeline manager if it exists
-        if let Some(pipeline_manager) = &self.pipeline_manager {
-            if let Err(e) = pipeline_manager.stop().await {
-                error!("Failed to stop pipeline manager: {}", e);
-            }
-        }
-
         Ok(())
     }
 
@@ -200,16 +117,13 @@ impl MediaStream {
         self.event_sender.subscribe()
     }
 
-    pub fn pipeline_manager(&self) -> Option<Arc<PipelineManager>> {
-        self.pipeline_manager.clone()
-    }
-
     pub async fn remove_track(&self, id: &TrackId) {
         if let Some(track) = self.tracks.lock().await.remove(id) {
             match track.stop().await {
                 Ok(_) => {
+                    let timestamp = Instant::now().elapsed().as_millis() as u32;
                     self.event_sender
-                        .send(MediaStreamEvent::TrackStop(id.clone()))
+                        .send(SessionEvent::TrackEnd(id.clone(), timestamp))
                         .ok();
                 }
                 Err(e) => {
@@ -229,31 +143,15 @@ impl MediaStream {
             Ok(_) => {
                 let track_id = track.id().clone();
                 self.tracks.lock().await.insert(track_id.clone(), track);
+                let timestamp = Instant::now().elapsed().as_millis() as u32;
                 self.event_sender
-                    .send(MediaStreamEvent::TrackStart(track_id))
+                    .send(SessionEvent::TrackStart(track_id.clone(), timestamp))
                     .ok();
             }
             Err(e) => {
                 error!("Failed to start track: {}", e);
             }
         }
-    }
-
-    // Forward audio frames to the pipeline manager if it exists
-    async fn process_audio_through_pipeline(&self, frame: &AudioFrame) -> Result<()> {
-        if let Some(pipeline_manager) = &self.pipeline_manager {
-            match &frame.samples {
-                Samples::PCM(samples) => {
-                    pipeline_manager
-                        .process_audio(samples.clone(), frame.sample_rate as u32)
-                        .await?;
-                }
-                _ => {
-                    // Ignore non-PCM samples for now
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -326,11 +224,6 @@ impl MediaStream {
             // Process for DTMF
             self.process_dtmf(&packet).await;
 
-            // Forward to pipeline manager if enabled
-            if let Err(e) = self.process_audio_through_pipeline(&packet).await {
-                error!("Failed to process audio through pipeline: {}", e);
-            }
-
             // Process the packet with each track
             for track in self.tracks.lock().await.values() {
                 if let Err(e) = track.send_packet(&packet).await {
@@ -351,7 +244,7 @@ impl MediaStream {
                 {
                     // Send DTMF event
                     self.event_sender
-                        .send(MediaStreamEvent::DTMF(
+                        .send(SessionEvent::DTMF(
                             packet.track_id.clone(),
                             packet.timestamp as u32,
                             digit.clone(),

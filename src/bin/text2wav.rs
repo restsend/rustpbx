@@ -106,7 +106,7 @@ fn generate_silence(duration_ms: u32) -> Vec<i16> {
 async fn main() -> Result<()> {
     // Set up logging
     tracing_subscriber::fmt::init();
-
+    dotenv().ok();
     // Parse command line arguments
     let args = Args::parse();
 
@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Missing TENCENT_APPID"));
         }
     };
-    debug!("Found TENCENT_APPID in environment");
+    info!("Found TENCENT_APPID in environment");
 
     // Create TTS client and config
     let synthesis_config = SynthesisConfig {
@@ -172,10 +172,8 @@ async fn main() -> Result<()> {
         speaker: Some(args.speaker),    // Speaker type
         codec: Some("pcm".to_string()), // PCM format
     };
-    debug!("Created TTS configuration");
-
-    let tts_client = Arc::new(TencentCloudTtsClient::new());
-    debug!("Created TencentCloudTtsClient");
+    info!("Created TTS configuration {:?}", synthesis_config);
+    let tts_client = TencentCloudTtsClient::new(synthesis_config);
 
     // Parse the input text into segments
     let segments = parse_input(&args.input_text);
@@ -228,10 +226,7 @@ async fn main() -> Result<()> {
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
 
-            match tts_client
-                .synthesize(&segment.text, &synthesis_config)
-                .await
-            {
+            match tts_client.synthesize(&segment.text).await {
                 Ok(audio_data) => {
                     debug!("Received {} bytes of audio data", audio_data.len());
 
