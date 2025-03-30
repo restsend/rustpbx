@@ -123,7 +123,10 @@ impl MediaStream {
                 Ok(_) => {
                     let timestamp = Instant::now().elapsed().as_millis() as u32;
                     self.event_sender
-                        .send(SessionEvent::TrackEnd(id.clone(), timestamp))
+                        .send(SessionEvent::TrackEnd {
+                            track_id: id.clone(),
+                            timestamp,
+                        })
                         .ok();
                 }
                 Err(e) => {
@@ -145,7 +148,10 @@ impl MediaStream {
                 self.tracks.lock().await.insert(track_id.clone(), track);
                 let timestamp = Instant::now().elapsed().as_millis() as u32;
                 self.event_sender
-                    .send(SessionEvent::TrackStart(track_id.clone(), timestamp))
+                    .send(SessionEvent::TrackStart {
+                        track_id: track_id.clone(),
+                        timestamp,
+                    })
                     .ok();
             }
             Err(e) => {
@@ -244,11 +250,11 @@ impl MediaStream {
                 {
                     // Send DTMF event
                     self.event_sender
-                        .send(SessionEvent::DTMF(
-                            packet.track_id.clone(),
-                            packet.timestamp as u32,
-                            digit.clone(),
-                        ))
+                        .send(SessionEvent::DTMF {
+                            track_id: packet.track_id.clone(),
+                            timestamp: packet.timestamp as u32,
+                            digit: digit.clone(),
+                        })
                         .ok();
                 }
             }

@@ -141,7 +141,6 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Missing TENCENT_SECRET_ID"));
         }
     };
-    debug!("Found TENCENT_SECRET_ID in environment");
 
     let secret_key = match std::env::var("TENCENT_SECRET_KEY") {
         Ok(key) if !key.is_empty() => key,
@@ -151,7 +150,6 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Missing TENCENT_SECRET_KEY"));
         }
     };
-    debug!("Found TENCENT_SECRET_KEY in environment");
 
     let appid = match std::env::var("TENCENT_APPID") {
         Ok(id) if !id.is_empty() => id,
@@ -165,7 +163,6 @@ async fn main() -> Result<()> {
 
     // Create TTS client and config
     let synthesis_config = SynthesisConfig {
-        url: "".to_string(),     // Not used with TencentCloud client
         voice: Some(args.voice), // Voice type
         rate: Some(args.rate),   // Speech rate
         appid: Some(appid),

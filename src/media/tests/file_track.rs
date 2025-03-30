@@ -161,7 +161,7 @@ async fn test_file_track_wav() -> Result<()> {
     // Should receive a track stop event
     match event_receiver.try_recv() {
         Ok(event) => {
-            if let SessionEvent::TrackEnd(id, _) = event {
+            if let SessionEvent::TrackEnd { track_id: id, .. } = event {
                 assert_eq!(id, track_id);
                 println!("Received TrackStop event");
             } else {

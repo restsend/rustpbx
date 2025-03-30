@@ -70,13 +70,13 @@ async fn main() -> Result<()> {
         println!("Listening for LLM events...");
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::LLMDelta(timestamp, text) => {
+                SessionEvent::LLMDelta { timestamp, word } => {
                     // Clear the line and print the current response
                     print!("\r\x1b[K"); // Clear line
-                    print!("[{}] Assistant: {}", timestamp, text);
+                    print!("[{}] Assistant: {}", timestamp, word);
                     std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 }
-                SessionEvent::LLMFinal(timestamp, text) => {
+                SessionEvent::LLMFinal { timestamp, text } => {
                     // Add a newline after the complete response
                     print!("\r\x1b[K"); // Clear line
                     println!("[{}] Assistant: {}", timestamp, text);
@@ -121,7 +121,10 @@ async fn main() -> Result<()> {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs() as u32;
-                            let _ = event_sender.send(SessionEvent::LLMDelta(timestamp, delta));
+                            let _ = event_sender.send(SessionEvent::LLMDelta {
+                                timestamp,
+                                word: delta,
+                            });
                         }
                         Ok(LlmContent::Final(final_text)) => {
                             // Send final event
@@ -129,8 +132,10 @@ async fn main() -> Result<()> {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs() as u32;
-                            let _ =
-                                event_sender.send(SessionEvent::LLMFinal(timestamp, final_text));
+                            let _ = event_sender.send(SessionEvent::LLMFinal {
+                                timestamp,
+                                text: final_text,
+                            });
                             break;
                         }
                         Err(e) => {

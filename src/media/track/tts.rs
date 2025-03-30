@@ -243,7 +243,10 @@ impl Track for TtsTrack {
                                         warn!("Failed to generate TTS audio: {}", e);
                                         let timestamp = Instant::now().elapsed().as_millis() as u32;
                                         event_sender
-                                            .send(SessionEvent::TrackEnd(id, timestamp))
+                                            .send(SessionEvent::TrackEnd {
+                                                track_id: id,
+                                                timestamp,
+                                            })
                                             .ok();
                                         return;
                                     }
@@ -282,7 +285,10 @@ impl Track for TtsTrack {
                                 warn!("Failed to generate TTS audio: {}", e);
                                 let timestamp = Instant::now().elapsed().as_millis() as u32;
                                 event_sender
-                                    .send(SessionEvent::TrackEnd(id, timestamp))
+                                    .send(SessionEvent::TrackEnd {
+                                        track_id: id,
+                                        timestamp,
+                                    })
                                     .ok();
                                 return;
                             }
@@ -307,7 +313,10 @@ impl Track for TtsTrack {
                     // Signal track stop
                     let timestamp = Instant::now().elapsed().as_millis() as u32;
                     event_sender
-                        .send(SessionEvent::TrackEnd(id, timestamp))
+                        .send(SessionEvent::TrackEnd {
+                            track_id: id,
+                            timestamp,
+                        })
                         .ok();
                 });
             }
@@ -315,7 +324,10 @@ impl Track for TtsTrack {
                 warn!("No text provided for TtsTrack");
                 let timestamp = Instant::now().elapsed().as_millis() as u32;
                 event_sender
-                    .send(SessionEvent::TrackEnd(self.id.clone(), timestamp))
+                    .send(SessionEvent::TrackEnd {
+                        track_id: self.id.clone(),
+                        timestamp,
+                    })
                     .ok();
             }
         }
@@ -390,7 +402,7 @@ mod tests {
         // Wait for stop event
         let mut received_stop = false;
         while let Ok(event) = event_rx.recv().await {
-            if let SessionEvent::TrackEnd(id, _) = event {
+            if let SessionEvent::TrackEnd { track_id: id, .. } = event {
                 if id == track_id {
                     received_stop = true;
                     break;
@@ -439,7 +451,7 @@ mod tests {
         // Wait for stop event
         let mut received_stop2 = false;
         while let Ok(event) = event_rx2.recv().await {
-            if let SessionEvent::TrackEnd(id, _) = event {
+            if let SessionEvent::TrackEnd { track_id: id, .. } = event {
                 if id == track_id2 {
                     received_stop2 = true;
                     break;

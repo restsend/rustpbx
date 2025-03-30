@@ -206,7 +206,10 @@ impl Track for WebrtcTrack {
         }
 
         let timestamp = Instant::now().elapsed().as_millis() as u32;
-        let _ = event_sender.send(SessionEvent::TrackStart(self.id.clone(), timestamp));
+        let _ = event_sender.send(SessionEvent::TrackStart {
+            track_id: self.id.clone(),
+            timestamp,
+        });
 
         // Start jitter buffer processing
         self.start_jitter_processing(token.clone()).await?;
@@ -220,7 +223,10 @@ impl Track for WebrtcTrack {
         tokio::spawn(async move {
             token_clone.cancelled().await;
             let timestamp = Instant::now().elapsed().as_millis() as u32;
-            let _ = event_sender_clone.send(SessionEvent::TrackEnd(track_id, timestamp));
+            let _ = event_sender_clone.send(SessionEvent::TrackEnd {
+                track_id,
+                timestamp,
+            });
         });
 
         Ok(())

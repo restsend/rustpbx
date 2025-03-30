@@ -1,8 +1,8 @@
 use crate::{
     event::SessionEvent,
     handler::call::{
-        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse,
-        SynthesisConfig, VadConfig, WsCommand,
+        ActiveCall, AsrConfig, AsrProcessor, CallEvent, CallHandlerState, CallResponse, Command,
+        SynthesisConfig, VadConfig,
     },
     media::{
         stream::MediaStreamBuilder,
@@ -186,7 +186,7 @@ async fn handle_ws_session(
 
 // Process WebSocket commands for WebRTC
 pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text: String) {
-    let command: Result<WsCommand, _> = serde_json::from_str(&text);
+    let command: Result<Command, _> = serde_json::from_str(&text);
 
     match command {
         Ok(cmd) => {
@@ -199,7 +199,7 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
             };
 
             match cmd {
-                WsCommand::PlayTts { text } => {
+                Command::Tts { text } => {
                     info!("Received TTS command: {}", text);
 
                     // Send TTS event to indicate processing
@@ -210,12 +210,12 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
 
                     let _ = call.events.send(tts_event);
                 }
-                WsCommand::PlayWav { url } => {
+                Command::Play { url } => {
                     info!("Received play WAV command: {}", url);
                     // Here you would implement WAV playback
                     // For now we just acknowledge the command
                 }
-                WsCommand::Hangup {} => {
+                Command::Hangup {} => {
                     info!("Received hangup command for session {}", session_id);
 
                     // Send hangup event
@@ -235,7 +235,7 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
                     // Remove from active calls
                     state.active_calls.lock().await.remove(session_id);
                 }
-                WsCommand::Refer { target } => {
+                Command::Refer { target } => {
                     info!("Received refer command: {}", target);
 
                     // Send refer event
@@ -246,14 +246,14 @@ pub async fn handle_ws_command(state: &CallHandlerState, session_id: &str, text:
 
                     let _ = call.events.send(refer_event);
                 }
-                WsCommand::Mute { track_id } => {
+                Command::Mute { track_id } => {
                     let track = track_id.unwrap_or_else(|| "main".to_string());
                     info!("Received mute command for track: {}", track);
 
                     // Implement mute functionality here
                     // This would interact with the media stream to mute a specific track
                 }
-                WsCommand::Unmute { track_id } => {
+                Command::Unmute { track_id } => {
                     let track = track_id.unwrap_or_else(|| "main".to_string());
                     info!("Received unmute command for track: {}", track);
 
@@ -368,7 +368,11 @@ pub async fn setup_webrtc_connection(
         let mut receiver = session_event_receiver;
         while let Ok(event) = receiver.recv().await {
             match event {
-                SessionEvent::TranscriptionFinal(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionFinal {
+                    track_id,
+                    timestamp,
+                    text,
+                } => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
@@ -376,7 +380,11 @@ pub async fn setup_webrtc_connection(
                         is_final: true,
                     });
                 }
-                SessionEvent::TranscriptionDelta(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionDelta {
+                    track_id,
+                    timestamp,
+                    text,
+                } => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
@@ -384,7 +392,7 @@ pub async fn setup_webrtc_connection(
                         is_final: false,
                     });
                 }
-                SessionEvent::Error(timestamp, error) => {
+                SessionEvent::Error { timestamp, error } => {
                     let _ = event_sender_clone.send(CallEvent::ErrorEvent { timestamp, error });
                 }
                 _ => {
