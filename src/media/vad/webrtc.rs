@@ -1,9 +1,8 @@
+use super::{ThreadSafeVad, VadEngine};
+use crate::{AudioFrame, Samples};
 use anyhow::Result;
 use std::sync::Mutex;
 use webrtc_vad::{SampleRate, Vad, VadMode};
-
-use super::{ThreadSafeVad, VadEngine};
-use crate::media::processor::{AudioFrame, Samples};
 
 pub struct WebRtcVad {
     vad: ThreadSafeVad,

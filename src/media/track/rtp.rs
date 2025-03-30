@@ -1,8 +1,11 @@
-use crate::media::{
-    jitter::JitterBuffer,
-    processor::{AudioFrame, Samples, Processor},
-    stream::EventSender,
-    track::{Track, TrackConfig, TrackId, TrackPacketSender},
+use crate::{
+    event::EventSender,
+    media::{
+        jitter::JitterBuffer,
+        processor::Processor,
+        track::{Track, TrackConfig, TrackId, TrackPacketSender},
+    },
+    AudioFrame, Samples,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -699,7 +702,6 @@ impl Track for RtpTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::processor::{AudioFrame, Samples};
     use anyhow::Result;
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;

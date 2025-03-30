@@ -1,7 +1,11 @@
-use crate::media::{
-    processor::{AudioFrame, Processor, Samples},
-    stream::{EventSender, MediaStreamBuilder},
-    track::{Track, TrackId, TrackPacketReceiver, TrackPacketSender},
+use crate::{
+    event::EventSender,
+    media::{
+        processor::Processor,
+        stream::MediaStreamBuilder,
+        track::{Track, TrackPacketReceiver, TrackPacketSender},
+    },
+    AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
 use async_trait::async_trait;

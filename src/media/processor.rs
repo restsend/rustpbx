@@ -1,19 +1,6 @@
-use super::track::TrackId;
+use crate::{AudioFrame, Samples};
 use anyhow::Result;
 
-#[derive(Clone)]
-pub enum Samples {
-    PCM(Vec<i16>),
-    RTP(u8, Vec<u8>),
-    Empty,
-}
-#[derive(Clone)]
-pub struct AudioFrame {
-    pub track_id: TrackId,
-    pub samples: Samples,
-    pub timestamp: u32,
-    pub sample_rate: u16,
-}
 pub trait Processor: Send + Sync {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()>;
 }

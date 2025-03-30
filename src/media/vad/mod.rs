@@ -1,7 +1,6 @@
-use crate::media::{
-    processor::{AudioFrame, Processor},
-    stream::{EventSender, MediaStreamEvent},
-};
+use crate::event::{EventSender, SessionEvent};
+use crate::media::processor::Processor;
+use crate::AudioFrame;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -100,9 +99,9 @@ impl Processor for VadProcessor {
 
         // Send VAD events
         let event = if is_speech {
-            MediaStreamEvent::StartSpeaking(frame.track_id.clone(), frame.timestamp)
+            SessionEvent::StartSpeaking(frame.track_id.clone(), frame.timestamp)
         } else {
-            MediaStreamEvent::Silence(frame.track_id.clone(), frame.timestamp)
+            SessionEvent::Silence(frame.track_id.clone(), frame.timestamp)
         };
         self.event_sender.send(event).ok();
         Ok(())

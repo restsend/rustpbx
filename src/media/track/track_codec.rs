@@ -1,11 +1,11 @@
-use crate::media::{
-    codecs::{
+use crate::{
+    media::codecs::{
         g722::{G722Decoder, G722Encoder},
         pcma::{PcmaDecoder, PcmaEncoder},
         pcmu::{PcmuDecoder, PcmuEncoder},
         Encoder,
     },
-    processor::{AudioFrame, Samples},
+    AudioFrame, Samples,
 };
 use anyhow::Result;
 use bytes::Bytes;

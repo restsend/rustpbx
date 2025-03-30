@@ -1,12 +1,11 @@
+use crate::event::EventSender;
+use crate::media::processor::Processor;
+use crate::{AudioFrame, TrackId};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-
-use super::processor::AudioFrame;
-use super::stream::EventSender;
-use crate::media::processor::Processor;
 
 pub type TrackPacketSender = mpsc::UnboundedSender<AudioFrame>;
 pub type TrackPacketReceiver = mpsc::UnboundedReceiver<AudioFrame>;
@@ -65,7 +64,6 @@ pub mod rtp;
 pub mod track_codec;
 pub mod tts;
 pub mod webrtc;
-pub type TrackId = String;
 
 #[async_trait]
 pub trait Track: Send + Sync {

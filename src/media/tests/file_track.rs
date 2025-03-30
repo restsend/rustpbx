@@ -5,10 +5,11 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::media::processor::{AudioFrame, Processor};
-use crate::media::stream::MediaStreamEvent;
+use crate::event::SessionEvent;
+use crate::media::processor::Processor;
 use crate::media::track::file::FileTrack;
 use crate::media::track::Track;
+use crate::AudioFrame;
 
 // Simple test processor that counts frames
 struct CountingProcessor {
@@ -160,7 +161,7 @@ async fn test_file_track_wav() -> Result<()> {
     // Should receive a track stop event
     match event_receiver.try_recv() {
         Ok(event) => {
-            if let MediaStreamEvent::TrackStop(id) = event {
+            if let SessionEvent::TrackEnd(id, _) = event {
                 assert_eq!(id, track_id);
                 println!("Received TrackStop event");
             } else {

@@ -1,15 +1,20 @@
+use super::{SynthesisClient, SynthesisConfig};
+use crate::event::{EventSender, SessionEvent};
+use crate::TrackId;
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use futures::Stream;
 use hmac::{Hmac, Mac};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
-
-use super::SynthesisClient;
-use super::SynthesisConfig;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error};
+use uuid;
 
 // TencentCloud TTS Response structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,25 +26,28 @@ pub struct TencentCloudTtsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudTtsResult {
     #[serde(rename = "Audio")]
-    pub audio: String,
+    pub audio: Option<String>,
     #[serde(rename = "SessionId")]
-    pub session_id: String,
+    pub session_id: Option<String>,
     #[serde(rename = "RequestId")]
     pub request_id: String,
 }
 
 #[derive(Debug)]
 pub struct TencentCloudTtsClient {
-    http_client: HttpClient,
+    config: SynthesisConfig,
 }
 
 impl TencentCloudTtsClient {
-    pub fn new() -> Self {
-        Self {
-            http_client: HttpClient::new(),
-        }
+    pub fn new(config: SynthesisConfig) -> Self {
+        Self { config }
     }
 
+    // Build with specific configuration
+    pub fn with_config(mut self, config: SynthesisConfig) -> Self {
+        self.config = config;
+        self
+    }
     // Generate authentication signature for TencentCloud API
     fn generate_signature(
         &self,
@@ -102,40 +110,38 @@ impl TencentCloudTtsClient {
 
         Ok(hex::encode(&signature))
     }
-}
 
-#[async_trait]
-impl SynthesisClient for TencentCloudTtsClient {
-    async fn synthesize(&self, text: &str, config: &SynthesisConfig) -> Result<Vec<u8>> {
-        // Clone values that we need in the async block
-        let secret_id = config.secret_id.clone().unwrap_or_default();
-        let secret_key = config.secret_key.clone().unwrap_or_default();
-        let appid = config
+    // Internal function to synthesize text to audio
+    async fn synthesize_text(&self, text: &str) -> Result<Vec<u8>> {
+        let secret_id = self.config.secret_id.clone().unwrap_or_default();
+        let secret_key = self.config.secret_key.clone().unwrap_or_default();
+        let appid = self
+            .config
             .appid
             .clone()
             .unwrap_or_default()
             .parse::<i32>()
             .unwrap_or(0);
-        let speaker = config.speaker.unwrap_or(1);
-        let volume = config.volume.unwrap_or(0);
-        let speed = config.rate.unwrap_or(0.0);
-        let codec = config.codec.clone().unwrap_or_else(|| "mp3".to_string());
+        let speaker = self.config.speaker.unwrap_or(1);
+        let volume = self.config.volume.unwrap_or(0);
+        let speed = self.config.rate.unwrap_or(0.0);
+        let codec = self
+            .config
+            .codec
+            .clone()
+            .unwrap_or_else(|| "mp3".to_string());
 
         if secret_id.is_empty() || secret_key.is_empty() {
             return Err(anyhow::anyhow!("Missing TencentCloud credentials"));
         }
 
-        // Create session ID
-        let session_id = Uuid::new_v4().to_string();
-
-        // Create request parameters
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        // Create request parameters - Use Unix timestamp
+        let timestamp = chrono::Utc::now().timestamp() as u64;
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         // Create request body
         let request_data = serde_json::json!({
             "Text": text,
-            "SessionId": session_id,
             "Volume": volume,
             "Speed": speed,
             "ProjectId": 0,
@@ -143,7 +149,8 @@ impl SynthesisClient for TencentCloudTtsClient {
             "VoiceType": speaker,
             "PrimaryLanguage": 1,
             "SampleRate": 16000,
-            "Codec": codec
+            "Codec": codec,
+            "SessionId": uuid::Uuid::new_v4().to_string()
         });
 
         let host = "tts.tencentcloudapi.com";
@@ -167,9 +174,10 @@ impl SynthesisClient for TencentCloudTtsClient {
         // Record request start time for TTFB measurement
         let request_start_time = std::time::Instant::now();
 
+        debug!("Sending TTS request with data: {:?}", request_data);
+
         // Send request to TencentCloud TTS API
-        let response = self
-            .http_client
+        let response = HttpClient::new()
             .post(format!("https://{}", host))
             .header("Content-Type", "application/json")
             .header("Authorization", authorization)
@@ -182,22 +190,51 @@ impl SynthesisClient for TencentCloudTtsClient {
             .send()
             .await?;
 
-        // Calculate TTFB
-        let ttfb = request_start_time.elapsed().as_millis() as u64;
-
-        // Store TTS metrics for monitoring
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-
-        // Print the raw response for debugging
+        let status = response.status();
         let response_text = response.text().await?;
-        // Parse the response
-        let response: TencentCloudTtsResponse = serde_json::from_str(&response_text)?;
+        debug!(
+            "TTS API Response status: {}, body: {}",
+            status, response_text
+        );
 
-        // Decode base64 audio data
-        let audio_bytes = BASE64_STANDARD.decode(response.response.audio)?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "TTS API request failed with status {}: {}",
+                status,
+                response_text
+            ));
+        }
+
+        let response: TencentCloudTtsResponse =
+            serde_json::from_str(&response_text).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse response: {}. Response text: {}",
+                    e,
+                    response_text
+                )
+            })?;
+
+        // Check if audio field exists and handle it safely
+        let response_str = serde_json::to_string_pretty(&response).unwrap_or_default();
+        let audio = response.response.audio.ok_or_else(|| {
+            anyhow::anyhow!("No audio data in response. Full response: {}", response_str)
+        })?;
+
+        let audio_bytes = BASE64_STANDARD.decode(audio)?;
+
+        let duration = request_start_time.elapsed().as_millis();
+        debug!(
+            "TencentCloud TTS response: {} bytes in {}ms",
+            audio_bytes.len(),
+            duration
+        );
         Ok(audio_bytes)
+    }
+}
+
+#[async_trait]
+impl SynthesisClient for TencentCloudTtsClient {
+    async fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
+        self.synthesize_text(&text).await
     }
 }

@@ -1,10 +1,10 @@
+use crate::{AudioFrame, Samples};
+
+use super::{VADConfig, VadEngine};
 use anyhow::Result;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use voice_activity_detector::VoiceActivityDetector;
-
-use super::{VADConfig, VadEngine};
-use crate::media::processor::{AudioFrame, Samples};
 
 pub struct VoiceActivityVad {
     detector: Mutex<VoiceActivityDetector>,

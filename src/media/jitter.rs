@@ -1,4 +1,4 @@
-use crate::media::processor::AudioFrame;
+use crate::AudioFrame;
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},

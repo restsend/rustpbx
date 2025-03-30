@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use rustpbx::{
     event::SessionEvent,
-    llm::{LlmConfig, LlmProcessor, OpenAiClient},
+    llm::{LlmClient, LlmConfig, LlmContent, OpenAiClient, OpenAiClientBuilder},
 };
 
 use anyhow::Result;
 use dotenv::dotenv;
+use futures::StreamExt;
 use tokio::sync::broadcast;
 
 #[tokio::main]
@@ -35,7 +36,7 @@ async fn main() -> Result<()> {
     println!("  Max conversation turns: {}", max_turns);
 
     // Initialize the OpenAI client from environment variables
-    let llm_client = match OpenAiClient::from_env() {
+    let llm_client = match OpenAiClientBuilder::from_env().build() {
         Ok(client) => client,
         Err(err) => {
             println!("Failed to initialize OpenAI client: {}", err);
@@ -49,6 +50,7 @@ async fn main() -> Result<()> {
 
     // Use LlmConfig default which already reads from OPENAI_MODEL environment variable
     let llm_config = LlmConfig {
+        model,
         prompt: "You are a helpful assistant. Keep your responses brief and to the point."
             .to_string(),
         temperature: Some(0.7),
@@ -60,19 +62,24 @@ async fn main() -> Result<()> {
         ..LlmConfig::default() // Get default values including model from env
     };
 
-    // Create processor
-    let processor = LlmProcessor::new(llm_config, Arc::new(llm_client), event_sender.clone());
+    // Configure client with our custom config
+    let llm_client = llm_client.with_config(llm_config);
 
     // Start listening for events in a separate task
     let event_task = tokio::spawn(async move {
         println!("Listening for LLM events...");
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::LLM(timestamp, text) => {
+                SessionEvent::LLMDelta(timestamp, text) => {
                     // Clear the line and print the current response
                     print!("\r\x1b[K"); // Clear line
                     print!("[{}] Assistant: {}", timestamp, text);
                     std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                }
+                SessionEvent::LLMFinal(timestamp, text) => {
+                    // Add a newline after the complete response
+                    print!("\r\x1b[K"); // Clear line
+                    println!("[{}] Assistant: {}", timestamp, text);
                 }
                 _ => {} // Ignore other events
             }
@@ -102,9 +109,38 @@ async fn main() -> Result<()> {
         println!("User: {}", input);
         println!("Assistant is thinking...");
 
-        // Process the input and get the response
-        match processor.process(input).await {
-            Ok(_) => println!("\n"), // Add a newline after the streaming response is complete
+        // Get LLM response stream
+        match llm_client.generate(input).await {
+            Ok(mut stream) => {
+                // Process stream items
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(LlmContent::Delta(delta)) => {
+                            // Send delta event
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as u32;
+                            let _ = event_sender.send(SessionEvent::LLMDelta(timestamp, delta));
+                        }
+                        Ok(LlmContent::Final(final_text)) => {
+                            // Send final event
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as u32;
+                            let _ =
+                                event_sender.send(SessionEvent::LLMFinal(timestamp, final_text));
+                            break;
+                        }
+                        Err(e) => {
+                            println!("\nError: {}", e);
+                            break;
+                        }
+                    }
+                }
+                println!(); // Add a newline after response is complete
+            }
             Err(e) => println!("Error: {}", e),
         }
     }

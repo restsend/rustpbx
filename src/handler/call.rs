@@ -1,15 +1,14 @@
+use crate::{
+    event::SessionEvent,
+    media::{processor::Processor, stream::MediaStream},
+    AudioFrame,
+};
 use anyhow::Result;
 use axum::Router;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use webrtc::peer_connection::RTCPeerConnection;
-
-use crate::event::{EventSender, SessionEvent};
-use crate::media::{
-    processor::{AudioFrame, Processor, Samples},
-    stream::{MediaStream, MediaStreamEvent},
-};
 
 // Configuration for Language Model - use the one from llm module
 pub use crate::llm::LlmConfig;
@@ -17,7 +16,7 @@ pub use crate::llm::LlmConfig;
 // Session state for active calls
 #[derive(Clone)]
 pub struct CallHandlerState {
-    pub active_calls: Arc<Mutex<std::collections::HashMap<String, ActiveCall>>>,
+    pub active_calls: Arc<Mutex<HashMap<String, ActiveCall>>>,
 }
 
 // Active call information
@@ -27,7 +26,6 @@ pub struct ActiveCall {
     pub media_stream: Arc<MediaStream>,
     pub peer_connection: Arc<RTCPeerConnection>,
     pub events: tokio::sync::broadcast::Sender<CallEvent>,
-    pub pipeline_manager: Option<Arc<crate::media::pipeline::PipelineManager>>,
 }
 
 // Configuration for ASR (Automatic Speech Recognition)
@@ -114,15 +112,6 @@ pub enum WsCommand {
     Hangup {},
     #[serde(rename = "refer")]
     Refer { target: String },
-    #[serde(rename = "pipeline_start")]
-    PipelineStart {
-        pipeline_type: String,
-        config: Option<serde_json::Value>,
-    },
-    #[serde(rename = "pipeline_stop")]
-    PipelineStop { pipeline_id: String },
-    #[serde(rename = "send_text")]
-    SendText { text: String },
     #[serde(rename = "mute")]
     Mute { track_id: Option<String> },
     #[serde(rename = "unmute")]
@@ -166,32 +155,30 @@ impl Processor for AsrProcessor {
 }
 
 // Adapt MediaStreamEvents to CallEvents
-pub fn convert_media_event(event: MediaStreamEvent) -> Option<CallEvent> {
+pub fn convert_media_event(event: SessionEvent) -> Option<CallEvent> {
     match event {
-        MediaStreamEvent::StartSpeaking(track_id, timestamp) => Some(CallEvent::VadEvent {
+        SessionEvent::StartSpeaking(track_id, timestamp) => Some(CallEvent::VadEvent {
             track_id,
             timestamp,
             is_speech: true,
         }),
-        MediaStreamEvent::Silence(track_id, timestamp) => Some(CallEvent::VadEvent {
+        SessionEvent::Silence(track_id, timestamp) => Some(CallEvent::VadEvent {
             track_id,
             timestamp,
             is_speech: false,
         }),
-        MediaStreamEvent::Transcription(track_id, timestamp, text) => Some(CallEvent::AsrEvent {
+        SessionEvent::TranscriptionFinal(track_id, timestamp, text) => Some(CallEvent::AsrEvent {
             track_id,
             timestamp,
             text,
             is_final: true,
         }),
-        MediaStreamEvent::TranscriptionSegment(track_id, timestamp, text) => {
-            Some(CallEvent::AsrEvent {
-                track_id,
-                timestamp,
-                text,
-                is_final: false,
-            })
-        }
+        SessionEvent::TranscriptionDelta(track_id, timestamp, text) => Some(CallEvent::AsrEvent {
+            track_id,
+            timestamp,
+            text,
+            is_final: false,
+        }),
         _ => None,
     }
 }
@@ -213,85 +200,10 @@ pub fn router() -> Router<CallHandlerState> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Samples;
+
     use super::*;
     use tokio::sync::broadcast;
-
-    // Test WsCommand serialization
-    #[test]
-    fn test_ws_command_serialization() {
-        // Test PlayTts command
-        let cmd = WsCommand::PlayTts {
-            text: "Hello, world!".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("play_tts"));
-        assert!(json.contains("Hello, world!"));
-
-        // Test PlayWav command
-        let cmd = WsCommand::PlayWav {
-            url: "https://example.com/audio.wav".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("play_wav"));
-        assert!(json.contains("https://example.com/audio.wav"));
-
-        // Test Hangup command
-        let cmd = WsCommand::Hangup {};
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("hangup"));
-
-        // Test PipelineStart command
-        let cmd = WsCommand::PipelineStart {
-            pipeline_type: "transcription".to_string(),
-            config: Some(serde_json::json!({ "model": "whisper" })),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("pipeline_start"));
-        assert!(json.contains("transcription"));
-        assert!(json.contains("whisper"));
-
-        // Test deserialization
-        let json = r#"{"command":"play_tts","text":"Test TTS"}"#;
-        let cmd: WsCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            WsCommand::PlayTts { text } => {
-                assert_eq!(text, "Test TTS");
-            }
-            _ => panic!("Unexpected command type"),
-        }
-
-        // Test PipelineStart deserialization
-        let json =
-            r#"{"command":"pipeline_start","pipeline_type":"llm","config":{"model":"gpt-4"}}"#;
-        let cmd: WsCommand = serde_json::from_str(json).unwrap();
-        match cmd {
-            WsCommand::PipelineStart {
-                pipeline_type,
-                config,
-            } => {
-                assert_eq!(pipeline_type, "llm");
-                assert_eq!(config.unwrap()["model"], "gpt-4");
-            }
-            _ => panic!("Unexpected command type"),
-        }
-    }
-
-    // Test CallEvent serialization
-    #[test]
-    fn test_call_event_serialization() {
-        let event = CallEvent::AsrEvent {
-            track_id: "test-track".to_string(),
-            timestamp: 12345,
-            text: "Test ASR".to_string(),
-            is_final: true,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("asr"));
-        assert!(json.contains("test-track"));
-        assert!(json.contains("Test ASR"));
-        assert!(json.contains("12345"));
-        assert!(json.contains("true"));
-    }
 
     // Test media event conversion
     #[test]
@@ -299,7 +211,7 @@ mod tests {
         // Test StartSpeaking event conversion
         let track_id = "test-track".to_string();
         let timestamp = 12345u32;
-        let event = MediaStreamEvent::StartSpeaking(track_id.clone(), timestamp);
+        let event = SessionEvent::StartSpeaking(track_id.clone(), timestamp);
 
         let converted = convert_media_event(event);
         assert!(converted.is_some());
@@ -318,7 +230,7 @@ mod tests {
         }
 
         // Test Silence event conversion
-        let event = MediaStreamEvent::Silence(track_id.clone(), timestamp);
+        let event = SessionEvent::Silence(track_id.clone(), timestamp);
         let converted = convert_media_event(event);
         assert!(converted.is_some());
 

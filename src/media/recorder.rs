@@ -7,9 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::media::processor::AudioFrame;
-
-use super::processor::Samples;
+use crate::{AudioFrame, Samples};
 
 pub struct RecorderConfig {
     pub sample_rate: u32,

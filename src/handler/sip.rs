@@ -9,6 +9,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -175,16 +176,60 @@ async fn handle_ws_session(
     // Send events
     let event_sender = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
-            match serde_json::to_string(&event) {
-                Ok(json) => {
-                    if let Err(e) = sender.send(Message::Text(json.into())).await {
-                        error!("Failed to send WebSocket message: {}", e);
-                        break;
-                    }
+            // Convert to WebSocket message
+            let msg = match event {
+                CallEvent::AsrEvent {
+                    track_id,
+                    timestamp,
+                    text,
+                    is_final,
+                } => {
+                    json!({
+                        "type": "transcription",
+                        "timestamp": timestamp,
+                        "track_id": track_id,
+                        "text": text,
+                        "is_final": is_final,
+                    })
                 }
-                Err(e) => {
-                    error!("Failed to serialize event: {}", e);
+                CallEvent::LlmEvent {
+                    timestamp,
+                    text,
+                    is_final,
+                } => {
+                    json!({
+                        "type": "llm",
+                        "timestamp": timestamp,
+                        "text": text,
+                        "is_final": is_final,
+                    })
                 }
+                CallEvent::TtsEvent { timestamp, text } => {
+                    json!({
+                        "type": "tts",
+                        "timestamp": timestamp,
+                        "text": text,
+                    })
+                }
+                CallEvent::ErrorEvent { timestamp, error } => {
+                    json!({
+                        "type": "error",
+                        "timestamp": timestamp,
+                        "error": error,
+                    })
+                }
+                CallEvent::RingingEvent { timestamp } => {
+                    json!({
+                        "type": "ringing",
+                        "timestamp": timestamp,
+                    })
+                }
+                _ => continue,
+            };
+
+            if let Err(e) = sender.send(Message::Text(msg.to_string().into())).await {
+                error!("Failed to send WebSocket message: {}", e);
+                break;
             }
         }
     });
@@ -259,7 +304,7 @@ async fn setup_sip_connection(
         let mut receiver = session_event_receiver;
         while let Ok(event) = receiver.recv().await {
             match event {
-                SessionEvent::Transcription(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionFinal(track_id, timestamp, text) => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
@@ -267,26 +312,13 @@ async fn setup_sip_connection(
                         is_final: true,
                     });
                 }
-                SessionEvent::TranscriptionSegment(track_id, timestamp, text) => {
+                SessionEvent::TranscriptionDelta(track_id, timestamp, text) => {
                     let _ = event_sender_clone.send(CallEvent::AsrEvent {
                         track_id,
                         timestamp,
                         text,
                         is_final: false,
                     });
-                }
-                SessionEvent::LLM(timestamp, text) => {
-                    let _ = event_sender_clone.send(CallEvent::LlmEvent {
-                        timestamp,
-                        text,
-                        is_final: true,
-                    });
-                }
-                SessionEvent::TTS(timestamp, text) => {
-                    let _ = event_sender_clone.send(CallEvent::TtsEvent { timestamp, text });
-                }
-                SessionEvent::Error(timestamp, error) => {
-                    let _ = event_sender_clone.send(CallEvent::ErrorEvent { timestamp, error });
                 }
                 _ => {
                     // Ignore other session events
@@ -306,19 +338,11 @@ async fn setup_sip_connection(
             .build(),
     );
 
-    // Create pipeline manager
-    let pipeline_manager = Arc::new(crate::media::pipeline::PipelineManager::new(
-        format!("sip-{}", session_id),
-        session_event_sender,
-        cancel_token.clone(),
-    ));
-
     let active_call = ActiveCall {
         session_id: session_id.clone(),
         media_stream: media_stream.clone(),
         peer_connection: peer_connection.clone(),
         events: event_sender.clone(),
-        pipeline_manager: Some(pipeline_manager.clone()),
     };
 
     // Store the active call in state
