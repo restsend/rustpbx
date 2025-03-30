@@ -37,9 +37,11 @@ impl Default for TranscriptionConfig {
 // Transcription Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionFrame {
-    pub timestamp: u32,
-    pub text: String,
+    pub index: u32,
     pub is_final: bool,
+    pub start_time: Option<u32>,
+    pub end_time: Option<u32>,
+    pub text: String,
 }
 pub type TranscriptionSender = mpsc::UnboundedSender<AudioFrame>;
 pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
