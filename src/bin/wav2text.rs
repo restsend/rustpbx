@@ -1,15 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Parser;
-use hound::WavReader;
 use rustpbx::{
     media::track::file::read_wav_file,
     transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig},
 };
-use std::fs::File;
-use std::io::BufReader;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tracing::{debug, error, info};
+use std::{path::PathBuf, time::Duration};
+use tracing::{debug, info};
 
 /// Convert WAV audio files to text using speech recognition
 #[derive(Parser, Debug)]
@@ -38,6 +34,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
     // Set up logging
     tracing_subscriber::fmt::init();
 
@@ -109,12 +108,32 @@ async fn main() -> Result<()> {
     .build()
     .await?;
     // Send the samples to the transcription client
-    info!("Sending samples to transcription client for processing...");
     transcription_client.send_audio(&all_samples).await?;
+    let duration = Duration::from_secs(all_samples.len() as u64 / sample_rate as u64);
+    let duration = duration;
+    info!(
+        "Sending samples to transcription client for processing {} seconds",
+        duration.as_secs()
+    );
+    let retch_result = async move {
+        let mut result = String::new();
+        while let Some(frame) = transcription_client.next().await {
+            let end_time = frame.end_time.unwrap_or(0);
+            let text = frame.text.clone();
+            println!("{} : {}", end_time, text);
+            if frame.is_final {
+                result.push_str(&frame.text);
+            }
+            if end_time > duration.as_millis() as u32 {
+                result.push_str(&frame.text);
+                break;
+            }
+        }
+        result
+    };
 
-    // Get the transcription result
-    let result = transcription_client.next().await.expect("No result");
-    println!("Transcription result: {}", result.text);
+    let result = tokio::time::timeout(duration + Duration::from_secs(1), retch_result).await?;
+    println!("Transcription result: {}", result);
 
     Ok(())
 }

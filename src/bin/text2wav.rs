@@ -104,6 +104,9 @@ fn generate_silence(duration_ms: u32) -> Vec<i16> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
     // Set up logging
     tracing_subscriber::fmt::init();
     dotenv().ok();
