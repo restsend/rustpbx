@@ -151,14 +151,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_add_track() {
-        let stream = MediaStreamBuilder::new().build();
+        let event_sender = EventSender::new(1);
+        let stream = MediaStreamBuilder::new(event_sender).build();
         let track = Box::new(TestTrack::new("test1".to_string()));
         stream.update_track(track).await;
     }
 
     #[tokio::test]
     async fn test_stream_remove_track() {
-        let stream = MediaStreamBuilder::new().build();
+        let event_sender = EventSender::new(1);
+        let stream = MediaStreamBuilder::new(event_sender).build();
         let track = Box::new(TestTrack::new("test1".to_string()));
         stream.update_track(track).await;
         stream.remove_track(&"test1".to_string()).await;
@@ -167,7 +169,8 @@ mod tests {
 
 #[tokio::test]
 async fn test_media_stream_basic() -> Result<()> {
-    let stream = MediaStreamBuilder::new().build();
+    let event_sender = EventSender::new(1);
+    let stream = MediaStreamBuilder::new(event_sender).build();
 
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));
@@ -190,7 +193,8 @@ async fn test_media_stream_basic() -> Result<()> {
 
 #[tokio::test]
 async fn test_media_stream_events() -> Result<()> {
-    let stream = MediaStreamBuilder::new().event_buf_size(32).build();
+    let event_sender = EventSender::new(1);
+    let stream = MediaStreamBuilder::new(event_sender).build();
 
     let _events = stream.subscribe();
 
@@ -216,7 +220,8 @@ async fn test_media_stream_events() -> Result<()> {
 // New test for track packet forwarding
 #[tokio::test]
 async fn test_stream_forward_packets() -> Result<()> {
-    let stream = Arc::new(MediaStreamBuilder::new().build());
+    let event_sender = EventSender::new(1);
+    let stream = MediaStreamBuilder::new(event_sender).build();
 
     // Create two test tracks
     let track1 = TestTrack::new("test1".to_string());
@@ -228,20 +233,16 @@ async fn test_stream_forward_packets() -> Result<()> {
     // Add tracks to the stream
     stream.update_track(Box::new(track1)).await;
     stream.update_track(Box::new(track2)).await;
-
-    // Clone the stream for the background task
-    let stream_clone = stream.clone();
-
+    let packet_sender = stream.packet_sender.clone();
     // Start the stream in a background task
     let handle = tokio::spawn(async move {
-        stream_clone.serve().await.unwrap();
+        stream.serve().await.unwrap();
     });
 
     // Allow time for setup
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Get access to the internal packet sender
-    let packet_sender = stream.packet_sender.clone();
 
     // Send PCM data through the sender
     let samples = vec![16000, 8000, 12000, 4000];
@@ -265,9 +266,10 @@ async fn test_stream_forward_packets() -> Result<()> {
 // Test for the Recorder functionality
 #[tokio::test]
 async fn test_stream_recorder() -> Result<()> {
+    let event_sender = EventSender::new(1);
     // Create a stream with recorder enabled
     let stream = Arc::new(
-        MediaStreamBuilder::new()
+        MediaStreamBuilder::new(event_sender)
             .recorder("test_recording".to_string())
             .build(),
     );
@@ -334,7 +336,8 @@ async fn test_stream_recorder() -> Result<()> {
 #[tokio::test]
 async fn test_stream_forward_payload_conversion() -> Result<()> {
     // Create a stream
-    let stream = Arc::new(MediaStreamBuilder::new().build());
+    let event_sender = EventSender::new(1);
+    let stream = Arc::new(MediaStreamBuilder::new(event_sender).build());
 
     // Create two test tracks with different packet types
     let track1 = TestTrack::new("track1".to_string()); // This will receive PCM

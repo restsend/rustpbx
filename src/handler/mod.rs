@@ -1,10 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{
     media::vad::{VADConfig, VadType},
     synthesis::{SynthesisConfig, SynthesisType},
     transcription::{TranscriptionConfig, TranscriptionType},
 };
+use serde::{Deserialize, Serialize};
 
 pub mod call;
 pub mod handler;
@@ -17,16 +16,27 @@ pub use handler::router;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StreamOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sdp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub callee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_recorder: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vad_type: Option<VadType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vad_config: Option<VADConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub asr_type: Option<TranscriptionType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub asr_config: Option<TranscriptionConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tts_type: Option<SynthesisType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tts_config: Option<SynthesisConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout: Option<String>,
 }
 
@@ -38,11 +48,11 @@ impl Default for StreamOptions {
             caller: None,
             enable_recorder: Some(true),
             vad_type: Some(VadType::WebRTC),
-            vad_config: Some(VADConfig::default()),
+            vad_config: None,
             asr_type: Some(TranscriptionType::TencentCloud),
-            asr_config: Some(TranscriptionConfig::default()),
+            asr_config: None,
             tts_type: Some(SynthesisType::TencentCloud),
-            tts_config: Some(SynthesisConfig::default()),
+            tts_config: None,
             handshake_timeout: None,
         }
     }
@@ -54,7 +64,7 @@ impl Default for StreamOptions {
 pub enum Command {
     /// Invite a call
     #[serde(rename = "invite")]
-    Invite { options: Option<StreamOptions> },
+    Invite { options: StreamOptions },
     /// Update the candidate for WebRTC
     #[serde(rename = "candidate")]
     Candidate { candidates: Vec<String> },

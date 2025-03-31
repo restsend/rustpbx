@@ -32,27 +32,21 @@ pub struct MediaStream {
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
     recorder: Option<String>,
-    event_buf_size: usize,
     id: Option<String>,
+    event_sender: EventSender,
 }
 
 impl MediaStreamBuilder {
-    pub fn new() -> Self {
+    pub fn new(event_sender: EventSender) -> Self {
         Self {
             id: Some(format!("ms:{}", uuid::Uuid::new_v4())),
             cancel_token: None,
             recorder: None,
-            event_buf_size: 16,
+            event_sender,
         }
     }
-
     pub fn with_id(mut self, id: String) -> Self {
         self.id = Some(id);
-        self
-    }
-
-    pub fn event_buf_size(mut self, event_buf_size: usize) -> Self {
-        self.event_buf_size = event_buf_size;
         self
     }
 
@@ -71,7 +65,6 @@ impl MediaStreamBuilder {
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
         let tracks = Mutex::new(HashMap::new());
-        let (event_sender, _) = broadcast::channel(self.event_buf_size);
         let (track_packet_sender, track_packet_receiver) = mpsc::unbounded_channel();
 
         MediaStream {
@@ -79,7 +72,7 @@ impl MediaStreamBuilder {
             cancel_token,
             recorder: self.recorder,
             tracks,
-            event_sender,
+            event_sender: self.event_sender,
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
             dtmf_detector: Mutex::new(DTMFDetector::new()),

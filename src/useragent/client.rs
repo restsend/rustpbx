@@ -14,9 +14,12 @@ use tokio::time;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use crate::media::stream::{MediaStream, MediaStreamBuilder};
 use crate::useragent::config::SipConfig;
 use crate::useragent::dialog::{DialogManager, SipDialog};
+use crate::{
+    event::EventSender,
+    media::stream::{MediaStream, MediaStreamBuilder},
+};
 
 /// SIP client events
 #[derive(Debug, Clone)]
@@ -72,9 +75,9 @@ impl SipClient {
         // Create media stream
         let stream_id = format!("sip-{}", Uuid::new_v4());
         let cancel_token = tokio_util::sync::CancellationToken::new();
-
+        let event_sender = EventSender::new(16);
         let media_stream = Arc::new(
-            MediaStreamBuilder::new()
+            MediaStreamBuilder::new(event_sender)
                 .with_id(stream_id)
                 .cancel_token(cancel_token)
                 .build(),

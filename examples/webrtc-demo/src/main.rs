@@ -6,11 +6,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use rustpbx::media::{
-    stream::{MediaStream, MediaStreamBuilder},
-    track::{
-        file::FileTrack,
-        webrtc::{WebrtcTrack, WebrtcTrackConfig},
+use rustpbx::{
+    event::EventSender,
+    media::{
+        stream::{MediaStream, MediaStreamBuilder},
+        track::{
+            file::FileTrack,
+            webrtc::{WebrtcTrack, WebrtcTrackConfig},
+        },
     },
 };
 use serde::{Deserialize, Serialize};
@@ -200,10 +203,10 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
 
     // Create a cancellation token
     let cancel_token = CancellationToken::new();
-
+    let event_sender = EventSender::new(16);
     // Create MediaStream
     let media_stream = Arc::new(
-        MediaStreamBuilder::new()
+        MediaStreamBuilder::new(event_sender)
             .with_id(format!("demo-stream-{}", Uuid::new_v4()))
             .cancel_token(cancel_token.child_token())
             .build(),
