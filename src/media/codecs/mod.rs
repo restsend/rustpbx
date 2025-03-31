@@ -103,3 +103,11 @@ pub fn convert_s16_to_u8(s16_data: &[i16]) -> Vec<u8> {
     }
     u8_data
 }
+
+pub fn convert_u8_to_s16(u8_data: &[u8]) -> Vec<i16> {
+    let u8_data = u8_data
+        .chunks(2)
+        .map(|chunk| (chunk[0] as i16) | ((chunk[1] as i16) << 8))
+        .collect();
+    u8_data
+}

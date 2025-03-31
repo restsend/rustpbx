@@ -28,6 +28,7 @@ pub struct MediaStream {
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
     dtmf_detector: Mutex<DTMFDetector>,
 }
+
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
     recorder: Option<String>,
@@ -117,7 +118,7 @@ impl MediaStream {
         if let Some(track) = self.tracks.lock().await.remove(id) {
             match track.stop().await {
                 Ok(_) => {
-                    let timestamp = Instant::now().elapsed().as_millis() as u32;
+                    let timestamp = crate::get_timestamp();
                     self.event_sender
                         .send(SessionEvent::TrackEnd {
                             track_id: id.clone(),
@@ -142,11 +143,10 @@ impl MediaStream {
             Ok(_) => {
                 let track_id = track.id().clone();
                 self.tracks.lock().await.insert(track_id.clone(), track);
-                let timestamp = Instant::now().elapsed().as_millis() as u32;
                 self.event_sender
                     .send(SessionEvent::TrackStart {
                         track_id: track_id.clone(),
-                        timestamp,
+                        timestamp: crate::get_timestamp(),
                     })
                     .ok();
             }
@@ -239,7 +239,7 @@ impl MediaStream {
                     self.event_sender
                         .send(SessionEvent::DTMF {
                             track_id: packet.track_id.clone(),
-                            timestamp: packet.timestamp as u32,
+                            timestamp: crate::get_timestamp(),
                             digit: digit.clone(),
                         })
                         .ok();

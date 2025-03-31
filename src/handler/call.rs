@@ -3,9 +3,15 @@ use crate::{
     media::{
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
-        track::{file::FileTrack, tts::TtsTrack, webrtc::WebrtcTrack, Track, TrackConfig},
+        track::{
+            file::FileTrack,
+            tts::{TtsCommand, TtsCommandSender, TtsTrack},
+            webrtc::WebrtcTrack,
+            Track, TrackConfig,
+        },
         vad::VadProcessor,
     },
+    synthesis::TencentCloudTtsClient,
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
     TrackId,
 };
@@ -13,7 +19,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -60,6 +66,7 @@ pub struct ActiveCall {
     pub created_at: DateTime<Utc>,
     pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
+    pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
 }
 
 impl ActiveCall {
@@ -165,6 +172,7 @@ impl ActiveCall {
             created_at: Utc::now(),
             media_stream: Arc::new(media_stream),
             track_config,
+            tts_command_tx: Mutex::new(None),
         };
         Ok(active_call)
     }
@@ -203,16 +211,44 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
     ) -> Result<()> {
-        let tts_track = TtsTrack::new("callee".to_string())
-            .with_cancel_token(self.cancel_token.clone())
-            .with_play_id(play_id)
-            .with_speaker(speaker)
-            .with_text(text);
-        self.media_stream.update_track(Box::new(tts_track)).await;
-        Ok(())
+        let play_command = TtsCommand {
+            text,
+            speaker,
+            play_id,
+        };
+        let tts_command_tx = self.tts_command_tx.lock().await;
+        if let Some(tts_command_tx) = tts_command_tx.as_ref() {
+            tts_command_tx.send(play_command)?;
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let tts_config = self.options.tts_config.clone().unwrap_or_default();
+        let tts_client = TencentCloudTtsClient::new(tts_config);
+        let tts_track = TtsTrack::new("callee".to_string(), rx, tts_client)
+            .with_cancel_token(self.cancel_token.clone());
+        match tts_track
+            .start(
+                self.cancel_token.clone(),
+                self.media_stream.get_event_sender(),
+                self.media_stream.packet_sender.clone(),
+            )
+            .await
+        {
+            Ok(_) => {
+                info!("Tts track started");
+                tx.send(play_command)?;
+                self.tts_command_tx.lock().await.replace(tx);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to start tts track: {}", e);
+                Err(e)
+            }
+        }
     }
 
     async fn do_play(&self, url: String) -> Result<()> {
+        self.tts_command_tx.lock().await.take();
         let file_track = FileTrack::new("callee".to_string())
             .with_path(url)
             .with_cancel_token(self.cancel_token.clone());

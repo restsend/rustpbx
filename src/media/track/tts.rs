@@ -1,56 +1,57 @@
+use std::{sync::Arc, time::Instant};
+
 use crate::{
-    event::EventSender,
+    event::{EventSender, SessionEvent},
     media::{
+        cache,
+        codecs::convert_u8_to_s16,
         processor::Processor,
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
+    synthesis::SynthesisClient,
     AudioFrame, Samples,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use std::io::Cursor;
-use tokio::time::Duration;
+use serde_json::to_vec;
+use tokio::{
+    select,
+    sync::{mpsc, Mutex},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
-pub struct TtsTrack {
-    id: TrackId,
+#[derive(Clone)]
+pub struct TtsCommand {
+    pub text: String,
+    pub speaker: Option<String>,
+    pub play_id: Option<String>,
+}
+pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
+type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
+
+pub struct TtsTrack<T: SynthesisClient> {
+    track_id: TrackId,
     processors: Vec<Box<dyn Processor>>,
     config: TrackConfig,
     cancel_token: CancellationToken,
-    text: Option<String>,
     use_cache: bool,
-    play_id: Option<String>,
-    speaker: Option<String>,
+    command_rx: Mutex<Option<TtsCommandReceiver>>,
+    client: Mutex<Option<T>>,
 }
 
-impl TtsTrack {
-    pub fn new(id: TrackId) -> Self {
+impl<T: SynthesisClient> TtsTrack<T> {
+    pub fn new(track_id: TrackId, command_rx: TtsCommandReceiver, client: T) -> Self {
         Self {
-            id,
+            track_id,
             processors: Vec::new(),
             config: TrackConfig::default(),
             cancel_token: CancellationToken::new(),
-            text: None,
+            command_rx: Mutex::new(Some(command_rx)),
             use_cache: true,
-            play_id: None,
-            speaker: None,
+            client: Mutex::new(Some(client)),
         }
-    }
-
-    pub fn with_play_id(mut self, play_id: Option<String>) -> Self {
-        self.play_id = play_id;
-        self
-    }
-
-    pub fn with_speaker(mut self, speaker: Option<String>) -> Self {
-        self.speaker = speaker;
-        self
-    }
-    pub fn with_text(mut self, text: String) -> Self {
-        self.text = Some(text);
-        self
     }
 
     pub fn with_config(mut self, config: TrackConfig) -> Self {
@@ -80,9 +81,9 @@ impl TtsTrack {
 }
 
 #[async_trait]
-impl Track for TtsTrack {
+impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
     fn id(&self) -> &TrackId {
-        &self.id
+        &self.track_id
     }
 
     fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
@@ -95,6 +96,128 @@ impl Track for TtsTrack {
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
+        let mut command_rx = self
+            .command_rx
+            .lock()
+            .await
+            .take()
+            .ok_or(anyhow!("Command receiver not found"))?;
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let client = self.client.lock().await.take().unwrap();
+        let buffer_clone = buffer.clone();
+        let sample_rate = self.config.sample_rate;
+        let use_cache = self.use_cache;
+        let command_loop = async move {
+            let mut last_play_id = None;
+            while let Some(command) = command_rx.recv().await {
+                let text = command.text;
+                let speaker = command.speaker;
+                let play_id = command.play_id;
+                if play_id != last_play_id {
+                    last_play_id = play_id.clone();
+                    buffer_clone.lock().await.clear();
+                }
+                let cache_key = format!("tts:{:?}{}", speaker, text);
+                let cache_key = cache::generate_cache_key(&cache_key, sample_rate);
+                if use_cache {
+                    match cache::is_cached(&cache_key).await {
+                        Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
+                            Ok(audio) => {
+                                info!("Using cached TTS audio for {}", cache_key);
+                                buffer_clone.lock().await.extend(audio);
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!("Error retrieving cached TTS audio: {}", e);
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+
+                let start_time = Instant::now();
+                match client.synthesize(&text).await {
+                    Ok(audio) => {
+                        event_sender
+                            .send(SessionEvent::Metrics {
+                                timestamp: crate::get_timestamp(),
+                                sender: "tts.tencent_cloud".to_string(),
+                                metrics: serde_json::json!({
+                                        "speaker": speaker.clone(),
+                                        "play_id": play_id.clone(),
+                                        "audio_length": audio.len(),
+                                        "duration": start_time.elapsed().as_millis() as u32,
+                                }),
+                            })
+                            .ok();
+                        debug!(
+                            "TTS audio length: {} bytes -> {}ms {}",
+                            audio.len(),
+                            start_time.elapsed().as_millis(),
+                            text
+                        );
+
+                        let audio = if audio.len() > 44 && audio[..4] == [0x52, 0x49, 0x46, 0x46] {
+                            audio[44..].to_vec()
+                        } else {
+                            audio
+                        };
+                        if use_cache {
+                            cache::store_in_cache(&cache_key, &audio).await.ok();
+                        }
+                        buffer_clone.lock().await.extend(audio);
+                    }
+                    Err(e) => {
+                        warn!("Error synthesizing text: {}", e);
+                        continue;
+                    }
+                }
+            }
+        };
+        let sample_rate = self.config.sample_rate;
+        let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
+        let track_id = self.track_id.clone();
+        let packet_duration = 1000.0 / sample_rate as f64 * max_pcm_chunk_size as f64;
+        let packet_duration_ms = packet_duration as u32;
+        info!(
+            "TTS track {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
+            track_id, sample_rate, max_pcm_chunk_size, packet_duration_ms
+        );
+        let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
+        let mut ts = 0;
+        let emit_loop = async move {
+            loop {
+                let packet = {
+                    let mut buffer = buffer.lock().await;
+                    if buffer.len() > max_pcm_chunk_size {
+                        let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<u8>>();
+                        Some(s16_data)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(packet) = packet {
+                    let packet = AudioFrame {
+                        track_id: track_id.clone(),
+                        timestamp: ts,
+                        samples: Samples::PCM(convert_u8_to_s16(&packet)),
+                        sample_rate: sample_rate as u16,
+                    };
+                    packet_sender.send(packet).ok();
+                }
+                ts += packet_duration_ms;
+                ptimer.tick().await;
+            }
+        };
+
+        tokio::spawn(async move {
+            select! {
+                _ = command_loop => {}
+                _ = emit_loop => {}
+                _ = token.cancelled() => {}
+            }
+        });
         Ok(())
     }
 

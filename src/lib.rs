@@ -28,3 +28,10 @@ pub struct AudioFrame {
     pub timestamp: u32,
     pub sample_rate: u16,
 }
+// get timestamp in milliseconds
+pub fn get_timestamp() -> u64 {
+    let now = std::time::SystemTime::now();
+    now.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::select;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -219,26 +219,17 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    // Load environment variables from .env file
     dotenv().ok();
 
-    // Initialize tracing for logging
     tracing_subscriber::fmt::init();
 
-    // Parse arguments
     let args = Args::parse();
-    // Create cancellation token for pipeline
     let cancel_token = CancellationToken::new();
 
-    // Create event sender for pipeline events
-    let (event_sender, mut event_receiver) = broadcast::channel::<SessionEvent>(32);
-
-    // Create audio buffer and channels for sending samples
     let audio_buffer = Arc::new(AudioBuffer::new(args.sample_rate as usize * 10)); // 10 seconds at specified sample rate
     let output_buffer = Arc::new(AudioBuffer::new(args.sample_rate as usize * 10));
     let (audio_sender, mut audio_receiver) = mpsc::channel::<Vec<i16>>(100);
 
-    // Get credentials from environment variables
     let secret_id = match std::env::var("TENCENT_SECRET_ID") {
         Ok(id) if !id.is_empty() => id,
         _ => {
@@ -266,7 +257,7 @@ async fn main() -> Result<()> {
         }
     };
     info!("Found TENCENT_APPID in environment");
-    // Set up ASR pipeline
+
     let transcription_config = TranscriptionConfig {
         appid: Some(appid.clone()),
         secret_id: Some(secret_id.clone()),
