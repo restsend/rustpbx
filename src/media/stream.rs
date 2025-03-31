@@ -33,7 +33,6 @@ pub struct MediaStreamBuilder {
     recorder: Option<String>,
     event_buf_size: usize,
     id: Option<String>,
-    use_pipeline: bool,
 }
 
 impl MediaStreamBuilder {
@@ -43,11 +42,10 @@ impl MediaStreamBuilder {
             cancel_token: None,
             recorder: None,
             event_buf_size: 16,
-            use_pipeline: false,
         }
     }
 
-    pub fn id(mut self, id: String) -> Self {
+    pub fn with_id(mut self, id: String) -> Self {
         self.id = Some(id);
         self
     }
@@ -64,11 +62,6 @@ impl MediaStreamBuilder {
 
     pub fn recorder(mut self, recorder: String) -> Self {
         self.recorder = Some(recorder);
-        self
-    }
-
-    pub fn use_pipeline(mut self, use_pipeline: bool) -> Self {
-        self.use_pipeline = use_pipeline;
         self
     }
 
@@ -115,6 +108,9 @@ impl MediaStream {
 
     pub fn subscribe(&self) -> EventReceiver {
         self.event_sender.subscribe()
+    }
+    pub fn get_event_sender(&self) -> EventSender {
+        self.event_sender.clone()
     }
 
     pub async fn remove_track(&self, id: &TrackId) {
@@ -211,15 +207,6 @@ impl MediaStream {
             }
             None => None,
         };
-
-        if let Some(processor) = recorder {
-            // Add processor to all tracks
-            let mut tracks = self.tracks.lock().await;
-            for track in tracks.values_mut() {
-                track.with_processors(vec![Box::new(processor.clone())]);
-            }
-        }
-
         // Wait for cancellation
         self.cancel_token.cancelled().await;
         Ok(())

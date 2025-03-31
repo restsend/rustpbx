@@ -75,7 +75,7 @@ impl SipClient {
 
         let media_stream = Arc::new(
             MediaStreamBuilder::new()
-                .id(stream_id)
+                .with_id(stream_id)
                 .cancel_token(cancel_token)
                 .build(),
         );

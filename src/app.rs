@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::handler::call;
+use crate::handler::call::{self, CallHandlerState};
 use anyhow::Result;
 use axum::Router;
 use std::collections::HashMap;
@@ -70,12 +70,8 @@ impl App {
 fn create_router() -> Router {
     // Create router with empty state
     let router = Router::new();
-
+    let call_state = CallHandlerState::new();
     // Merge call and WebSocket handlers
-    let call_state = call::CallHandlerState {
-        active_calls: Arc::new(Mutex::new(HashMap::new())),
-    };
-
-    let call_routes = call::router().with_state(call_state.clone());
+    let call_routes = crate::handler::router().with_state(call_state);
     router.merge(call_routes)
 }

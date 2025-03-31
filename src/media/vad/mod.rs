@@ -7,9 +7,9 @@ use std::any::Any;
 use std::sync::Mutex;
 use webrtc_vad::Vad;
 
+mod silero;
 #[cfg(test)]
 mod tests;
-mod voice_activity;
 mod webrtc;
 
 // Thread-safe wrapper for Vad
@@ -17,7 +17,7 @@ pub(crate) struct ThreadSafeVad(Mutex<Vad>);
 unsafe impl Send for ThreadSafeVad {}
 unsafe impl Sync for ThreadSafeVad {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VADConfig {
     /// Minimum duration of silence to consider speech ended (in milliseconds)
     pub silence_duration_threshold: u64,
@@ -50,8 +50,10 @@ impl Default for VADConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VadType {
+    #[serde(rename = "webrtc")]
     WebRTC,
-    VoiceActivity,
+    #[serde(rename = "silero")]
+    Silero,
 }
 
 pub struct VadProcessor {
@@ -70,7 +72,7 @@ impl VadProcessor {
     pub fn new(track_id: String, vad_type: VadType, event_sender: EventSender) -> Self {
         let vad: Box<dyn VadEngine> = match vad_type {
             VadType::WebRTC => Box::new(webrtc::WebRtcVad::new()),
-            VadType::VoiceActivity => Box::new(voice_activity::VoiceActivityVad::new()),
+            VadType::Silero => Box::new(silero::SileroVad::new()),
         };
 
         Self {
@@ -81,12 +83,10 @@ impl VadProcessor {
 
     #[cfg(test)]
     pub fn set_test_mode(&self, vad_type: &VadType, is_speech: bool) {
-        if let VadType::VoiceActivity = vad_type {
+        if let VadType::Silero = vad_type {
             let mut vad = self.vad.lock().unwrap();
             let vad_any = vad.as_any_mut();
-            if let Some(voice_activity_vad) =
-                vad_any.downcast_mut::<voice_activity::VoiceActivityVad>()
-            {
+            if let Some(voice_activity_vad) = vad_any.downcast_mut::<silero::SileroVad>() {
                 voice_activity_vad.set_test_mode(is_speech);
             }
         }

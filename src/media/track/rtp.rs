@@ -657,13 +657,6 @@ impl Track for RtpTrack {
         self.processors.extend(processors);
     }
 
-    fn processors(&self) -> Vec<&dyn Processor> {
-        self.processors
-            .iter()
-            .map(|p| p.as_ref() as &dyn Processor)
-            .collect()
-    }
-
     async fn start(
         &self,
         token: CancellationToken,

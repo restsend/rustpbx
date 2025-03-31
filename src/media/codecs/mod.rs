@@ -53,6 +53,36 @@ pub fn create_encoder(codec: CodecType) -> Result<Box<dyn Encoder>> {
     }
 }
 
+impl CodecType {
+    pub fn mime_type(&self) -> &str {
+        match self {
+            CodecType::PCMU => "audio/PCMU",
+            CodecType::PCMA => "audio/PCMA",
+            CodecType::G722 => "audio/G722",
+        }
+    }
+    pub fn clock_rate(&self) -> u32 {
+        match self {
+            CodecType::PCMU => 8000,
+            CodecType::PCMA => 8000,
+            CodecType::G722 => 8000,
+        }
+    }
+    pub fn payload_type(&self) -> u8 {
+        match self {
+            CodecType::PCMU => 0,
+            CodecType::PCMA => 8,
+            CodecType::G722 => 9,
+        }
+    }
+    pub fn samplerate(&self) -> u32 {
+        match self {
+            CodecType::PCMU => 8000,
+            CodecType::PCMA => 8000,
+            CodecType::G722 => 16000,
+        }
+    }
+}
 pub struct DecoderFactory {}
 
 impl DecoderFactory {

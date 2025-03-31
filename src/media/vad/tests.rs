@@ -61,7 +61,7 @@ async fn test_voice_activity_vad() {
     let (event_sender, mut event_receiver) = broadcast::channel(16);
     let track_id = "test_track".to_string();
 
-    let vad = VadProcessor::new(track_id.clone(), VadType::VoiceActivity, event_sender);
+    let vad = VadProcessor::new(track_id.clone(), VadType::Silero, event_sender);
 
     // Test with silence (all zeros)
     let mut silence_frame = AudioFrame {
@@ -86,7 +86,7 @@ async fn test_voice_activity_vad() {
 
     // Since the library model may not detect our test sine wave as speech,
     // enable test mode to force speech detection
-    vad.set_test_mode(&VadType::VoiceActivity, true);
+    vad.set_test_mode(&VadType::Silero, true);
 
     // Test with speech frame (doesn't matter what we send since we're in test mode)
     let speech_samples: Vec<i16> = (0..512)
@@ -128,7 +128,7 @@ async fn test_vad_type_switching() {
     let vad = VadProcessor::new(track_id.clone(), VadType::WebRTC, event_sender.clone());
 
     // Create VAD with VoiceActivity type
-    let vad2 = VadProcessor::new(track_id.clone(), VadType::VoiceActivity, event_sender);
+    let vad2 = VadProcessor::new(track_id.clone(), VadType::Silero, event_sender);
 
     // Test that both can process frames
     let mut frame = AudioFrame {

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use voice_activity_detector::VoiceActivityDetector;
 
-pub struct VoiceActivityVad {
+pub struct SileroVad {
     detector: Mutex<VoiceActivityDetector>,
     config: VADConfig,
     buffer: Vec<i16>,
@@ -17,7 +17,7 @@ pub struct VoiceActivityVad {
     test_mode: Option<bool>, // When set, forces speech detection for testing
 }
 
-impl VoiceActivityVad {
+impl SileroVad {
     pub fn new() -> Self {
         // Create detector with default settings for 16kHz audio
         // Using 512 samples chunk size (32ms at 16kHz) - required by voice_activity_detector
@@ -49,7 +49,7 @@ impl VoiceActivityVad {
     }
 }
 
-impl VadEngine for VoiceActivityVad {
+impl VadEngine for SileroVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
         // For testing - if test_mode is set, use it instead of actual detection
         #[cfg(test)]

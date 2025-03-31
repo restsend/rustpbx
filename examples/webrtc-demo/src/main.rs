@@ -150,12 +150,12 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
         RTCRtpCodecParameters {
             capability: RTCRtpCodecCapability {
                 mime_type: MIME_TYPE_PCMU.to_string(),
-                clock_rate: 8000, // G722 uses 8kHz clock rate (16kHz samples)
+                clock_rate: 8000, // PCMU uses 8kHz clock rate (16kHz samples)
                 channels: 1,      // Mono
                 sdp_fmtp_line: "".to_string(),
                 rtcp_feedback: vec![],
             },
-            payload_type: 0, // Standard payload type for G722
+            payload_type: 0, // Standard payload type for PCMU
             ..Default::default()
         },
         RTPCodecType::Audio,
@@ -204,7 +204,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
     // Create MediaStream
     let media_stream = Arc::new(
         MediaStreamBuilder::new()
-            .id(format!("demo-stream-{}", Uuid::new_v4()))
+            .with_id(format!("demo-stream-{}", Uuid::new_v4()))
             .cancel_token(cancel_token.child_token())
             .build(),
     );

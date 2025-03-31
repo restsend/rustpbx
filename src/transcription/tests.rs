@@ -82,7 +82,6 @@ async fn test_tencent_cloud_asr() {
     for chunk in chunks.iter() {
         client
             .send_audio(chunk)
-            .await
             .expect("Failed to send audio chunk");
     }
     // Wait for transcription result with timeout

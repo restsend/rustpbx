@@ -10,7 +10,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use std::{io::Cursor, time::Instant};
+use std::{io::Cursor, sync::Arc, time::Instant};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -196,13 +196,6 @@ impl Track for TtsTrack {
 
     fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
         self.processors.extend(processors);
-    }
-
-    fn processors(&self) -> Vec<&dyn Processor> {
-        self.processors
-            .iter()
-            .map(|p| p.as_ref() as &dyn Processor)
-            .collect()
     }
 
     async fn start(

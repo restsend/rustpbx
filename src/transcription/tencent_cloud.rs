@@ -1,3 +1,4 @@
+use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionConfig, TranscriptionFrame};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -20,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
+
+use super::TranscriptionSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudAsrResult {
@@ -44,6 +47,7 @@ pub struct TencentCloudAsrWord {
 pub struct TencentCloudAsrResponse {
     pub code: i32,
     pub message: String,
+    pub voice_id: String,
     pub result: Option<TencentCloudAsrResult>,
 }
 
@@ -55,12 +59,14 @@ pub struct TencentCloudAsrClient {
 
 pub struct TencentCloudAsrClientBuilder {
     config: TranscriptionConfig,
+    track_id: Option<String>,
     cancellation_token: Option<CancellationToken>,
 }
 
 impl Into<TranscriptionFrame> for TencentCloudAsrResult {
     fn into(self) -> TranscriptionFrame {
         TranscriptionFrame {
+            track_id: None,
             index: self.index,
             is_final: self.slice_type == 2,
             start_time: Some(self.start_time),
@@ -74,6 +80,7 @@ impl TencentCloudAsrClientBuilder {
         Self {
             config,
             cancellation_token: None,
+            track_id: None,
         }
     }
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
@@ -99,7 +106,10 @@ impl TencentCloudAsrClientBuilder {
         self.config.engine_type = engine_type;
         self
     }
-
+    pub fn with_track_id(mut self, track_id: String) -> Self {
+        self.track_id = Some(track_id);
+        self
+    }
     pub async fn build(self) -> Result<TencentCloudAsrClient> {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
         let (frame_tx, frame_rx) = mpsc::unbounded_channel();
@@ -109,7 +119,7 @@ impl TencentCloudAsrClientBuilder {
             audio_tx,
             frame_rx: Mutex::new(frame_rx),
         };
-        let voice_id = Uuid::new_v4().to_string();
+        let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let ws_stream = client.connect_websocket(voice_id.as_str()).await?;
         let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
         let samplerate = client.config.sample_rate;
@@ -165,14 +175,6 @@ impl TencentCloudAsrClient {
         // Encode the signature with base64 and then URL encode it
         let base64_sig = STANDARD.encode(hmac.as_ref());
         Ok(urlencoding::encode(&base64_sig).into_owned())
-    }
-
-    fn samples_to_bytes_le(samples: &[i16]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
-        for &sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        bytes
     }
 
     // Establish WebSocket connection to TencentCloud ASR service
@@ -297,7 +299,11 @@ impl TencentCloudAsrClient {
                                     );
                                     break;
                                 }
-                                response.result.map(|result| frame_tx.send(result.into()));
+                                response.result.map(|result| {
+                                    let mut frame: TranscriptionFrame = result.into();
+                                    frame.track_id = Some(response.voice_id);
+                                    frame_tx.send(frame).unwrap();
+                                });
                             }
                             Err(e) => {
                                 warn!("Failed to parse ASR response: {} {}", e, text);
@@ -370,8 +376,8 @@ impl TencentCloudAsrClient {
 
 #[async_trait]
 impl TranscriptionClient for TencentCloudAsrClient {
-    async fn send_audio(&self, samples: &[i16]) -> Result<()> {
-        self.audio_tx.send(Self::samples_to_bytes_le(samples))?;
+    fn send_audio(&self, samples: &[i16]) -> Result<()> {
+        self.audio_tx.send(codecs::convert_s16_to_u8(samples))?;
         Ok(())
     }
 

@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 mod tencent_cloud;
 pub use tencent_cloud::TencentCloudTtsClient;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SynthesisType {
+    #[serde(rename = "tencent_cloud")]
+    TencentCloud,
+}
 #[cfg(test)]
 mod tests;
 #[derive(Debug, Clone, Deserialize, Serialize)]
