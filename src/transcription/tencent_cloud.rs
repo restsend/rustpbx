@@ -292,7 +292,8 @@ impl TencentCloudAsrClient {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
-                                            timestamp: result.start_time,
+                                            timestamp: crate::get_timestamp(),
+                                            start_time: Some(result.start_time),
                                             end_time: Some(result.end_time),
                                         }
                                     } else {
@@ -300,7 +301,8 @@ impl TencentCloudAsrClient {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
-                                            timestamp: result.start_time,
+                                            timestamp: crate::get_timestamp(),
+                                            start_time: Some(result.start_time),
                                             end_time: Some(result.end_time),
                                         }
                                     };

@@ -122,11 +122,10 @@ impl Track for FileTrack {
                         tracing::error!("Error streaming audio: {}", e);
                     }
                     // Signal the end of the file
-                    let timestamp = Instant::now().elapsed().as_millis() as u32;
                     event_sender
                         .send(SessionEvent::TrackEnd {
                             track_id: id,
-                            timestamp,
+                            timestamp: crate::get_timestamp(),
                         })
                         .ok();
                 });
@@ -134,11 +133,10 @@ impl Track for FileTrack {
             None => {
                 tracing::error!("No path provided for FileTrack");
 
-                let timestamp = Instant::now().elapsed().as_millis() as u32;
                 event_sender
                     .send(SessionEvent::TrackEnd {
                         track_id: self.id.clone(),
-                        timestamp,
+                        timestamp: crate::get_timestamp(),
                     })
                     .ok();
             }
@@ -203,7 +201,7 @@ async fn stream_from_url(
 
     // Store in cache if enabled
     if use_cache {
-        if let Err(e) = cache::store_in_cache(&cache_key, data.clone()).await {
+        if let Err(e) = cache::store_in_cache(&cache_key, &data).await {
             warn!("Failed to store audio in cache: {}", e);
         } else {
             debug!("Stored audio in cache with key: {}", cache_key);
@@ -223,7 +221,7 @@ async fn stream_from_url(
 }
 
 // Helper function to stream a WAV file from memory
-async fn stream_from_memory(
+pub(crate) async fn stream_from_memory(
     data: &[u8],
     track_id: &str,
     target_sample_rate: u32,
@@ -495,7 +493,7 @@ mod tests {
         // Manually store the file in cache if it's not already there, to make the test more reliable
         if !cache::is_cached(&cache_key).await? {
             info!("Cache file not found, manually storing it");
-            cache::store_in_cache(&cache_key, wav_data).await?;
+            cache::store_in_cache(&cache_key, &wav_data).await?;
         }
 
         // Now verify the cache exists

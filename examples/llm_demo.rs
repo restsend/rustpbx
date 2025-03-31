@@ -111,23 +111,15 @@ async fn main() -> Result<()> {
                     match result {
                         Ok(LlmContent::Delta(delta)) => {
                             // Send delta event
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as u32;
                             let _ = event_sender.send(SessionEvent::LLMDelta {
-                                timestamp,
+                                timestamp: rustpbx::get_timestamp(),
                                 word: delta,
                             });
                         }
                         Ok(LlmContent::Final(final_text)) => {
                             // Send final event
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as u32;
                             let _ = event_sender.send(SessionEvent::LLMFinal {
-                                timestamp,
+                                timestamp: rustpbx::get_timestamp(),
                                 text: final_text,
                             });
                             break;

@@ -73,11 +73,11 @@ pub async fn is_cached(key: &str) -> Result<bool> {
 }
 
 /// Store data in the cache
-pub async fn store_in_cache(key: &str, data: Vec<u8>) -> Result<()> {
+pub async fn store_in_cache(key: &str, data: &Vec<u8>) -> Result<()> {
     ensure_cache_dir().await?;
     let path = get_cache_path(key)?;
 
-    tokio::fs::write(&path, &data).await?;
+    tokio::fs::write(&path, data).await?;
 
     debug!("Stored file in cache with key: {}", key);
     Ok(())
@@ -151,7 +151,7 @@ mod tests {
 
         // Test storing data in cache
         let test_data = b"TEST DATA".to_vec();
-        store_in_cache(&key, test_data.clone()).await?;
+        store_in_cache(&key, &test_data).await?;
 
         // Test if data is cached
         assert!(is_cached(&key).await?);
@@ -166,7 +166,7 @@ mod tests {
 
         // Test clean cache
         let key2 = generate_cache_key("test_data2", 16000);
-        store_in_cache(&key2, test_data.clone()).await?;
+        store_in_cache(&key2, &test_data).await?;
         clean_cache().await?;
         assert!(!is_cached(&key2).await?);
 

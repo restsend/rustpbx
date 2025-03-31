@@ -101,12 +101,12 @@ impl Processor for VadProcessor {
         let event = if is_speech {
             SessionEvent::StartSpeaking {
                 track_id: frame.track_id.clone(),
-                timestamp: frame.timestamp,
+                timestamp: frame.timestamp as u64,
             }
         } else {
             SessionEvent::Silence {
                 track_id: frame.track_id.clone(),
-                timestamp: frame.timestamp,
+                timestamp: frame.timestamp as u64,
             }
         };
         self.event_sender.send(event).ok();

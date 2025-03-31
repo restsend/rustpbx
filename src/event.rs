@@ -5,41 +5,42 @@ pub enum SessionEvent {
     #[serde(rename = "answer")]
     Answer {
         track_id: String,
-        timestamp: u32,
+        timestamp: u64,
         sdp: String,
     },
     #[serde(rename = "reject")]
     Reject {
         track_id: String,
-        timestamp: u32,
+        timestamp: u64,
         reason: String,
     },
     #[serde(rename = "ringing")]
     Ringing {
         track_id: String,
-        timestamp: u32,
+        timestamp: u64,
         early_media: bool,
     },
     #[serde(rename = "start_speaking")]
-    StartSpeaking { track_id: String, timestamp: u32 },
+    StartSpeaking { track_id: String, timestamp: u64 },
     #[serde(rename = "silence")]
-    Silence { track_id: String, timestamp: u32 },
+    Silence { track_id: String, timestamp: u64 },
     #[serde(rename = "dtmf")]
     DTMF {
         track_id: String,
-        timestamp: u32,
+        timestamp: u64,
         digit: String,
     },
     #[serde(rename = "track_start")]
-    TrackStart { track_id: String, timestamp: u32 },
+    TrackStart { track_id: String, timestamp: u64 },
     #[serde(rename = "track_end")]
-    TrackEnd { track_id: String, timestamp: u32 },
+    TrackEnd { track_id: String, timestamp: u64 },
     /// track_id, timestamp, text
     #[serde(rename = "transcription_final")]
     TranscriptionFinal {
         track_id: String,
+        timestamp: u64,
         index: u32,
-        timestamp: u32,
+        start_time: Option<u32>,
         end_time: Option<u32>,
         text: String,
     },
@@ -48,32 +49,34 @@ pub enum SessionEvent {
     TranscriptionDelta {
         track_id: String,
         index: u32,
-        timestamp: u32,
+        timestamp: u64,
+        start_time: Option<u32>,
         end_time: Option<u32>,
         text: String,
     },
     /// timestamp, text
     #[serde(rename = "llm_final")]
-    LLMFinal { timestamp: u32, text: String },
+    LLMFinal { timestamp: u64, text: String },
     /// track_id, timestamp,  word
     #[serde(rename = "llm_delta")]
-    LLMDelta { timestamp: u32, word: String },
+    LLMDelta { timestamp: u64, word: String },
     /// timestamp, audio
     #[serde(rename = "synthesis")]
-    Synthesis { timestamp: u32, audio: Vec<u8> },
+    Synthesis { timestamp: u64, audio: Vec<u8> },
     /// timestamp, metrics
     #[serde(rename = "metrics")]
     Metrics {
-        timestamp: u32,
+        timestamp: u64,
+        sender: String,
         metrics: serde_json::Value,
     },
     /// timestamp, error message
     #[serde(rename = "error")]
-    Error { timestamp: u32, error: String },
+    Error { timestamp: u64, error: String },
 }
 
 impl SessionEvent {
-    pub fn timestamp(&self) -> u32 {
+    pub fn timestamp(&self) -> u64 {
         match self {
             SessionEvent::Answer { timestamp, .. } => *timestamp,
             SessionEvent::Reject { timestamp, .. } => *timestamp,

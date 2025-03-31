@@ -31,7 +31,7 @@ impl Default for TrackConfig {
             ptime: Duration::from_millis(20),
             sample_rate: 16000,
             channels: 1,
-            max_pcm_chunk_size: 320, // 20ms at 16kHz
+            max_pcm_chunk_size: 320, // 20ms at 16kHz, 16-bit mono
         }
     }
 }
