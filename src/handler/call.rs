@@ -3,7 +3,7 @@ use crate::{
     media::{
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
-        track::{webrtc::WebrtcTrack, Track},
+        track::{file::FileTrack, tts::TtsTrack, webrtc::WebrtcTrack, Track, TrackConfig},
         vad::VadProcessor,
     },
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
 // Session state for active calls
@@ -59,6 +59,7 @@ pub struct ActiveCall {
     pub options: StreamOptions,
     pub created_at: DateTime<Utc>,
     pub media_stream: Arc<MediaStream>,
+    pub track_config: TrackConfig,
 }
 
 impl ActiveCall {
@@ -118,18 +119,15 @@ impl ActiveCall {
             Some(ref asr_type) => match asr_type {
                 TranscriptionType::TencentCloud => {
                     let asr_config = options.asr_config.clone().unwrap_or_default();
-                    let asr_client = TencentCloudAsrClientBuilder::new(asr_config)
+                    let event_sender = media_stream.get_event_sender();
+                    let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
                         .with_track_id(track_id.clone())
                         .with_cancellation_token(cancel_token.clone())
                         .build()
                         .await?;
-
-                    let asr_processor = AsrProcessor::new(
-                        track_id.clone(),
-                        asr_client,
-                        media_stream.get_event_sender(),
-                    );
+                    let asr_processor = AsrProcessor::new(asr_client);
                     processors.push(Box::new(asr_processor) as Box<dyn Processor>);
+                    debug!("TencentCloud Asr processor added");
                 }
             },
             None => {}
@@ -158,7 +156,7 @@ impl ActiveCall {
         let media_stream =
             Self::create_stream(state, cancel_token.clone(), track_id, &session_id, &options)
                 .await?;
-
+        let track_config = TrackConfig::default();
         let active_call = ActiveCall {
             cancel_token,
             call_type: ActiveCallType::Webrtc,
@@ -166,12 +164,13 @@ impl ActiveCall {
             options,
             created_at: Utc::now(),
             media_stream: Arc::new(media_stream),
+            track_config,
         };
         Ok(active_call)
     }
 
     pub async fn process_stream(&self) -> Result<()> {
-        Ok(())
+        self.media_stream.serve().await
     }
 
     pub async fn dispatch(&self, command: Command) -> Result<()> {
@@ -204,20 +203,37 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
     ) -> Result<()> {
+        let tts_track = TtsTrack::new("callee".to_string())
+            .with_cancel_token(self.cancel_token.clone())
+            .with_play_id(play_id)
+            .with_speaker(speaker)
+            .with_text(text);
+        self.media_stream.update_track(Box::new(tts_track)).await;
         Ok(())
     }
+
     async fn do_play(&self, url: String) -> Result<()> {
+        let file_track = FileTrack::new("callee".to_string())
+            .with_path(url)
+            .with_cancel_token(self.cancel_token.clone());
+        self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
+
     async fn do_hangup(&self) -> Result<()> {
+        self.cancel_token.cancel();
+        info!("Call {} do_hangup", self.session_id);
         Ok(())
     }
+
     async fn do_refer(&self, target: String) -> Result<()> {
         Ok(())
     }
+
     async fn do_mute(&self, track_id: Option<String>) -> Result<()> {
         Ok(())
     }
+
     async fn do_unmute(&self, track_id: Option<String>) -> Result<()> {
         Ok(())
     }

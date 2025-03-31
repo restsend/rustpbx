@@ -42,16 +42,6 @@ impl Default for TranscriptionConfig {
     }
 }
 
-// Transcription Events
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscriptionFrame {
-    pub track_id: Option<String>,
-    pub index: u32,
-    pub is_final: bool,
-    pub start_time: Option<u32>,
-    pub end_time: Option<u32>,
-    pub text: String,
-}
 pub type TranscriptionSender = mpsc::UnboundedSender<AudioFrame>;
 pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 
@@ -59,25 +49,7 @@ pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 #[async_trait]
 pub trait TranscriptionClient: Send + Sync {
     fn send_audio(&self, data: &[i16]) -> Result<()>;
-    async fn next(&self) -> Option<TranscriptionFrame>;
 }
 
-impl Into<SessionEvent> for TranscriptionFrame {
-    fn into(self) -> SessionEvent {
-        if self.is_final {
-            SessionEvent::TranscriptionFinal {
-                text: self.text,
-                timestamp: self.start_time.unwrap_or(0),
-                track_id: self.track_id.unwrap_or_default(),
-            }
-        } else {
-            SessionEvent::TranscriptionDelta {
-                text: self.text,
-                timestamp: self.start_time.unwrap_or(0),
-                track_id: self.track_id.unwrap_or_default(),
-            }
-        }
-    }
-}
 #[cfg(test)]
 mod tests;

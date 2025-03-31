@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use rustpbx::{
+    event::SessionEvent,
     media::track::file::read_wav_file,
     transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig},
 };
@@ -95,16 +96,19 @@ async fn main() -> Result<()> {
         all_samples.len(),
         sample_rate
     );
-
+    let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
     // Create ASR client
-    let transcription_client = TencentCloudAsrClientBuilder::new(TranscriptionConfig {
-        language: Some(args.language),
-        appid: Some(tencent_appid),
-        secret_id: Some(tencent_secret_id),
-        secret_key: Some(tencent_secret_key),
-        engine_type: args.engine,
-        ..Default::default()
-    })
+    let transcription_client = TencentCloudAsrClientBuilder::new(
+        TranscriptionConfig {
+            language: Some(args.language),
+            appid: Some(tencent_appid),
+            secret_id: Some(tencent_secret_id),
+            secret_key: Some(tencent_secret_key),
+            engine_type: args.engine,
+            ..Default::default()
+        },
+        event_sender,
+    )
     .build()
     .await?;
     // Send the samples to the transcription client
@@ -117,16 +121,15 @@ async fn main() -> Result<()> {
     );
     let retch_result = async move {
         let mut result = String::new();
-        while let Some(frame) = transcription_client.next().await {
-            let end_time = frame.end_time.unwrap_or(0);
-            let text = frame.text.clone();
-            println!("{} : {}", end_time, text);
-            if frame.is_final {
-                result.push_str(&frame.text);
-            }
-            if end_time > duration.as_millis() as u32 {
-                result.push_str(&frame.text);
-                break;
+        while let Ok(event) = event_receiver.recv().await {
+            match event {
+                SessionEvent::TranscriptionFinal { text, end_time, .. } => {
+                    result.push_str(&text);
+                    if end_time.unwrap_or(0) > duration.as_millis() as u32 {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
         result
