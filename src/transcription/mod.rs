@@ -1,3 +1,4 @@
+use crate::event::SessionEvent;
 use crate::AudioFrame;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,6 +7,13 @@ use tokio::sync::mpsc;
 mod tencent_cloud;
 pub use tencent_cloud::TencentCloudAsrClient;
 pub use tencent_cloud::TencentCloudAsrClientBuilder;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum TranscriptionType {
+    #[serde(rename = "tencent_cloud")]
+    TencentCloud,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TranscriptionConfig {
     pub model: Option<String>,
@@ -37,6 +45,7 @@ impl Default for TranscriptionConfig {
 // Transcription Events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionFrame {
+    pub track_id: Option<String>,
     pub index: u32,
     pub is_final: bool,
     pub start_time: Option<u32>,
@@ -49,8 +58,26 @@ pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 // Unified transcription client trait with async_trait support
 #[async_trait]
 pub trait TranscriptionClient: Send + Sync {
-    async fn send_audio(&self, data: &[i16]) -> Result<()>;
+    fn send_audio(&self, data: &[i16]) -> Result<()>;
     async fn next(&self) -> Option<TranscriptionFrame>;
+}
+
+impl Into<SessionEvent> for TranscriptionFrame {
+    fn into(self) -> SessionEvent {
+        if self.is_final {
+            SessionEvent::TranscriptionFinal {
+                text: self.text,
+                timestamp: self.start_time.unwrap_or(0),
+                track_id: self.track_id.unwrap_or_default(),
+            }
+        } else {
+            SessionEvent::TranscriptionDelta {
+                text: self.text,
+                timestamp: self.start_time.unwrap_or(0),
+                track_id: self.track_id.unwrap_or_default(),
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests;

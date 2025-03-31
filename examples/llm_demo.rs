@@ -1,21 +1,15 @@
-use std::sync::Arc;
-
-use rustpbx::{
-    event::SessionEvent,
-    llm::{LlmClient, LlmConfig, LlmContent, OpenAiClient, OpenAiClientBuilder},
-};
-
 use anyhow::Result;
 use dotenv::dotenv;
 use futures::StreamExt;
+use rustpbx::{
+    event::SessionEvent,
+    llm::{LlmClient, LlmConfig, LlmContent, OpenAiClientBuilder},
+};
 use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up logging
     tracing_subscriber::fmt::init();
-
-    // Load environment variables from .env file
     dotenv().ok();
 
     println!("Initializing LLM client from environment variables...");

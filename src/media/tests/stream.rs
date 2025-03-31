@@ -92,13 +92,6 @@ impl Track for TestTrack {
         self.processors = processors;
     }
 
-    fn processors(&self) -> Vec<&dyn Processor> {
-        self.processors
-            .iter()
-            .map(|p| p.as_ref() as &dyn Processor)
-            .collect()
-    }
-
     async fn start(
         &self,
         _token: CancellationToken,

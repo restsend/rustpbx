@@ -401,10 +401,10 @@ async fn main() -> Result<()> {
                 info!("Read {} samples at {} Hz", samples.len(), sample_rate);
                 let chunk_size = sample_rate as usize / 1000 * 20; // 20ms at 48kHz
                 for chunk in samples.chunks(chunk_size) {
-                    asr_client.send_audio(chunk).await.ok();
+                    asr_client.send_audio(chunk).ok();
                     sleep(Duration::from_millis(20)).await;
                 }
-                asr_client.send_audio(&vec![0; 16000]).await.ok();
+                asr_client.send_audio(&vec![0; 16000]).ok();
                 info!("Input file processed");
                 cancel_token_clone.cancelled().await;
             }
@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
                     }
                     if buffer.len() >= chunk_size {
                         for chunk in buffer.chunks(chunk_size) {
-                            asr_client.send_audio(chunk).await.ok();
+                            asr_client.send_audio(chunk).ok();
                         }
                         buffer.clear();
                     }

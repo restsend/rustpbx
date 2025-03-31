@@ -2,6 +2,7 @@ use crate::{
     event::{EventSender, SessionEvent},
     media::{
         jitter::JitterBuffer,
+        negotiate::prefer_audio_codec,
         processor::Processor,
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
@@ -14,16 +15,40 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tokio::sync::mpsc;
-use tokio::time::Duration;
+use tokio::{select, time::Duration};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
-use webrtc::media::Sample;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use tracing::{debug, error, info, warn};
+use webrtc::{
+    api::{
+        media_engine::{
+            MediaEngine, MIME_TYPE_G722, MIME_TYPE_PCMA, MIME_TYPE_PCMU, MIME_TYPE_TELEPHONE_EVENT,
+        },
+        APIBuilder,
+    },
+    ice_transport::ice_server::RTCIceServer,
+    media::Sample,
+    peer_connection::{
+        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+        sdp::session_description::RTCSessionDescription,
+    },
+    rtp_transceiver::{
+        rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+        rtp_sender::RTCRtpSender,
+    },
+    track::track_local::TrackLocal,
+};
+use webrtc::{
+    peer_connection::RTCPeerConnection,
+    track::track_local::track_local_static_sample::TrackLocalStaticSample,
+};
 
 use super::{track_codec::TrackCodec, TrackPacketReceiver};
-
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 // Configuration for integrating a webrtc crate track with our WebrtcTrack
 #[derive(Clone)]
 pub struct WebrtcTrackConfig {
@@ -33,6 +58,7 @@ pub struct WebrtcTrackConfig {
 
 pub struct WebrtcTrack {
     id: TrackId,
+    stream_id: String,
     config: TrackConfig,
     processors: Vec<Box<dyn Processor>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
@@ -40,14 +66,76 @@ pub struct WebrtcTrack {
     packet_sender: Mutex<Option<TrackPacketSender>>,
     cancel_token: CancellationToken,
     webrtc_track: Option<WebrtcTrackConfig>,
+    rtp_sender: Option<Arc<RTCRtpSender>>,
 }
 
 impl WebrtcTrack {
-    pub fn new(id: TrackId) -> Self {
-        let config = TrackConfig::default().with_sample_rate(48000); // WebRTC typically uses 48kHz
+    pub fn get_media_engine() -> Result<MediaEngine> {
+        let mut media_engine = MediaEngine::default();
+        for codec in vec![
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_G722.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 9,
+                ..Default::default()
+            },
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_PCMU.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 0,
+                ..Default::default()
+            },
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_PCMA.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 8,
+                ..Default::default()
+            },
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: 8000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 101,
+                ..Default::default()
+            },
+        ] {
+            media_engine.register_codec(codec, RTPCodecType::Audio)?;
+        }
+        Ok(media_engine)
+    }
 
+    pub async fn get_ice_servers() -> Vec<RTCIceServer> {
+        let servers = vec![RTCIceServer {
+            urls: vec!["stun:restsend.com:3478".to_owned()],
+            ..Default::default()
+        }];
+        servers
+    }
+
+    pub fn new(id: TrackId) -> Self {
+        let config = TrackConfig::default().with_sample_rate(16000);
         Self {
             id,
+            stream_id: "rustpbx-stream".to_string(),
             config: config.clone(),
             processors: Vec::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
@@ -55,6 +143,7 @@ impl WebrtcTrack {
             packet_sender: Mutex::new(None),
             cancel_token: CancellationToken::new(),
             webrtc_track: None,
+            rtp_sender: None,
         }
     }
 
@@ -75,6 +164,11 @@ impl WebrtcTrack {
         self
     }
 
+    pub fn with_webrtc_track(mut self, webrtc_track: WebrtcTrackConfig) -> Self {
+        self.webrtc_track = Some(webrtc_track);
+        self
+    }
+
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.config = self.config.with_sample_rate(sample_rate);
 
@@ -86,10 +180,105 @@ impl WebrtcTrack {
 
         self
     }
-
-    pub fn with_webrtc_track(mut self, webrtc_track_config: WebrtcTrackConfig) -> Self {
-        self.webrtc_track = Some(webrtc_track_config);
+    pub fn with_stream_id(mut self, stream_id: String) -> Self {
+        self.stream_id = stream_id;
         self
+    }
+
+    pub async fn setup_webrtc_track(
+        &mut self,
+        offer: String,
+        timeout: Option<Duration>,
+    ) -> Result<RTCSessionDescription> {
+        let media_engine = Self::get_media_engine()?;
+        let api = APIBuilder::new().with_media_engine(media_engine).build();
+        let config = RTCConfiguration {
+            ice_servers: Self::get_ice_servers().await,
+            ..Default::default()
+        };
+
+        let peer_connection = api.new_peer_connection(config).await?;
+        let remote_desc = RTCSessionDescription::offer(offer)?;
+        let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
+            Some(codec) => codec,
+            None => {
+                return Err(anyhow::anyhow!("No codec found"));
+            }
+        };
+        let track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: codec.mime_type().to_string(),
+                clock_rate: 8000,
+                channels: 1,
+                ..Default::default()
+            },
+            "audio".to_string(),
+            self.stream_id.clone(),
+        ));
+
+        let cancel_token = self.cancel_token.clone();
+        let (connected_tx, connected_rx) = oneshot::channel();
+        let connected_tx = Arc::new(Mutex::new(Some(connected_tx)));
+        peer_connection.on_peer_connection_state_change(Box::new(
+            move |s: RTCPeerConnectionState| {
+                info!("Peer connection state changed: {}", s);
+                let cancel_token = cancel_token.clone();
+                let connected_tx = connected_tx.clone();
+                Box::pin(async move {
+                    match s {
+                        RTCPeerConnectionState::Connected => {
+                            let mut connected_tx = connected_tx.lock().unwrap();
+                            if let Some(tx) = connected_tx.take() {
+                                tx.send(()).ok();
+                            }
+                        }
+                        RTCPeerConnectionState::Closed
+                        | RTCPeerConnectionState::Failed
+                        | RTCPeerConnectionState::Disconnected => {
+                            cancel_token.cancel();
+                        }
+                        _ => {}
+                    }
+                })
+            },
+        ));
+
+        let rtp_sender = peer_connection
+            .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+
+        self.rtp_sender = Some(rtp_sender);
+        peer_connection.set_remote_description(remote_desc).await?;
+
+        select! {
+            _ = connected_rx => {}
+            _ = self.cancel_token.cancelled() => {
+                warn!("wait peer connection established cancelled");
+                return Err(anyhow::anyhow!("Cancelled for peer connection establishment"));
+            }
+            _ = sleep(timeout.unwrap_or_else(||HANDSHAKE_TIMEOUT)) => {
+                warn!("wait peer connection established timeout");
+                return Err(anyhow::anyhow!("Timeout waiting for peer connection establishment"));
+            }
+        };
+        let answer = peer_connection.create_answer(None).await?;
+        peer_connection
+            .set_local_description(answer.clone())
+            .await?;
+
+        self.config = self.config.clone().with_sample_rate(codec.samplerate());
+
+        {
+            let mut jitter_buffer = self.jitter_buffer.lock().unwrap();
+            *jitter_buffer = JitterBuffer::new(codec.samplerate());
+        }
+
+        self.webrtc_track = Some(WebrtcTrackConfig {
+            track: Arc::clone(&track),
+            payload_type: codec.payload_type(),
+        });
+        info!("Peer connection established answer: {}", answer.sdp);
+        Ok(answer)
     }
 
     async fn start_jitter_processing(&self, token: CancellationToken) -> Result<()> {
@@ -175,13 +364,6 @@ impl Track for WebrtcTrack {
 
     fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
         self.processors.extend(processors);
-    }
-
-    fn processors(&self) -> Vec<&dyn Processor> {
-        self.processors
-            .iter()
-            .map(|p| p.as_ref() as &dyn Processor)
-            .collect()
     }
 
     async fn start(

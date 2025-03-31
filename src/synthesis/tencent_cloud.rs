@@ -1,19 +1,12 @@
 use super::{SynthesisClient, SynthesisConfig};
-use crate::event::{EventSender, SessionEvent};
-use crate::TrackId;
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use futures::Stream;
 use hmac::{Hmac, Mac};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::debug;
 use uuid;
 
 // TencentCloud TTS Response structure
@@ -115,13 +108,6 @@ impl TencentCloudTtsClient {
     async fn synthesize_text(&self, text: &str) -> Result<Vec<u8>> {
         let secret_id = self.config.secret_id.clone().unwrap_or_default();
         let secret_key = self.config.secret_key.clone().unwrap_or_default();
-        let appid = self
-            .config
-            .appid
-            .clone()
-            .unwrap_or_default()
-            .parse::<i32>()
-            .unwrap_or(0);
         let speaker = self.config.speaker.unwrap_or(1);
         let volume = self.config.volume.unwrap_or(0);
         let speed = self.config.rate.unwrap_or(0.0);
@@ -131,15 +117,8 @@ impl TencentCloudTtsClient {
             .clone()
             .unwrap_or_else(|| "mp3".to_string());
 
-        if secret_id.is_empty() || secret_key.is_empty() {
-            return Err(anyhow::anyhow!("Missing TencentCloud credentials"));
-        }
-
-        // Create request parameters - Use Unix timestamp
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-
-        // Create request body
         let request_data = serde_json::json!({
             "Text": text,
             "Volume": volume,
@@ -173,7 +152,6 @@ impl TencentCloudTtsClient {
 
         // Record request start time for TTFB measurement
         let request_start_time = std::time::Instant::now();
-
         debug!("Sending TTS request with data: {:?}", request_data);
 
         // Send request to TencentCloud TTS API

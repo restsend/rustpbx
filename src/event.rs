@@ -1,10 +1,25 @@
-use crate::AudioFrame;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
-    #[serde(rename = "audio")]
-    Audio { frame: AudioFrame },
+    #[serde(rename = "answer")]
+    Answer {
+        track_id: String,
+        timestamp: u32,
+        sdp: String,
+    },
+    #[serde(rename = "reject")]
+    Reject {
+        track_id: String,
+        timestamp: u32,
+        reason: String,
+    },
+    #[serde(rename = "ringing")]
+    Ringing {
+        track_id: String,
+        timestamp: u32,
+        early_media: bool,
+    },
     #[serde(rename = "start_speaking")]
     StartSpeaking { track_id: String, timestamp: u32 },
     #[serde(rename = "silence")]
@@ -56,7 +71,9 @@ pub enum SessionEvent {
 impl SessionEvent {
     pub fn timestamp(&self) -> u32 {
         match self {
-            SessionEvent::Audio { frame } => frame.timestamp,
+            SessionEvent::Answer { timestamp, .. } => *timestamp,
+            SessionEvent::Reject { timestamp, .. } => *timestamp,
+            SessionEvent::Ringing { timestamp, .. } => *timestamp,
             SessionEvent::DTMF { timestamp, .. } => *timestamp,
             SessionEvent::TrackStart { timestamp, .. } => *timestamp,
             SessionEvent::TrackEnd { timestamp, .. } => *timestamp,

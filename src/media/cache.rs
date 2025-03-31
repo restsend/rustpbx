@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::RwLock;
 use tokio::fs::create_dir_all;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 // Default cache directory
 static DEFAULT_CACHE_DIR: &str = "/tmp/mediacache";

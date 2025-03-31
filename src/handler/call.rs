@@ -1,320 +1,224 @@
+use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
-    event::SessionEvent,
-    media::{processor::Processor, stream::MediaStream},
-    AudioFrame,
+    media::{
+        processor::Processor,
+        stream::{MediaStream, MediaStreamBuilder},
+        track::{webrtc::WebrtcTrack, Track},
+        vad::VadProcessor,
+    },
+    transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
+    TrackId,
 };
 use anyhow::Result;
-use axum::Router;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use webrtc::peer_connection::RTCPeerConnection;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
-// Configuration for Language Model - use the one from llm module
-pub use crate::llm::LlmConfig;
-
+pub type ActiveCallRef = Arc<ActiveCall>;
 // Session state for active calls
 #[derive(Clone)]
 pub struct CallHandlerState {
-    pub active_calls: Arc<Mutex<HashMap<String, ActiveCall>>>,
+    pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
+    pub recorder_root: String,
 }
 
-// Active call information
-#[derive(Clone)]
-pub struct ActiveCall {
-    pub session_id: String,
-    pub media_stream: Arc<MediaStream>,
-    pub peer_connection: Arc<RTCPeerConnection>,
-    pub events: tokio::sync::broadcast::Sender<CallEvent>,
-}
-
-// Configuration for ASR (Automatic Speech Recognition)
-#[derive(Debug, Clone, Deserialize)]
-pub struct AsrConfig {
-    pub enabled: bool,
-    pub model: Option<String>,
-    pub language: Option<String>,
-}
-
-// Configuration for Text-to-Speech
-#[derive(Debug, Clone, Deserialize)]
-pub struct SynthesisConfig {
-    pub url: String,
-    pub voice: Option<String>,
-    pub rate: Option<f32>,
-}
-
-// Configuration for Voice Activity Detection
-#[derive(Debug, Clone, Deserialize)]
-pub struct VadConfig {
-    pub enabled: bool,
-    pub mode: Option<String>,
-    pub min_speech_duration_ms: Option<u32>,
-    pub min_silence_duration_ms: Option<u32>,
-}
-
-// Response for WebRTC SDP answer
-#[derive(Debug, Serialize)]
-pub struct CallResponse {
-    pub session_id: String,
-    pub sdp: String,
-}
-
-// Call Events
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-pub enum CallEvent {
-    #[serde(rename = "vad")]
-    VadEvent {
-        track_id: String,
-        timestamp: u32,
-        is_speech: bool,
-    },
-    #[serde(rename = "asr")]
-    AsrEvent {
-        track_id: String,
-        timestamp: u32,
-        text: String,
-        is_final: bool,
-    },
-    #[serde(rename = "llm")]
-    LlmEvent {
-        timestamp: u32,
-        text: String,
-        is_final: bool,
-    },
-    #[serde(rename = "tts")]
-    TtsEvent { timestamp: u32, text: String },
-    #[serde(rename = "metrics")]
-    MetricsEvent {
-        timestamp: u32,
-        metrics: serde_json::Value,
-    },
-    #[serde(rename = "ringing")]
-    RingingEvent { timestamp: u32 },
-    #[serde(rename = "hangup")]
-    HangupEvent { timestamp: u32, reason: String },
-    #[serde(rename = "refer")]
-    ReferEvent { timestamp: u32, target: String },
-    #[serde(rename = "error")]
-    ErrorEvent { timestamp: u32, error: String },
-}
-
-// WebSocket Commands
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "command")]
-pub enum Command {
-    /// Play a text to speech
-    #[serde(rename = "tts")]
-    Tts { text: String },
-    /// Play a wav file
-    #[serde(rename = "play")]
-    Play { url: String },
-    /// Hangup the call
-    #[serde(rename = "hangup")]
-    Hangup {},
-    /// Refer to a target
-    #[serde(rename = "refer")]
-    Refer { target: String },
-    /// Mute a track
-    #[serde(rename = "mute")]
-    Mute { track_id: Option<String> },
-    /// Unmute a track
-    #[serde(rename = "unmute")]
-    Unmute { track_id: Option<String> },
-}
-
-// ASR Processor that integrates with the media stream system
-pub struct AsrProcessor {
-    config: AsrConfig,
-    event_sender: tokio::sync::broadcast::Sender<CallEvent>,
-}
-
-impl AsrProcessor {
-    pub fn new(config: AsrConfig, event_sender: tokio::sync::broadcast::Sender<CallEvent>) -> Self {
+impl CallHandlerState {
+    pub fn new() -> Self {
+        let recorder_root =
+            std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
         Self {
-            config,
-            event_sender,
+            active_calls: Arc::new(Mutex::new(HashMap::new())),
+            recorder_root,
         }
+    }
+
+    pub fn get_recorder_file(&self, session_id: &String) -> String {
+        std::path::Path::new(&self.recorder_root)
+            .join(session_id)
+            .with_extension("wav")
+            .to_string_lossy()
+            .to_string()
     }
 }
 
-impl Processor for AsrProcessor {
-    fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        if self.config.enabled {
-            // In a real implementation, this would process the audio data
-            // and send it to an ASR service
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ActiveCallType {
+    #[serde(rename = "webrtc")]
+    Webrtc,
+    #[serde(rename = "sip")]
+    Sip,
+}
 
-            // For now, we'll just simulate ASR events occasionally
-            if frame.timestamp % 3000 == 0 {
-                let event = CallEvent::AsrEvent {
-                    track_id: frame.track_id.clone(),
-                    timestamp: frame.timestamp,
-                    text: "Sample transcription".to_string(),
-                    is_final: frame.timestamp % 6000 == 0,
-                };
-                let _ = self.event_sender.send(event);
+pub struct ActiveCall {
+    pub cancel_token: CancellationToken,
+    pub call_type: ActiveCallType,
+    pub session_id: String,
+    pub options: StreamOptions,
+    pub created_at: DateTime<Utc>,
+    pub media_stream: Arc<MediaStream>,
+}
+
+impl ActiveCall {
+    pub async fn create_stream(
+        state: &CallHandlerState,
+        cancel_token: CancellationToken,
+        track_id: TrackId,
+        session_id: &String,
+        options: &StreamOptions,
+    ) -> Result<MediaStream> {
+        let mut media_stream_builder = MediaStreamBuilder::new()
+            .with_id(session_id.clone())
+            .cancel_token(cancel_token.clone());
+
+        if options.enable_recorder.unwrap_or(false) {
+            media_stream_builder =
+                media_stream_builder.recorder(state.get_recorder_file(session_id));
+        }
+
+        let media_stream = media_stream_builder.build();
+        let offer = options
+            .sdp
+            .clone()
+            .ok_or(anyhow::anyhow!("SDP is required"))?;
+
+        let mut webrtc_track = WebrtcTrack::new(track_id.clone());
+        let timeout = options
+            .handshake_timeout
+            .as_ref()
+            .map(|d| {
+                d.clone()
+                    .parse::<u64>()
+                    .map(|d| Duration::from_secs(d))
+                    .ok()
+            })
+            .flatten();
+
+        let mut processors = vec![];
+        if options.enable_recorder.unwrap_or(false) {
+            // add recorder processor
+            //let recorder_processor = RecorderProcessor::new(media_stream.get_event_sender());
+            // processors.push(Box::new(recorder_processor) as Box<dyn Processor>);
+        }
+
+        match options.vad_type {
+            Some(ref vad_type) => {
+                let vad_processor = VadProcessor::new(
+                    track_id.clone(),
+                    vad_type.clone(),
+                    media_stream.get_event_sender(),
+                );
+                processors.push(Box::new(vad_processor) as Box<dyn Processor>);
+            }
+            None => {}
+        }
+        match options.asr_type {
+            Some(ref asr_type) => match asr_type {
+                TranscriptionType::TencentCloud => {
+                    let asr_config = options.asr_config.clone().unwrap_or_default();
+                    let asr_client = TencentCloudAsrClientBuilder::new(asr_config)
+                        .with_track_id(track_id.clone())
+                        .with_cancellation_token(cancel_token.clone())
+                        .build()
+                        .await?;
+
+                    let asr_processor = AsrProcessor::new(
+                        track_id.clone(),
+                        asr_client,
+                        media_stream.get_event_sender(),
+                    );
+                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
+                }
+            },
+            None => {}
+        }
+        webrtc_track.with_processors(processors);
+
+        match webrtc_track.setup_webrtc_track(offer, timeout).await {
+            Ok(_) => {
+                media_stream.update_track(Box::new(webrtc_track)).await;
+            }
+            Err(e) => {
+                warn!("Failed to setup webrtc track: {}", e);
+                return Err(e);
             }
         }
+        Ok(media_stream)
+    }
+
+    pub async fn new_webrtc(
+        state: &CallHandlerState,
+        cancel_token: CancellationToken,
+        track_id: TrackId,
+        session_id: String,
+        options: StreamOptions,
+    ) -> Result<Self> {
+        let media_stream =
+            Self::create_stream(state, cancel_token.clone(), track_id, &session_id, &options)
+                .await?;
+
+        let active_call = ActiveCall {
+            cancel_token,
+            call_type: ActiveCallType::Webrtc,
+            session_id,
+            options,
+            created_at: Utc::now(),
+            media_stream: Arc::new(media_stream),
+        };
+        Ok(active_call)
+    }
+
+    pub async fn process_stream(&self) -> Result<()> {
         Ok(())
     }
-}
 
-// Adapt MediaStreamEvents to CallEvents
-pub fn convert_media_event(event: SessionEvent) -> Option<CallEvent> {
-    match event {
-        SessionEvent::StartSpeaking {
-            track_id,
-            timestamp,
-        } => Some(CallEvent::VadEvent {
-            track_id,
-            timestamp,
-            is_speech: true,
-        }),
-        SessionEvent::Silence {
-            track_id,
-            timestamp,
-        } => Some(CallEvent::VadEvent {
-            track_id,
-            timestamp,
-            is_speech: false,
-        }),
-        SessionEvent::TranscriptionFinal {
-            track_id,
-            timestamp,
-            text,
-        } => Some(CallEvent::AsrEvent {
-            track_id,
-            timestamp,
-            text,
-            is_final: true,
-        }),
-        SessionEvent::TranscriptionDelta {
-            track_id,
-            timestamp,
-            text,
-        } => Some(CallEvent::AsrEvent {
-            track_id,
-            timestamp,
-            text,
-            is_final: false,
-        }),
-        _ => None,
-    }
-}
-
-// Configure Router function now moved to individual modules
-pub fn router() -> Router<CallHandlerState> {
-    // Combine routers from webrtc and sip modules
-    let state = CallHandlerState {
-        active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
-    };
-
-    let webrtc_router = crate::handler::webrtc::router();
-    let sip_router = crate::handler::sip::router();
-
-    webrtc_router.merge(sip_router).with_state(state)
-}
-
-// Handler for ws commands moved to individual modules
-
-#[cfg(test)]
-mod tests {
-    use crate::Samples;
-
-    use super::*;
-    use tokio::sync::broadcast;
-
-    // Test media event conversion
-    #[test]
-    fn test_convert_media_event() {
-        // Test StartSpeaking event conversion
-        let track_id = "test-track".to_string();
-        let timestamp = 12345u32;
-        let event = SessionEvent::StartSpeaking {
-            track_id: track_id.clone(),
-            timestamp,
-        };
-
-        let converted = convert_media_event(event);
-        assert!(converted.is_some());
-
-        if let Some(CallEvent::VadEvent {
-            track_id: tid,
-            timestamp: ts,
-            is_speech,
-        }) = converted
-        {
-            assert_eq!(tid, track_id);
-            assert_eq!(ts, timestamp);
-            assert!(is_speech);
-        } else {
-            panic!("Converted event is not the expected type");
-        }
-
-        // Test Silence event conversion
-        let event = SessionEvent::Silence {
-            track_id: track_id.clone(),
-            timestamp,
-        };
-        let converted = convert_media_event(event);
-        assert!(converted.is_some());
-
-        if let Some(CallEvent::VadEvent {
-            track_id: tid,
-            timestamp: ts,
-            is_speech,
-        }) = converted
-        {
-            assert_eq!(tid, track_id);
-            assert_eq!(ts, timestamp);
-            assert!(!is_speech);
-        } else {
-            panic!("Converted event is not the expected type");
+    pub async fn dispatch(&self, command: Command) -> Result<()> {
+        match command {
+            Command::Candidate { candidates } => self.do_candidate(candidates).await,
+            Command::Tts {
+                text,
+                speaker,
+                play_id,
+            } => self.do_tts(text, speaker, play_id).await,
+            Command::Play { url } => self.do_play(url).await,
+            Command::Hangup {} => self.do_hangup().await,
+            Command::Refer { target } => self.do_refer(target).await,
+            Command::Mute { track_id } => self.do_mute(track_id).await,
+            Command::Unmute { track_id } => self.do_unmute(track_id).await,
+            _ => {
+                info!("Invalid command: {:?}", command);
+                Ok(())
+            }
         }
     }
 
-    // Test ASR processor
-    #[test]
-    fn test_asr_processor() {
-        let (sender, _) = broadcast::channel(10);
-        let config = AsrConfig {
-            enabled: true,
-            model: Some("test".to_string()),
-            language: Some("en".to_string()),
-        };
-
-        let processor = AsrProcessor::new(config, sender.clone());
-
-        // Create test audio frame
-        let mut frame = AudioFrame {
-            track_id: "test".to_string(),
-            samples: Samples::PCM(vec![0; 160]),
-            timestamp: 3000, // Choose a timestamp divisible by 3000
-            sample_rate: 16000,
-        };
-
-        // Test processor processing audio frame
-        let result = processor.process_frame(&mut frame);
-        assert!(result.is_ok());
+    async fn do_candidate(&self, candidates: Vec<String>) -> Result<()> {
+        Ok(())
     }
 
-    // Test CallResponse structure
-    #[test]
-    fn test_call_response_structure() {
-        // Create a call response
-        let response = CallResponse {
-            session_id: "test-session-id".to_string(),
-            sdp: "test-sdp-content".to_string(),
-        };
-
-        // Serialize response to JSON
-        let json = serde_json::to_string(&response).unwrap();
-
-        // Test JSON structure contains expected fields
-        assert!(json.contains("session_id"));
-        assert!(json.contains("test-session-id"));
-        assert!(json.contains("sdp"));
-        assert!(json.contains("test-sdp-content"));
+    async fn do_tts(
+        &self,
+        text: String,
+        speaker: Option<String>,
+        play_id: Option<String>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn do_play(&self, url: String) -> Result<()> {
+        Ok(())
+    }
+    async fn do_hangup(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn do_refer(&self, target: String) -> Result<()> {
+        Ok(())
+    }
+    async fn do_mute(&self, track_id: Option<String>) -> Result<()> {
+        Ok(())
+    }
+    async fn do_unmute(&self, track_id: Option<String>) -> Result<()> {
+        Ok(())
     }
 }
