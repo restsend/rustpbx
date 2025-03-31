@@ -38,9 +38,11 @@ use webrtc::{
     },
     rtp_transceiver::{
         rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+        rtp_receiver::RTCRtpReceiver,
         rtp_sender::RTCRtpSender,
+        RTCRtpTransceiver,
     },
-    track::track_local::TrackLocal,
+    track::{track_local::TrackLocal, track_remote::TrackRemote},
 };
 use webrtc::{
     peer_connection::RTCPeerConnection,
@@ -63,10 +65,11 @@ pub struct WebrtcTrack {
     processors: Vec<Box<dyn Processor>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
     receiver: Mutex<Option<TrackPacketReceiver>>,
-    packet_sender: Mutex<Option<TrackPacketSender>>,
+    packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
     cancel_token: CancellationToken,
     webrtc_track: Option<WebrtcTrackConfig>,
     rtp_sender: Option<Arc<RTCRtpSender>>,
+    track_remote: Option<Arc<TrackRemote>>,
 }
 
 impl WebrtcTrack {
@@ -125,7 +128,6 @@ impl WebrtcTrack {
 
     pub async fn get_ice_servers() -> Vec<RTCIceServer> {
         let servers = vec![RTCIceServer {
-            urls: vec!["stun:restsend.com:3478".to_owned()],
             ..Default::default()
         }];
         servers
@@ -140,10 +142,11 @@ impl WebrtcTrack {
             processors: Vec::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
             receiver: Mutex::new(None),
-            packet_sender: Mutex::new(None),
+            packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
             webrtc_track: None,
             rtp_sender: None,
+            track_remote: None,
         }
     }
 
@@ -197,7 +200,76 @@ impl WebrtcTrack {
             ..Default::default()
         };
 
+        let cancel_token = self.cancel_token.clone();
+
+        let (candidate_tx, candidate_rx) = oneshot::channel();
+        let candidate_tx = Arc::new(Mutex::new(Some(candidate_tx)));
+
         let peer_connection = api.new_peer_connection(config).await?;
+        peer_connection.on_ice_candidate(Box::new(
+            move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
+                info!("ICE candidate received: {:?}", candidate);
+                let candidate_tx = candidate_tx.clone();
+                Box::pin(async move {
+                    if candidate.is_none() {
+                        if let Some(tx) = candidate_tx.lock().unwrap().take() {
+                            tx.send(()).ok();
+                        }
+                    }
+                })
+            },
+        ));
+        peer_connection.on_peer_connection_state_change(Box::new(
+            move |s: RTCPeerConnectionState| {
+                info!("Peer connection state changed: {}", s);
+                let cancel_token = cancel_token.clone();
+                Box::pin(async move {
+                    match s {
+                        RTCPeerConnectionState::Connected => {}
+                        RTCPeerConnectionState::Closed
+                        | RTCPeerConnectionState::Failed
+                        | RTCPeerConnectionState::Disconnected => {
+                            cancel_token.cancel();
+                        }
+                        _ => {}
+                    }
+                })
+            },
+        ));
+        let packet_sender = self.packet_sender.clone();
+        let track_id_clone = self.id.clone();
+        peer_connection.on_track(Box::new(
+            move |track: Arc<TrackRemote>,
+                  receiver: Arc<RTCRtpReceiver>,
+                  transceiver: Arc<RTCRtpTransceiver>| {
+                info!("Track received: {:?}", track);
+                let track_id_clone = track_id_clone.clone();
+                let packet_sender_clone = packet_sender.clone();
+                Box::pin(async move {
+                    while let Ok((packet, _)) = track.read_rtp().await {
+                        let packet_sender = packet_sender_clone.lock().unwrap();
+                        if let Some(sender) = packet_sender.as_ref() {
+                            let frame = AudioFrame {
+                                track_id: track_id_clone.clone(),
+                                samples: crate::Samples::RTP(
+                                    packet.header.payload_type,
+                                    packet.payload.to_vec(),
+                                ),
+                                timestamp: packet.header.timestamp,
+                                ..Default::default()
+                            };
+                            match sender.send(frame) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Failed to send packet: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                })
+            },
+        ));
         let remote_desc = RTCSessionDescription::offer(offer)?;
         let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
             Some(codec) => codec,
@@ -205,6 +277,10 @@ impl WebrtcTrack {
                 return Err(anyhow::anyhow!("No codec found"));
             }
         };
+
+        info!("set remote description {}", remote_desc.sdp);
+        peer_connection.set_remote_description(remote_desc).await?;
+
         let track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: codec.mime_type().to_string(),
@@ -216,55 +292,29 @@ impl WebrtcTrack {
             self.stream_id.clone(),
         ));
 
-        let cancel_token = self.cancel_token.clone();
-        let (connected_tx, connected_rx) = oneshot::channel();
-        let connected_tx = Arc::new(Mutex::new(Some(connected_tx)));
-        peer_connection.on_peer_connection_state_change(Box::new(
-            move |s: RTCPeerConnectionState| {
-                info!("Peer connection state changed: {}", s);
-                let cancel_token = cancel_token.clone();
-                let connected_tx = connected_tx.clone();
-                Box::pin(async move {
-                    match s {
-                        RTCPeerConnectionState::Connected => {
-                            let mut connected_tx = connected_tx.lock().unwrap();
-                            if let Some(tx) = connected_tx.take() {
-                                tx.send(()).ok();
-                            }
-                        }
-                        RTCPeerConnectionState::Closed
-                        | RTCPeerConnectionState::Failed
-                        | RTCPeerConnectionState::Disconnected => {
-                            cancel_token.cancel();
-                        }
-                        _ => {}
-                    }
-                })
-            },
-        ));
-
         let rtp_sender = peer_connection
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
         self.rtp_sender = Some(rtp_sender);
-        peer_connection.set_remote_description(remote_desc).await?;
-
-        select! {
-            _ = connected_rx => {}
-            _ = self.cancel_token.cancelled() => {
-                warn!("wait peer connection established cancelled");
-                return Err(anyhow::anyhow!("Cancelled for peer connection establishment"));
-            }
-            _ = sleep(timeout.unwrap_or_else(||HANDSHAKE_TIMEOUT)) => {
-                warn!("wait peer connection established timeout");
-                return Err(anyhow::anyhow!("Timeout waiting for peer connection establishment"));
-            }
-        };
         let answer = peer_connection.create_answer(None).await?;
         peer_connection
             .set_local_description(answer.clone())
             .await?;
+
+        select! {
+            _ = candidate_rx => {
+                info!("ICE candidate received");
+            }
+            _ = sleep(timeout.unwrap_or(HANDSHAKE_TIMEOUT)) => {
+                warn!("wait candidate timeout");
+            }
+        }
+
+        let answer = peer_connection
+            .local_description()
+            .await
+            .ok_or(anyhow::anyhow!("Failed to get local description"))?;
 
         self.config = self.config.clone().with_sample_rate(codec.samplerate());
 

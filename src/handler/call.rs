@@ -1,5 +1,6 @@
 use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
+    event::{EventSender, SessionEvent},
     media::{
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
@@ -73,11 +74,12 @@ impl ActiveCall {
     pub async fn create_stream(
         state: &CallHandlerState,
         cancel_token: CancellationToken,
+        event_sender: EventSender,
         track_id: TrackId,
         session_id: &String,
         options: &StreamOptions,
     ) -> Result<MediaStream> {
-        let mut media_stream_builder = MediaStreamBuilder::new()
+        let mut media_stream_builder = MediaStreamBuilder::new(event_sender)
             .with_id(session_id.clone())
             .cancel_token(cancel_token.clone());
 
@@ -142,7 +144,15 @@ impl ActiveCall {
         webrtc_track.with_processors(processors);
 
         match webrtc_track.setup_webrtc_track(offer, timeout).await {
-            Ok(_) => {
+            Ok(answer) => {
+                media_stream
+                    .get_event_sender()
+                    .send(SessionEvent::Answer {
+                        track_id: track_id.to_string(),
+                        timestamp: crate::get_timestamp(),
+                        sdp: answer.sdp,
+                    })
+                    .ok();
                 media_stream.update_track(Box::new(webrtc_track)).await;
             }
             Err(e) => {
@@ -156,13 +166,20 @@ impl ActiveCall {
     pub async fn new_webrtc(
         state: &CallHandlerState,
         cancel_token: CancellationToken,
+        event_sender: EventSender,
         track_id: TrackId,
         session_id: String,
         options: StreamOptions,
     ) -> Result<Self> {
-        let media_stream =
-            Self::create_stream(state, cancel_token.clone(), track_id, &session_id, &options)
-                .await?;
+        let media_stream = Self::create_stream(
+            state,
+            cancel_token.clone(),
+            event_sender,
+            track_id,
+            &session_id,
+            &options,
+        )
+        .await?;
         let track_config = TrackConfig::default();
         let active_call = ActiveCall {
             cancel_token,
@@ -225,7 +242,7 @@ impl ActiveCall {
         let tts_config = self.options.tts_config.clone().unwrap_or_default();
         let tts_client = TencentCloudTtsClient::new(tts_config);
         let tts_track = TtsTrack::new("callee".to_string(), rx, tts_client)
-            .with_cancel_token(self.cancel_token.clone());
+            .with_cancel_token(self.cancel_token.child_token());
         match tts_track
             .start(
                 self.cancel_token.clone(),
@@ -251,7 +268,7 @@ impl ActiveCall {
         self.tts_command_tx.lock().await.take();
         let file_track = FileTrack::new("callee".to_string())
             .with_path(url)
-            .with_cancel_token(self.cancel_token.clone());
+            .with_cancel_token(self.cancel_token.child_token());
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
