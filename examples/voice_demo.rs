@@ -27,12 +27,12 @@ use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use tracing_subscriber;
 
 use rustpbx::{
     event::SessionEvent,
-    llm::{LlmClient, LlmConfig, OpenAiClientBuilder},
+    llm::{LlmClient, OpenAiClientBuilder},
     media::codecs::resample,
     synthesis::{SynthesisConfig, TencentCloudTtsClient},
     transcription::{TranscriptionClient, TranscriptionConfig},
@@ -273,9 +273,9 @@ async fn main() -> Result<()> {
         secret_key: Some(secret_key.clone()),
         ..Default::default()
     };
-
+    let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
     let asr_client = Arc::new(
-        TencentCloudAsrClientBuilder::new(transcription_config)
+        TencentCloudAsrClientBuilder::new(transcription_config, event_sender)
             .with_cancellation_token(cancel_token.clone())
             .build()
             .await?,
@@ -433,52 +433,54 @@ async fn main() -> Result<()> {
     };
 
     let transcription_loop = async move {
-        while let Some(frame) = asr_client_clone.next().await {
-            if !frame.is_final {
-                continue;
-            }
-            info!("Transcription: {}", frame.text);
-            let st = Instant::now();
-            match llm_client.generate(&frame.text).await {
-                Ok(mut llm_response) => {
-                    while let Some(content) = llm_response.next().await {
-                        if let Ok(LlmContent::Final(text)) = content {
-                            info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
-                            let st = Instant::now();
-                            if let Ok(audio) = tts_client.synthesize(&text).await {
-                                info!(
-                                    "TTS synthesis: {}ms ({}) bytes",
-                                    st.elapsed().as_millis(),
-                                    audio.len()
-                                );
-                                let audio_data: Vec<i16> = audio
-                                    .chunks_exact(2)
-                                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                    .collect();
-                                let final_audio = if sample_rate != output_sample_rate {
-                                    resample::resample_mono(
-                                        &audio_data,
-                                        sample_rate,
-                                        output_sample_rate,
-                                    )
-                                } else {
-                                    audio_data
-                                };
-                                output_buffer.push(&final_audio);
-                            } else {
-                                error!("Error synthesizing TTS");
-                                break;
+        while let Ok(event) = event_receiver.recv().await {
+            match event {
+                SessionEvent::TranscriptionFinal { text, .. } => {
+                    info!("Transcription: {}", text);
+                    let st = Instant::now();
+                    match llm_client.generate(&text).await {
+                        Ok(mut llm_response) => {
+                            while let Some(content) = llm_response.next().await {
+                                if let Ok(LlmContent::Final(text)) = content {
+                                    info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
+                                    let st = Instant::now();
+                                    if let Ok(audio) = tts_client.synthesize(&text).await {
+                                        info!(
+                                            "TTS synthesis: {}ms ({}) bytes",
+                                            st.elapsed().as_millis(),
+                                            audio.len()
+                                        );
+                                        let audio_data: Vec<i16> = audio
+                                            .chunks_exact(2)
+                                            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                                            .collect();
+                                        let final_audio = if sample_rate != output_sample_rate {
+                                            resample::resample_mono(
+                                                &audio_data,
+                                                sample_rate,
+                                                output_sample_rate,
+                                            )
+                                        } else {
+                                            audio_data
+                                        };
+                                        output_buffer.push(&final_audio);
+                                    } else {
+                                        error!("Error synthesizing TTS");
+                                        break;
+                                    }
+                                } else if let Err(e) = content {
+                                    error!("Error generating LLM response: {}", e);
+                                    break;
+                                }
                             }
-                        } else if let Err(e) = content {
+                        }
+                        Err(e) => {
                             error!("Error generating LLM response: {}", e);
                             break;
                         }
                     }
                 }
-                Err(e) => {
-                    error!("Error generating LLM response: {}", e);
-                    break;
-                }
+                _ => {}
             }
         }
     };

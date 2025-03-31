@@ -38,14 +38,18 @@ pub enum SessionEvent {
     #[serde(rename = "transcription_final")]
     TranscriptionFinal {
         track_id: String,
+        index: u32,
         timestamp: u32,
+        end_time: Option<u32>,
         text: String,
     },
     /// track_id, timestamp, text
     #[serde(rename = "transcription_delta")]
     TranscriptionDelta {
         track_id: String,
+        index: u32,
         timestamp: u32,
+        end_time: Option<u32>,
         text: String,
     },
     /// timestamp, text

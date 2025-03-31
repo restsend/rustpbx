@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use hound::WavReader;
 use reqwest::Client;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufReader, Cursor};
 use std::time::Instant;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;

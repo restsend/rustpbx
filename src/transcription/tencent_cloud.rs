@@ -1,5 +1,7 @@
+use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
-use crate::transcription::{TranscriptionClient, TranscriptionConfig, TranscriptionFrame};
+use crate::transcription::{TranscriptionClient, TranscriptionConfig};
+use crate::TrackId;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
@@ -12,21 +14,16 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tokio::{
-    select,
-    time::{sleep, Duration},
-};
+use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
 
-use super::TranscriptionSender;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudAsrResult {
-    pub slice_type: u32, // 0: 未识别, 1: 识别中, 2: 识别结束
+    pub slice_type: u32,
     pub index: u32,
     pub start_time: u32,
     pub end_time: u32,
@@ -54,33 +51,22 @@ pub struct TencentCloudAsrResponse {
 pub struct TencentCloudAsrClient {
     config: TranscriptionConfig,
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
-    frame_rx: Mutex<mpsc::UnboundedReceiver<TranscriptionFrame>>,
 }
 
 pub struct TencentCloudAsrClientBuilder {
     config: TranscriptionConfig,
     track_id: Option<String>,
     cancellation_token: Option<CancellationToken>,
+    event_sender: EventSender,
 }
 
-impl Into<TranscriptionFrame> for TencentCloudAsrResult {
-    fn into(self) -> TranscriptionFrame {
-        TranscriptionFrame {
-            track_id: None,
-            index: self.index,
-            is_final: self.slice_type == 2,
-            start_time: Some(self.start_time),
-            end_time: Some(self.end_time),
-            text: self.voice_text_str,
-        }
-    }
-}
 impl TencentCloudAsrClientBuilder {
-    pub fn new(config: TranscriptionConfig) -> Self {
+    pub fn new(config: TranscriptionConfig, event_sender: EventSender) -> Self {
         Self {
             config,
             cancellation_token: None,
             track_id: None,
+            event_sender,
         }
     }
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
@@ -112,23 +98,24 @@ impl TencentCloudAsrClientBuilder {
     }
     pub async fn build(self) -> Result<TencentCloudAsrClient> {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
 
         let client = TencentCloudAsrClient {
             config: self.config,
             audio_tx,
-            frame_rx: Mutex::new(frame_rx),
         };
         let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let ws_stream = client.connect_websocket(voice_id.as_str()).await?;
         let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
         let samplerate = client.config.sample_rate;
+        let event_sender = self.event_sender;
+        let track_id = voice_id.clone();
         tokio::spawn(async move {
             match TencentCloudAsrClient::handle_websocket_message(
+                track_id,
                 ws_stream,
                 samplerate,
                 audio_rx,
-                frame_tx,
+                event_sender,
                 cancellation_token,
             )
             .await
@@ -150,7 +137,6 @@ impl TencentCloudAsrClient {
         Self {
             config: TranscriptionConfig::default(),
             audio_tx: mpsc::unbounded_channel().0,
-            frame_rx: Mutex::new(mpsc::unbounded_channel().1),
         }
     }
 
@@ -278,10 +264,11 @@ impl TencentCloudAsrClient {
     }
 
     async fn handle_websocket_message(
+        track_id: TrackId,
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
         samplerate: u32,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        frame_tx: mpsc::UnboundedSender<TranscriptionFrame>,
+        event_sender: EventSender,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -300,9 +287,24 @@ impl TencentCloudAsrClient {
                                     break;
                                 }
                                 response.result.map(|result| {
-                                    let mut frame: TranscriptionFrame = result.into();
-                                    frame.track_id = Some(response.voice_id);
-                                    frame_tx.send(frame).unwrap();
+                                    let event = if result.slice_type == 2 {
+                                        SessionEvent::TranscriptionFinal {
+                                            track_id: track_id.clone(),
+                                            index: result.index,
+                                            text: result.voice_text_str,
+                                            timestamp: result.start_time,
+                                            end_time: Some(result.end_time),
+                                        }
+                                    } else {
+                                        SessionEvent::TranscriptionDelta {
+                                            track_id: track_id.clone(),
+                                            index: result.index,
+                                            text: result.voice_text_str,
+                                            timestamp: result.start_time,
+                                            end_time: Some(result.end_time),
+                                        }
+                                    };
+                                    event_sender.send(event).ok();
                                 });
                             }
                             Err(e) => {
@@ -379,9 +381,5 @@ impl TranscriptionClient for TencentCloudAsrClient {
     fn send_audio(&self, samples: &[i16]) -> Result<()> {
         self.audio_tx.send(codecs::convert_s16_to_u8(samples))?;
         Ok(())
-    }
-
-    async fn next(&self) -> Option<TranscriptionFrame> {
-        self.frame_rx.lock().await.recv().await
     }
 }

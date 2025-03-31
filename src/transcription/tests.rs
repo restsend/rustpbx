@@ -1,4 +1,5 @@
 use crate::{
+    event::SessionEvent,
     media::track::file::read_wav_file,
     transcription::{
         tencent_cloud::TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig,
@@ -54,9 +55,9 @@ async fn test_tencent_cloud_asr() {
         appid: Some(app_id),
         ..Default::default()
     };
-
+    let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
     // Create client builder and connect
-    let client_builder = TencentCloudAsrClientBuilder::new(config);
+    let client_builder = TencentCloudAsrClientBuilder::new(config, event_sender);
     let client = match client_builder.build().await {
         Ok(c) => c,
         Err(e) => {
@@ -87,32 +88,28 @@ async fn test_tencent_cloud_asr() {
     // Wait for transcription result with timeout
     let timeout_duration = Duration::from_secs(5);
     let result_fut = async {
-        let mut frames = Vec::new();
-        while let Some(frame) = client.next().await {
-            let text = frame.text.clone();
-            if frame.is_final {
-                frames.push(frame);
-                if text.contains("你好") {
-                    break;
+        let mut fulltext = String::new();
+        while let Ok(event) = event_receiver.recv().await {
+            match event {
+                SessionEvent::TranscriptionDelta { text, .. } => {
+                    fulltext += &text;
                 }
+                _ => {}
+            }
+            if fulltext.contains("你好") {
+                break;
             }
         }
-        frames
+        fulltext
     };
 
-    let frames = match timeout(timeout_duration, result_fut).await {
-        Ok(frames) => frames,
+    let final_text = match timeout(timeout_duration, result_fut).await {
+        Ok(fulltext) => fulltext,
         Err(_) => {
             println!("Timeout waiting for transcription result");
-            vec![]
+            String::new()
         }
     };
-
-    let final_text = frames
-        .iter()
-        .map(|f| f.text.clone())
-        .collect::<Vec<_>>()
-        .join("");
 
     println!("Final transcription result: {}", final_text);
     assert!(

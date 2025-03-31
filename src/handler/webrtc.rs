@@ -50,7 +50,7 @@ pub async fn handle_webrtc_connection(
             match command {
                 Ok(Command::Invite { options }) => {
                     let options = options.unwrap_or_default();
-                    let track_id = format!("webrtc-{}", session_id);
+                    let track_id = session_id.clone();
                     let call = ActiveCall::new_webrtc(
                         &state,
                         cancel_token.child_token(),
@@ -72,6 +72,7 @@ pub async fn handle_webrtc_connection(
         }
     };
 
+    let active_call_clone = active_call.clone();
     let active_calls_len = {
         let mut active_calls = state.active_calls.lock().await;
         active_calls.insert(active_call.session_id.clone(), active_call.clone());
@@ -123,7 +124,6 @@ pub async fn handle_webrtc_connection(
             }
         }
     };
-
     select! {
         _ = cancel_token.cancelled() => {
             info!("active_call: Cancelled");
@@ -133,6 +133,9 @@ pub async fn handle_webrtc_connection(
         },
         _ = recv_from_ws => {
             info!("recv_from_ws: Websocket disconnected");
+        },
+        _ = active_call_clone.process_stream() => {
+            info!("active_call: Call loop disconnected");
         },
     }
     Ok(())
