@@ -151,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_add_track() {
-        let event_sender = EventSender::new(1);
+        let event_sender = crate::event::create_event_sender();
         let stream = MediaStreamBuilder::new(event_sender).build();
         let track = Box::new(TestTrack::new("test1".to_string()));
         stream.update_track(track).await;
@@ -159,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_remove_track() {
-        let event_sender = EventSender::new(1);
+        let event_sender = crate::event::create_event_sender();
         let stream = MediaStreamBuilder::new(event_sender).build();
         let track = Box::new(TestTrack::new("test1".to_string()));
         stream.update_track(track).await;
@@ -169,7 +169,7 @@ mod tests {
 
 #[tokio::test]
 async fn test_media_stream_basic() -> Result<()> {
-    let event_sender = EventSender::new(1);
+    let event_sender = crate::event::create_event_sender();
     let stream = MediaStreamBuilder::new(event_sender).build();
 
     // Add a test track
@@ -193,7 +193,7 @@ async fn test_media_stream_basic() -> Result<()> {
 
 #[tokio::test]
 async fn test_media_stream_events() -> Result<()> {
-    let event_sender = EventSender::new(1);
+    let event_sender = crate::event::create_event_sender();
     let stream = MediaStreamBuilder::new(event_sender).build();
 
     let _events = stream.subscribe();
@@ -220,7 +220,7 @@ async fn test_media_stream_events() -> Result<()> {
 // New test for track packet forwarding
 #[tokio::test]
 async fn test_stream_forward_packets() -> Result<()> {
-    let event_sender = EventSender::new(1);
+    let event_sender = crate::event::create_event_sender();
     let stream = MediaStreamBuilder::new(event_sender).build();
 
     // Create two test tracks
@@ -266,7 +266,7 @@ async fn test_stream_forward_packets() -> Result<()> {
 // Test for the Recorder functionality
 #[tokio::test]
 async fn test_stream_recorder() -> Result<()> {
-    let event_sender = EventSender::new(1);
+    let event_sender = crate::event::create_event_sender();
     // Create a stream with recorder enabled
     let stream = Arc::new(
         MediaStreamBuilder::new(event_sender)
@@ -336,7 +336,7 @@ async fn test_stream_recorder() -> Result<()> {
 #[tokio::test]
 async fn test_stream_forward_payload_conversion() -> Result<()> {
     // Create a stream
-    let event_sender = EventSender::new(1);
+    let event_sender = crate::event::create_event_sender();
     let stream = Arc::new(MediaStreamBuilder::new(event_sender).build());
 
     // Create two test tracks with different packet types

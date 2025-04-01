@@ -203,7 +203,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
 
     // Create a cancellation token
     let cancel_token = CancellationToken::new();
-    let event_sender = EventSender::new(16);
+    let event_sender = rustpbx::event::create_event_sender();
     // Create MediaStream
     let media_stream = Arc::new(
         MediaStreamBuilder::new(event_sender)

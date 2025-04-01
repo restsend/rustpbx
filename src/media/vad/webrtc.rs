@@ -35,9 +35,4 @@ impl VadEngine for WebRtcVad {
             .is_voice_segment(samples)
             .unwrap_or(false))
     }
-
-    #[cfg(test)]
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

@@ -4,9 +4,7 @@ use crate::media::codecs::{convert_u8_to_s16, Encoder};
 use crate::media::vad::VadType;
 use crate::transcription::TranscriptionType;
 use crate::{
-    event::{EventReceiver, EventSender},
     handler::{call::CallHandlerState, Command, StreamOptions},
-    media::vad::VADConfig,
     synthesis::{SynthesisConfig, SynthesisType},
     transcription::TranscriptionConfig,
 };
@@ -19,7 +17,6 @@ use axum::{
 };
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
-use std::io::Bytes;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::{fs::File, io::AsyncReadExt, net::TcpListener};

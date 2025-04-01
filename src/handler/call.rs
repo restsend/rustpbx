@@ -119,6 +119,7 @@ impl ActiveCall {
                     track_id.clone(),
                     vad_type.clone(),
                     media_stream.get_event_sender(),
+                    options.vad_config.clone().unwrap_or_default(),
                 );
                 processors.push(Box::new(vad_processor) as Box<dyn Processor>);
             }
