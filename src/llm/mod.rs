@@ -15,9 +15,6 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-
 #[cfg(test)]
 mod tests;
 // Configuration for Language Model

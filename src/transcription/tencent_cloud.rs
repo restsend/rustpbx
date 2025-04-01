@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write;
+
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionConfig};
@@ -329,10 +332,11 @@ impl TencentCloudAsrClient {
             let chunk_size = frame_size as usize;
             let mut packet_ticker =
                 tokio::time::interval(Duration::from_millis(frame_duration as u64));
-            debug!(
+            info!(
                 "TencentCloud ASR service with frame_duration: {}ms, chunk_size: {} bytes",
                 frame_duration, chunk_size
             );
+            //let mut audio_file = File::create("audio.pcm").unwrap();
             while let Some(samples) = audio_rx.recv().await {
                 total_bytes_sent += samples.len();
                 debug!(
@@ -340,7 +344,7 @@ impl TencentCloudAsrClient {
                     samples.len(),
                     total_bytes_sent
                 );
-
+                // audio_file.write_all(&samples).unwrap();
                 for chunk in samples.chunks(chunk_size) {
                     match ws_sender.send(Message::Binary(chunk.to_vec().into())).await {
                         Ok(_) => {}

@@ -13,7 +13,6 @@ use hound::WavReader;
 use reqwest::Client;
 use std::fs::File;
 use std::io::{BufReader, Cursor};
-use std::sync::Arc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -398,7 +397,7 @@ async fn process_wav_reader<R: std::io::Read + Send>(
             track_id: track_id.to_string(),
             timestamp: timestamp as u32,
             samples: Samples::PCM(chunk.to_vec()),
-            sample_rate: target_sample_rate as u16,
+            sample_rate: spec.sample_rate,
         };
 
         // Process the packet

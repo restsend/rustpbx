@@ -418,7 +418,7 @@ impl RtpTrack {
                                     track_id: track_id.clone(),
                                     timestamp,
                                     samples: Samples::RTP(payload_type, payload),
-                                    sample_rate: sample_rate as u16,
+                                    sample_rate,
                                 });
                             }
                             Err(e) => {

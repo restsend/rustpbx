@@ -157,8 +157,8 @@ pub async fn handle_webrtc_connection(
         _ = recv_from_ws => {
             info!("recv_from_ws: Websocket disconnected");
         },
-        _ = active_call_clone.process_stream() => {
-            info!("active_call: Call loop disconnected");
+        r = active_call_clone.process_stream() => {
+            info!("active_call: Call loop disconnected {:?}", r);
         },
     }
     Ok(())

@@ -38,14 +38,11 @@ impl PcmaDecoder {
 }
 
 impl Decoder for PcmaDecoder {
-    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
-        let mut output = Vec::with_capacity(data.len());
-
-        for &sample in data {
-            let pcm = decode_a_law(sample);
-            output.push(pcm);
-        }
-
+    fn decode(&mut self, samples: &[u8]) -> Result<Vec<i16>> {
+        let output = samples
+            .iter()
+            .map(|sample| decode_a_law(*sample))
+            .collect::<Vec<i16>>();
         Ok(output)
     }
 

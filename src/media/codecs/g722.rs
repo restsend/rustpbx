@@ -805,24 +805,8 @@ impl Encoder for G722Encoder {
 }
 
 impl Decoder for G722Decoder {
-    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
-        // Create a mutable copy for decoding, but avoid unnecessary cloning of complex structures
-        let mut decoder = G722Decoder {
-            itu_test_mode: self.itu_test_mode,
-            packed: self.packed,
-            eight_k: self.eight_k,
-            bits_per_sample: self.bits_per_sample,
-            x: [0; 24],                                       // Initialize empty
-            band: [G722Band::default(), G722Band::default()], // Initialize defaults
-            in_buffer: 0,
-            in_bits: 0,
-        };
-
-        // Copy essential state
-        decoder.band[0].det = self.band[0].det;
-        decoder.band[1].det = self.band[1].det;
-
-        let pcm_samples = decoder.decode_frame(data, 0)?;
+    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+        let pcm_samples = self.decode_frame(data, 0)?;
         Ok(pcm_samples)
     }
 
