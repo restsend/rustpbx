@@ -4,7 +4,6 @@ use dotenv::dotenv;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, TencentCloudTtsClient};

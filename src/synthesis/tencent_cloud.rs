@@ -44,7 +44,6 @@ impl TencentCloudTtsClient {
     // Generate authentication signature for TencentCloud API
     fn generate_signature(
         &self,
-        secret_id: &str,
         secret_key: &str,
         host: &str,
         method: &str,
@@ -134,7 +133,6 @@ impl TencentCloudTtsClient {
 
         let host = "tts.tencentcloudapi.com";
         let signature = self.generate_signature(
-            &secret_id,
             &secret_key,
             host,
             "POST",

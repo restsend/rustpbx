@@ -2,7 +2,7 @@ use crate::{
     event::EventSender,
     media::{
         jitter::JitterBuffer,
-        processor::Processor,
+        processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
     AudioFrame, Samples,
@@ -272,11 +272,11 @@ impl RtpSession {
 pub struct RtpTrack {
     id: TrackId,
     config: TrackConfig,
-    processors: Vec<Box<dyn Processor>>,
     jitter_buffer: Arc<Mutex<JitterBuffer>>,
     cancel_token: CancellationToken,
     rtp_session: Arc<Mutex<Option<RtpSession>>>,
     session_config: RtpSessionConfig,
+    processor_chain: ProcessorChain,
 }
 
 impl RtpTrack {
@@ -286,11 +286,11 @@ impl RtpTrack {
         Self {
             id,
             config: config.clone(),
-            processors: Vec::new(),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
             cancel_token: CancellationToken::new(),
             rtp_session: Arc::new(Mutex::new(None)),
             session_config: RtpSessionConfig::default(),
+            processor_chain: ProcessorChain::new(),
         }
     }
 
@@ -653,8 +653,12 @@ impl Track for RtpTrack {
         &self.id
     }
 
-    fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
-        self.processors.extend(processors);
+    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.insert_processor(processor);
+    }
+
+    fn append_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.append_processor(processor);
     }
 
     async fn start(
@@ -677,11 +681,11 @@ impl Track for RtpTrack {
     }
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
-        let mut frame = packet.clone();
+        let frame = packet.clone();
 
-        // Process the frame with all processors
-        for processor in &self.processors {
-            let _ = processor.process_frame(&mut frame);
+        // Process the frame with processor chain
+        if let Err(e) = self.processor_chain.process_frame(&frame) {
+            tracing::error!("Error processing frame: {}", e);
         }
 
         // Add processed frame to jitter buffer for any packet format
@@ -734,7 +738,7 @@ mod tests {
 
         // Create a processor
         let (processor, count) = CountingProcessor::new();
-        rtp_track.with_processors(vec![Box::new(processor)]);
+        rtp_track.insert_processor(Box::new(processor));
 
         // Create channels
         let (event_sender, _) = broadcast::channel(16);
