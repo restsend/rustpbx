@@ -5,7 +5,7 @@ use crate::{
     media::{
         cache,
         codecs::convert_u8_to_s16,
-        processor::Processor,
+        processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
     synthesis::SynthesisClient,
@@ -33,7 +33,7 @@ type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
 
 pub struct TtsTrack<T: SynthesisClient> {
     track_id: TrackId,
-    processors: Vec<Box<dyn Processor>>,
+    processor_chain: ProcessorChain,
     config: TrackConfig,
     cancel_token: CancellationToken,
     use_cache: bool,
@@ -45,7 +45,7 @@ impl<T: SynthesisClient> TtsTrack<T> {
     pub fn new(track_id: TrackId, command_rx: TtsCommandReceiver, client: T) -> Self {
         Self {
             track_id,
-            processors: Vec::new(),
+            processor_chain: ProcessorChain::new(),
             config: TrackConfig::default(),
             cancel_token: CancellationToken::new(),
             command_rx: Mutex::new(Some(command_rx)),
@@ -86,8 +86,12 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         &self.track_id
     }
 
-    fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
-        self.processors.extend(processors);
+    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.insert_processor(processor);
+    }
+
+    fn append_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.append_processor(processor);
     }
 
     async fn start(
@@ -186,6 +190,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let mut ts = 0;
+        let processor_chain = self.processor_chain.clone();
         let emit_loop = async move {
             loop {
                 let packet = {
@@ -204,6 +209,13 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         samples: Samples::PCM(convert_u8_to_s16(&packet)),
                         sample_rate: sample_rate as u16,
                     };
+
+                    // Process the frame with processor chain
+                    if let Err(e) = processor_chain.process_frame(&packet) {
+                        warn!("Error processing frame: {}", e);
+                    }
+
+                    // Send the packet
                     packet_sender.send(packet).ok();
                 }
                 ts += packet_duration_ms;

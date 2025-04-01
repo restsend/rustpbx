@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::event::EventSender;
 use crate::media::processor::Processor;
 use crate::{AudioFrame, TrackId};
@@ -70,7 +68,8 @@ pub mod webrtc;
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &TrackId;
-    fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>);
+    fn insert_processor(&mut self, processor: Box<dyn Processor>);
+    fn append_processor(&mut self, processor: Box<dyn Processor>);
     async fn start(
         &self,
         token: CancellationToken,

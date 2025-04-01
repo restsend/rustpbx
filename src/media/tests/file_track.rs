@@ -77,7 +77,7 @@ async fn test_file_track_wav() -> Result<()> {
 
     // Create a processor
     let (processor, count) = CountingProcessor::new();
-    file_track.with_processors(vec![Box::new(processor)]);
+    file_track.insert_processor(Box::new(processor));
 
     // Set up the path
     file_track = file_track.with_path(test_file);

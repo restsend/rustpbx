@@ -3,7 +3,7 @@ use crate::{
         g722::{G722Decoder, G722Encoder},
         pcma::{PcmaDecoder, PcmaEncoder},
         pcmu::{PcmuDecoder, PcmuEncoder},
-        Encoder,
+        Decoder, Encoder,
     },
     AudioFrame, Samples,
 };
@@ -30,6 +30,18 @@ impl TrackCodec {
             pcma_decoder: RefCell::new(PcmaDecoder::new()),
             g722_encoder: RefCell::new(G722Encoder::new()),
             g722_decoder: RefCell::new(G722Decoder::new()),
+        }
+    }
+
+    pub fn decode(&self, payload_type: u8, payload: &[u8]) -> Result<Vec<i16>> {
+        match payload_type {
+            0 => self.pcmu_decoder.borrow().decode(payload),
+            8 => self.pcma_decoder.borrow().decode(payload),
+            9 => self.g722_decoder.borrow().decode(payload),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported payload type: {}",
+                payload_type
+            )),
         }
     }
 

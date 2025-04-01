@@ -204,24 +204,26 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .send(tungstenite::Message::Text(command_str.into()))
         .await?;
 
-    let msg = ws_receiver.next().await.unwrap().unwrap();
-    let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
-    match event {
-        SessionEvent::Answer {
-            track_id,
-            timestamp,
-            sdp,
-        } => {
-            info!("Received answer: {}", sdp);
-            let offer = RTCSessionDescription::answer(sdp)?;
-            peer_connection.set_remote_description(offer).await?;
-        }
-        _ => {
-            error!("Received unexpected event: {:?}", event);
-            return Err(anyhow::anyhow!("Received unexpected event"));
+    loop {
+        let msg = ws_receiver.next().await.unwrap().unwrap();
+        let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
+        match event {
+            SessionEvent::Answer {
+                track_id,
+                timestamp,
+                sdp,
+            } => {
+                info!("Received answer: {}", sdp);
+                let offer = RTCSessionDescription::answer(sdp)?;
+                peer_connection.set_remote_description(offer).await?;
+                break;
+            }
+            _ => {
+                error!("Received unexpected event: {:?}", event);
+                continue;
+            }
         }
     }
-
     // Wait for transcription event
     let recv_event_loop = async move {
         let mut transcription_received = false;

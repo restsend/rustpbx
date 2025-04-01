@@ -142,23 +142,15 @@ impl TencentCloudAsrClient {
 
     fn generate_signature(
         &self,
-        secret_id: &str,
         secret_key: &str,
         host: &str,
-        method: &str,
-        timestamp: u64,
         request_body: &str,
     ) -> Result<String> {
         // Create HMAC-SHA1 instance with secret key
         let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
 
-        // Get the URL path and query string
         let url_to_sign = format!("{}{}", host, request_body);
-
-        // Sign the request URL
         let hmac = hmac::sign(&key, url_to_sign.as_bytes());
-
-        // Encode the signature with base64 and then URL encode it
         let base64_sig = STANDARD.encode(hmac.as_ref());
         Ok(urlencoding::encode(&base64_sig).into_owned())
     }
@@ -224,13 +216,9 @@ impl TencentCloudAsrClient {
 
         // Generate signature
         let host = "asr.cloud.tencent.com";
-        let method = "GET";
         let signature = self.generate_signature(
-            secret_id.as_str(),
             secret_key.as_str(),
             host,
-            method,
-            timestamp,
             &format!("{}?{}", url_path, query_string),
         )?;
 

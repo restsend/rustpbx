@@ -1,5 +1,6 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs::resample;
+use crate::media::processor::ProcessorChain;
 use crate::media::{
     cache,
     processor::Processor,
@@ -12,16 +13,16 @@ use hound::WavReader;
 use reqwest::Client;
 use std::fs::File;
 use std::io::{BufReader, Cursor};
-use std::time::Instant;
+use std::sync::Arc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub struct FileTrack {
-    id: TrackId,
+    track_id: TrackId,
     config: TrackConfig,
     cancel_token: CancellationToken,
-    processors: Vec<Box<dyn Processor>>,
+    processor_chain: ProcessorChain,
     path: Option<String>,
     use_cache: bool,
 }
@@ -29,10 +30,10 @@ pub struct FileTrack {
 impl FileTrack {
     pub fn new(id: TrackId) -> Self {
         Self {
-            id,
+            track_id: id,
             config: TrackConfig::default(),
             cancel_token: CancellationToken::new(),
-            processors: Vec::new(),
+            processor_chain: ProcessorChain::new(),
             path: None,
             use_cache: true,
         }
@@ -72,11 +73,15 @@ impl FileTrack {
 #[async_trait]
 impl Track for FileTrack {
     fn id(&self) -> &TrackId {
-        &self.id
+        &self.track_id
     }
 
-    fn with_processors(&mut self, processors: Vec<Box<dyn Processor>>) {
-        self.processors.extend(processors);
+    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.insert_processor(processor);
+    }
+
+    fn append_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain.append_processor(processor);
     }
 
     async fn start(
@@ -85,62 +90,52 @@ impl Track for FileTrack {
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
-        match &self.path {
-            Some(path) => {
-                let path = path.clone();
-                let id = self.id.clone();
-                let sample_rate = self.config.sample_rate;
-                let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
-                let use_cache = self.use_cache;
-
-                tokio::spawn(async move {
-                    let stream_result =
-                        if path.starts_with("http://") || path.starts_with("https://") {
-                            stream_from_url(
-                                &path,
-                                &id,
-                                sample_rate,
-                                max_pcm_chunk_size,
-                                token.clone(),
-                                packet_sender,
-                                use_cache,
-                            )
-                            .await
-                        } else {
-                            stream_wav_file(
-                                &path,
-                                &id,
-                                sample_rate,
-                                max_pcm_chunk_size,
-                                token.clone(),
-                                packet_sender,
-                            )
-                            .await
-                        };
-
-                    if let Err(e) = stream_result {
-                        tracing::error!("Error streaming audio: {}", e);
-                    }
-                    // Signal the end of the file
-                    event_sender
-                        .send(SessionEvent::TrackEnd {
-                            track_id: id,
-                            timestamp: crate::get_timestamp(),
-                        })
-                        .ok();
-                });
-            }
-            None => {
-                tracing::error!("No path provided for FileTrack");
-
-                event_sender
-                    .send(SessionEvent::TrackEnd {
-                        track_id: self.id.clone(),
-                        timestamp: crate::get_timestamp(),
-                    })
-                    .ok();
-            }
+        if self.path.is_none() {
+            return Err(anyhow::anyhow!("No path provided for FileTrack"));
         }
+        let path = self.path.clone().unwrap();
+        let id = self.track_id.clone();
+        let sample_rate = self.config.sample_rate;
+        let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
+        let use_cache = self.use_cache;
+        let processor_chain = self.processor_chain.clone();
+        tokio::spawn(async move {
+            let stream_result = if path.starts_with("http://") || path.starts_with("https://") {
+                stream_from_url(
+                    processor_chain,
+                    &path,
+                    &id,
+                    sample_rate,
+                    max_pcm_chunk_size,
+                    token.clone(),
+                    packet_sender,
+                    use_cache,
+                )
+                .await
+            } else {
+                stream_wav_file(
+                    processor_chain,
+                    &path,
+                    &id,
+                    sample_rate,
+                    max_pcm_chunk_size,
+                    token.clone(),
+                    packet_sender,
+                )
+                .await
+            };
+
+            if let Err(e) = stream_result {
+                tracing::error!("Error streaming audio: {}", e);
+            }
+            // Signal the end of the file
+            event_sender
+                .send(SessionEvent::TrackEnd {
+                    track_id: id,
+                    timestamp: crate::get_timestamp(),
+                })
+                .ok();
+        });
         Ok(())
     }
 
@@ -158,6 +153,7 @@ impl Track for FileTrack {
 
 // Helper function to download from URL and stream
 async fn stream_from_url(
+    processor_chain: ProcessorChain,
     url: &str,
     track_id: &str,
     target_sample_rate: u32,
@@ -174,6 +170,7 @@ async fn stream_from_url(
         debug!("Using cached audio for URL: {}", url);
         let cached_data = cache::retrieve_from_cache(&cache_key).await?;
         return stream_from_memory(
+            processor_chain,
             &cached_data,
             track_id,
             target_sample_rate,
@@ -210,6 +207,7 @@ async fn stream_from_url(
 
     // Stream the downloaded file
     stream_from_memory(
+        processor_chain,
         &data,
         track_id,
         target_sample_rate,
@@ -222,6 +220,7 @@ async fn stream_from_url(
 
 // Helper function to stream a WAV file from memory
 pub(crate) async fn stream_from_memory(
+    processor_chain: ProcessorChain,
     data: &[u8],
     track_id: &str,
     target_sample_rate: u32,
@@ -234,6 +233,7 @@ pub(crate) async fn stream_from_memory(
 
     // Process and stream the WAV data
     process_wav_reader(
+        processor_chain,
         &mut wav_reader,
         track_id,
         target_sample_rate,
@@ -293,6 +293,7 @@ pub fn read_wav_file(path: &str) -> Result<(Vec<i16>, u32)> {
 }
 // Helper function to stream a WAV file
 async fn stream_wav_file(
+    processor_chain: ProcessorChain,
     path: &str,
     track_id: &str,
     target_sample_rate: u32,
@@ -303,6 +304,7 @@ async fn stream_wav_file(
     let reader = BufReader::new(File::open(path)?);
     let mut wav_reader = WavReader::new(reader)?;
     process_wav_reader(
+        processor_chain,
         &mut wav_reader,
         track_id,
         target_sample_rate,
@@ -315,6 +317,7 @@ async fn stream_wav_file(
 
 // Helper function to process a WAV reader and stream audio
 async fn process_wav_reader<R: std::io::Read + Send>(
+    processor_chain: ProcessorChain,
     wav_reader: &mut WavReader<R>,
     track_id: &str,
     target_sample_rate: u32,
@@ -398,6 +401,8 @@ async fn process_wav_reader<R: std::io::Read + Send>(
             sample_rate: target_sample_rate as u16,
         };
 
+        // Process the packet
+        processor_chain.process_frame(&packet)?;
         // Send the packet
         if let Err(e) = packet_sender.send(packet) {
             tracing::error!("Failed to send audio packet: {}", e);

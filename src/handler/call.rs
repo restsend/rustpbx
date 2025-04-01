@@ -1,6 +1,6 @@
 use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
-    event::{EventSender, SessionEvent},
+    event::EventSender,
     media::{
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
@@ -79,11 +79,12 @@ impl ActiveCall {
         session_id: &String,
         options: &StreamOptions,
     ) -> Result<MediaStream> {
-        let mut media_stream_builder = MediaStreamBuilder::new(event_sender)
+        let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
             .cancel_token(cancel_token.clone());
 
-        if options.enable_recorder.unwrap_or(false) {
+        let enable_recorder = options.enable_recorder.unwrap_or(false);
+        if enable_recorder {
             media_stream_builder =
                 media_stream_builder.recorder(state.get_recorder_file(session_id));
         }
@@ -107,11 +108,10 @@ impl ActiveCall {
             .flatten();
 
         let mut processors = vec![];
-        if options.enable_recorder.unwrap_or(false) {
-            // add recorder processor
-            //let recorder_processor = RecorderProcessor::new(media_stream.get_event_sender());
-            // processors.push(Box::new(recorder_processor) as Box<dyn Processor>);
-        }
+
+        // We don't need to do anything special for the recorder here
+        // The MediaStream will handle setting up the recorder processor
+        // when we call media_stream.serve()
 
         match options.vad_type {
             Some(ref vad_type) => {
@@ -142,26 +142,20 @@ impl ActiveCall {
             },
             None => {}
         }
-        webrtc_track.with_processors(processors);
-
+        for processor in processors {
+            webrtc_track.append_processor(processor);
+        }
         match webrtc_track.setup_webrtc_track(offer, timeout).await {
             Ok(answer) => {
-                media_stream
-                    .get_event_sender()
-                    .send(SessionEvent::Answer {
-                        track_id: track_id.to_string(),
-                        timestamp: crate::get_timestamp(),
-                        sdp: answer.sdp,
-                    })
-                    .ok();
+                info!("Webrtc track setup complete {}", answer.sdp);
                 media_stream.update_track(Box::new(webrtc_track)).await;
+                Ok(media_stream)
             }
             Err(e) => {
                 warn!("Failed to setup webrtc track: {}", e);
-                return Err(e);
+                Err(e)
             }
         }
-        Ok(media_stream)
     }
 
     pub async fn new_webrtc(

@@ -8,6 +8,7 @@ use crate::media::{
 use crate::{AudioFrame, Samples, TrackId};
 use anyhow::Result;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::{
@@ -27,6 +28,8 @@ pub struct MediaStream {
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
     dtmf_detector: Mutex<DTMFDetector>,
+    recorder_sender: mpsc::UnboundedSender<AudioFrame>,
+    recorder_receiver: Mutex<Option<mpsc::UnboundedReceiver<AudioFrame>>>,
 }
 
 pub struct MediaStreamBuilder {
@@ -66,7 +69,7 @@ impl MediaStreamBuilder {
             .unwrap_or_else(|| CancellationToken::new());
         let tracks = Mutex::new(HashMap::new());
         let (track_packet_sender, track_packet_receiver) = mpsc::unbounded_channel();
-
+        let (recorder_sender, recorder_receiver) = mpsc::unbounded_channel();
         MediaStream {
             id: self.id.unwrap_or_default(),
             cancel_token,
@@ -76,6 +79,8 @@ impl MediaStreamBuilder {
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
             dtmf_detector: Mutex::new(DTMFDetector::new()),
+            recorder_sender,
+            recorder_receiver: Mutex::new(Some(recorder_receiver)),
         }
     }
 }
@@ -126,9 +131,15 @@ impl MediaStream {
         }
     }
 
-    pub async fn update_track(&self, track: Box<dyn Track>) {
+    pub async fn update_track(&self, mut track: Box<dyn Track>) {
         self.remove_track(track.id()).await;
         let token = self.cancel_token.child_token();
+        if let Some(ref recorder_path) = self.recorder {
+            track.insert_processor(Box::new(RecorderProcessor::new(
+                self.recorder_sender.clone(),
+            )));
+        }
+
         match track
             .start(token, self.event_sender.clone(), self.packet_sender.clone())
             .await
@@ -150,58 +161,40 @@ impl MediaStream {
     }
 }
 
-// RecorderProcessor implementation for processing audio data
 #[derive(Clone)]
 pub struct RecorderProcessor {
-    recorder: Arc<Mutex<Recorder>>,
-    sender: mpsc::Sender<AudioFrame>,
+    sender: mpsc::UnboundedSender<AudioFrame>,
 }
 
 impl RecorderProcessor {
-    pub fn new(recorder: Arc<Mutex<Recorder>>) -> (Self, mpsc::Receiver<AudioFrame>) {
-        let (sender, receiver) = mpsc::channel(100); // Buffer size of 100
-        (Self { recorder, sender }, receiver)
+    pub fn new(sender: mpsc::UnboundedSender<AudioFrame>) -> Self {
+        Self { sender }
     }
 }
 
 impl Processor for RecorderProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        // Clone the frame and send it to the recorder
         let frame_clone = frame.clone();
-        let _ = self.sender.try_send(frame_clone);
+        let _ = self.sender.send(frame_clone);
         Ok(())
     }
 }
 
 impl MediaStream {
     async fn handle_recorder(&self) -> Result<()> {
-        let recorder = match self.recorder.clone() {
-            Some(_) => {
-                let config = RecorderConfig {
-                    sample_rate: 16000,
-                    channels: 1,
-                };
-                let recorder = Arc::new(Mutex::new(Recorder::new(self.id.clone(), config)));
+        if self.recorder.is_none() {
+            self.cancel_token.cancelled().await;
+            return Ok(());
+        }
 
-                // Create RecorderProcessor and get the receiver
-                let (processor, mut frame_receiver) = RecorderProcessor::new(recorder.clone());
-
-                // Create a task to process received frames
-                tokio::spawn(async move {
-                    while let Some(frame) = frame_receiver.recv().await {
-                        if let Ok(mut recorder) = recorder.try_lock() {
-                            let _ = recorder.process_frame(frame).await;
-                        }
-                    }
-                });
-
-                // Return the processor for tracks to use
-                Some(processor)
-            }
-            None => None,
-        };
-        // Wait for cancellation
-        self.cancel_token.cancelled().await;
+        if let Some(ref recorder_path) = self.recorder {
+            let config = RecorderConfig { sample_rate: 16000 };
+            let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
+            let recorder = Recorder::new(self.cancel_token.child_token(), config);
+            recorder
+                .process_recording(Path::new(&recorder_path), recorder_receiver)
+                .await?;
+        }
         Ok(())
     }
 
