@@ -99,3 +99,7 @@ impl SessionEvent {
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;
 pub type EventReceiver = tokio::sync::broadcast::Receiver<SessionEvent>;
+
+pub fn create_event_sender() -> EventSender {
+    EventSender::new(128)
+}

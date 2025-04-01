@@ -51,7 +51,7 @@ pub async fn handle_webrtc_connection(
 ) -> Result<()> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let cancel_token = CancellationToken::new();
-    let event_sender = EventSender::new(16);
+    let event_sender = crate::event::create_event_sender();
     let mut event_receiver = event_sender.subscribe();
 
     let active_call = match ws_receiver.next().await {
