@@ -26,7 +26,7 @@ pub struct AudioFrame {
     pub track_id: TrackId,
     pub samples: Samples,
     pub timestamp: u32,
-    pub sample_rate: u16,
+    pub sample_rate: u32,
 }
 // get timestamp in milliseconds
 pub fn get_timestamp() -> u64 {

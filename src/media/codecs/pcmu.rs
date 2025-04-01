@@ -40,7 +40,7 @@ impl PcmuDecoder {
 }
 
 impl Decoder for PcmuDecoder {
-    fn decode(&self, data: &[u8]) -> Result<Vec<i16>> {
+    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         let mut output = Vec::with_capacity(data.len());
 
         for &sample in data {
@@ -109,11 +109,11 @@ impl PcmuEncoder {
 
 impl Encoder for PcmuEncoder {
     fn encode(&mut self, samples: &[i16]) -> Result<Bytes> {
-        let mut output = BytesMut::with_capacity(samples.len());
-        for &sample in samples {
-            output.extend_from_slice(&[self.linear2ulaw(sample)]);
-        }
-        Ok(output.freeze())
+        let output = samples
+            .iter()
+            .map(|sample| self.linear2ulaw(*sample))
+            .collect::<Vec<u8>>();
+        Ok(output.into())
     }
 
     fn sample_rate(&self) -> u32 {

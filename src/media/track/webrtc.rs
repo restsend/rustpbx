@@ -2,6 +2,7 @@ use super::TrackPacketReceiver;
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
+        codecs::{convert_s16_to_u8, g722::G722Decoder, Decoder},
         jitter::JitterBuffer,
         negotiate::prefer_audio_codec,
         processor::{Processor, ProcessorChain},
@@ -12,7 +13,11 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::sync::{Arc, Mutex};
+use std::{
+    fs::File,
+    io::Write,
+    sync::{Arc, Mutex},
+};
 use tokio::{select, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -71,7 +76,7 @@ impl WebrtcTrack {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_G722.to_owned(),
                     clock_rate: 8000,
-                    channels: 0,
+                    channels: 1,
                     sdp_fmtp_line: "".to_owned(),
                     rtcp_feedback: vec![],
                 },
@@ -82,7 +87,7 @@ impl WebrtcTrack {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_PCMU.to_owned(),
                     clock_rate: 8000,
-                    channels: 0,
+                    channels: 1,
                     sdp_fmtp_line: "".to_owned(),
                     rtcp_feedback: vec![],
                 },
@@ -93,7 +98,7 @@ impl WebrtcTrack {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_PCMA.to_owned(),
                     clock_rate: 8000,
-                    channels: 0,
+                    channels: 1,
                     sdp_fmtp_line: "".to_owned(),
                     rtcp_feedback: vec![],
                 },
@@ -104,7 +109,7 @@ impl WebrtcTrack {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
                     clock_rate: 8000,
-                    channels: 0,
+                    channels: 1,
                     sdp_fmtp_line: "".to_owned(),
                     rtcp_feedback: vec![],
                 },
@@ -233,10 +238,17 @@ impl WebrtcTrack {
             move |track: Arc<TrackRemote>,
                   _receiver: Arc<RTCRtpReceiver>,
                   _transceiver: Arc<RTCRtpTransceiver>| {
-                info!("Track received: {:?}", track);
                 let track_id_clone = track_id_clone.clone();
                 let packet_sender_clone = packet_sender.clone();
                 let processor_chain = processor_chain.clone();
+                let track_samplerate = match track.codec().payload_type {
+                    9 => 16000, // G722
+                    _ => 8000,  // PCMU, PCMA, TELEPHONE_EVENT
+                };
+                info!(
+                    "Track received: {:?} track_samplerate:{}",
+                    track, track_samplerate,
+                );
                 Box::pin(async move {
                     while let Ok((packet, _)) = track.read_rtp().await {
                         let packet_sender = packet_sender_clone.lock().unwrap();
@@ -248,9 +260,9 @@ impl WebrtcTrack {
                                     packet.payload.to_vec(),
                                 ),
                                 timestamp: packet.header.timestamp,
+                                sample_rate: track_samplerate,
                                 ..Default::default()
                             };
-
                             if let Err(e) = processor_chain.process_frame(&frame) {
                                 error!("Failed to process frame: {}", e);
                             }

@@ -1,6 +1,9 @@
 use crate::event::SessionEvent;
-use crate::media::codecs::g722::G722Encoder;
-use crate::media::codecs::{convert_u8_to_s16, Encoder};
+use crate::media::codecs::g722::{G722Decoder, G722Encoder};
+use crate::media::codecs::pcmu::PcmuEncoder;
+use crate::media::codecs::resample::resample_mono;
+use crate::media::codecs::{convert_s16_to_u8, convert_u8_to_s16, Decoder, Encoder};
+use crate::media::track::file::read_wav_file;
 use crate::media::vad::VadType;
 use crate::transcription::TranscriptionType;
 use crate::{
@@ -18,7 +21,8 @@ use axum::{
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use tokio::io::AsyncWriteExt;
 use tokio::{fs::File, io::AsyncReadExt, net::TcpListener};
 use tokio::{select, time};
 use tokio_tungstenite::tungstenite;
@@ -65,7 +69,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     // Start the server
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let server_addr = listener.local_addr()?;
-    let server_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
@@ -85,9 +89,22 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         },
         RTPCodecType::Audio,
     )?;
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            capability: RTCRtpCodecCapability {
+                mime_type: "audio/PCMU".to_owned(),
+                clock_rate: 8000,
+                channels: 1,
+                sdp_fmtp_line: "".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: 0,
+            ..Default::default()
+        },
+        RTPCodecType::Audio,
+    )?;
 
     let api = APIBuilder::new().with_media_engine(media_engine).build();
-
     let config = RTCConfiguration {
         ..Default::default()
     };
@@ -188,7 +205,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     // Create the invite command with proper options
     let options = StreamOptions {
         sdp: Some(offer.sdp.clone()),
-        enable_recorder: Some(true),
+        enable_recorder: Some(false),
         vad_type: Some(VadType::WebRTC),
         asr_type: Some(TranscriptionType::TencentCloud),
         asr_config: Some(asr_config),
@@ -204,8 +221,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .send(tungstenite::Message::Text(command_str.into()))
         .await?;
 
-    loop {
-        let msg = ws_receiver.next().await.unwrap().unwrap();
+    while let Some(Ok(msg)) = ws_receiver.next().await {
         let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
         match event {
             SessionEvent::Answer {
@@ -242,27 +258,35 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     };
     let send_audio_loop = async move {
         // Read test audio file
-        let mut file = File::open("fixtures/hello_book_course_zh_16k.wav")
-            .await
-            .unwrap();
-        let mut audio_data = Vec::new();
-        file.read_to_end(&mut audio_data)
-            .await
-            .expect("Failed to read audio file");
-        let mut ticker = time::interval(std::time::Duration::from_millis(20));
-        let mut encoder_g722 = G722Encoder::new();
-        for chunk in audio_data.chunks(640) {
-            let samples = convert_u8_to_s16(chunk);
-            let g722_data = encoder_g722.encode(&samples).unwrap();
+        let (mut audio_samples, sample_rate) =
+            read_wav_file("fixtures/hello_book_course_zh_16k.wav").unwrap();
+        let mut ticker = time::interval(Duration::from_millis(20));
+        let mut encoder = G722Encoder::new();
+        let mut packet_timestamp = 0;
+        let chunk_size = if encoder.sample_rate() == 16000 {
+            320
+        } else {
+            160
+        };
+        if sample_rate != encoder.sample_rate() {
+            audio_samples = resample_mono(&audio_samples, sample_rate, encoder.sample_rate());
+        }
+
+        for chunk in audio_samples.chunks(chunk_size) {
+            let encoded = encoder.encode(&chunk).unwrap();
             let sample = webrtc::media::Sample {
-                data: g722_data.into(),
-                duration: std::time::Duration::from_millis(20),
+                data: encoded.into(),
+                duration: Duration::from_millis(20),
                 timestamp: SystemTime::now(),
+                packet_timestamp,
                 ..Default::default()
             };
             track.write_sample(&sample).await.unwrap();
+            packet_timestamp += chunk_size as u32;
             ticker.tick().await;
         }
+        info!("Audio sent");
+        time::sleep(Duration::from_secs(30)).await;
     };
 
     select! {
@@ -270,9 +294,8 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             info!("Transcription received");
         }
         _ = send_audio_loop => {
-            info!("Audio sent");
         }
-        _ = time::sleep(std::time::Duration::from_secs(30)) => {
+        _ = time::sleep(std::time::Duration::from_secs(10)) => {
             error!("Transcription timeout");
         }
     }

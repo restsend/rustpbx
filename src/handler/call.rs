@@ -1,6 +1,6 @@
 use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
-    event::EventSender,
+    event::{EventSender, SessionEvent},
     media::{
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
@@ -19,7 +19,7 @@ use crate::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -43,8 +43,20 @@ impl CallHandlerState {
     }
 
     pub fn get_recorder_file(&self, session_id: &String) -> String {
-        std::path::Path::new(&self.recorder_root)
-            .join(session_id)
+        let root = Path::new(&self.recorder_root);
+        if !root.exists() {
+            match std::fs::create_dir_all(root) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Failed to create recorder root: {} {}",
+                        e,
+                        root.to_string_lossy()
+                    );
+                }
+            }
+        }
+        root.join(session_id)
             .with_extension("wav")
             .to_string_lossy()
             .to_string()
@@ -108,11 +120,6 @@ impl ActiveCall {
             .flatten();
 
         let mut processors = vec![];
-
-        // We don't need to do anything special for the recorder here
-        // The MediaStream will handle setting up the recorder processor
-        // when we call media_stream.serve()
-
         match options.vad_type {
             Some(ref vad_type) => {
                 let vad_processor = VadProcessor::new(
@@ -148,6 +155,13 @@ impl ActiveCall {
         match webrtc_track.setup_webrtc_track(offer, timeout).await {
             Ok(answer) => {
                 info!("Webrtc track setup complete {}", answer.sdp);
+                event_sender
+                    .send(SessionEvent::Answer {
+                        track_id: track_id.clone(),
+                        timestamp: crate::get_timestamp(),
+                        sdp: answer.sdp,
+                    })
+                    .ok();
                 media_stream.update_track(Box::new(webrtc_track)).await;
                 Ok(media_stream)
             }
@@ -190,7 +204,13 @@ impl ActiveCall {
     }
 
     pub async fn process_stream(&self) -> Result<()> {
-        self.media_stream.serve().await
+        match self.media_stream.serve().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!("Failed to serve media stream: {}", e);
+                Err(e)
+            }
+        }
     }
 
     pub async fn dispatch(&self, command: Command) -> Result<()> {

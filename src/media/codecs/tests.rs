@@ -8,7 +8,7 @@ use std::{
 #[test]
 fn test_pcmu_codec() {
     let mut encoder = pcmu::PcmuEncoder::new();
-    let decoder = pcmu::PcmuDecoder::new();
+    let mut decoder = pcmu::PcmuDecoder::new();
 
     // Test with a simple sine wave
     let samples: Vec<i16> = (0..160)
@@ -37,7 +37,7 @@ fn test_pcmu_codec() {
 #[test]
 fn test_pcma_codec() {
     let mut encoder = pcma::PcmaEncoder::new();
-    let decoder = pcma::PcmaDecoder::new();
+    let mut decoder = pcma::PcmaDecoder::new();
 
     // Test with a simple sine wave
     let samples: Vec<i16> = (0..160)
@@ -66,7 +66,7 @@ fn test_pcma_codec() {
 #[test]
 fn test_g722_codec() {
     let mut encoder = g722::G722Encoder::new();
-    let decoder = g722::G722Decoder::new();
+    let mut decoder = g722::G722Decoder::new();
 
     // Test with a simple sine wave at 16kHz
     let samples: Vec<i16> = (0..320)
@@ -237,7 +237,7 @@ fn test_codec_encode_decode() {
         file.write_all(&encoded).expect("Failed to write file");
         println!("ffplay -f g722 -ar 16000 -i fixtures/sample.g722.encoded");
 
-        let decoder = g722::G722Decoder::new();
+        let mut decoder = g722::G722Decoder::new();
         let decoded = decoder.decode(&encoded).unwrap();
         println!(
             "G722 decoded {} samples to {} bytes ",
@@ -261,7 +261,7 @@ fn test_codec_encode_decode() {
         file.write_all(&encoded).expect("Failed to write file");
         println!("ffplay -f mulaw -ar 8000 -i fixtures/sample.pcmu.encoded");
 
-        let decoder = pcmu::PcmuDecoder::new();
+        let mut decoder = pcmu::PcmuDecoder::new();
         let decoded = decoder.decode(&encoded).unwrap();
         println!(
             "PCMU decoded {} samples to {} bytes ",
@@ -285,7 +285,7 @@ fn test_codec_encode_decode() {
         file.write_all(&encoded).expect("Failed to write file");
         println!("ffplay -f alaw -ar 8000 -i fixtures/sample.pcma.encoded");
 
-        let decoder = pcma::PcmaDecoder::new();
+        let mut decoder = pcma::PcmaDecoder::new();
         let decoded = decoder.decode(&encoded).unwrap();
         println!(
             "PCMA decoded {} samples to {} bytes ",

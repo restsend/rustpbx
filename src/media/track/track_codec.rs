@@ -12,8 +12,8 @@ use bytes::Bytes;
 use std::cell::RefCell;
 
 pub struct TrackCodec {
-    pub pcmu_encoder: RefCell<PcmuEncoder>,
-    pub pcmu_decoder: RefCell<PcmuDecoder>,
+    pub pcmu_encoder: RefCell<PcmaEncoder>,
+    pub pcmu_decoder: RefCell<PcmaDecoder>,
     pub pcma_encoder: RefCell<PcmaEncoder>,
     pub pcma_decoder: RefCell<PcmaDecoder>,
 
@@ -24,8 +24,8 @@ pub struct TrackCodec {
 impl TrackCodec {
     pub fn new() -> Self {
         Self {
-            pcmu_encoder: RefCell::new(PcmuEncoder::new()),
-            pcmu_decoder: RefCell::new(PcmuDecoder::new()),
+            pcmu_encoder: RefCell::new(PcmaEncoder::new()),
+            pcmu_decoder: RefCell::new(PcmaDecoder::new()),
             pcma_encoder: RefCell::new(PcmaEncoder::new()),
             pcma_decoder: RefCell::new(PcmaDecoder::new()),
             g722_encoder: RefCell::new(G722Encoder::new()),
@@ -35,9 +35,9 @@ impl TrackCodec {
 
     pub fn decode(&self, payload_type: u8, payload: &[u8]) -> Result<Vec<i16>> {
         match payload_type {
-            0 => self.pcmu_decoder.borrow().decode(payload),
-            8 => self.pcma_decoder.borrow().decode(payload),
-            9 => self.g722_decoder.borrow().decode(payload),
+            0 => self.pcmu_decoder.borrow_mut().decode(payload),
+            8 => self.pcma_decoder.borrow_mut().decode(payload),
+            9 => self.g722_decoder.borrow_mut().decode(payload),
             _ => Err(anyhow::anyhow!(
                 "Unsupported payload type: {}",
                 payload_type

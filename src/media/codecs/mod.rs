@@ -17,7 +17,7 @@ pub enum CodecType {
 
 pub trait Decoder: Send + Sync {
     /// Decode encoded audio data into PCM samples
-    fn decode(&self, data: &[u8]) -> Result<Vec<i16>>;
+    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>>;
 
     /// Get the sample rate of the decoded audio
     fn sample_rate(&self) -> u32;
@@ -96,18 +96,12 @@ impl DecoderFactory {
 }
 
 pub fn convert_s16_to_u8(s16_data: &[i16]) -> Vec<u8> {
-    let mut u8_data = Vec::with_capacity(s16_data.len() * 2);
-    for &s in s16_data {
-        u8_data.push((s & 0xFF) as u8);
-        u8_data.push((s >> 8) as u8);
-    }
-    u8_data
+    s16_data.iter().flat_map(|s| s.to_le_bytes()).collect()
 }
 
 pub fn convert_u8_to_s16(u8_data: &[u8]) -> Vec<i16> {
-    let u8_data = u8_data
+    u8_data
         .chunks(2)
         .map(|chunk| (chunk[0] as i16) | ((chunk[1] as i16) << 8))
-        .collect();
-    u8_data
+        .collect()
 }

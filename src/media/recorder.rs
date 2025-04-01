@@ -18,7 +18,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct RecorderConfig {
     pub sample_rate: u32,
@@ -187,7 +187,17 @@ impl Recorder {
         file_path: &Path,
         mut receiver: UnboundedReceiver<AudioFrame>,
     ) -> Result<()> {
-        let mut file = File::create(file_path).await?;
+        let mut file = match File::create(file_path).await {
+            Ok(file) => file,
+            Err(e) => {
+                warn!(
+                    "Failed to create recording file: {} {}",
+                    e,
+                    file_path.display()
+                );
+                return Err(anyhow::anyhow!("Failed to create recording file"));
+            }
+        };
 
         // Write initial WAV header
         // Define spec for reference only (not directly used)

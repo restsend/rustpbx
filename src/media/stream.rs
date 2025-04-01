@@ -9,14 +9,12 @@ use crate::{AudioFrame, Samples, TrackId};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
 use tokio::{
     select,
-    sync::{broadcast, mpsc, Mutex},
+    sync::{mpsc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid;
 
 pub struct MediaStream {
@@ -90,14 +88,13 @@ impl MediaStream {
         let packet_receiver = self.packet_receiver.lock().await.take().unwrap();
         select! {
             _ = self.cancel_token.cancelled() => {}
-            _ = self.handle_recorder() => {
-                debug!("Recorder stopped");
+            r = self.handle_recorder() => {
+                info!("Recorder stopped {:?}", r);
             }
-            _ = self.handle_forward_track(packet_receiver) => {
-                debug!("Track packet receiver stopped");
+            r = self.handle_forward_track(packet_receiver) => {
+                info!("Track packet receiver stopped {:?}", r);
             }
         }
-
         Ok(())
     }
 
@@ -134,7 +131,7 @@ impl MediaStream {
     pub async fn update_track(&self, mut track: Box<dyn Track>) {
         self.remove_track(track.id()).await;
         let token = self.cancel_token.child_token();
-        if let Some(ref recorder_path) = self.recorder {
+        if self.recorder.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
                 self.recorder_sender.clone(),
             )));
@@ -182,11 +179,6 @@ impl Processor for RecorderProcessor {
 
 impl MediaStream {
     async fn handle_recorder(&self) -> Result<()> {
-        if self.recorder.is_none() {
-            self.cancel_token.cancelled().await;
-            return Ok(());
-        }
-
         if let Some(ref recorder_path) = self.recorder {
             let config = RecorderConfig { sample_rate: 16000 };
             let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
@@ -195,6 +187,7 @@ impl MediaStream {
                 .process_recording(Path::new(&recorder_path), recorder_receiver)
                 .await?;
         }
+        self.cancel_token.cancelled().await;
         Ok(())
     }
 

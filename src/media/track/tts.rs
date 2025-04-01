@@ -1,5 +1,3 @@
-use std::{sync::Arc, time::Instant};
-
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
@@ -13,7 +11,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use serde_json::to_vec;
+use std::{sync::Arc, time::Instant};
 use tokio::{
     select,
     sync::{mpsc, Mutex},
@@ -207,7 +205,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         track_id: track_id.clone(),
                         timestamp: ts,
                         samples: Samples::PCM(convert_u8_to_s16(&packet)),
-                        sample_rate: sample_rate as u16,
+                        sample_rate: sample_rate,
                     };
 
                     // Process the frame with processor chain
