@@ -84,6 +84,7 @@ async fn test_tencent_cloud_asr() {
         client
             .send_audio(chunk)
             .expect("Failed to send audio chunk");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Wait for transcription result with timeout
     let timeout_duration = Duration::from_secs(5);

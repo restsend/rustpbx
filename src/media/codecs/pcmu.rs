@@ -1,6 +1,3 @@
-use anyhow::Result;
-use bytes::{Bytes, BytesMut};
-
 use super::{Decoder, Encoder};
 
 const BIAS: i16 = 0x84;
@@ -40,15 +37,8 @@ impl PcmuDecoder {
 }
 
 impl Decoder for PcmuDecoder {
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
-        let mut output = Vec::with_capacity(data.len());
-
-        for &sample in data {
-            let pcm = decode_mu_law(sample);
-            output.push(pcm);
-        }
-
-        Ok(output)
+    fn decode(&mut self, data: &[u8]) -> Vec<i16> {
+        data.iter().map(|sample| decode_mu_law(*sample)).collect()
     }
 
     fn sample_rate(&self) -> u32 {
@@ -108,12 +98,11 @@ impl PcmuEncoder {
 }
 
 impl Encoder for PcmuEncoder {
-    fn encode(&mut self, samples: &[i16]) -> Result<Bytes> {
-        let output = samples
+    fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
+        samples
             .iter()
             .map(|sample| self.linear2ulaw(*sample))
-            .collect::<Vec<u8>>();
-        Ok(output.into())
+            .collect::<Vec<u8>>()
     }
 
     fn sample_rate(&self) -> u32 {

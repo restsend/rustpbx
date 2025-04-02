@@ -187,7 +187,6 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
             track_id, sample_rate, max_pcm_chunk_size, packet_duration_ms
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
-        let mut ts = 0;
         let processor_chain = self.processor_chain.clone();
         let emit_loop = async move {
             loop {
@@ -203,9 +202,9 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 if let Some(packet) = packet {
                     let packet = AudioFrame {
                         track_id: track_id.clone(),
-                        timestamp: ts,
                         samples: Samples::PCM(convert_u8_to_s16(&packet)),
-                        sample_rate: sample_rate,
+                        timestamp: crate::get_timestamp(),
+                        sample_rate,
                     };
 
                     // Process the frame with processor chain
@@ -216,7 +215,6 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     // Send the packet
                     packet_sender.send(packet).ok();
                 }
-                ts += packet_duration_ms;
                 ptimer.tick().await;
             }
         };

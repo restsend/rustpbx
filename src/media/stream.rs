@@ -142,6 +142,7 @@ impl MediaStream {
             .await
         {
             Ok(_) => {
+                info!("track started {:?}", track.id());
                 let track_id = track.id().clone();
                 self.tracks.lock().await.insert(track_id.clone(), track);
                 self.event_sender
@@ -195,7 +196,6 @@ impl MediaStream {
         while let Some(packet) = packet_receiver.recv().await {
             // Process for DTMF
             self.process_dtmf(&packet).await;
-
             // Process the packet with each track
             for track in self.tracks.lock().await.values() {
                 if let Err(e) = track.send_packet(&packet).await {

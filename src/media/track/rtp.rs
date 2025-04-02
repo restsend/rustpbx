@@ -1,6 +1,7 @@
 use crate::{
     event::EventSender,
     media::{
+        codecs,
         jitter::JitterBuffer,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
@@ -286,7 +287,7 @@ impl RtpTrack {
         Self {
             id,
             config: config.clone(),
-            jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate))),
+            jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new())),
             cancel_token: CancellationToken::new(),
             rtp_session: Arc::new(Mutex::new(None)),
             session_config: RtpSessionConfig::default(),
@@ -296,7 +297,7 @@ impl RtpTrack {
 
     pub fn with_config(mut self, config: TrackConfig) -> Self {
         self.config = config.clone();
-        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new(config.sample_rate)));
+        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new()));
         self
     }
 
@@ -307,7 +308,7 @@ impl RtpTrack {
 
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.config = self.config.with_sample_rate(sample_rate);
-        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new(sample_rate)));
+        self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new()));
         self
     }
 
@@ -406,7 +407,7 @@ impl RtpTrack {
 
                                 // Extract packet data
                                 let payload_type = packet.payload_type;
-                                let timestamp = packet.timestamp;
+                                let timestamp = crate::get_timestamp();
                                 let payload = packet.payload;
 
                                 debug!(
@@ -446,12 +447,14 @@ impl RtpTrack {
         let interval = tokio::time::interval(self.config.ptime);
         let mut interval_stream = IntervalStream::new(interval);
 
+        let codec_type = self.config.codec;
+        let mut encoder = codecs::create_encoder(codec_type);
         tokio::spawn(async move {
             debug!(
                 "Started RTP jitter buffer processing with ptime: {}ms",
                 ptime_ms
             );
-
+            let mut packet_timestamp = 0;
             loop {
                 tokio::select! {
                     _ = token.cancelled() => {
@@ -462,19 +465,33 @@ impl RtpTrack {
                         // Get frames from jitter buffer
                         let frames = {
                             let mut jitter = jitter_buffer.lock().unwrap();
-                            jitter.pull_frames(ptime_ms, sample_rate)
+                            jitter.pull_frames(ptime_ms)
                         };
 
                         for frame in frames {
-                            if let Samples::RTP(payload_type, payload) = &frame.samples {
-                                // Try to send the packet
-                                Self::send_rtp_packet_internal(
-                                    &rtp_session,
-                                    *payload_type,
-                                    payload,
-                                    frame.timestamp
-                                ).await;
+                            match &frame.samples {
+                                Samples::RTP(payload_type, payload) => {
+                                    // Try to send the packet
+                                    Self::send_rtp_packet_internal(
+                                        &rtp_session,
+                                        *payload_type,
+                                        payload,
+                                        packet_timestamp
+                                    ).await;
+                                }
+                                Samples::PCM(samples) => {
+                                    // Try to send the packet
+                                    let payload = encoder.encode(&samples);
+                                    Self::send_rtp_packet_internal(
+                                        &rtp_session,
+                                        codec_type.payload_type(),
+                                        &payload,
+                                        packet_timestamp
+                                    ).await;
+                                }
+                                _ => {}
                             }
+                            packet_timestamp += ptime_ms;
                         }
                     }
                 }

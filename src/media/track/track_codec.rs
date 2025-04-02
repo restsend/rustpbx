@@ -1,5 +1,6 @@
 use crate::{
     media::codecs::{
+        convert_s16_to_u8, convert_u8_to_s16,
         g722::{G722Decoder, G722Encoder},
         pcma::{PcmaDecoder, PcmaEncoder},
         pcmu::{PcmuDecoder, PcmuEncoder},
@@ -33,33 +34,27 @@ impl TrackCodec {
         }
     }
 
-    pub fn decode(&self, payload_type: u8, payload: &[u8]) -> Result<Vec<i16>> {
+    pub fn decode(&self, payload_type: u8, payload: &[u8]) -> Vec<i16> {
         match payload_type {
             0 => self.pcmu_decoder.borrow_mut().decode(payload),
             8 => self.pcma_decoder.borrow_mut().decode(payload),
             9 => self.g722_decoder.borrow_mut().decode(payload),
-            _ => Err(anyhow::anyhow!(
-                "Unsupported payload type: {}",
-                payload_type
-            )),
+            _ => convert_u8_to_s16(payload),
         }
     }
 
-    pub fn encode(&self, payload_type: u8, audio_frame: AudioFrame) -> Result<Bytes> {
+    pub fn encode(&self, payload_type: u8, audio_frame: AudioFrame) -> Vec<u8> {
         let payload = match audio_frame.samples {
             Samples::PCM(pcm) => pcm,
-            Samples::RTP(_, payload) => return Ok(Bytes::from(payload)),
-            Samples::Empty => return Err(anyhow::anyhow!("Empty payload")),
+            Samples::RTP(_, payload) => return payload,
+            Samples::Empty => return vec![],
         };
 
         match payload_type {
             0 => self.pcmu_encoder.borrow_mut().encode(&payload),
             8 => self.pcma_encoder.borrow_mut().encode(&payload),
             9 => self.g722_encoder.borrow_mut().encode(&payload),
-            _ => Err(anyhow::anyhow!(
-                "Unsupported payload type: {}",
-                payload_type
-            )),
+            _ => convert_s16_to_u8(&payload),
         }
     }
 }

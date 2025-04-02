@@ -38,7 +38,7 @@ impl TestTrack {
     pub fn create_pcm_packet(&self, samples: Vec<i16>, timestamp: u64) -> AudioFrame {
         AudioFrame {
             track_id: self.id.clone(),
-            timestamp: timestamp as u32,
+            timestamp,
             samples: Samples::PCM(samples),
             sample_rate: 16000,
         }
@@ -53,7 +53,7 @@ impl TestTrack {
     ) -> AudioFrame {
         AudioFrame {
             track_id: self.id.clone(),
-            timestamp: timestamp as u32,
+            timestamp,
             samples: Samples::RTP(payload_type, payload),
             sample_rate: 16000,
         }
