@@ -165,7 +165,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     let options = StreamOptions {
         sdp: Some(offer.sdp.clone()),
         enable_recorder: Some(false),
-        vad_type: Some(VadType::WebRTC),
+        vad_type: Some(VadType::Silero),
         asr_type: Some(TranscriptionType::TencentCloud),
         asr_config: Some(asr_config),
         tts_type: Some(SynthesisType::TencentCloud),

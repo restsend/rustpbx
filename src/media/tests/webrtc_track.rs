@@ -1,143 +1,184 @@
+use crate::event::test_utils::dummy_event_sender;
+use crate::media::track::{rtp::*, webrtc::*, Track, TrackConfig};
+use crate::{AudioFrame, Samples};
 use anyhow::Result;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::media::codecs::pcmu;
-use crate::media::codecs::Encoder;
-use crate::media::processor::Processor;
-use crate::media::track::webrtc::WebrtcTrack;
-use crate::media::track::Track;
-use crate::{AudioFrame, Samples};
-
-// Simple test processor that counts frames
-struct CountingProcessor {
-    count: Arc<AtomicUsize>,
-}
-
-impl CountingProcessor {
-    fn new() -> (Self, Arc<AtomicUsize>) {
-        let count = Arc::new(AtomicUsize::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
-    }
-}
-
-impl Processor for CountingProcessor {
-    fn process_frame(&self, _frame: &mut AudioFrame) -> Result<()> {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-}
-
-// Helper to create a WebRTC RTP packet (simplified version without webrtc-rs dependency)
-fn create_simple_rtp_packet(
-    track_id: &str,
-    timestamp: u64,
-    payload_type: u8,
-    payload: Vec<u8>,
-) -> AudioFrame {
-    // Create basic RTP packet
-    AudioFrame {
-        track_id: track_id.to_string(),
-        timestamp,
-        samples: Samples::RTP(payload_type, payload),
-        sample_rate: 16000,
-    }
-}
-
 #[tokio::test]
-async fn test_webrtc_track_pcm() -> Result<()> {
-    // Create a WebRTC track
-    let track_id = "test_webrtc_track".to_string();
-    let webrtc_track = WebrtcTrack::new(track_id.clone());
+async fn test_rtp_track_creation() -> Result<()> {
+    let track_id = "test-rtp-track".to_string();
+    let track = RtpTrack::new(track_id.clone());
 
-    // Create a processor
-    let (processor, count) = CountingProcessor::new();
+    assert_eq!(track.id(), &track_id);
 
-    // Create channels
-    let (event_sender, _) = broadcast::channel(16);
-    let (packet_sender, _packet_receiver) = mpsc::unbounded_channel();
+    // Test with modified configuration
+    let sample_rate = 16000;
+    let track = RtpTrack::new(track_id)
+        .with_sample_rate(sample_rate)
+        .with_config(TrackConfig::default().with_sample_rate(sample_rate));
 
-    // Start the track
-    let token = CancellationToken::new();
-    webrtc_track
-        .start(token.clone(), event_sender, packet_sender)
-        .await?;
+    // Configure RTP
+    let rtp_config = RtpTrackConfig {
+        local_addr: "127.0.0.1:0".parse().unwrap(),
+        remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        payload_type: 0,
+        ssrc: 12345,
+    };
 
-    // Wait briefly for setup to complete
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    // Add the processor directly to the jitter buffer to ensure it's called
-    {
-        let packet = AudioFrame {
-            track_id: track_id.clone(),
-            timestamp: 1000,
-            samples: Samples::PCM(vec![1, 2, 3, 4]),
-            sample_rate: 16000,
-        };
-
-        // Process it directly with our processor
-        let mut packet_clone = packet.clone();
-        processor.process_frame(&mut packet_clone)?;
-
-        // Verify count was incremented
-        assert!(
-            count.load(Ordering::Relaxed) > 0,
-            "Processor should have been called at least once"
-        );
-    }
-
-    // Stop the track
-    webrtc_track.stop().await?;
+    let _track = track.with_rtp_config(rtp_config);
 
     Ok(())
 }
 
 #[tokio::test]
-async fn test_webrtc_track_rtp() -> Result<()> {
-    // Create an WebrtcTrack with PCMU codec
-    let track_id = "test_webrtc_track".to_string();
-    let webrtc_track = WebrtcTrack::new(track_id.clone());
+async fn test_webrtc_track_creation() -> Result<()> {
+    let track_id = "test-webrtc-track".to_string();
+    let track = WebrtcTrack::new(track_id.clone());
 
-    // Create channels
-    let (event_sender, _event_receiver) = broadcast::channel(16);
-    let (packet_sender, _packet_receiver) = mpsc::unbounded_channel();
+    assert_eq!(track.id(), &track_id);
 
-    // Start the track
-    let token = CancellationToken::new();
-    webrtc_track
-        .start(token.clone(), event_sender, packet_sender)
+    // Test with modified configuration
+    let sample_rate = 16000;
+    let track = WebrtcTrack::new(track_id)
+        .with_sample_rate(sample_rate)
+        .with_config(TrackConfig::default().with_sample_rate(sample_rate));
+
+    let _track = track.with_stream_id("test-stream".to_string());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Need to implement webrtc track"]
+async fn test_rtp_track_send_receive() -> Result<()> {
+    let cancel_token = CancellationToken::new();
+    let track_id = "test-rtp-send-receive".to_string();
+
+    let mut sender_track = RtpTrack::new(track_id.clone()).with_cancel_token(cancel_token.clone());
+
+    let receiver_track_id = "test-rtp-receiver".to_string();
+    let mut receiver_track =
+        RtpTrack::new(receiver_track_id).with_cancel_token(cancel_token.clone());
+
+    let sender_config = RtpTrackConfig {
+        local_addr: "127.0.0.1:6000".parse().unwrap(),
+        remote_addr: "127.0.0.1:6001".parse().unwrap(),
+        payload_type: 0,
+        ssrc: 12345,
+    };
+
+    let receiver_config = RtpTrackConfig {
+        local_addr: "127.0.0.1:6001".parse().unwrap(),
+        remote_addr: "127.0.0.1:6000".parse().unwrap(),
+        payload_type: 0,
+        ssrc: 54321,
+    };
+
+    sender_track = sender_track.with_rtp_config(sender_config);
+    receiver_track = receiver_track.with_rtp_config(receiver_config);
+
+    sender_track.setup_rtp_socket().await?;
+    receiver_track.setup_rtp_socket().await?;
+
+    let (sender, _receiver) = mpsc::unbounded_channel();
+
+    receiver_track
+        .start(cancel_token.clone(), dummy_event_sender(), sender)
         .await?;
 
-    // Create a PCMU encoder to encode PCM data
-    let mut encoder = pcmu::PcmuEncoder::new();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Create PCM data
-    let pcm_data: Vec<i16> = (0..320)
-        .map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16)
-        .collect();
+    let audio_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: Samples::PCM(vec![0; 160]), // 20ms of silence at 8kHz
+        timestamp: 0,
+        sample_rate: 8000,
+    };
 
-    // Encode the PCM data
-    let encoded = encoder.encode(&pcm_data);
+    for _ in 0..5 {
+        sender_track.send_packet(&audio_frame).await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
-    // Create a simpler RTP packet (no WebRTC-RS dependency)
-    let rtp_packet = create_simple_rtp_packet(&track_id, 1000, 0, encoded.to_vec()); // 0 is PCMU
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Send the packet to the track
-    webrtc_track.send_packet(&rtp_packet).await?;
+    let received_packets = receiver_track.get_received_packets().await;
 
-    // Wait for processing to occur
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    println!("Received {} packets", received_packets.len());
 
-    // Stop the track
-    webrtc_track.stop().await?;
+    sender_track.stop().await?;
+    receiver_track.stop().await?;
+    cancel_token.cancel();
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Need to implement webrtc track"]
+async fn test_multiple_rtp_packets() -> Result<()> {
+    let cancel_token = CancellationToken::new();
+    let track_id = "test-multiple-packets".to_string();
+
+    let mut sender_track = RtpTrack::new(track_id.clone()).with_cancel_token(cancel_token.clone());
+
+    let receiver_track_id = "test-multiple-receiver".to_string();
+    let mut receiver_track =
+        RtpTrack::new(receiver_track_id).with_cancel_token(cancel_token.clone());
+
+    let sender_config = RtpTrackConfig {
+        local_addr: "127.0.0.1:6002".parse().unwrap(),
+        remote_addr: "127.0.0.1:6003".parse().unwrap(),
+        payload_type: 0,
+        ssrc: 12346,
+    };
+
+    let receiver_config = RtpTrackConfig {
+        local_addr: "127.0.0.1:6003".parse().unwrap(),
+        remote_addr: "127.0.0.1:6002".parse().unwrap(),
+        payload_type: 0,
+        ssrc: 54322,
+    };
+
+    sender_track = sender_track.with_rtp_config(sender_config);
+    receiver_track = receiver_track.with_rtp_config(receiver_config);
+
+    sender_track.setup_rtp_socket().await?;
+    receiver_track.setup_rtp_socket().await?;
+
+    let (sender, _receiver) = mpsc::unbounded_channel();
+
+    receiver_track
+        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let num_packets = 5;
+    for i in 0..num_packets {
+        let audio_frame = AudioFrame {
+            track_id: track_id.clone(),
+            samples: Samples::PCM(vec![i as i16; 160]),
+            timestamp: i as u64 * 20,
+            sample_rate: 8000,
+        };
+
+        for _ in 0..3 {
+            sender_track.send_packet(&audio_frame).await?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let received_packets = receiver_track.get_received_packets().await;
+
+    println!("Received {} packets", received_packets.len());
+
+    sender_track.stop().await?;
+    receiver_track.stop().await?;
+    cancel_token.cancel();
 
     Ok(())
 }

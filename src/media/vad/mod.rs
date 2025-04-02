@@ -72,12 +72,7 @@ pub trait VadEngine: Send + Sync + Any {
 }
 
 impl VadProcessor {
-    pub fn new(
-        track_id: String,
-        vad_type: VadType,
-        event_sender: EventSender,
-        config: VADConfig,
-    ) -> Self {
+    pub fn new(vad_type: VadType, event_sender: EventSender, config: VADConfig) -> Self {
         let vad: Box<dyn VadEngine> = match vad_type {
             VadType::WebRTC => Box::new(webrtc::WebRtcVad::new()),
             VadType::Silero => Box::new(silero::SileroVad::new()),
