@@ -1,9 +1,17 @@
 use crate::config::Config;
 use crate::handler::call::CallHandlerState;
 use anyhow::Result;
-use axum::Router;
-use std::net::SocketAddr;
+use axum::{
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
+use std::{net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+};
 use tracing::info;
 
 pub struct App {
@@ -64,11 +72,54 @@ impl App {
     }
 }
 
+// Index page handler
+async fn index_handler() -> impl IntoResponse {
+    match std::fs::read_to_string("static/index.html") {
+        Ok(content) => Html(content).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to read index.html: {}", e);
+            Html("<html><body><h1>Error loading page</h1></body></html>").into_response()
+        }
+    }
+}
+
 fn create_router() -> Router {
     // Create router with empty state
     let router = Router::new();
     let call_state = CallHandlerState::new();
-    // Merge call and WebSocket handlers
+
+    // Serve static files
+    let static_files_service = ServeDir::new("static");
+
+    // CORS configuration to allow cross-origin requests
+    let cors = CorsLayer::new()
+        .allow_origin([
+            "http://localhost:3000".parse().unwrap(),
+            "http://127.0.0.1:3000".parse().unwrap(),
+            "http://localhost:8080".parse().unwrap(),
+            "http://127.0.0.1:8080".parse().unwrap(),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+            axum::http::header::ORIGIN,
+        ])
+        .allow_credentials(true);
+
+    // Merge call and WebSocket handlers with static file serving
     let call_routes = crate::handler::router().with_state(call_state);
-    router.merge(call_routes)
+
+    router
+        .route("/", get(index_handler))
+        .nest_service("/static", static_files_service)
+        .merge(call_routes)
+        .layer(cors)
 }
