@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustPBX WebRTC Interface</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Alpine.js CDN -->
+    <script defer src="https://cdn.alpinejs.dev/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body class="bg-gray-100 min-h-screen pb-20" x-data="mainApp()">
+    <div class="container mx-auto p-4">
+        <header class="bg-blue-600 text-white p-4 rounded-t-lg shadow">
+            <h1 class="text-2xl font-bold">RustPBX WebRTC Interface</h1>
+        </header>
+
+        <div class="flex flex-col md:flex-row gap-4 mt-4">
+            <!-- Configuration Column -->
+            <div class="w-full md:w-1/2 bg-white p-4 rounded-lg shadow">
+                <h2 class="text-xl font-bold mb-4 border-b pb-2">Configuration</h2>
+
+                <!-- VAD Configuration -->
+                <div class="mb-6">
+                    <h3 class="text-lg font-semibold mb-2">VAD Settings</h3>
+                    <div class="flex items-center mb-2">
+                        <input type="checkbox" id="enableVad" x-model="config.vad.enabled" class="mr-2">
+                        <label for="enableVad">Enable Voice Activity Detection (VAD)</label>
+                    </div>
+                    <div x-show="config.vad.enabled" class="pl-4 space-y-2">
+                        <div class="flex flex-col">
+                            <label for="vadThreshold" class="text-sm">Threshold</label>
+                            <input type="range" id="vadThreshold" x-model="config.vad.threshold" min="0" max="1"
+                                step="0.01" class="w-full">
+                            <span class="text-xs text-right" x-text="config.vad.threshold"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recording Configuration -->
+                <div class="mb-6">
+                    <div class="flex items-center mb-2">
+                        <input type="checkbox" id="enableRecording" x-model="config.recording.enabled" class="mr-2">
+                        <label for="enableRecording">Enable Recording</label>
+                    </div>
+                </div>
+
+                <!-- ASR, TTS, LLM Tabbed Configuration -->
+                <div class="mb-6">
+                    <h3 class="text-lg font-semibold mb-2">Advanced Settings</h3>
+
+                    <!-- Tab Navigation -->
+                    <div class="flex border-b">
+                        <button @click="config.uiState.activeTab = 'asr'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'asr' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            ASR
+                        </button>
+                        <button @click="config.uiState.activeTab = 'tts'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'tts' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            TTS
+                        </button>
+                        <button @click="config.uiState.activeTab = 'llm'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            LLM
+                        </button>
+                    </div>
+
+                    <!-- Tab Content -->
+                    <div class="py-4">
+                        <!-- ASR Tab -->
+                        <div x-show="config.uiState.activeTab === 'asr'" class="space-y-2">
+                            <label for="asrProvider" class="text-sm">Provider</label>
+                            <select id="asrProvider" x-model="config.asr.provider" class="border p-2 rounded w-full">
+                                <option value="tencent_cloud">Tencent Cloud</option>
+                                <option value="azure">Azure</option>
+                                <option value="google">Google</option>
+                            </select>
+
+                            <div x-show="config.asr.provider !== ''">
+                                <label for="asrAppId" class="text-sm">App ID</label>
+                                <input type="text" id="asrAppId" x-model="config.asr.appId"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="asrSecretId" class="text-sm">Secret ID</label>
+                                <input type="text" id="asrSecretId" x-model="config.asr.secretId"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="asrSecretKey" class="text-sm">Secret Key</label>
+                                <input type="password" id="asrSecretKey" x-model="config.asr.secretKey"
+                                    class="border p-2 rounded w-full">
+                            </div>
+                        </div>
+
+                        <!-- TTS Tab -->
+                        <div x-show="config.uiState.activeTab === 'tts'" class="space-y-2">
+                            <label for="ttsProvider" class="text-sm">Provider</label>
+                            <select id="ttsProvider" x-model="config.tts.provider" class="border p-2 rounded w-full">
+                                <option value="tencent_cloud">Tencent Cloud</option>
+                                <option value="azure">Azure</option>
+                                <option value="google">Google</option>
+                            </select>
+
+                            <div x-show="config.tts.provider !== ''">
+                                <label for="ttsAppId" class="text-sm">App ID</label>
+                                <input type="text" id="ttsAppId" x-model="config.tts.appId"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="ttsSecretId" class="text-sm">Secret ID</label>
+                                <input type="text" id="ttsSecretId" x-model="config.tts.secretId"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="ttsSecretKey" class="text-sm">Secret Key</label>
+                                <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="ttsSpeaker" class="text-sm">Speaker</label>
+                                <select id="ttsSpeaker" x-model="config.tts.speaker" class="border p-2 rounded w-full">
+                                    <option value="female">Female</option>
+                                    <option value="male">Male</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- LLM Tab -->
+                        <div x-show="config.uiState.activeTab === 'llm'" class="space-y-2">
+                            <label for="llmProvider" class="text-sm">Provider</label>
+                            <select id="llmProvider" x-model="config.llm.provider" class="border p-2 rounded w-full">
+                                <option value="openai">OpenAI</option>
+                                <option value="anthropic">Anthropic</option>
+                            </select>
+
+                            <div x-show="config.llm.provider !== ''">
+                                <label for="llmApiKey" class="text-sm">API Key</label>
+                                <input type="password" id="llmApiKey" x-model="config.llm.apiKey"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="llmModel" class="text-sm">Model</label>
+                                <input type="text" id="llmModel" x-model="config.llm.model"
+                                    class="border p-2 rounded w-full">
+
+                                <label for="llmPrompt" class="text-sm">System Prompt</label>
+                                <textarea id="llmPrompt" x-model="config.llm.prompt"
+                                    class="border p-2 rounded w-full h-24"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Debug Console Column -->
+            <div class="w-full md:w-1/2 bg-white p-4 rounded-lg shadow">
+                <h2 class="text-xl font-bold mb-4 border-b pb-2">Debug Console</h2>
+
+                <!-- Connection Status -->
+                <div class="mb-4 flex items-center space-x-4">
+                    <div class="flex items-center">
+                        <span class="mr-2">WebSocket:</span>
+                        <span :class="wsStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
+                            <i :class="wsStatus === 'connected' ? 'fas fa-plug' : 'fas fa-plug-circle-exclamation'"></i>
+                            <span x-text="wsStatus"></span>
+                        </span>
+                    </div>
+                    <div class="flex items-center">
+                        <span class="mr-2">WebRTC:</span>
+                        <span :class="rtcStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
+                            <i :class="rtcStatus === 'connected' ? 'fas fa-phone' : 'fas fa-phone-slash'"></i>
+                            <span x-text="rtcStatus"></span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Timeline-style Debug Console -->
+                <div class="mb-4">
+                    <div class="border rounded h-[600px] p-2 overflow-y-auto bg-gray-50 font-mono text-sm"
+                        id="eventLog">
+                        <template x-for="(entry, index) in eventLog" :key="index">
+                            <div class="mb-2 pb-2 border-b border-gray-200 last:border-0">
+                                <div class="flex items-start">
+                                    <span class="text-gray-500 mr-2 shrink-0"
+                                        x-text="formatTime(entry.timestamp)"></span>
+                                    <span class="mr-2 font-semibold px-2 py-0.5 rounded text-xs"
+                                        :class="getLogEntryClass(entry.type)">
+                                        <span x-text="entry.type"></span>
+                                    </span>
+                                    <span x-text="entry.message" class="whitespace-pre-wrap break-words"></span>
+                                </div>
+                                <div x-if="entry.type === 'ASR'" class="ml-12 mt-1 text-blue-600">
+                                    <span x-text="entry.asrResult || ''"></span>
+                                </div>
+                                <div x-if="entry.type === 'LLM'" class="ml-12 mt-1 text-purple-600">
+                                    <span x-text="entry.llmResponse || ''"></span>
+                                </div>
+                                <div x-if="entry.type === 'TTS'" class="ml-12 mt-1 text-green-600">
+                                    <span x-text="entry.ttsMessage || ''"></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fixed Call Controls at Bottom -->
+    <div class="fixed bottom-0 left-0 right-0 bg-white shadow-lg p-4 border-t border-gray-200">
+        <div class="container mx-auto flex justify-center">
+            <div class="flex space-x-6">
+                <button @click="startCall" :disabled="callActive"
+                    class="bg-green-500 hover:bg-green-600 text-white py-2 px-6 rounded-full disabled:opacity-50 flex items-center">
+                    <i class="fas fa-phone mr-2"></i> Call
+                </button>
+                <button @click="endCall" :disabled="!callActive"
+                    class="bg-red-500 hover:bg-red-600 text-white py-2 px-6 rounded-full disabled:opacity-50 flex items-center">
+                    <i class="fas fa-phone-slash mr-2"></i> Hang Up
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/agent.js"></script>
+</body>
+
+</html>
