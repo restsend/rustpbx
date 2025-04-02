@@ -13,6 +13,8 @@ use hound::WavReader;
 use reqwest::Client;
 use std::fs::File;
 use std::io::{BufReader, Cursor};
+use std::time::Instant;
+use tokio::select;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -372,48 +374,55 @@ async fn process_wav_reader<R: std::io::Read + Send>(
         all_samples = resample::resample_mono(&all_samples, spec.sample_rate, target_sample_rate);
     }
 
-    // Send PCM data in chunks
-    let mut timestamp: u64 = 0;
     let packet_duration = 1000.0 / target_sample_rate as f64 * max_pcm_chunk_size as f64;
     let packet_duration_ms = packet_duration as u64;
 
     info!(
-        "Streaming WAV with {} samples, packet_duration_ms: {} target_sample_rate: {} spec.sample_rate: {}",
+        "Streaming WAV with {} samples, packet_duration: {} target_sample_rate: {} spec.sample_rate: {} max_pcm_chunk_size: {}",
         all_samples.len(),
         packet_duration_ms,
         target_sample_rate,
-        spec.sample_rate
+        spec.sample_rate,
+        max_pcm_chunk_size
     );
+    let stream_loop = async move {
+        let start_time = Instant::now();
+        let mut ticker = tokio::time::interval(Duration::from_millis(packet_duration_ms));
+        for chunk in all_samples.chunks(max_pcm_chunk_size) {
+            let packet = AudioFrame {
+                track_id: track_id.to_string(),
+                timestamp: crate::get_timestamp(),
+                samples: Samples::PCM(chunk.to_vec()),
+                sample_rate: target_sample_rate,
+            };
 
-    // Stream the audio data
-    for chunk in all_samples.chunks(max_pcm_chunk_size) {
-        // Check if we should stop
-        if token.is_cancelled() {
-            break;
+            match processor_chain.process_frame(&packet) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to process audio packet: {}", e);
+                }
+            }
+            if let Err(e) = packet_sender.send(packet) {
+                warn!("Failed to send audio packet: {}", e);
+                break;
+            }
+            ticker.tick().await;
         }
+        info!(
+            "filetrack: stream loop finished in {:?}",
+            start_time.elapsed()
+        );
+    };
 
-        // Create a TrackPacket with PCM data
-        let packet = AudioFrame {
-            track_id: track_id.to_string(),
-            timestamp: timestamp as u32,
-            samples: Samples::PCM(chunk.to_vec()),
-            sample_rate: spec.sample_rate,
-        };
-
-        // Process the packet
-        processor_chain.process_frame(&packet)?;
-        // Send the packet
-        if let Err(e) = packet_sender.send(packet) {
-            tracing::error!("Failed to send audio packet: {}", e);
-            break;
+    select! {
+        _ = token.cancelled() => {
+            info!("filetrack: stream cancelled");
+            return Ok(());
         }
-
-        // Update timestamp for next packet
-        timestamp += packet_duration_ms;
-        // Sleep for the duration of the packet to simulate real-time streaming
-        tokio::time::sleep(Duration::from_millis(packet_duration_ms)).await;
+        _ = stream_loop => {
+            info!("filetrack: stream loop finished");
+        }
     }
-
     Ok(())
 }
 

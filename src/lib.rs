@@ -1,3 +1,5 @@
+use std::time::{Instant, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 pub mod app;
@@ -25,13 +27,13 @@ pub enum Samples {
 pub struct AudioFrame {
     pub track_id: TrackId,
     pub samples: Samples,
-    pub timestamp: u32,
+    pub timestamp: u64,
     pub sample_rate: u32,
 }
 // get timestamp in milliseconds
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
     now.duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .expect("Time went backwards")
         .as_millis() as u64
 }

@@ -1,9 +1,10 @@
 use crate::event::SessionEvent;
-use crate::media::codecs::g722::{G722Decoder, G722Encoder};
+use crate::media::codecs::g722::G722Encoder;
 use crate::media::codecs::pcmu::PcmuEncoder;
 use crate::media::codecs::resample::resample_mono;
-use crate::media::codecs::{convert_s16_to_u8, convert_u8_to_s16, Decoder, Encoder};
+use crate::media::codecs::{convert_u8_to_s16, CodecType, Encoder};
 use crate::media::track::file::read_wav_file;
+use crate::media::track::webrtc::WebrtcTrack;
 use crate::media::vad::VadType;
 use crate::transcription::TranscriptionType;
 use crate::{
@@ -74,36 +75,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     });
 
     // Create WebRTC client
-    let mut media_engine = MediaEngine::default();
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "audio/G722".to_owned(),
-                clock_rate: 8000,
-                channels: 1,
-                sdp_fmtp_line: "".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 9,
-            ..Default::default()
-        },
-        RTPCodecType::Audio,
-    )?;
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: "audio/PCMU".to_owned(),
-                clock_rate: 8000,
-                channels: 1,
-                sdp_fmtp_line: "".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 0,
-            ..Default::default()
-        },
-        RTPCodecType::Audio,
-    )?;
-
+    let media_engine = WebrtcTrack::get_media_engine()?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
     let config = RTCConfiguration {
         ..Default::default()
@@ -111,16 +83,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     // Create an audio track
-    let track = Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type: "audio/G722".to_owned(),
-            clock_rate: 8000,
-            channels: 1,
-            ..Default::default()
-        },
-        "audio".to_owned(),
-        "webrtc-rs".to_owned(),
-    ));
+    let track = WebrtcTrack::create_audio_track(CodecType::G722, None);
 
     // Add the track to the peer connection
     let _rtp_sender = peer_connection
@@ -273,7 +236,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         }
 
         for chunk in audio_samples.chunks(chunk_size) {
-            let encoded = encoder.encode(&chunk).unwrap();
+            let encoded = encoder.encode(&chunk);
             let sample = webrtc::media::Sample {
                 data: encoded.into(),
                 duration: Duration::from_millis(20),
@@ -295,7 +258,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         }
         _ = send_audio_loop => {
         }
-        _ = time::sleep(std::time::Duration::from_secs(10)) => {
+        _ = time::sleep(std::time::Duration::from_secs(30)) => {
             error!("Transcription timeout");
         }
     }

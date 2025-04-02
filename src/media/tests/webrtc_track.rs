@@ -39,14 +39,14 @@ impl Processor for CountingProcessor {
 // Helper to create a WebRTC RTP packet (simplified version without webrtc-rs dependency)
 fn create_simple_rtp_packet(
     track_id: &str,
-    timestamp: u32,
+    timestamp: u64,
     payload_type: u8,
     payload: Vec<u8>,
 ) -> AudioFrame {
     // Create basic RTP packet
     AudioFrame {
         track_id: track_id.to_string(),
-        timestamp: timestamp as u32,
+        timestamp,
         samples: Samples::RTP(payload_type, payload),
         sample_rate: 16000,
     }
@@ -125,7 +125,7 @@ async fn test_webrtc_track_rtp() -> Result<()> {
         .collect();
 
     // Encode the PCM data
-    let encoded = encoder.encode(&pcm_data)?;
+    let encoded = encoder.encode(&pcm_data);
 
     // Create a simpler RTP packet (no WebRTC-RS dependency)
     let rtp_packet = create_simple_rtp_packet(&track_id, 1000, 0, encoded.to_vec()); // 0 is PCMU

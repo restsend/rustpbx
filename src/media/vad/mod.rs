@@ -156,7 +156,7 @@ impl Processor for VadProcessor {
                 // Emit StartSpeaking event
                 let event = SessionEvent::StartSpeaking {
                     track_id: frame.track_id.clone(),
-                    timestamp: frame.timestamp as u64,
+                    timestamp: frame.timestamp,
                 };
                 self.event_sender.send(event).ok();
 
@@ -179,7 +179,7 @@ impl Processor for VadProcessor {
                         // Emit Silence event
                         let event = SessionEvent::Silence {
                             track_id: frame.track_id.clone(),
-                            timestamp: frame.timestamp as u64,
+                            timestamp: frame.timestamp,
                         };
                         self.event_sender.send(event).ok();
 
@@ -195,7 +195,7 @@ impl Processor for VadProcessor {
 
                 let event = SessionEvent::Silence {
                     track_id: frame.track_id.clone(),
-                    timestamp: frame.timestamp as u64,
+                    timestamp: frame.timestamp,
                 };
                 self.event_sender.send(event).ok();
             }

@@ -1,6 +1,3 @@
-use anyhow::Result;
-use bytes::{Bytes, BytesMut};
-
 use super::{Decoder, Encoder};
 
 const SEG_SHIFT: i16 = 4;
@@ -38,12 +35,8 @@ impl PcmaDecoder {
 }
 
 impl Decoder for PcmaDecoder {
-    fn decode(&mut self, samples: &[u8]) -> Result<Vec<i16>> {
-        let output = samples
-            .iter()
-            .map(|sample| decode_a_law(*sample))
-            .collect::<Vec<i16>>();
-        Ok(output)
+    fn decode(&mut self, samples: &[u8]) -> Vec<i16> {
+        samples.iter().map(|sample| decode_a_law(*sample)).collect()
     }
 
     fn sample_rate(&self) -> u32 {
@@ -76,53 +69,46 @@ impl PcmaEncoder {
         size
     }
 
-    fn linear2alaw(&self, mut pcm_val: i16) -> u8 {
-        let mask: i16;
-        let seg: usize;
-        let aval: i16;
-
-        if pcm_val >= 0 {
-            mask = 0xD5; /* sign (7th) bit = 1 */
-        } else if pcm_val < -8 {
-            mask = 0x55; /* sign bit = 0 */
-            pcm_val = -pcm_val - 8;
-        } else {
-            // For all values in range [-7; -1] end result will be 0^0xD5,
-            // so we may just return it from here.
-            // NOTE: This is not just optimization! For values in that range
-            //       expression (-pcm_val - 8) will return negative result,
-            //       messing all following calculations. This is old bug,
-            //       coming from original code from Sun Microsystems, Inc.
-            // Btw, seems there is no code for 0, value after decoding will be
-            // either 8 (if we return 0xD5 here) or -8 (if we return 0x55 here).
+    fn linear2alaw(&self, pcm_val: i16) -> u8 {
+        // Special case handling for small negative values [-8, -1]
+        if pcm_val < 0 && pcm_val >= -8 {
             return 0xD5;
         }
 
-        /* Convert the scaled magnitude to segment number. */
-        seg = self.search(pcm_val, &SEG_END, 8);
-
-        /* Combine the sign, segment, and quantization bits. */
-        if seg >= 8 {
-            /* out of range, return maximum value. */
-            (0x7F ^ mask) as u8
+        // Determine sign mask and prepare the positive sample value
+        let (mask, abs_val) = if pcm_val >= 0 {
+            (0xD5, pcm_val) // sign bit = 1
         } else {
-            aval = (seg as i16) << SEG_SHIFT;
-            if seg < 2 {
-                ((aval | ((pcm_val >> 4) & QUANT_MASK)) ^ mask) as u8
-            } else {
-                ((aval | ((pcm_val >> (seg + 3)) & QUANT_MASK)) ^ mask) as u8
-            }
+            (0x55, -pcm_val - 8) // sign bit = 0
+        };
+
+        // Convert the scaled magnitude to segment number
+        let seg = self.search(abs_val, &SEG_END, 8);
+
+        // If out of range, return maximum value
+        if seg >= 8 {
+            return (0x7F ^ mask) as u8;
         }
+
+        // Calculate the base value from segment
+        let aval = (seg as i16) << SEG_SHIFT;
+
+        // Combine the segment value with the quantization bits
+        let shift = if seg < 2 { 4 } else { seg as i16 + 3 };
+        let result = aval | ((abs_val >> shift) & QUANT_MASK);
+
+        // Apply the mask to set the sign bit
+        (result ^ mask) as u8
     }
 }
 
 impl Encoder for PcmaEncoder {
-    fn encode(&mut self, samples: &[i16]) -> Result<Bytes> {
-        let mut output = BytesMut::with_capacity(samples.len());
+    fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(samples.len());
         for &sample in samples {
-            output.extend_from_slice(&[self.linear2alaw(sample)]);
+            output.push(self.linear2alaw(sample));
         }
-        Ok(output.freeze())
+        output
     }
 
     fn sample_rate(&self) -> u32 {

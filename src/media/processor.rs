@@ -79,9 +79,8 @@ impl ProcessorChain {
             }
         }
         if let Samples::RTP(payload_type, payload) = &frame.samples {
-            if let Ok(samples) = self.codec.lock().unwrap().decode(*payload_type, &payload) {
-                frame.samples = Samples::PCM(samples);
-            }
+            let samples = self.codec.lock().unwrap().decode(*payload_type, &payload);
+            frame.samples = Samples::PCM(samples);
         }
         // Process the frame with all processors
         for processor in processors.iter() {

@@ -1,4 +1,4 @@
-use rubato::Resampler;
+use rubato::{Resampler, SincFixedIn, SincInterpolationType, WindowFunction};
 
 pub fn resample(
     input: &[i16],
@@ -9,28 +9,35 @@ pub fn resample(
     if input_sample_rate == output_sample_rate {
         return input.to_vec();
     }
-    let resample_ratio = output_sample_rate as f64 / input_sample_rate as f64;
-    let params = rubato::SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: rubato::SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: rubato::WindowFunction::BlackmanHarris2,
-    };
 
     if input.len() % channels != 0 {
         return Vec::new();
     }
 
     let frames = input.len() / channels;
+    let expected_output_frames =
+        (frames as f64 * output_sample_rate as f64 / input_sample_rate as f64).round() as usize;
 
-    let mut resampler =
-        match rubato::SincFixedIn::<f64>::new(resample_ratio, 2.0, params, frames, channels) {
-            Ok(r) => r,
-            Err(_) => {
-                return Vec::new();
-            }
-        };
+    let params = rubato::SincInterpolationParameters {
+        sinc_len: 64,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::Blackman,
+    };
+
+    let mut resampler = match SincFixedIn::<f64>::new(
+        output_sample_rate as f64 / input_sample_rate as f64,
+        1.0,
+        params,
+        frames,
+        channels,
+    ) {
+        Ok(r) => r,
+        Err(_) => {
+            return Vec::new();
+        }
+    };
 
     let mut channel_data: Vec<Vec<f64>> = vec![Vec::with_capacity(frames); channels];
 
@@ -46,8 +53,10 @@ pub fn resample(
         }
     };
 
-    let mut result = Vec::with_capacity(resampled[0].len() * channels);
-    for frame in 0..resampled[0].len() {
+    let mut result = Vec::with_capacity(expected_output_frames * channels);
+    let actual_frames = resampled[0].len().min(expected_output_frames);
+
+    for frame in 0..actual_frames {
         for channel in 0..channels {
             let value = resampled[channel][frame];
             let clamped = if value > 1.0 {
@@ -60,6 +69,11 @@ pub fn resample(
             result.push((clamped * i16::MAX as f64) as i16);
         }
     }
+
+    while result.len() < expected_output_frames * channels {
+        result.push(0);
+    }
+
     result
 }
 
@@ -71,34 +85,28 @@ pub fn resample_mono(input: &[i16], input_sample_rate: u32, output_sample_rate: 
 mod tests {
     use super::*;
     use crate::media::codecs::convert_s16_to_u8;
-    use hound::WavReader;
+    use crate::media::track::file::read_wav_file;
     use std::fs::File;
-    use std::io::BufReader;
     use std::io::Write;
 
     #[test]
     fn test_resampler() {
-        let reader =
-            BufReader::new(File::open("fixtures/sample.wav").expect("Failed to open file"));
-        let mut wav_reader = WavReader::new(reader).expect("Failed to read wav file");
-        let spec = wav_reader.spec();
-        let channels = spec.channels as usize;
+        let (all_samples, samplerate) = read_wav_file("fixtures/sample.wav").unwrap();
+        let frame_samples = all_samples[0..640].to_vec();
+        let frame_resampled = resample_mono(&frame_samples, samplerate, 8000);
+        assert_eq!(frame_resampled.len(), 320);
 
-        let mut all_samples = Vec::new();
-        for sample in wav_reader.samples::<i16>() {
-            all_samples.push(sample.unwrap_or(0));
-        }
-
-        let resampled = resample(&all_samples, 16000, 8000, channels);
-
+        let resampled = resample_mono(&all_samples, samplerate, 8000);
         let mut file = File::create("fixtures/sample.8k.decoded").expect("Failed to create file");
         let decoded_bytes = convert_s16_to_u8(&resampled);
         file.write_all(&decoded_bytes)
             .expect("Failed to write file");
+        let rate = resampled.len() as f64 / all_samples.len() as f64;
         println!(
-            "resampled {}->{} samples",
+            "resampled {}->{} samples, rate: {}",
             all_samples.len(),
-            resampled.len()
+            resampled.len(),
+            rate
         );
         println!("ffplay -f s16le -ar 8000 -i fixtures/sample.8k.decoded");
     }

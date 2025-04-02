@@ -109,14 +109,12 @@ impl TencentCloudAsrClientBuilder {
         let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let ws_stream = client.connect_websocket(voice_id.as_str()).await?;
         let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
-        let samplerate = client.config.sample_rate;
         let event_sender = self.event_sender;
         let track_id = voice_id.clone();
         tokio::spawn(async move {
             match TencentCloudAsrClient::handle_websocket_message(
                 track_id,
                 ws_stream,
-                samplerate,
                 audio_rx,
                 event_sender,
                 cancellation_token,
@@ -257,7 +255,6 @@ impl TencentCloudAsrClient {
     async fn handle_websocket_message(
         track_id: TrackId,
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
-        samplerate: u32,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         event_sender: EventSender,
         cancellation_token: CancellationToken,
@@ -323,20 +320,6 @@ impl TencentCloudAsrClient {
 
         let send_loop = async move {
             let mut total_bytes_sent = 0;
-            let frame_size = match samplerate {
-                16000 => 640,
-                8000 => 320,
-                _ => 640,
-            };
-            let frame_duration = 20;
-            let chunk_size = frame_size as usize;
-            let mut packet_ticker =
-                tokio::time::interval(Duration::from_millis(frame_duration as u64));
-            info!(
-                "TencentCloud ASR service with frame_duration: {}ms, chunk_size: {} bytes",
-                frame_duration, chunk_size
-            );
-            //let mut audio_file = File::create("audio.pcm").unwrap();
             while let Some(samples) = audio_rx.recv().await {
                 total_bytes_sent += samples.len();
                 debug!(
@@ -344,15 +327,11 @@ impl TencentCloudAsrClient {
                     samples.len(),
                     total_bytes_sent
                 );
-                // audio_file.write_all(&samples).unwrap();
-                for chunk in samples.chunks(chunk_size) {
-                    match ws_sender.send(Message::Binary(chunk.to_vec().into())).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Err(anyhow!("Failed to send audio data: {}", e));
-                        }
+                match ws_sender.send(Message::Binary(samples.into())).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(anyhow!("Failed to send audio data: {}", e));
                     }
-                    packet_ticker.tick().await;
                 }
             }
             info!(

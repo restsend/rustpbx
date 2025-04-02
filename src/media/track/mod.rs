@@ -1,3 +1,4 @@
+use super::codecs::CodecType;
 use crate::event::EventSender;
 use crate::media::processor::Processor;
 use crate::{AudioFrame, TrackId};
@@ -13,6 +14,7 @@ pub type TrackPacketReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 // New shared track configuration struct
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
+    pub codec: CodecType,
     // Packet time in milliseconds (typically 10, 20, or 30ms)
     pub ptime: Duration,
     // Sample rate for PCM audio (e.g., 8000, 16000, 48000)
@@ -26,6 +28,7 @@ pub struct TrackConfig {
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
+            codec: CodecType::PCMU,
             ptime: Duration::from_millis(20),
             sample_rate: 16000,
             channels: 1,

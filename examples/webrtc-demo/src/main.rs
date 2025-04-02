@@ -9,6 +9,7 @@ use axum::{
 use rustpbx::{
     event::EventSender,
     media::{
+        codecs::CodecType,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
             file::FileTrack,
@@ -27,7 +28,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use uuid::Uuid;
 use webrtc::{
     api::{
@@ -52,8 +53,6 @@ struct AppState {
 }
 
 struct ConnectionState {
-    peer_connection: Arc<RTCPeerConnection>,
-    media_stream: Arc<MediaStream>,
     cancel_token: CancellationToken,
 }
 
@@ -131,191 +130,55 @@ async fn offer_handler(
 
 // Process WebRTC offer and create answer
 async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(String, WebRTCAnswer)> {
-    // Create media engine
-    let mut media_engine = MediaEngine::default();
-
-    // Register G722 codec - use G722 instead of Opus as required
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_G722.to_string(),
-                clock_rate: 8000, // G722 uses 8kHz clock rate (16kHz samples)
-                channels: 1,      // Mono
-                sdp_fmtp_line: "".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 9, // Standard payload type for G722
-            ..Default::default()
-        },
-        RTPCodecType::Audio,
-    )?;
-    media_engine.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_PCMU.to_string(),
-                clock_rate: 8000, // PCMU uses 8kHz clock rate (16kHz samples)
-                channels: 1,      // Mono
-                sdp_fmtp_line: "".to_string(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 0, // Standard payload type for PCMU
-            ..Default::default()
-        },
-        RTPCodecType::Audio,
-    )?;
-
-    // Create registry and API
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine)?;
-    let api = APIBuilder::new()
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build();
-
-    // Create configuration
-    let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    // Create peer connection
-    let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-    let stream_samplerate = 16000;
-    let mime_type = MIME_TYPE_G722.to_string();
-    // Create audio track
-    let track = Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type,
-            clock_rate: 8000,
-            channels: 1,
-            ..Default::default()
-        },
-        "audio".to_string(),
-        "wav-player".to_string(),
-    ));
-
-    // Add track to peer connection
-    let rtp_sender = peer_connection
-        .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
-        .await?;
-
-    // Create a cancellation token
+    let connection_id = Uuid::new_v4().to_string();
     let cancel_token = CancellationToken::new();
     let event_sender = rustpbx::event::create_event_sender();
-    // Create MediaStream
+    let media_stream_builder = MediaStreamBuilder::new(event_sender.clone());
     let media_stream = Arc::new(
-        MediaStreamBuilder::new(event_sender)
-            .with_id(format!("demo-stream-{}", Uuid::new_v4()))
-            .cancel_token(cancel_token.child_token())
+        media_stream_builder
+            .cancel_token(cancel_token.clone())
             .build(),
     );
-
-    // Create connection state
-    let connection_state = ConnectionState {
-        peer_connection: Arc::clone(&peer_connection),
-        media_stream: Arc::clone(&media_stream),
-        cancel_token: cancel_token.clone(),
-    };
-
-    // Handle connection state changes
-    let connection_id = Uuid::new_v4().to_string();
-    let state_clone = Arc::clone(&state);
-    let connection_id_clone = connection_id.clone();
-    let track_clone = Arc::clone(&track);
+    let track_id = format!("webrtc-{}", Uuid::new_v4());
+    let mut webrtc_track = WebrtcTrack::new(track_id.clone());
     let sample_path = state
         .root_dir
         .join("assets/sample.wav")
-        .canonicalize()?
         .to_string_lossy()
         .to_string();
-
-    peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-        let connection_id = connection_id_clone.clone();
-        let state = Arc::clone(&state_clone);
-        let track = Arc::clone(&track_clone);
-        let sample_path = sample_path.clone();
-
-        Box::pin(async move {
-            info!("Peer connection state changed: {}", s);
-
-            if s == RTCPeerConnectionState::Connected {
-                info!("Connection established - starting MediaStream");
-
-                // Get the MediaStream from the connection state
-                let mut media_stream_to_serve = None;
-                {
-                    let connections = state.connections.lock().unwrap();
-                    if let Some(conn_state) = connections.get(&connection_id) {
-                        media_stream_to_serve = Some(Arc::clone(&conn_state.media_stream));
-                    }
+    // Create connection state
+    let connection_state = ConnectionState {
+        cancel_token: cancel_token.clone(),
+    };
+    let mut local_desc = None;
+    match webrtc_track.setup_webrtc_track(offer.sdp.sdp, None).await {
+        Ok(answer) => {
+            info!("Webrtc track setup complete {}", answer.sdp);
+            let file_track_id = format!("file-{}", Uuid::new_v4());
+            let file_track = FileTrack::new(file_track_id.clone()).with_path(sample_path);
+            local_desc = Some(answer);
+            media_stream.update_track(Box::new(webrtc_track)).await;
+            media_stream.update_track(Box::new(file_track)).await;
+            tokio::spawn(async move {
+                if let Err(e) = media_stream.serve().await {
+                    error!("Media stream error: {}", e);
                 }
-
-                if let Some(media_stream) = media_stream_to_serve {
-                    // Start the media stream in a separate task
-                    tokio::spawn(async move {
-                        // Create WebRTC track
-                        let webrtc_track_id = format!("webrtc-{}", Uuid::new_v4());
-                        let webrtc_track = WebrtcTrack::new(webrtc_track_id.clone())
-                            .with_sample_rate(stream_samplerate) // G722 uses 16kHz sample rate
-                            .with_webrtc_track(WebrtcTrackConfig {
-                                track,
-                                payload_type: 9, // G722 payload type
-                            });
-
-                        // Create file track
-                        let file_track_id = format!("file-{}", Uuid::new_v4());
-                        let file_track = FileTrack::new(file_track_id.clone())
-                            .with_sample_rate(stream_samplerate) // G722 uses 16kHz sample rate
-                            .with_path(sample_path);
-
-                        // Add tracks to the media stream
-                        media_stream.update_track(Box::new(webrtc_track)).await;
-                        media_stream.update_track(Box::new(file_track)).await;
-
-                        // Serve the media stream
-                        if let Err(e) = media_stream.serve().await {
-                            error!("Media stream error: {}", e);
-                        }
-                    });
-                }
-            } else if s == RTCPeerConnectionState::Disconnected
-                || s == RTCPeerConnectionState::Failed
-                || s == RTCPeerConnectionState::Closed
-            {
-                // Clean up connection
-                let mut connections = state.connections.lock().unwrap();
-                if let Some(conn_state) = connections.remove(&connection_id) {
-                    // Cancel the media stream
-                    conn_state.cancel_token.cancel();
-                }
-            }
-        })
-    }));
-
-    // Set remote description from offer
-    let remote_desc = RTCSessionDescription::offer(offer.sdp.sdp)?;
-    peer_connection.set_remote_description(remote_desc).await?;
-
-    // Create answer
-    let answer = peer_connection.create_answer(None).await?;
-    peer_connection
-        .set_local_description(answer.clone())
-        .await?;
-
+            });
+        }
+        Err(e) => {
+            warn!("Failed to setup webrtc track: {}", e);
+        }
+    }
     // Store connection in state
     {
         let mut connections = state.connections.lock().unwrap();
         connections.insert(connection_id.clone(), connection_state);
     }
 
-    // Return answer to client
-    let local_desc = peer_connection.local_description().await.unwrap();
     let answer_json = WebRTCAnswer {
         sdp: WebRTCSessionDescription {
             type_field: "answer".to_string(),
-            sdp: local_desc.sdp,
+            sdp: local_desc.unwrap().sdp,
         },
         ice_candidates: vec![],
     };
