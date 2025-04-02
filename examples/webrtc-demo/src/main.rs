@@ -6,16 +6,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use rustpbx::{
-    event::EventSender,
-    media::{
-        codecs::CodecType,
-        stream::{MediaStream, MediaStreamBuilder},
-        track::{
-            file::FileTrack,
-            webrtc::{WebrtcTrack, WebrtcTrackConfig},
-        },
-    },
+use rustpbx::media::{
+    stream::MediaStreamBuilder,
+    track::{file::FileTrack, webrtc::WebrtcTrack},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,21 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn, Level};
 use uuid::Uuid;
-use webrtc::{
-    api::{
-        interceptor_registry::register_default_interceptors,
-        media_engine::{MediaEngine, MIME_TYPE_G722, MIME_TYPE_PCMU},
-        APIBuilder,
-    },
-    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
-    interceptor::registry::Registry,
-    peer_connection::{
-        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
-        sdp::session_description::RTCSessionDescription, RTCPeerConnection,
-    },
-    rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
-    track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal},
-};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 // Application state
 struct AppState {

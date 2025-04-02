@@ -1,24 +1,21 @@
-use super::TrackPacketReceiver;
+use super::track_codec::TrackCodec;
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
-        codecs::{self, resample::resample_mono, CodecType},
+        codecs::CodecType,
         jitter::JitterBuffer,
         negotiate::prefer_audio_codec,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
-    AudioFrame, Samples,
+    AudioFrame,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::{fs::File, io::Write, sync::Arc, time::SystemTime};
+use std::{sync::Arc, time::SystemTime};
 use tokio::{select, sync::Mutex, time::Duration};
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::sleep,
-};
+use tokio::{sync::oneshot, time::sleep};
 use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -38,7 +35,6 @@ use webrtc::{
     rtp_transceiver::{
         rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
         rtp_receiver::RTCRtpReceiver,
-        rtp_sender::RTCRtpSender,
         RTCRtpTransceiver,
     },
     track::{track_local::TrackLocal, track_remote::TrackRemote},
@@ -145,7 +141,7 @@ impl WebrtcTrack {
             track_id: id,
             stream_id: "rustpbx-stream".to_string(),
             config: config.clone(),
-            processor_chain: ProcessorChain::new(),
+            processor_chain: ProcessorChain::new(config.sample_rate),
             jitter_buffer: Arc::new(Mutex::new(JitterBuffer::new())),
             packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
@@ -167,6 +163,7 @@ impl WebrtcTrack {
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.config = self.config.with_sample_rate(sample_rate);
         self.jitter_buffer = Arc::new(Mutex::new(JitterBuffer::new()));
+        self.processor_chain = ProcessorChain::new(sample_rate);
         self
     }
     pub fn with_stream_id(mut self, stream_id: String) -> Self {
@@ -194,7 +191,7 @@ impl WebrtcTrack {
         let peer_connection = api.new_peer_connection(config).await?;
         peer_connection.on_ice_candidate(Box::new(
             move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-                info!("ICE candidate received: {:?}", candidate);
+                info!("webrtctrack: ICE candidate received: {:?}", candidate);
                 let candidate_tx = candidate_tx.clone();
                 Box::pin(async move {
                     if candidate.is_none() {
@@ -207,7 +204,7 @@ impl WebrtcTrack {
         ));
         peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                info!("Peer connection state changed: {}", s);
+                info!("webrtctrack: Peer connection state changed: {}", s);
                 let cancel_token = cancel_token.clone();
                 Box::pin(async move {
                     match s {
@@ -257,12 +254,12 @@ impl WebrtcTrack {
                                 ..Default::default()
                             };
                             if let Err(e) = processor_chain.process_frame(&frame) {
-                                error!("Failed to process frame: {}", e);
+                                error!("webrtctrack: Failed to process frame: {}", e);
                             }
                             match sender.send(frame) {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    error!("Failed to send packet: {}", e);
+                                    error!("webrtctrack: Failed to send packet: {}", e);
                                     break;
                                 }
                             }
@@ -275,16 +272,9 @@ impl WebrtcTrack {
         let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
             Some(codec) => codec,
             None => {
-                return Err(anyhow::anyhow!("No codec found"));
+                return Err(anyhow::anyhow!("webrtctrack: No codec found"));
             }
         };
-
-        info!(
-            "set remote description codec:{} {}",
-            codec.mime_type(),
-            remote_desc.sdp
-        );
-        peer_connection.set_remote_description(remote_desc).await?;
 
         let track = Self::create_audio_track(codec, Some(self.stream_id.clone()));
         peer_connection
@@ -293,6 +283,13 @@ impl WebrtcTrack {
         self.local_track = Some(track.clone());
         self.config.codec = codec;
 
+        info!(
+            "set remote description codec:{} {}",
+            codec.mime_type(),
+            remote_desc.sdp
+        );
+        peer_connection.set_remote_description(remote_desc).await?;
+
         let answer = peer_connection.create_answer(None).await?;
         peer_connection
             .set_local_description(answer.clone())
@@ -300,18 +297,23 @@ impl WebrtcTrack {
 
         select! {
             _ = candidate_rx => {
-                info!("ICE candidate received");
+                info!("webrtctrack: ICE candidate received");
             }
             _ = sleep(timeout.unwrap_or(HANDSHAKE_TIMEOUT)) => {
-                warn!("wait candidate timeout");
+                warn!("webrtctrack: wait candidate timeout");
             }
         }
 
         let answer = peer_connection
             .local_description()
             .await
-            .ok_or(anyhow::anyhow!("Failed to get local description"))?;
-        info!("Peer connection established answer: {}", answer.sdp);
+            .ok_or(anyhow::anyhow!(
+                "webrtctrack: Failed to get local description"
+            ))?;
+        info!(
+            "webrtctrack: Peer connection established answer: {}",
+            answer.sdp
+        );
         Ok(answer)
     }
 
@@ -319,12 +321,12 @@ impl WebrtcTrack {
         let jitter_buffer = self.jitter_buffer.clone();
         let sample_rate = self.config.sample_rate;
         let ptime = self.config.ptime;
-        let codec_type = self.config.codec;
-        let mut encoder = codecs::create_encoder(codec_type);
-        let rtp_sender = self
+        let local_track = self
             .local_track
             .clone()
-            .ok_or(anyhow::anyhow!("RTP sender not found"))?;
+            .ok_or(anyhow::anyhow!("webrtctrack: RTP sender not found"))?;
+        let codec_type = self.config.codec;
+
         tokio::spawn(async move {
             let mut interval = IntervalStream::new(tokio::time::interval(ptime));
             let ptime_ms = ptime.as_millis() as u32;
@@ -334,32 +336,22 @@ impl WebrtcTrack {
                 "webrtctrack: Starting jitter processing ptime_ms:{} codec_type:{:?} sample_rate:{}",
                 ptime_ms, codec_type, sample_rate
             );
+            let encoder = TrackCodec::new();
+            let payload_type = codec_type.payload_type();
+
             loop {
                 select! {
                     _ = token.cancelled() => {
-                        debug!("Jitter processing cancelled");
+                        debug!("webrtctrack: Jitter processing cancelled");
                         break;
                     }
                     Some(_) = interval.next() => {
                         let frame = jitter_buffer.lock().await.pop();
                         match frame {
                             Some(frame) => {
-                                let payload = match frame.samples {
-                                    Samples::PCM(mut samples) => {
-                                        if frame.sample_rate != sample_rate {
-                                            samples = resample_mono(&samples, frame.sample_rate, sample_rate);
-                                        }
-                                        let payload = encoder.encode(&samples);
-                                        packet_timestamp += payload.len() as u32;
-                                        payload
-                                    }
-                                    Samples::RTP(_, payload) => {
-                                        payload
-                                    }
-                                    Samples::Empty => {
-                                        continue;
-                                    }
-                                };
+                                let payload = encoder.encode(payload_type, frame);
+                                packet_timestamp += payload.len() as u32;
+
                                 let sample = webrtc::media::Sample {
                                     data: payload.into(),
                                     duration: Duration::from_millis(ptime_ms as u64),
@@ -368,7 +360,7 @@ impl WebrtcTrack {
                                     ..Default::default()
                                 };
 
-                                match rtp_sender.write_sample(&sample).await {
+                                match local_track.write_sample(&sample).await {
                                     Ok(_) => {}
                                     Err(e) => {
                                         error!("webrtctrack: Failed to send sample: {}", e);

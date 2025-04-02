@@ -4,21 +4,21 @@ use crate::{
     media::{
         processor::Processor,
         stream::MediaStreamBuilder,
-        track::{Track, TrackPacketReceiver, TrackPacketSender},
+        track::{Track, TrackPacketSender},
     },
     AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tempfile::tempdir;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct TestTrack {
     id: TrackId,
     sender: Option<TrackPacketSender>,
-    receivers: Vec<TrackPacketReceiver>,
     processor_chain: ProcessorChain,
     received_packets: Arc<Mutex<Vec<AudioFrame>>>,
 }
@@ -28,8 +28,7 @@ impl TestTrack {
         Self {
             id,
             sender: None,
-            receivers: Vec::new(),
-            processor_chain: ProcessorChain::new(),
+            processor_chain: ProcessorChain::new(16000),
             received_packets: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -120,7 +119,7 @@ impl Track for TestTrack {
         }
 
         // Clone and process the packet
-        let mut packet_clone = packet.clone();
+        let packet_clone = packet.clone();
 
         // Apply processors to the packet
         if let Err(e) = self.processor_chain.process_frame(&packet_clone) {
@@ -264,9 +263,12 @@ async fn test_stream_forward_packets() -> Result<()> {
 async fn test_stream_recorder() -> Result<()> {
     let event_sender = crate::event::create_event_sender();
     // Create a stream with recorder enabled
+
+    let temp_dir = tempdir()?;
+    let file_path = temp_dir.path().join("test_recording.wav");
     let stream = Arc::new(
         MediaStreamBuilder::new(event_sender)
-            .recorder("test_recording".to_string())
+            .recorder(file_path.to_string_lossy().to_string())
             .build(),
     );
 

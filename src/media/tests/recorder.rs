@@ -1,8 +1,9 @@
 use anyhow::Result;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::{
     media::recorder::{Recorder, RecorderConfig},
@@ -16,16 +17,19 @@ async fn test_recorder() -> Result<()> {
     let file_path = temp_dir.path().join("test_recording.wav");
     let file_path_clone = file_path.clone(); // Clone for the spawned task
     let cancel_token = CancellationToken::new();
-    let config = RecorderConfig { sample_rate: 16000 };
+    let config = RecorderConfig::default();
 
-    let recorder = Recorder::new(cancel_token.clone(), config);
+    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
 
     // Create channels for testing
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Start recording in the background
-    let recording_handle =
-        tokio::spawn(async move { recorder.process_recording(&file_path_clone, rx).await });
+    let recorder_clone = recorder.clone();
+    tokio::spawn(async move {
+        let r = recorder_clone.process_recording(&file_path_clone, rx).await;
+        info!("recorder: {:?}", r);
+    });
 
     // Create test frames
     let left_channel_id = "left".to_string();
@@ -73,14 +77,10 @@ async fn test_recorder() -> Result<()> {
         // Wait a bit to simulate real-time recording
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
-
-    // Stop recording
-    drop(tx);
-    recording_handle.await??;
-
+    recorder.stop_recording()?;
     // Verify the file exists
     assert!(file_path.exists());
-
+    println!("file_path: {:?}", file_path.to_str());
     // Verify the file is a valid WAV file with expected content
     verify_wav_file(&file_path)?;
 
