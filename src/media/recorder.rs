@@ -138,13 +138,8 @@ impl Recorder {
             let mut count: u32 = 0;
             select! {
                 Some(_) = interval.next() => {
-                    loop {
-                        let frame = receiver.try_recv();
-                        if let Ok(frame) = frame {
-                            self.append_frame(frame).await.ok();
-                        } else {
-                            break;
-                        }
+                    while let Ok(frame) = receiver.try_recv() {
+                        self.append_frame(frame).await.ok();
                     }
 
                     let (mono_buf, stereo_buf) = self.pop().await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));

@@ -1,14 +1,12 @@
+use crate::{
+    media::recorder::{Recorder, RecorderConfig},
+    AudioFrame, Samples,
+};
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use crate::{
-    media::recorder::{Recorder, RecorderConfig},
-    AudioFrame, Samples,
-};
 
 #[tokio::test]
 async fn test_recorder() -> Result<()> {
@@ -26,9 +24,9 @@ async fn test_recorder() -> Result<()> {
 
     // Start recording in the background
     let recorder_clone = recorder.clone();
-    tokio::spawn(async move {
+    let recorder_hanadle = tokio::spawn(async move {
         let r = recorder_clone.process_recording(&file_path_clone, rx).await;
-        info!("recorder: {:?}", r);
+        println!("recorder: {:?}", r);
     });
 
     // Create test frames
@@ -78,6 +76,7 @@ async fn test_recorder() -> Result<()> {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
     recorder.stop_recording()?;
+    recorder_hanadle.await?;
     // Verify the file exists
     assert!(file_path.exists());
     println!("file_path: {:?}", file_path.to_str());

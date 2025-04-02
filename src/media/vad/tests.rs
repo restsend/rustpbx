@@ -7,12 +7,7 @@ async fn test_webrtc_vad() {
     let (event_sender, mut event_receiver) = broadcast::channel(16);
     let track_id = "test_track".to_string();
 
-    let vad = VadProcessor::new(
-        track_id.clone(),
-        VadType::WebRTC,
-        event_sender.clone(),
-        VADConfig::default(),
-    );
+    let vad = VadProcessor::new(VadType::WebRTC, event_sender.clone(), VADConfig::default());
 
     // Test with silence (all zeros)
     let mut silence_frame = AudioFrame {
@@ -66,12 +61,7 @@ async fn test_voice_activity_vad() {
     let (event_sender, mut event_receiver) = broadcast::channel(16);
     let track_id = "test_track".to_string();
 
-    let vad = VadProcessor::new(
-        track_id.clone(),
-        VadType::Silero,
-        event_sender.clone(),
-        VADConfig::default(),
-    );
+    let vad = VadProcessor::new(VadType::Silero, event_sender.clone(), VADConfig::default());
 
     // Test with silence (all zeros)
     let mut silence_frame = AudioFrame {
@@ -131,20 +121,10 @@ async fn test_vad_type_switching() {
     let track_id = "test_track".to_string();
 
     // Create VAD with WebRTC type
-    let vad = VadProcessor::new(
-        track_id.clone(),
-        VadType::WebRTC,
-        event_sender.clone(),
-        VADConfig::default(),
-    );
+    let vad = VadProcessor::new(VadType::WebRTC, event_sender.clone(), VADConfig::default());
 
     // Create VAD with VoiceActivity type
-    let vad2 = VadProcessor::new(
-        track_id.clone(),
-        VadType::Silero,
-        event_sender.clone(),
-        VADConfig::default(),
-    );
+    let vad2 = VadProcessor::new(VadType::Silero, event_sender.clone(), VADConfig::default());
 
     // Test that both can process frames
     let mut frame = AudioFrame {

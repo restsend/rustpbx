@@ -103,3 +103,13 @@ pub type EventReceiver = tokio::sync::broadcast::Receiver<SessionEvent>;
 pub fn create_event_sender() -> EventSender {
     EventSender::new(128)
 }
+
+// Helper function for testing
+#[cfg(test)]
+pub mod test_utils {
+    use super::*;
+
+    pub fn dummy_event_sender() -> EventSender {
+        create_event_sender()
+    }
+}
