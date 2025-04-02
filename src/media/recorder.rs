@@ -1,32 +1,39 @@
-use crate::{AudioFrame, Samples};
+use crate::{media::codecs::convert_s16_to_u8, AudioFrame, Samples};
 use anyhow::Result;
 use byteorder::{ByteOrder, LittleEndian};
+use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
 use std::{
     collections::HashMap,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Mutex,
     },
     time::Duration,
+    u32,
 };
 use tokio::{
     fs::File,
     io::{AsyncSeekExt, AsyncWriteExt},
+    select,
     sync::mpsc::UnboundedReceiver,
-    time::Instant,
 };
+use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub struct RecorderConfig {
     pub sample_rate: u32,
+    pub ptime: Duration,
 }
 
 impl Default for RecorderConfig {
     fn default() -> Self {
-        Self { sample_rate: 16000 }
+        Self {
+            sample_rate: 16000,
+            ptime: Duration::from_millis(20),
+        }
     }
 }
 
@@ -34,8 +41,10 @@ pub struct Recorder {
     config: RecorderConfig,
     samples_written: AtomicUsize,
     cancel_token: CancellationToken,
-    last_header_update: Arc<Mutex<Instant>>,
-    channel_buffers: Arc<Mutex<HashMap<String, Vec<i16>>>>,
+    channel_idx: AtomicUsize,
+    channels: Mutex<HashMap<String, usize>>,
+    stereo_buf: Mutex<Vec<i16>>,
+    mono_buf: Mutex<Vec<i16>>,
 }
 
 impl Recorder {
@@ -44,105 +53,11 @@ impl Recorder {
             config,
             samples_written: AtomicUsize::new(0),
             cancel_token,
-            last_header_update: Arc::new(Mutex::new(Instant::now())),
-            channel_buffers: Arc::new(Mutex::new(HashMap::new())),
+            channel_idx: AtomicUsize::new(0),
+            channels: Mutex::new(HashMap::new()),
+            stereo_buf: Mutex::new(Vec::new()),
+            mono_buf: Mutex::new(Vec::new()),
         }
-    }
-
-    pub async fn write_frame(&self, file: &mut File, frame: AudioFrame) -> Result<()> {
-        match frame.samples {
-            Samples::PCM(samples) => {
-                let track_id = frame.track_id.clone();
-
-                // Store samples in appropriate channel buffer
-                {
-                    let mut buffers = self.channel_buffers.lock().unwrap();
-                    let buffer = buffers.entry(track_id).or_insert_with(Vec::new);
-                    buffer.extend_from_slice(&samples);
-                }
-
-                // Process buffered samples to write interleaved stereo
-                let stereo_data = {
-                    let buffers = self.channel_buffers.lock().unwrap();
-                    if buffers.len() >= 2 {
-                        let keys: Vec<String> = buffers.keys().cloned().collect();
-                        if keys.len() >= 2 {
-                            let left_channel = &buffers[&keys[0]];
-                            let right_channel = &buffers[&keys[1]];
-
-                            // Find the minimum length between channels
-                            let min_len = std::cmp::min(left_channel.len(), right_channel.len());
-                            if min_len > 0 {
-                                // Create interleaved stereo data
-                                let mut stereo_data = Vec::with_capacity(min_len * 2);
-                                for i in 0..min_len {
-                                    stereo_data.push(left_channel[i]);
-                                    stereo_data.push(right_channel[i]);
-                                }
-
-                                // Remove processed samples from buffers
-                                let mut buffers_mut = self.channel_buffers.lock().unwrap();
-                                if let Some(left) = buffers_mut.get_mut(&keys[0]) {
-                                    left.drain(0..min_len);
-                                }
-                                if let Some(right) = buffers_mut.get_mut(&keys[1]) {
-                                    right.drain(0..min_len);
-                                }
-
-                                Some(stereo_data)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-
-                // Write stereo data if available
-                if let Some(stereo_data) = stereo_data {
-                    // Convert i16 samples to bytes
-                    let mut bytes = Vec::with_capacity(stereo_data.len() * 2);
-                    for sample in &stereo_data {
-                        let mut sample_bytes = [0u8; 2];
-                        LittleEndian::write_i16(&mut sample_bytes, *sample);
-                        bytes.extend_from_slice(&sample_bytes);
-                    }
-
-                    // Write the bytes to the file
-                    file.write_all(&bytes).await?;
-
-                    // Update number of samples written
-                    self.samples_written
-                        .fetch_add(stereo_data.len() / 2, Ordering::SeqCst);
-
-                    // Update WAV header if needed (every 100ms)
-                    let should_update = {
-                        let mut last_update = self.last_header_update.lock().unwrap();
-                        let now = Instant::now();
-                        let elapsed = now.duration_since(*last_update);
-                        if elapsed >= Duration::from_millis(100) {
-                            *last_update = now;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-
-                    if should_update {
-                        self.update_wav_header(file).await?;
-                    }
-                }
-            }
-            _ => {
-                // Non-PCM samples are not supported for recording
-                info!("Non-PCM samples are not supported for recording");
-            }
-        }
-
-        Ok(())
     }
 
     async fn update_wav_header(&self, file: &mut File) -> Result<()> {
@@ -214,17 +129,87 @@ impl Recorder {
         file.write_all(&placeholder).await?;
 
         info!("Recording to {}", file_path.display());
-        while let Some(frame) = receiver.recv().await {
-            self.write_frame(&mut file, frame).await?;
+
+        let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
+        let chunk_size =
+            (self.config.sample_rate / 1000 * self.config.ptime.as_millis() as u32) as usize;
+
+        loop {
+            let mut count: u32 = 0;
+            select! {
+                Some(_) = interval.next() => {
+                    loop {
+                        let frame = receiver.try_recv();
+                        if let Ok(frame) = frame {
+                            self.append_frame(frame).await.ok();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let (mono_buf, stereo_buf) = self.pop().await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));
+                    let mut mix_buff = vec![0; chunk_size * 2]; // Doubled size for stereo interleaving
+                    for i in 0..mono_buf.len().min(chunk_size) {
+                        mix_buff[i * 2] = mono_buf[i];
+                    }
+                    for i in 0..stereo_buf.len().min(chunk_size) {
+                        mix_buff[i * 2 + 1] = stereo_buf[i];
+                    }
+
+                    file.write_all(&convert_s16_to_u8(&mix_buff)).await?;
+                    count += 1;
+                    if count % 5 == 0 {
+                         // update header every 100ms
+                        self.update_wav_header(&mut file).await?;
+                    }
+                    self.samples_written.fetch_add(chunk_size, Ordering::SeqCst);
+                }
+                _ = self.cancel_token.cancelled() => {
+                    // Update the final header
+                    self.update_wav_header(&mut file).await?;
+                    return Ok(());
+                }
+            }
         }
-
-        // Final header update
-        self.update_wav_header(&mut file).await?;
-
+    }
+    async fn append_frame(&self, frame: AudioFrame) -> Result<()> {
+        let buffer = match frame.samples {
+            Samples::PCM(samples) => samples,
+            _ => return Ok(()), // ignore non-PCM frames
+        };
+        let mut channels = self.channels.lock().unwrap();
+        let channel_idx = if let Some(channel_idx) = channels.get(&frame.track_id) {
+            channel_idx % 2
+        } else {
+            self.channel_idx.fetch_add(1, Ordering::SeqCst);
+            let new_idx = self.channel_idx.load(Ordering::SeqCst);
+            channels.insert(frame.track_id, new_idx);
+            new_idx % 2
+        };
+        match channel_idx {
+            0 => self.mono_buf.lock().unwrap().extend(buffer.iter()),
+            1 => self.stereo_buf.lock().unwrap().extend(buffer.iter()),
+            _ => {}
+        }
         Ok(())
     }
 
-    pub fn stop_recording(&mut self) -> Result<()> {
+    async fn pop(&self) -> Option<(Vec<i16>, Vec<i16>)> {
+        let mut mono_buf = self.mono_buf.lock().unwrap();
+        let mut stereo_buf = self.stereo_buf.lock().unwrap();
+
+        // Return non-empty buffers even if one is empty
+        if mono_buf.len() > 0 || stereo_buf.len() > 0 {
+            // take all buffers
+            let mono_buf = mono_buf.drain(..).collect();
+            let stereo_buf = stereo_buf.drain(..).collect();
+            Some((mono_buf, stereo_buf))
+        } else {
+            None
+        }
+    }
+
+    pub fn stop_recording(&self) -> Result<()> {
         self.cancel_token.cancel();
         Ok(())
     }

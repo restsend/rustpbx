@@ -233,7 +233,7 @@ impl ActiveCall {
         }
     }
 
-    async fn do_candidate(&self, candidates: Vec<String>) -> Result<()> {
+    async fn do_candidate(&self, _candidates: Vec<String>) -> Result<()> {
         Ok(())
     }
 
@@ -294,15 +294,15 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn do_refer(&self, target: String) -> Result<()> {
+    async fn do_refer(&self, _target: String) -> Result<()> {
         Ok(())
     }
 
-    async fn do_mute(&self, track_id: Option<String>) -> Result<()> {
+    async fn do_mute(&self, _track_id: Option<String>) -> Result<()> {
         Ok(())
     }
 
-    async fn do_unmute(&self, track_id: Option<String>) -> Result<()> {
+    async fn do_unmute(&self, _track_id: Option<String>) -> Result<()> {
         Ok(())
     }
 }

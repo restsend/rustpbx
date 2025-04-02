@@ -2,7 +2,6 @@ use crate::llm::{LlmClient, LlmContent, OpenAiClientBuilder};
 use anyhow::Result;
 use futures::stream::StreamExt;
 use std::env;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_llm_content() {

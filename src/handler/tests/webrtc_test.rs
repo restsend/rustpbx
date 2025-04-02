@@ -1,8 +1,7 @@
 use crate::event::SessionEvent;
 use crate::media::codecs::g722::G722Encoder;
-use crate::media::codecs::pcmu::PcmuEncoder;
 use crate::media::codecs::resample::resample_mono;
-use crate::media::codecs::{convert_u8_to_s16, CodecType, Encoder};
+use crate::media::codecs::{CodecType, Encoder};
 use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::media::vad::VadType;
@@ -23,17 +22,14 @@ use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::io::AsyncWriteExt;
-use tokio::{fs::File, io::AsyncReadExt, net::TcpListener};
+use tokio::net::TcpListener;
 use tokio::{select, time};
 use tokio_tungstenite::tungstenite;
 use tracing::{error, info};
 use uuid::Uuid;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::{
-    api::{media_engine::MediaEngine, APIBuilder},
-    peer_connection::configuration::RTCConfiguration,
-    rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
+    api::APIBuilder, peer_connection::configuration::RTCConfiguration,
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
@@ -122,7 +118,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     }
 
     let offer = peer_connection
-        .pending_local_description()
+        .local_description()
         .await
         .ok_or(anyhow::anyhow!("Failed to get local description"))?;
 
@@ -248,8 +244,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             packet_timestamp += chunk_size as u32;
             ticker.tick().await;
         }
-        info!("Audio sent");
-        time::sleep(Duration::from_secs(30)).await;
+        info!("Audio sent done");
     };
 
     select! {

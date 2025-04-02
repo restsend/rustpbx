@@ -30,11 +30,12 @@ pub struct FileTrack {
 
 impl FileTrack {
     pub fn new(id: TrackId) -> Self {
+        let config = TrackConfig::default();
         Self {
             track_id: id,
-            config: TrackConfig::default(),
+            processor_chain: ProcessorChain::new(config.sample_rate),
+            config,
             cancel_token: CancellationToken::new(),
-            processor_chain: ProcessorChain::new(),
             path: None,
             use_cache: true,
         }
@@ -92,7 +93,7 @@ impl Track for FileTrack {
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
         if self.path.is_none() {
-            return Err(anyhow::anyhow!("No path provided for FileTrack"));
+            return Err(anyhow::anyhow!("filetrack: No path provided for FileTrack"));
         }
         let path = self.path.clone().unwrap();
         let id = self.track_id.clone();
@@ -127,7 +128,7 @@ impl Track for FileTrack {
             };
 
             if let Err(e) = stream_result {
-                tracing::error!("Error streaming audio: {}", e);
+                tracing::error!("filetrack: Error streaming audio: {}, {}", path, e);
             }
             // Signal the end of the file
             event_sender
@@ -168,7 +169,7 @@ async fn stream_from_url(
 
     // Check if file is in cache and use_cache is enabled
     if use_cache && cache::is_cached(&cache_key).await? {
-        debug!("Using cached audio for URL: {}", url);
+        debug!("filetrack: Using cached audio for URL: {}", url);
         let cached_data = cache::retrieve_from_cache(&cache_key).await?;
         return stream_from_memory(
             processor_chain,
@@ -183,13 +184,13 @@ async fn stream_from_url(
     }
 
     // Download the file
-    debug!("Downloading audio from URL: {}", url);
+    debug!("filetrack: Downloading audio from URL: {}", url);
     let client = Client::new();
     let response = client.get(url).send().await?;
 
     if !response.status().is_success() {
         return Err(anyhow!(
-            "Failed to download file, status code: {}",
+            "filetrack: Failed to download file, status code: {}",
             response.status()
         ));
     }
@@ -200,9 +201,9 @@ async fn stream_from_url(
     // Store in cache if enabled
     if use_cache {
         if let Err(e) = cache::store_in_cache(&cache_key, &data).await {
-            warn!("Failed to store audio in cache: {}", e);
+            warn!("filetrack: Failed to store audio in cache: {}", e);
         } else {
-            debug!("Stored audio in cache with key: {}", cache_key);
+            debug!("filetrack: Stored audio in cache with key: {}", cache_key);
         }
     }
 
@@ -399,11 +400,11 @@ async fn process_wav_reader<R: std::io::Read + Send>(
             match processor_chain.process_frame(&packet) {
                 Ok(_) => {}
                 Err(e) => {
-                    warn!("Failed to process audio packet: {}", e);
+                    warn!("filetrack: Failed to process audio packet: {}", e);
                 }
             }
             if let Err(e) = packet_sender.send(packet) {
-                warn!("Failed to send audio packet: {}", e);
+                warn!("filetrack: Failed to send audio packet: {}", e);
                 break;
             }
             ticker.tick().await;
@@ -416,7 +417,7 @@ async fn process_wav_reader<R: std::io::Read + Send>(
 
     select! {
         _ = token.cancelled() => {
-            info!("filetrack: stream cancelled");
+            info!("filetrack: filetrack: stream cancelled");
             return Ok(());
         }
         _ = stream_loop => {
@@ -431,8 +432,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tokio::sync::{broadcast, mpsc};
-    fn create_test_wav(sample_rate: u32, duration_ms: u32) -> Result<Vec<u8>> {
-        Ok(vec![1; 320])
+    fn create_test_wav(_sample_rate: u32, duration_ms: u32) -> Result<Vec<u8>> {
+        Ok(vec![1; 320 * duration_ms as usize])
     }
     #[tokio::test]
     async fn test_file_track_with_cache() -> Result<()> {

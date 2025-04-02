@@ -41,10 +41,11 @@ pub struct TtsTrack<T: SynthesisClient> {
 
 impl<T: SynthesisClient> TtsTrack<T> {
     pub fn new(track_id: TrackId, command_rx: TtsCommandReceiver, client: T) -> Self {
+        let config = TrackConfig::default();
         Self {
             track_id,
-            processor_chain: ProcessorChain::new(),
-            config: TrackConfig::default(),
+            processor_chain: ProcessorChain::new(config.sample_rate),
+            config,
             cancel_token: CancellationToken::new(),
             command_rx: Mutex::new(Some(command_rx)),
             use_cache: true,
@@ -64,6 +65,7 @@ impl<T: SynthesisClient> TtsTrack<T> {
 
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.config = self.config.with_sample_rate(sample_rate);
+        self.processor_chain = ProcessorChain::new(sample_rate);
         self
     }
 

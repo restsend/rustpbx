@@ -56,14 +56,14 @@ fn create_simple_rtp_packet(
 async fn test_webrtc_track_pcm() -> Result<()> {
     // Create a WebRTC track
     let track_id = "test_webrtc_track".to_string();
-    let mut webrtc_track = WebrtcTrack::new(track_id.clone());
+    let webrtc_track = WebrtcTrack::new(track_id.clone());
 
     // Create a processor
     let (processor, count) = CountingProcessor::new();
 
     // Create channels
     let (event_sender, _) = broadcast::channel(16);
-    let (packet_sender, mut packet_receiver) = mpsc::unbounded_channel();
+    let (packet_sender, _packet_receiver) = mpsc::unbounded_channel();
 
     // Start the track
     let token = CancellationToken::new();

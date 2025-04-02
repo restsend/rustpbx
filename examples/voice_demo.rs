@@ -381,7 +381,6 @@ async fn main() -> Result<()> {
         "Speaker output started with sample rate {}Hz",
         output_sample_rate
     );
-    let asr_client_clone = asr_client.clone();
     let cancel_token_clone = cancel_token.clone();
     let audio_input_loop = async move {
         match args.input {

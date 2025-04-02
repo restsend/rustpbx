@@ -1,4 +1,3 @@
-use anyhow::Result;
 pub mod g722;
 pub mod pcma;
 pub mod pcmu;

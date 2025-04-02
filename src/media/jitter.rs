@@ -1,8 +1,5 @@
 use crate::AudioFrame;
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use std::collections::BTreeMap;
 
 pub struct JitterBuffer {
     frames: BTreeMap<u64, AudioFrame>,

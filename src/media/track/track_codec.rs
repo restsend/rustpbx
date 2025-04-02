@@ -4,17 +4,16 @@ use crate::{
         g722::{G722Decoder, G722Encoder},
         pcma::{PcmaDecoder, PcmaEncoder},
         pcmu::{PcmuDecoder, PcmuEncoder},
+        resample::resample_mono,
         Decoder, Encoder,
     },
     AudioFrame, Samples,
 };
-use anyhow::Result;
-use bytes::Bytes;
 use std::cell::RefCell;
 
 pub struct TrackCodec {
-    pub pcmu_encoder: RefCell<PcmaEncoder>,
-    pub pcmu_decoder: RefCell<PcmaDecoder>,
+    pub pcmu_encoder: RefCell<PcmuEncoder>,
+    pub pcmu_decoder: RefCell<PcmuDecoder>,
     pub pcma_encoder: RefCell<PcmaEncoder>,
     pub pcma_decoder: RefCell<PcmaDecoder>,
 
@@ -25,8 +24,8 @@ pub struct TrackCodec {
 impl TrackCodec {
     pub fn new() -> Self {
         Self {
-            pcmu_encoder: RefCell::new(PcmaEncoder::new()),
-            pcmu_decoder: RefCell::new(PcmaDecoder::new()),
+            pcmu_encoder: RefCell::new(PcmuEncoder::new()),
+            pcmu_decoder: RefCell::new(PcmuDecoder::new()),
             pcma_encoder: RefCell::new(PcmaEncoder::new()),
             pcma_decoder: RefCell::new(PcmaDecoder::new()),
             g722_encoder: RefCell::new(G722Encoder::new()),
@@ -43,18 +42,29 @@ impl TrackCodec {
         }
     }
 
-    pub fn encode(&self, payload_type: u8, audio_frame: AudioFrame) -> Vec<u8> {
-        let payload = match audio_frame.samples {
-            Samples::PCM(pcm) => pcm,
-            Samples::RTP(_, payload) => return payload,
-            Samples::Empty => return vec![],
-        };
+    pub fn encode(&self, payload_type: u8, frame: AudioFrame) -> Vec<u8> {
+        match frame.samples {
+            Samples::PCM(mut pcm) => {
+                let target_samplerate = match payload_type {
+                    0 => 8000,
+                    8 => 8000,
+                    9 => 16000,
+                    _ => 8000,
+                };
 
-        match payload_type {
-            0 => self.pcmu_encoder.borrow_mut().encode(&payload),
-            8 => self.pcma_encoder.borrow_mut().encode(&payload),
-            9 => self.g722_encoder.borrow_mut().encode(&payload),
-            _ => convert_s16_to_u8(&payload),
+                if frame.sample_rate != target_samplerate {
+                    pcm = resample_mono(&pcm, frame.sample_rate, target_samplerate);
+                }
+
+                match payload_type {
+                    0 => self.pcmu_encoder.borrow_mut().encode(&pcm),
+                    8 => self.pcma_encoder.borrow_mut().encode(&pcm),
+                    9 => self.g722_encoder.borrow_mut().encode(&pcm),
+                    _ => convert_s16_to_u8(&pcm),
+                }
+            }
+            Samples::RTP(_, payload) => payload,
+            Samples::Empty => vec![],
         }
     }
 }

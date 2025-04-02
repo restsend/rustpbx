@@ -14,7 +14,7 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{error, info, instrument};
 use uuid;
 
 pub struct MediaStream {
@@ -84,6 +84,7 @@ impl MediaStreamBuilder {
 }
 
 impl MediaStream {
+    #[instrument(name = "MediaStream::serve", skip(self), fields(id = self.id))]
     pub async fn serve(&self) -> Result<()> {
         let packet_receiver = self.packet_receiver.lock().await.take().unwrap();
         select! {
@@ -181,7 +182,7 @@ impl Processor for RecorderProcessor {
 impl MediaStream {
     async fn handle_recorder(&self) -> Result<()> {
         if let Some(ref recorder_path) = self.recorder {
-            let config = RecorderConfig { sample_rate: 16000 };
+            let config = RecorderConfig::default();
             let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
             let recorder = Recorder::new(self.cancel_token.child_token(), config);
             recorder

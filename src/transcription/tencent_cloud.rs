@@ -1,6 +1,3 @@
-use std::fs::File;
-use std::io::Write;
-
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionConfig};
@@ -16,8 +13,7 @@ use rand::random;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::Duration;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
