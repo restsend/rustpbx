@@ -2,6 +2,7 @@ use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
+        negotiate::strip_ipv6_candidates,
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
@@ -12,7 +13,7 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::TencentCloudTtsClient,
+    synthesis::{SynthesisConfig, TencentCloudTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
     TrackId,
 };
@@ -80,6 +81,7 @@ pub struct ActiveCall {
     pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
     pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
+    pub tts_config: Option<SynthesisConfig>,
 }
 
 impl ActiveCall {
@@ -95,17 +97,18 @@ impl ActiveCall {
             .with_id(session_id.clone())
             .cancel_token(cancel_token.clone());
 
-        let enable_recorder = options.enable_recorder.unwrap_or(false);
-        if enable_recorder {
+        if let Some(_) = options.recorder {
             media_stream_builder =
-                media_stream_builder.recorder(state.get_recorder_file(session_id));
+                media_stream_builder.recorder(state.get_recorder_file(session_id))
         }
 
         let media_stream = media_stream_builder.build();
-        let offer = options
-            .sdp
-            .clone()
-            .ok_or(anyhow::anyhow!("SDP is required"))?;
+        let offer = strip_ipv6_candidates(
+            options
+                .offer
+                .as_ref()
+                .ok_or(anyhow::anyhow!("SDP is required"))?,
+        );
 
         let mut webrtc_track = WebrtcTrack::new(track_id.clone());
         let timeout = options
@@ -120,21 +123,22 @@ impl ActiveCall {
             .flatten();
 
         let mut processors = vec![];
-        match options.vad_type {
-            Some(ref vad_type) => {
+        match options.vad {
+            Some(ref vad_config) => {
+                let vad_config = vad_config.to_owned();
                 let vad_processor = VadProcessor::new(
-                    vad_type.clone(),
+                    vad_config.r#type,
                     media_stream.get_event_sender(),
-                    options.vad_config.clone().unwrap_or_default(),
+                    vad_config,
                 );
                 processors.push(Box::new(vad_processor) as Box<dyn Processor>);
             }
             None => {}
         }
-        match options.asr_type {
-            Some(ref asr_type) => match asr_type {
-                TranscriptionType::TencentCloud => {
-                    let asr_config = options.asr_config.clone().unwrap_or_default();
+        match options.asr {
+            Some(ref asr_config) => match asr_config.provider {
+                Some(TranscriptionType::TencentCloud) => {
+                    let asr_config = asr_config.clone();
                     let event_sender = media_stream.get_event_sender();
                     let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
                         .with_track_id(track_id.clone())
@@ -145,20 +149,23 @@ impl ActiveCall {
                     processors.push(Box::new(asr_processor) as Box<dyn Processor>);
                     debug!("TencentCloud Asr processor added");
                 }
+                None => {}
             },
             None => {}
         }
+
         for processor in processors {
             webrtc_track.append_processor(processor);
         }
         match webrtc_track.setup_webrtc_track(offer, timeout).await {
             Ok(answer) => {
-                info!("Webrtc track setup complete {}", answer.sdp);
+                let sdp = strip_ipv6_candidates(&answer.sdp);
+                info!("Webrtc track setup complete {}", sdp);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id: track_id.clone(),
                         timestamp: crate::get_timestamp(),
-                        sdp: answer.sdp,
+                        sdp,
                     })
                     .ok();
                 media_stream.update_track(Box::new(webrtc_track)).await;
@@ -189,6 +196,7 @@ impl ActiveCall {
         )
         .await?;
         let track_config = TrackConfig::default();
+        let tts_config = options.tts.clone();
         let active_call = ActiveCall {
             cancel_token,
             call_type: ActiveCallType::Webrtc,
@@ -198,6 +206,7 @@ impl ActiveCall {
             media_stream: Arc::new(media_stream),
             track_config,
             tts_command_tx: Mutex::new(None),
+            tts_config,
         };
         Ok(active_call)
     }
@@ -242,6 +251,11 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
     ) -> Result<()> {
+        let tts_config = match self.tts_config {
+            Some(ref config) => config,
+            None => return Ok(()),
+        };
+
         let play_command = TtsCommand {
             text,
             speaker,
@@ -253,8 +267,8 @@ impl ActiveCall {
             return Ok(());
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let tts_config = self.options.tts_config.clone().unwrap_or_default();
-        let tts_client = TencentCloudTtsClient::new(tts_config);
+
+        let tts_client = TencentCloudTtsClient::new(tts_config.clone());
         let tts_track = TtsTrack::new("callee".to_string(), rx, tts_client)
             .with_cancel_token(self.cancel_token.child_token());
         match tts_track

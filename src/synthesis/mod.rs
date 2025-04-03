@@ -6,20 +6,21 @@ pub use tencent_cloud::TencentCloudTtsClient;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SynthesisType {
-    #[serde(rename = "tencent_cloud")]
+    #[serde(rename = "tencent")]
     TencentCloud,
 }
 #[cfg(test)]
 mod tests;
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SynthesisConfig {
-    pub voice: Option<String>,
+    pub provider: Option<SynthesisType>,
     pub rate: Option<f32>,
-    pub appid: Option<String>,
+    pub app_id: Option<String>,
     pub secret_id: Option<String>,
     pub secret_key: Option<String>,
     pub volume: Option<i32>,
-    pub speaker: Option<i32>,
+    pub speaker: Option<String>,
     pub codec: Option<String>,
 }
 #[async_trait]
@@ -30,13 +31,13 @@ pub trait SynthesisClient: Send + Sync {
 impl Default for SynthesisConfig {
     fn default() -> Self {
         Self {
-            voice: Some("1".to_string()),
+            provider: None,
             rate: Some(1.0),
-            appid: None,
+            app_id: None,
             secret_id: None,
             secret_key: None,
             volume: Some(5), // 0-10
-            speaker: Some(1),
+            speaker: None,
             codec: Some("pcm".to_string()),
         }
     }

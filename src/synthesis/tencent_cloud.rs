@@ -107,14 +107,20 @@ impl TencentCloudTtsClient {
     async fn synthesize_text(&self, text: &str) -> Result<Vec<u8>> {
         let secret_id = self.config.secret_id.clone().unwrap_or_default();
         let secret_key = self.config.secret_key.clone().unwrap_or_default();
-        let speaker = self.config.speaker.unwrap_or(1);
+        let speaker = self
+            .config
+            .speaker
+            .as_ref()
+            .map(|s| s.parse().ok())
+            .flatten()
+            .unwrap_or(1);
         let volume = self.config.volume.unwrap_or(0);
         let speed = self.config.rate.unwrap_or(0.0);
         let codec = self
             .config
             .codec
             .clone()
-            .unwrap_or_else(|| "mp3".to_string());
+            .unwrap_or_else(|| "pcm".to_string());
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();

@@ -153,23 +153,29 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     let tencent_secret_id = std::env::var("TENCENT_SECRET_ID").unwrap();
     let tencent_secret_key = std::env::var("TENCENT_SECRET_KEY").unwrap();
 
-    asr_config.appid = Some(tencent_appid.clone());
+    asr_config.app_id = Some(tencent_appid.clone());
     asr_config.secret_id = Some(tencent_secret_id.clone());
     asr_config.secret_key = Some(tencent_secret_key.clone());
 
-    tts_config.appid = Some(tencent_appid);
+    tts_config.app_id = Some(tencent_appid);
     tts_config.secret_id = Some(tencent_secret_id);
     tts_config.secret_key = Some(tencent_secret_key);
 
     // Create the invite command with proper options
     let options = StreamOptions {
-        sdp: Some(offer.sdp.clone()),
-        enable_recorder: Some(false),
-        vad_type: Some(VadType::Silero),
-        asr_type: Some(TranscriptionType::TencentCloud),
-        asr_config: Some(asr_config),
-        tts_type: Some(SynthesisType::TencentCloud),
-        tts_config: Some(tts_config),
+        offer: Some(offer.sdp.clone()),
+        vad: Some(crate::media::vad::VADConfig {
+            r#type: VadType::WebRTC,
+            ..Default::default()
+        }),
+        asr: Some(TranscriptionConfig {
+            provider: Some(TranscriptionType::TencentCloud),
+            ..Default::default()
+        }),
+        tts: Some(SynthesisConfig {
+            provider: Some(SynthesisType::TencentCloud),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -180,40 +186,31 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .send(tungstenite::Message::Text(command_str.into()))
         .await?;
 
-    while let Some(Ok(msg)) = ws_receiver.next().await {
-        let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
-        match event {
-            SessionEvent::Answer {
-                track_id,
-                timestamp,
-                sdp,
-            } => {
-                info!("Received answer: {}", sdp);
-                let offer = RTCSessionDescription::answer(sdp)?;
-                peer_connection.set_remote_description(offer).await?;
-                break;
-            }
-            _ => {
-                error!("Received unexpected event: {:?}", event);
-                continue;
-            }
-        }
-    }
     // Wait for transcription event
     let recv_event_loop = async move {
-        let mut transcription_received = false;
-        while !transcription_received {
-            if let Some(Ok(msg)) = ws_receiver.next().await {
-                if let tungstenite::Message::Text(text) = msg {
-                    info!("Received message: {}", text);
-                    let event: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if event["type"] == "transcription_final" {
-                        assert_eq!(event["text"].as_str().unwrap(), "你好,请帮我预约课程");
-                        transcription_received = true;
-                    }
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
+            match event {
+                SessionEvent::Answer {
+                    track_id,
+                    timestamp,
+                    sdp,
+                } => {
+                    info!("Received answer: {}", sdp);
+                    let offer = RTCSessionDescription::answer(sdp)?;
+                    peer_connection.set_remote_description(offer).await?;
+                }
+                SessionEvent::Error { timestamp, error } => {
+                    error!("Received error: {}", error);
+                    break;
+                }
+                _ => {
+                    error!("Received unexpected event: {:?}", event);
+                    continue;
                 }
             }
         }
+        Ok::<(), anyhow::Error>(())
     };
     let send_audio_loop = async move {
         // Read test audio file

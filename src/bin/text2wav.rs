@@ -6,7 +6,7 @@ use regex::Regex;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
-use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, TencentCloudTtsClient};
+use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, SynthesisType, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
 
@@ -31,13 +31,9 @@ struct Args {
     #[arg(value_name = "OUTPUT")]
     output_file: PathBuf,
 
-    /// Voice ID to use (default: 1)
-    #[arg(short = 'i', long, default_value = "1")]
-    voice: String,
-
     /// Speaker ID (default: 1)
     #[arg(short, long, default_value = "1")]
-    speaker: i32,
+    speaker: String,
 
     /// Speech rate (0.5-2.0, default: 1.0)
     #[arg(short, long, default_value = "1.0")]
@@ -162,9 +158,9 @@ async fn main() -> Result<()> {
 
     // Create TTS client and config
     let synthesis_config = SynthesisConfig {
-        voice: Some(args.voice), // Voice type
-        rate: Some(args.rate),   // Speech rate
-        appid: Some(appid),
+        provider: Some(SynthesisType::TencentCloud),
+        rate: Some(args.rate), // Speech rate
+        app_id: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
         volume: Some(args.volume),      // Volume level (0-10)

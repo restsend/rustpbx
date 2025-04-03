@@ -4,6 +4,7 @@ use crate::AudioFrame;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::default;
 use std::sync::Mutex;
 use webrtc_vad::Vad;
 
@@ -18,7 +19,10 @@ unsafe impl Send for ThreadSafeVad {}
 unsafe impl Sync for ThreadSafeVad {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct VADConfig {
+    pub r#type: VadType,
     /// Minimum duration of silence to consider speech ended (in milliseconds)
     pub silence_duration_threshold: u64,
     /// Duration of audio to keep before speech starts (in milliseconds)
@@ -40,6 +44,7 @@ pub struct VADConfig {
 impl Default for VADConfig {
     fn default() -> Self {
         Self {
+            r#type: VadType::WebRTC,
             silence_duration_threshold: 500,
             pre_speech_padding: 150,  // Keep 150ms before speech
             post_speech_padding: 200, // Keep 200ms after speech
@@ -48,7 +53,7 @@ impl Default for VADConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum VadType {
     #[serde(rename = "webrtc")]
     WebRTC,
@@ -149,7 +154,7 @@ impl Processor for VadProcessor {
                 *is_speaking = true;
 
                 // Emit StartSpeaking event
-                let event = SessionEvent::StartSpeaking {
+                let event = SessionEvent::Speaking {
                     track_id: frame.track_id.clone(),
                     timestamp: frame.timestamp,
                 };

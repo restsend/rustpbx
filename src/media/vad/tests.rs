@@ -44,7 +44,7 @@ async fn test_webrtc_vad() {
     vad.process_frame(&mut speech_frame).unwrap();
 
     // Should receive speech event
-    if let Ok(SessionEvent::StartSpeaking {
+    if let Ok(SessionEvent::Speaking {
         track_id: id,
         timestamp: ts,
     }) = event_receiver.try_recv()
@@ -99,7 +99,7 @@ async fn test_voice_activity_vad() {
 
     // Check what event we got
     match event_receiver.try_recv() {
-        Ok(SessionEvent::StartSpeaking {
+        Ok(SessionEvent::Speaking {
             track_id: id,
             timestamp: ts,
         }) => {

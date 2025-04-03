@@ -146,11 +146,11 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         event_sender
                             .send(SessionEvent::Metrics {
                                 timestamp: crate::get_timestamp(),
-                                sender: "tts.tencent_cloud".to_string(),
+                                sender: "tts.tencent".to_string(),
                                 metrics: serde_json::json!({
                                         "speaker": speaker.clone(),
-                                        "play_id": play_id.clone(),
-                                        "audio_length": audio.len(),
+                                        "playId": play_id.clone(),
+                                        "audioLength": audio.len(),
                                         "duration": start_time.elapsed().as_millis() as u32,
                                 }),
                             })

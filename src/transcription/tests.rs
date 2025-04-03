@@ -52,7 +52,7 @@ async fn test_tencent_cloud_asr() {
     let config = TranscriptionConfig {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
-        appid: Some(app_id),
+        app_id: Some(app_id),
         ..Default::default()
     };
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);

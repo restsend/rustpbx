@@ -6,12 +6,9 @@ use axum::{
     routing::get,
     Router,
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    services::ServeDir,
-};
+use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::info;
 
 pub struct App {

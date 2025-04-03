@@ -9,7 +9,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument};
@@ -26,8 +26,9 @@ pub async fn webrtc_handler(
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
-
     ws.on_upgrade(|socket| async move {
+        info!("webrtc call: {session_id}");
+        let start_time = Instant::now();
         match handle_webrtc_connection(session_id.clone(), socket, state).await {
             Ok(_) => (),
             Err(e) => {
@@ -36,6 +37,10 @@ pub async fn webrtc_handler(
         }
         let mut active_calls = state_clone.active_calls.lock().await;
         active_calls.remove(&session_id);
+        info!(
+            "webrtc call: hangup, duration {}s",
+            start_time.elapsed().as_secs_f32()
+        );
     })
 }
 
