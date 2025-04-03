@@ -1,4 +1,4 @@
-use crate::event::test_utils::dummy_event_sender;
+use crate::event::create_event_sender;
 use crate::media::track::{rtp::*, webrtc::*, Track, TrackConfig};
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
@@ -85,7 +85,7 @@ async fn test_rtp_track_send_receive() -> Result<()> {
     let (sender, _receiver) = mpsc::unbounded_channel();
 
     receiver_track
-        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .start(cancel_token.clone(), create_event_sender(), sender)
         .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -150,7 +150,7 @@ async fn test_multiple_rtp_packets() -> Result<()> {
     let (sender, _receiver) = mpsc::unbounded_channel();
 
     receiver_track
-        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .start(cancel_token.clone(), create_event_sender(), sender)
         .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;

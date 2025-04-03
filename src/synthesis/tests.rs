@@ -25,8 +25,8 @@ async fn test_tencent_cloud_tts() {
     let config = SynthesisConfig {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
-        appid: Some(app_id),
-        speaker: Some(1),               // Standard female voice
+        app_id: Some(app_id),
+        speaker: Some("1".to_string()), // Standard female voice
         volume: Some(5),                // Medium volume
         rate: Some(1.0),                // Normal speed
         codec: Some("pcm".to_string()), // PCM format for easy verification

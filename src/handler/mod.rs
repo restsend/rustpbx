@@ -1,7 +1,7 @@
 use crate::{
-    media::vad::{VADConfig, VadType},
-    synthesis::{SynthesisConfig, SynthesisType},
-    transcription::{TranscriptionConfig, TranscriptionType},
+    media::{recorder::RecorderConfig, vad::VADConfig},
+    synthesis::SynthesisConfig,
+    transcription::TranscriptionConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,27 +15,22 @@ pub mod webrtc;
 pub use handler::router;
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sdp: Option<String>,
+    pub offer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callee: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enable_recorder: Option<bool>,
+    pub recorder: Option<RecorderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub vad_type: Option<VadType>,
+    pub vad: Option<VADConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub vad_config: Option<VADConfig>,
+    pub asr: Option<TranscriptionConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub asr_type: Option<TranscriptionType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asr_config: Option<TranscriptionConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tts_type: Option<SynthesisType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tts_config: Option<SynthesisConfig>,
+    pub tts: Option<SynthesisConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout: Option<String>,
 }
@@ -43,16 +38,13 @@ pub struct StreamOptions {
 impl Default for StreamOptions {
     fn default() -> Self {
         Self {
-            sdp: None,
+            offer: None,
             callee: None,
             caller: None,
-            enable_recorder: Some(true),
-            vad_type: Some(VadType::WebRTC),
-            vad_config: None,
-            asr_type: Some(TranscriptionType::TencentCloud),
-            asr_config: None,
-            tts_type: Some(SynthesisType::TencentCloud),
-            tts_config: None,
+            recorder: None,
+            asr: None,
+            vad: None,
+            tts: None,
             handshake_timeout: None,
         }
     }

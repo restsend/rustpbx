@@ -3,6 +3,7 @@ use anyhow::Result;
 use byteorder::{ByteOrder, LittleEndian};
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::Path,
@@ -23,15 +24,16 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RecorderConfig {
-    pub sample_rate: u32,
+    pub samplerate: u32,
     pub ptime: Duration,
 }
 
 impl Default for RecorderConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 16000,
+            samplerate: 16000,
             ptime: Duration::from_millis(20),
         }
     }
@@ -78,8 +80,8 @@ impl Recorder {
         LittleEndian::write_u32(&mut header[16..20], 16); // Format chunk size
         LittleEndian::write_u16(&mut header[20..22], 1); // PCM format
         LittleEndian::write_u16(&mut header[22..24], 2); // 2 channels (stereo)
-        LittleEndian::write_u32(&mut header[24..28], self.config.sample_rate); // Sample rate
-        LittleEndian::write_u32(&mut header[28..32], self.config.sample_rate * 4); // Byte rate
+        LittleEndian::write_u32(&mut header[24..28], self.config.samplerate); // Sample rate
+        LittleEndian::write_u32(&mut header[28..32], self.config.samplerate * 4); // Byte rate
         LittleEndian::write_u16(&mut header[32..34], 4); // Block align
         LittleEndian::write_u16(&mut header[34..36], 16); // Bits per sample
 
@@ -118,7 +120,7 @@ impl Recorder {
         // Define spec for reference only (not directly used)
         let _spec = WavSpec {
             channels: 2,
-            sample_rate: self.config.sample_rate,
+            sample_rate: self.config.samplerate,
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
@@ -132,7 +134,7 @@ impl Recorder {
 
         let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
         let chunk_size =
-            (self.config.sample_rate / 1000 * self.config.ptime.as_millis() as u32) as usize;
+            (self.config.samplerate / 1000 * self.config.ptime.as_millis() as u32) as usize;
 
         loop {
             let mut count: u32 = 0;

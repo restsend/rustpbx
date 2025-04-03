@@ -1,7 +1,9 @@
-use crate::event::test_utils::dummy_event_sender;
-use crate::media::{
-    processor::Processor,
-    track::{rtp::*, Track, TrackConfig},
+use crate::{
+    event::create_event_sender,
+    media::{
+        processor::Processor,
+        track::{rtp::*, Track, TrackConfig},
+    },
 };
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
@@ -165,7 +167,7 @@ async fn test_rtp_track_start_stop() -> Result<()> {
 
     // Start the track with event sender and packet sender
     track
-        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .start(cancel_token.clone(), create_event_sender(), sender)
         .await?;
 
     // Test that stopping works
@@ -217,7 +219,7 @@ async fn test_rtp_track_send_receive() -> Result<()> {
 
     // Start the receiver track
     receiver_track
-        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .start(cancel_token.clone(), create_event_sender(), sender)
         .await?;
 
     // Wait to ensure receiver is started
@@ -298,7 +300,7 @@ async fn test_multiple_rtp_packets() -> Result<()> {
 
     // Start the receiver track
     receiver_track
-        .start(cancel_token.clone(), dummy_event_sender(), sender)
+        .start(cancel_token.clone(), create_event_sender(), sender)
         .await?;
 
     // Wait to ensure receiver is started

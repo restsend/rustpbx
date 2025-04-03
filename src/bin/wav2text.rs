@@ -101,10 +101,10 @@ async fn main() -> Result<()> {
     let transcription_client = TencentCloudAsrClientBuilder::new(
         TranscriptionConfig {
             language: Some(args.language),
-            appid: Some(tencent_appid),
+            app_id: Some(tencent_appid),
             secret_id: Some(tencent_secret_id),
             secret_key: Some(tencent_secret_key),
-            engine_type: args.engine,
+            model_type: args.engine,
             ..Default::default()
         },
         event_sender,

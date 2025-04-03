@@ -1,6 +1,14 @@
 use super::codecs;
 use webrtc::sdp::SessionDescription;
 
+pub fn strip_ipv6_candidates(sdp: &str) -> String {
+    sdp.lines()
+        .filter(|line| !(line.starts_with("a=candidate:") && line.matches(':').count() >= 8))
+        .collect::<Vec<&str>>()
+        .join("\n")
+        + "\n"
+}
+
 pub fn prefer_audio_codec(sdp: &SessionDescription) -> Option<codecs::CodecType> {
     let mut formats = Vec::new();
     for media in sdp.media_descriptions.iter() {

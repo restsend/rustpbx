@@ -83,12 +83,12 @@ impl TencentCloudAsrClientBuilder {
     }
 
     pub fn with_appid(mut self, appid: String) -> Self {
-        self.config.appid = Some(appid);
+        self.config.app_id = Some(appid);
         self
     }
 
-    pub fn with_engine_type(mut self, engine_type: String) -> Self {
-        self.config.engine_type = engine_type;
+    pub fn with_model_type(mut self, model_type: String) -> Self {
+        self.config.model_type = model_type;
         self
     }
     pub fn with_track_id(mut self, track_id: String) -> Self {
@@ -169,11 +169,11 @@ impl TencentCloudAsrClient {
             .ok_or_else(|| anyhow!("No secret_key provided"))?;
         let appid = self
             .config
-            .appid
+            .app_id
             .as_ref()
             .ok_or_else(|| anyhow!("No appid provided"))?;
 
-        let engine_type = self.config.engine_type.as_str();
+        let engine_type = self.config.model_type.as_str();
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let nonce = timestamp.to_string(); // Use timestamp as nonce
