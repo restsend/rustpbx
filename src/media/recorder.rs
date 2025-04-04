@@ -6,6 +6,7 @@ use hound::{SampleFormat, WavSpec};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -25,8 +26,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct RecorderConfig {
     pub samplerate: u32,
+    #[serde(skip)]
     pub ptime: Duration,
 }
 
@@ -67,31 +71,47 @@ impl Recorder {
         let total_samples = self.samples_written.load(Ordering::SeqCst);
         let data_size = total_samples * 4; // Stereo, 16-bit = 4 bytes per sample
 
-        // Create WAV header
-        let mut header = vec![0u8; 44];
+        // Create a WavSpec for the WAV header
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: self.config.samplerate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        // Create a memory buffer for the WAV header
+        let mut header_buf = Vec::new();
 
-        // Write RIFF header
-        header[0..4].copy_from_slice(b"RIFF");
-        LittleEndian::write_u32(&mut header[4..8], 36 + data_size as u32); // File size - 8
-        header[8..12].copy_from_slice(b"WAVE");
+        // Create a WAV header using standard structure
+        // RIFF header
+        header_buf.extend_from_slice(b"RIFF");
+        let file_size = data_size + 36; // 36 bytes for header - 8 + data bytes
+        header_buf.extend_from_slice(&(file_size as u32).to_le_bytes());
+        header_buf.extend_from_slice(b"WAVE");
 
-        // Write format chunk
-        header[12..16].copy_from_slice(b"fmt ");
-        LittleEndian::write_u32(&mut header[16..20], 16); // Format chunk size
-        LittleEndian::write_u16(&mut header[20..22], 1); // PCM format
-        LittleEndian::write_u16(&mut header[22..24], 2); // 2 channels (stereo)
-        LittleEndian::write_u32(&mut header[24..28], self.config.samplerate); // Sample rate
-        LittleEndian::write_u32(&mut header[28..32], self.config.samplerate * 4); // Byte rate
-        LittleEndian::write_u16(&mut header[32..34], 4); // Block align
-        LittleEndian::write_u16(&mut header[34..36], 16); // Bits per sample
+        // fmt subchunk - use values from WavSpec
+        header_buf.extend_from_slice(b"fmt ");
+        header_buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        header_buf.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+        header_buf.extend_from_slice(&(spec.channels as u16).to_le_bytes());
+        header_buf.extend_from_slice(&(spec.sample_rate).to_le_bytes());
 
-        // Write data chunk
-        header[36..40].copy_from_slice(b"data");
-        LittleEndian::write_u32(&mut header[40..44], data_size as u32); // Data size
+        // Bytes per second: sample_rate * num_channels * bytes_per_sample
+        let bytes_per_sec =
+            spec.sample_rate * (spec.channels as u32) * (spec.bits_per_sample as u32 / 8);
+        header_buf.extend_from_slice(&bytes_per_sec.to_le_bytes());
+
+        // Block align: num_channels * bytes_per_sample
+        let block_align = (spec.channels as u16) * (spec.bits_per_sample / 8);
+        header_buf.extend_from_slice(&block_align.to_le_bytes());
+        header_buf.extend_from_slice(&spec.bits_per_sample.to_le_bytes());
+
+        // Data subchunk
+        header_buf.extend_from_slice(b"data");
+        header_buf.extend_from_slice(&(data_size as u32).to_le_bytes());
 
         // Seek to beginning of file and write header
         file.seek(std::io::SeekFrom::Start(0)).await?;
-        file.write_all(&header).await?;
+        file.write_all(&header_buf).await?;
 
         // Seek back to end of file for further writing
         file.seek(std::io::SeekFrom::End(0)).await?;
@@ -116,28 +136,16 @@ impl Recorder {
             }
         };
 
-        // Write initial WAV header
-        // Define spec for reference only (not directly used)
-        let _spec = WavSpec {
-            channels: 2,
-            sample_rate: self.config.samplerate,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-
-        // Write placeholder header (will be updated later)
-        let header_size = 44;
-        let placeholder = vec![0u8; header_size];
-        file.write_all(&placeholder).await?;
-
+        // Create an initial WAV header
+        self.update_wav_header(&mut file).await?;
         info!("Recording to {}", file_path.display());
 
         let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
         let chunk_size =
             (self.config.samplerate / 1000 * self.config.ptime.as_millis() as u32) as usize;
 
+        let mut count: u32 = 0;
         loop {
-            let mut count: u32 = 0;
             select! {
                 Some(_) = interval.next() => {
                     while let Ok(frame) = receiver.try_recv() {
@@ -145,24 +153,31 @@ impl Recorder {
                     }
 
                     let (mono_buf, stereo_buf) = self.pop().await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));
-                    let mut mix_buff = vec![0; chunk_size * 2]; // Doubled size for stereo interleaving
-                    for i in 0..mono_buf.len().min(chunk_size) {
+                    let max_len = mono_buf.len().max(stereo_buf.len());
+                    let mut mix_buff = vec![]; // Doubled size for stereo interleaving
+                    mix_buff.resize(max_len * 2, 0);
+                    for i in 0..mono_buf.len() {
                         mix_buff[i * 2] = mono_buf[i];
                     }
-                    for i in 0..stereo_buf.len().min(chunk_size) {
+                    for i in 0..stereo_buf.len() {
                         mix_buff[i * 2 + 1] = stereo_buf[i];
                     }
-
+                    // Move to the end of file before writing audio data
+                    file.seek(std::io::SeekFrom::End(0)).await?;
                     file.write_all(&convert_s16_to_u8(&mix_buff)).await?;
+
+                    // Update the samples written counter
+                    self.samples_written.fetch_add(max_len as usize, Ordering::SeqCst);
                     count += 1;
+
+                    // Update header every 5 frames (approximately 100ms with 20ms ptime)
                     if count % 5 == 0 {
-                         // update header every 100ms
+                        // Update the WAV header with current sample count
                         self.update_wav_header(&mut file).await?;
                     }
-                    self.samples_written.fetch_add(chunk_size, Ordering::SeqCst);
                 }
                 _ = self.cancel_token.cancelled() => {
-                    // Update the final header
+                    // Update the final header before finishing
                     self.update_wav_header(&mut file).await?;
                     return Ok(());
                 }

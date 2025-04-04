@@ -8,7 +8,8 @@ function mainApp() {
                 threshold: 0.5
             },
             recording: {
-                enabled: false
+                enabled: false,
+                samplerate: 16000,
             },
             asr: {
                 provider: 'tencent',
@@ -66,6 +67,7 @@ function mainApp() {
         getLogEntryClass(type) {
             const classes = {
                 'SYSTEM': 'bg-gray-100 text-gray-800',
+                'VAD': 'bg-blue-100 text-blue-800',
                 'ASR': 'bg-blue-100 text-blue-800',
                 'LLM': 'bg-purple-100 text-purple-800',
                 'TTS': 'bg-green-100 text-green-800',
@@ -121,7 +123,11 @@ function mainApp() {
                 'info': 'SYSTEM',
                 'error': 'ERROR',
                 'warning': 'WARNING',
-                'success': 'SYSTEM'
+                'success': 'SYSTEM',
+                'VAD': 'VAD',
+                'ASR': 'ASR',
+                'LLM': 'LLM',
+                'TTS': 'TTS'
             };
             return typeMap[type] || 'SYSTEM';
         },
@@ -217,7 +223,7 @@ function mainApp() {
             this.lastAsrResult = data.text;
             // If we have a valid ASR result, process it with LLM
             if (data.text && data.text.trim() !== '') {
-                this.addLogEntry('info', `ASR Final: ${data.text}`);
+                this.addLogEntry('ASR', `ASR Final: ${data.text}`);
                 this.processWithLlm(data.text);
             }
         },
@@ -227,7 +233,7 @@ function mainApp() {
         },
         // Handle VAD status update
         handleVadStatus(event) {
-            this.addLogEntry('info', `VAD Status: ${event.active ? 'Speech detected' : 'Silence detected'}`);
+            this.addLogEntry('VAD', `VAD Status: ${event.active ? 'Speech detected' : 'Silence detected'}`);
         },
         // Process text with LLM
         processWithLlm(text) {
@@ -294,7 +300,13 @@ function mainApp() {
             const configuration = {
             };
 
-            let mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            let mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    advanced: [{
+                        echoCancellation: true,
+                    }]
+                }, video: false
+            });
 
             this.peerConnection = new RTCPeerConnection(configuration);
             mediaStream.getTracks().forEach(track => {
@@ -353,6 +365,10 @@ function mainApp() {
 
         sendInvite() {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                let recorder = this.config.recording.enabled ? {
+                    samplerate: this.config.recording.samplerate,
+                    ptime: this.config.recording.ptime
+                } : undefined;
                 const invite = {
                     command: 'invite',
                     options: {
@@ -364,6 +380,7 @@ function mainApp() {
                             secretId: this.config.asr.secretId || undefined,
                             secretKey: this.config.asr.secretKey || undefined,
                         },
+                        recorder,
                         tts: {
                             provider: this.config.tts.provider,
                             appId: this.config.tts.appId || undefined,
