@@ -98,8 +98,8 @@ impl ActiveCall {
             .cancel_token(cancel_token.clone());
 
         if let Some(_) = options.recorder {
-            media_stream_builder =
-                media_stream_builder.recorder(state.get_recorder_file(session_id))
+            let recorder_file = state.get_recorder_file(session_id);
+            media_stream_builder = media_stream_builder.recorder(recorder_file);
         }
 
         let media_stream = media_stream_builder.build();
