@@ -155,13 +155,13 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                 }),
                             })
                             .ok();
-                        debug!(
+                        info!(
                             "TTS audio length: {} bytes -> {}ms {}",
                             audio.len(),
                             start_time.elapsed().as_millis(),
                             text
                         );
-
+                        // strip wav header
                         let audio = if audio.len() > 44 && audio[..4] == [0x52, 0x49, 0x46, 0x46] {
                             audio[44..].to_vec()
                         } else {
@@ -195,8 +195,8 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 let packet = {
                     let mut buffer = buffer.lock().await;
                     if buffer.len() > max_pcm_chunk_size {
-                        let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<u8>>();
-                        Some(s16_data)
+                        let s8_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<u8>>();
+                        Some(s8_data)
                     } else {
                         None
                     }
@@ -213,7 +213,6 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     if let Err(e) = processor_chain.process_frame(&packet) {
                         warn!("Error processing frame: {}", e);
                     }
-
                     // Send the packet
                     packet_sender.send(packet).ok();
                 }
@@ -228,6 +227,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 _ = token.cancelled() => {}
             }
         });
+        info!("TTS track {} shutdown", self.track_id);
         Ok(())
     }
 
