@@ -138,11 +138,16 @@ impl Recorder {
 
         // Create an initial WAV header
         self.update_wav_header(&mut file).await?;
-        info!("Recording to {}", file_path.display());
-
-        let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
         let chunk_size =
             (self.config.samplerate / 1000 * self.config.ptime.as_millis() as u32) as usize;
+        info!(
+            "Recording to {} ptime: {}ms chunk_size: {}",
+            file_path.display(),
+            self.config.ptime.as_millis(),
+            chunk_size
+        );
+
+        let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
 
         let mut count: u32 = 0;
         loop {
@@ -152,10 +157,9 @@ impl Recorder {
                         self.append_frame(frame).await.ok();
                     }
 
-                    let (mono_buf, stereo_buf) = self.pop().await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));
+                    let (mono_buf, stereo_buf) = self.pop(chunk_size).await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));
                     let max_len = mono_buf.len().max(stereo_buf.len());
-                    let mut mix_buff = vec![]; // Doubled size for stereo interleaving
-                    mix_buff.resize(max_len * 2, 0);
+                    let mut mix_buff = vec![0; max_len * 2]; // Doubled size for stereo interleaving
                     for i in 0..mono_buf.len() {
                         mix_buff[i * 2] = mono_buf[i];
                     }
@@ -206,19 +210,21 @@ impl Recorder {
         Ok(())
     }
 
-    async fn pop(&self) -> Option<(Vec<i16>, Vec<i16>)> {
+    async fn pop(&self, chunk_size: usize) -> Option<(Vec<i16>, Vec<i16>)> {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 
-        // Return non-empty buffers even if one is empty
-        if mono_buf.len() > 0 || stereo_buf.len() > 0 {
-            // take all buffers
-            let mono_buf = mono_buf.drain(..).collect();
-            let stereo_buf = stereo_buf.drain(..).collect();
-            Some((mono_buf, stereo_buf))
+        let mono_buf = if mono_buf.len() > chunk_size {
+            mono_buf.drain(..chunk_size).collect()
         } else {
-            None
-        }
+            vec![0; chunk_size]
+        };
+        let stereo_buf = if stereo_buf.len() > chunk_size {
+            stereo_buf.drain(..chunk_size).collect()
+        } else {
+            vec![0; chunk_size]
+        };
+        Some((mono_buf, stereo_buf))
     }
 
     pub fn stop_recording(&self) -> Result<()> {

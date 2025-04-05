@@ -199,6 +199,9 @@ impl MediaStream {
             self.process_dtmf(&packet).await;
             // Process the packet with each track
             for track in self.tracks.lock().await.values() {
+                if &packet.track_id == track.id() {
+                    continue;
+                }
                 if let Err(e) = track.send_packet(&packet).await {
                     error!("Failed to send packet to track: {}", e);
                 }

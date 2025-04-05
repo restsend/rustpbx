@@ -25,7 +25,7 @@ function mainApp() {
                 speaker: '1',
             },
             llm: {
-                endpoint: '',
+                baseurl: '',
                 apiKey: '',
                 model: '',
                 prompt: 'You are a helpful assistant.'
@@ -224,7 +224,9 @@ function mainApp() {
             // If we have a valid ASR result, process it with LLM
             if (data.text && data.text.trim() !== '') {
                 this.addLogEntry('ASR', `ASR Final: ${data.text}`);
-                this.processWithLlm(data.text);
+                this.processWithLlm(data.text).then().catch((reason) => {
+                    this.addLogEntry('error', `processWithLlm failed: ${reason}`);
+                })
             }
         },
 
@@ -233,29 +235,145 @@ function mainApp() {
         },
         // Handle VAD status update
         handleVadStatus(event) {
-            this.addLogEntry('VAD', `VAD Status: ${event.active ? 'Speech detected' : 'Silence detected'}`);
+            this.addLogEntry('VAD', `${event.active ? 'Speech detected' : 'Silence detected'}`);
         },
         // Process text with LLM
-        processWithLlm(text) {
-            if (!this.config.llm.endpoint) {
+        async processWithLlm(text) {
+            if (!this.config.llm.baseurl) {
                 this.addLogEntry('warning', 'LLM configuration is incomplete');
                 return;
             }
 
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                // const llmRequest = {
-                //     type: 'llm_request',
-                //     text: text,
-                //     config: {
-                //         provider: this.config.llm.provider,
-                //         api_key: this.config.llm.apiKey,
-                //         model: this.config.llm.model,
-                //         prompt: this.config.llm.prompt
-                //     }
-                // };
+            // Create abort controller for the fetch request
+            const controller = new AbortController();
+            const signal = controller.signal;
 
-                // this.ws.send(JSON.stringify(llmRequest));
-                // this.addLogEntry('info', 'Sent LLM request');
+            // Store the full LLM response
+            let fullLlmResponse = '';
+
+            // Prepare the request payload
+            const payload = {
+                model: this.config.llm.model,
+                messages: [
+                    { role: 'system', content: this.config.llm.prompt },
+                    { role: 'user', content: text }
+                ],
+                stream: true
+            };
+
+            // Set up headers
+            const headers = {
+                'Content-Type': 'application/json'
+            };
+
+            // Add API key if present
+            if (this.config.llm.apiKey) {
+                headers['Authorization'] = `Bearer ${this.config.llm.apiKey}`;
+            }
+
+            // Make the fetch request to the LLM endpoint
+            let baseurl = this.config.llm.baseurl;
+            if (!baseurl.endsWith('/')) {
+                baseurl += '/';
+            }
+            let start = new Date();
+            fetch(baseurl + 'chat/completions', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(payload),
+                signal: signal
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+
+                    if (!response.body) {
+                        throw new Error('ReadableStream not supported in this browser.');
+                    }
+
+                    // Process the response as a stream
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    // Function to process each chunk
+                    const processStream = ({ done, value }) => {
+                        if (done) {
+                            let duration = new Date() - start;
+                            // When stream is complete, send the full response for TTS
+                            this.logEvent('LLM', `${duration} ms`, { llmResponse: fullLlmResponse });
+                            this.sendTtsRequest(fullLlmResponse);
+                            return;
+                        }
+
+                        // Decode the chunk
+                        const chunk = decoder.decode(value, { stream: true });
+
+                        // Process SSE format - each line starts with "data: "
+                        const lines = chunk.split('\n');
+
+                        lines.forEach(line => {
+                            if (line.startsWith('data: ')) {
+                                const data = line.substring(6);
+
+                                // Handle special case for "[DONE]" message
+                                if (data === '[DONE]') {
+                                    return;
+                                }
+
+                                try {
+                                    // Parse the JSON data
+                                    const jsonData = JSON.parse(data);
+
+                                    // Extract the content
+                                    if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
+                                        const content = jsonData.choices[0].delta.content;
+                                        fullLlmResponse += content;
+
+                                        // Update the UI with the latest response
+                                        this.lastLlmResponse = fullLlmResponse;
+                                    }
+                                } catch (error) {
+                                    this.addLogEntry('error', `Error parsing SSE JSON: ${error.message}`);
+                                }
+                            }
+                        });
+
+                        // Continue reading the stream
+                        return reader.read().then(processStream);
+                    };
+
+                    // Start processing the stream
+                    return reader.read().then(processStream);
+                })
+                .catch(error => {
+                    this.addLogEntry('error', `LLM API error: ${error.message}`);
+
+                    // If there was already some response, send that for TTS
+                    if (fullLlmResponse) {
+                        this.sendTtsRequest(fullLlmResponse);
+                    }
+                });
+        },
+
+        // Send TTS request to the WebSocket
+        sendTtsRequest(text) {
+            if (!text || text.trim() === '') {
+                this.addLogEntry('warning', 'Cannot send empty text to TTS');
+                return;
+            }
+
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                const ttsCommand = {
+                    command: 'tts',
+                    text: text,
+                };
+
+                this.ws.send(JSON.stringify(ttsCommand));
+                this.addLogEntry('TTS', `${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+                this.lastTtsMessage = text;
+            } else {
+                this.addLogEntry('error', 'WebSocket not connected, cannot send TTS request');
             }
         },
 
