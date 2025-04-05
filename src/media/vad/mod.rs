@@ -4,7 +4,6 @@ use crate::AudioFrame;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use std::default;
 use std::sync::Mutex;
 use webrtc_vad::Vad;
 

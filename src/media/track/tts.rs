@@ -18,7 +18,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct TtsCommand {
@@ -118,22 +118,22 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 let text = command.text;
                 let speaker = command.speaker;
                 let play_id = command.play_id;
-                if play_id != last_play_id {
+                if play_id != last_play_id || play_id.is_none() {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
                 }
                 let cache_key = format!("tts:{:?}{}", speaker, text);
-                let cache_key = cache::generate_cache_key(&cache_key, sample_rate);
+                let cache_key = cache::generate_cache_key(&cache_key, sample_rate) + ".pcm";
                 if use_cache {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
-                                info!("Using cached TTS audio for {}", cache_key);
-                                buffer_clone.lock().await.extend(audio);
+                                info!("tts: Using cached audio for {}", cache_key);
+                                buffer_clone.lock().await.extend(convert_u8_to_s16(&audio));
                                 continue;
                             }
                             Err(e) => {
-                                warn!("Error retrieving cached TTS audio: {}", e);
+                                warn!("tts: Error retrieving cached audio: {}", e);
                             }
                         },
                         _ => {}
@@ -148,15 +148,15 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                 timestamp: crate::get_timestamp(),
                                 sender: "tts.tencent".to_string(),
                                 metrics: serde_json::json!({
-                                        "speaker": speaker.clone(),
-                                        "playId": play_id.clone(),
-                                        "audioLength": audio.len(),
+                                        "speaker": speaker,
+                                        "playId": play_id,
+                                        "length": audio.len(),
                                         "duration": start_time.elapsed().as_millis() as u32,
                                 }),
                             })
                             .ok();
                         info!(
-                            "TTS audio length: {} bytes -> {}ms {}",
+                            "tts: synthesize audio {} bytes -> {}ms {}",
                             audio.len(),
                             start_time.elapsed().as_millis(),
                             text
@@ -170,7 +170,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         if use_cache {
                             cache::store_in_cache(&cache_key, &audio).await.ok();
                         }
-                        buffer_clone.lock().await.extend(audio);
+                        buffer_clone.lock().await.extend(convert_u8_to_s16(&audio));
                     }
                     Err(e) => {
                         warn!("Error synthesizing text: {}", e);
@@ -195,8 +195,8 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 let packet = {
                     let mut buffer = buffer.lock().await;
                     if buffer.len() > max_pcm_chunk_size {
-                        let s8_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<u8>>();
-                        Some(s8_data)
+                        let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
+                        Some(s16_data)
                     } else {
                         None
                     }
@@ -204,11 +204,10 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 if let Some(packet) = packet {
                     let packet = AudioFrame {
                         track_id: track_id.clone(),
-                        samples: Samples::PCM(convert_u8_to_s16(&packet)),
+                        samples: Samples::PCM(packet),
                         timestamp: crate::get_timestamp(),
                         sample_rate,
                     };
-
                     // Process the frame with processor chain
                     if let Err(e) = processor_chain.process_frame(&packet) {
                         warn!("Error processing frame: {}", e);

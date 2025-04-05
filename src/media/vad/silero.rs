@@ -1,6 +1,5 @@
-use crate::{AudioFrame, Samples};
-
 use super::{VADConfig, VadEngine};
+use crate::{AudioFrame, Samples};
 use anyhow::Result;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

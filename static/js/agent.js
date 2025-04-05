@@ -214,6 +214,13 @@ function mainApp() {
                 type: 'answer',
                 sdp: event.sdp
             })).then()
+            setTimeout(() => {
+                this.sendTtsRequest('你好！有什么我可以帮助你的？').then()
+            }, 1000)
+
+            setTimeout(() => {
+                this.sendTtsRequest('请帮我讲个笑话').then()
+            }, 5000)
         },
         handleTrackStart(event) {
             //this.addLogEntry('info', `track start`)
@@ -236,6 +243,14 @@ function mainApp() {
         // Handle VAD status update
         handleVadStatus(event) {
             this.addLogEntry('VAD', `${event.active ? 'Speech detected' : 'Silence detected'}`);
+        },
+        async playWav(url) {
+            const playCommand = {
+                command: 'play',
+                url,
+            };
+            this.ws.send(JSON.stringify(playCommand));
+            this.addLogEntry('info', 'play wav')
         },
         // Process text with LLM
         async processWithLlm(text) {
@@ -492,12 +507,12 @@ function mainApp() {
                     options: {
                         offer: this.peerConnection.localDescription.sdp,
                         vad: this.config.vad,
-                        asr: {
-                            provider: this.config.asr.provider,
-                            appId: this.config.asr.appId || undefined,
-                            secretId: this.config.asr.secretId || undefined,
-                            secretKey: this.config.asr.secretKey || undefined,
-                        },
+                        // asr: {
+                        //     provider: this.config.asr.provider,
+                        //     appId: this.config.asr.appId || undefined,
+                        //     secretId: this.config.asr.secretId || undefined,
+                        //     secretKey: this.config.asr.secretKey || undefined,
+                        // },
                         recorder,
                         tts: {
                             provider: this.config.tts.provider,

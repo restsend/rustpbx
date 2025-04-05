@@ -1,12 +1,10 @@
 use crate::{media::codecs::convert_s16_to_u8, AudioFrame, Samples};
 use anyhow::Result;
-use byteorder::{ByteOrder, LittleEndian};
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -166,6 +164,7 @@ impl Recorder {
                     for i in 0..stereo_buf.len() {
                         mix_buff[i * 2 + 1] = stereo_buf[i];
                     }
+
                     // Move to the end of file before writing audio data
                     file.seek(std::io::SeekFrom::End(0)).await?;
                     file.write_all(&convert_s16_to_u8(&mix_buff)).await?;
