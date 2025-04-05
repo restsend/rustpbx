@@ -439,12 +439,8 @@ impl Track for WebrtcTrack {
         if self.local_track.is_none() {
             return Ok(());
         }
-        let frame = packet.clone();
-        if let Err(e) = self.processor_chain.process_frame(&frame) {
-            error!("Error processing frame: {}", e);
-        }
         let mut jitter = self.jitter_buffer.lock().await;
-        jitter.push(frame);
+        jitter.push(packet.clone());
 
         Ok(())
     }

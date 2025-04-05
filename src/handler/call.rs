@@ -261,7 +261,7 @@ impl ActiveCall {
             speaker,
             play_id,
         };
-        let tts_command_tx = self.tts_command_tx.lock().await;
+        let mut tts_command_tx = self.tts_command_tx.lock().await;
         if let Some(tts_command_tx) = tts_command_tx.as_ref() {
             tts_command_tx.send(play_command)?;
             return Ok(());
@@ -282,7 +282,7 @@ impl ActiveCall {
             Ok(_) => {
                 info!("Tts track started");
                 tx.send(play_command)?;
-                self.tts_command_tx.lock().await.replace(tx);
+                tts_command_tx.replace(tx);
                 Ok(())
             }
             Err(e) => {
