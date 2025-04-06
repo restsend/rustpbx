@@ -150,14 +150,13 @@ impl Recorder {
         let mut count: u32 = 0;
         loop {
             select! {
-                Some(_) = interval.next() => {
-                    while let Ok(frame) = receiver.try_recv() {
-                        self.append_frame(frame).await.ok();
-                    }
-
-                    let (mono_buf, stereo_buf) = self.pop(chunk_size).await.unwrap_or((vec![0; chunk_size], vec![0; chunk_size as usize]));
+                Some(frame) = receiver.recv() => {
+                    self.append_frame(frame).await.ok();
+                }
+                _ = interval.next() => {
+                    let (mono_buf, stereo_buf) = self.pop(chunk_size).await;
                     let max_len = mono_buf.len().max(stereo_buf.len());
-                    let mut mix_buff = vec![0; max_len * 2]; // Doubled size for stereo interleaving
+                    let mut mix_buff = vec![0; max_len * 2];
                     for i in 0..mono_buf.len() {
                         mix_buff[i * 2] = mono_buf[i];
                     }
@@ -165,17 +164,13 @@ impl Recorder {
                         mix_buff[i * 2 + 1] = stereo_buf[i];
                     }
 
-                    // Move to the end of file before writing audio data
                     file.seek(std::io::SeekFrom::End(0)).await?;
                     file.write_all(&convert_s16_to_u8(&mix_buff)).await?;
 
-                    // Update the samples written counter
                     self.samples_written.fetch_add(max_len as usize, Ordering::SeqCst);
                     count += 1;
 
-                    // Update header every 5 frames (approximately 100ms with 20ms ptime)
                     if count % 5 == 0 {
-                        // Update the WAV header with current sample count
                         self.update_wav_header(&mut file).await?;
                     }
                 }
@@ -209,7 +204,7 @@ impl Recorder {
         Ok(())
     }
 
-    async fn pop(&self, chunk_size: usize) -> Option<(Vec<i16>, Vec<i16>)> {
+    async fn pop(&self, chunk_size: usize) -> (Vec<i16>, Vec<i16>) {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 
@@ -223,7 +218,7 @@ impl Recorder {
         } else {
             vec![0; chunk_size]
         };
-        Some((mono_buf, stereo_buf))
+        (mono_buf, stereo_buf)
     }
 
     pub fn stop_recording(&self) -> Result<()> {

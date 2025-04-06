@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::{sync::Arc, time::Instant};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument};
+use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 #[derive(Deserialize)]
 pub struct CallParams {
@@ -57,7 +57,7 @@ pub async fn handle_webrtc_connection(
 
     let active_call = match ws_receiver.next().await {
         Some(Ok(Message::Text(text))) => {
-            info!("Received text message: {}", text);
+            debug!("webrtc call: received text message: {}", text);
             let command = serde_json::from_str::<Command>(&text);
             match command {
                 Ok(Command::Invite { options }) => {
@@ -74,25 +74,28 @@ pub async fn handle_webrtc_connection(
                     Arc::new(call)
                 }
                 Ok(cmd) => {
-                    error!("Invalid first command: {:?}", cmd);
+                    error!("webrtc call: invalid first command: {:?}", cmd);
                     return Err(anyhow::anyhow!("The first message must be an invite"));
                 }
                 Err(e) => {
-                    error!("Error parsing command: {} from text: {}", e, text);
+                    error!(
+                        "webrtc call: error parsing command: {} from text: {}",
+                        e, text
+                    );
                     return Err(anyhow::anyhow!("Error parsing command: {}", e));
                 }
             }
         }
         Some(Ok(msg)) => {
-            error!("Invalid message type: {:?}", msg);
+            error!("webrtc call: invalid message type: {:?}", msg);
             return Err(anyhow::anyhow!("Invalid message type"));
         }
         Some(Err(e)) => {
-            error!("WebSocket error: {}", e);
+            error!("webrtc call: webSocket error: {}", e);
             return Err(anyhow::anyhow!("WebSocket error: {}", e));
         }
         None => {
-            error!("WebSocket closed");
+            error!("webrtc call: webSocket closed");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
     };
@@ -105,7 +108,7 @@ pub async fn handle_webrtc_connection(
     };
 
     info!(
-        "New call: {} -> {:?}, {} active calls",
+        "webrtc call: new call: {} -> {:?}, {} active calls",
         active_call.session_id, active_call.call_type, active_calls_len
     );
 
@@ -114,12 +117,12 @@ pub async fn handle_webrtc_connection(
             let data = match serde_json::to_string(&event) {
                 Ok(data) => data,
                 Err(e) => {
-                    error!("Error serializing event: {} {:?}", e, event);
+                    error!("webrtc call: error serializing event: {} {:?}", e, event);
                     continue;
                 }
             };
             if let Err(e) = ws_sender.send(data.into()).await {
-                error!("Error sending event to WebSocket: {}", e);
+                error!("webrtc call: error sending event to WebSocket: {}", e);
             }
         }
     };
@@ -130,7 +133,7 @@ pub async fn handle_webrtc_connection(
                 Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
                     Ok(command) => Some(command),
                     Err(e) => {
-                        error!("Error deserializing command: {} {}", e, text);
+                        error!("webrtc call: error deserializing command: {} {}", e, text);
                         None
                     }
                 },
@@ -141,7 +144,7 @@ pub async fn handle_webrtc_connection(
                 Some(command) => match active_call.dispatch(command).await {
                     Ok(_) => (),
                     Err(e) => {
-                        error!("Error dispatching command: {}", e);
+                        error!("webrtc call: Error dispatching command: {}", e);
                     }
                 },
                 None => {}
@@ -150,16 +153,16 @@ pub async fn handle_webrtc_connection(
     };
     select! {
         _ = cancel_token.cancelled() => {
-            info!("active_call: Cancelled");
+            info!("webrtc call: cancelled");
         },
         _ = send_to_ws => {
-            info!("send_to_ws: Websocket disconnected");
+            info!("send_to_ws: websocket disconnected");
         },
         _ = recv_from_ws => {
-            info!("recv_from_ws: Websocket disconnected");
+            info!("recv_from_ws: websocket disconnected");
         },
         r = active_call_clone.process_stream() => {
-            info!("active_call: Call loop disconnected {:?}", r);
+            info!("webrtc call: call loop disconnected {:?}", r);
         },
     }
     Ok(())
