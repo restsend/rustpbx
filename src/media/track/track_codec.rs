@@ -20,6 +20,8 @@ pub struct TrackCodec {
     pub g722_encoder: RefCell<G722Encoder>,
     pub g722_decoder: RefCell<G722Decoder>,
 }
+unsafe impl Send for TrackCodec {}
+unsafe impl Sync for TrackCodec {}
 
 impl TrackCodec {
     pub fn new() -> Self {
