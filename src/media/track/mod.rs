@@ -23,6 +23,7 @@ pub struct TrackConfig {
     pub channels: u16,
     // Maximum size of PCM chunks to process at once
     pub max_pcm_chunk_size: usize,
+    pub server_side_track_id: TrackId,
 }
 
 impl Default for TrackConfig {
@@ -33,6 +34,7 @@ impl Default for TrackConfig {
             sample_rate: 16000,
             channels: 1,
             max_pcm_chunk_size: 320, // 20ms at 16kHz, 16-bit mono
+            server_side_track_id: "server-side-track".to_string(),
         }
     }
 }
@@ -58,6 +60,11 @@ impl TrackConfig {
 
     pub fn with_max_pcm_chunk_size(mut self, max_pcm_chunk_size: usize) -> Self {
         self.max_pcm_chunk_size = max_pcm_chunk_size;
+        self
+    }
+
+    pub fn with_server_side_track_id(mut self, server_side_track_id: TrackId) -> Self {
+        self.server_side_track_id = server_side_track_id;
         self
     }
 }

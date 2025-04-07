@@ -432,9 +432,6 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tokio::sync::{broadcast, mpsc};
-    fn create_test_wav(_sample_rate: u32, duration_ms: u32) -> Result<Vec<u8>> {
-        Ok(vec![1; 320 * duration_ms as usize])
-    }
     #[tokio::test]
     async fn test_file_track_with_cache() -> Result<()> {
         // Set up a temporary cache directory with a unique name for this test

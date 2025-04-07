@@ -1,10 +1,5 @@
-use crate::event::create_event_sender;
 use crate::media::track::{rtp::*, webrtc::*, Track, TrackConfig};
-use crate::{AudioFrame, Samples};
 use anyhow::Result;
-use tokio::sync::mpsc;
-use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_rtp_track_creation() -> Result<()> {
@@ -25,6 +20,7 @@ async fn test_rtp_track_creation() -> Result<()> {
         remote_addr: "127.0.0.1:12345".parse().unwrap(),
         payload_type: 0,
         ssrc: 12345,
+        dtmf_payload_type: 101,
     };
 
     let _track = track.with_rtp_config(rtp_config);

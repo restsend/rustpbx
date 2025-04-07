@@ -47,7 +47,7 @@ async fn test_tts_track_basic() -> Result<()> {
     // Create a TtsTrack with our mock client
     let track_id = "test-track".to_string();
     let client = MockSynthesisClient;
-    let mut tts_track = TtsTrack::new(track_id.clone(), command_rx, client);
+    let tts_track = TtsTrack::new(track_id.clone(), command_rx, client);
 
     // Create channels for the test
     let (event_tx, _event_rx) = broadcast::channel(16);
