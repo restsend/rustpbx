@@ -447,18 +447,11 @@ mod tests {
         // Ensure cache directory exists
         cache::ensure_cache_dir().await?;
 
-        // Create a temporary test file in fixtures directory
-        let fixtures_dir = temp_dir.path().join("fixtures");
-        tokio::fs::create_dir_all(&fixtures_dir).await?;
-        let wav_data = create_test_wav(16000, 1000)?;
-        let test_file_path = fixtures_dir.join("test_16k.wav");
-        tokio::fs::write(&test_file_path, &wav_data).await?;
-        let file_path = test_file_path.to_str().unwrap();
-
+        let file_path = "fixtures/sample.wav".to_string();
         // Create a FileTrack instance
         let track_id = "test_track".to_string();
         let file_track = FileTrack::new(track_id.clone())
-            .with_path(file_path.to_string())
+            .with_path(file_path.clone())
             .with_sample_rate(16000)
             .with_cache_enabled(true);
 
@@ -502,8 +495,8 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // Get the cache key and verify it exists
-        let cache_key = cache::generate_cache_key(file_path, 16000);
-
+        let cache_key = cache::generate_cache_key(&file_path, 16000);
+        let wav_data = tokio::fs::read(&file_path).await?;
         // Manually store the file in cache if it's not already there, to make the test more reliable
         if !cache::is_cached(&cache_key).await? {
             info!("Cache file not found, manually storing it");
@@ -516,10 +509,6 @@ mod tests {
             "Cache file should exist for key: {}",
             cache_key
         );
-
-        // Cleanup
-        cache::clean_cache().await?;
-
         // Allow the test to pass if packets weren't received - only assert the cache operations worked
         if !received_packet {
             println!("Warning: No packets received in test, but cache operations were verified");

@@ -46,7 +46,7 @@ async fn handle_error(
 async fn test_webrtc_audio_streaming() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .ok();
     dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -191,16 +191,12 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
             match event {
-                SessionEvent::Answer {
-                    track_id,
-                    timestamp,
-                    sdp,
-                } => {
+                SessionEvent::Answer { sdp, .. } => {
                     info!("Received answer: {}", sdp);
                     let offer = RTCSessionDescription::answer(sdp)?;
                     peer_connection.set_remote_description(offer).await?;
                 }
-                SessionEvent::Error { timestamp, error } => {
+                SessionEvent::Error { error, .. } => {
                     error!("Received error: {}", error);
                     break;
                 }
