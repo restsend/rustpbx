@@ -15,8 +15,7 @@ static CRYPTO_PROVIDER: OnceCell<()> = OnceCell::new();
 
 fn init_crypto() {
     CRYPTO_PROVIDER.get_or_init(|| {
-        rustls::crypto::CryptoProvider::install_default(default_provider())
-            .expect("Failed to initialize crypto provider");
+        rustls::crypto::CryptoProvider::install_default(default_provider()).ok();
     });
 }
 

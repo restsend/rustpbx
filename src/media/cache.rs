@@ -95,26 +95,6 @@ pub async fn retrieve_from_cache(key: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Clean the cache by removing all files
-pub async fn clean_cache() -> Result<()> {
-    let cache_dir = get_cache_dir()?;
-
-    if tokio::fs::try_exists(&cache_dir).await? {
-        let mut dir_entries = tokio::fs::read_dir(&cache_dir).await?;
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-            let metadata = tokio::fs::metadata(&path).await?;
-            if metadata.is_file() {
-                tokio::fs::remove_file(path).await?;
-            }
-        }
-
-        info!("Cache cleaned successfully");
-    }
-
-    Ok(())
-}
-
 /// Delete a specific file from the cache
 pub async fn delete_from_cache(key: &str) -> Result<()> {
     let path = get_cache_path(key)?;
@@ -165,9 +145,6 @@ mod tests {
         // Test clean cache
         let key2 = generate_cache_key("test_data2", 16000);
         store_in_cache(&key2, &test_data).await?;
-        clean_cache().await?;
-        assert!(!is_cached(&key2).await?);
-
         Ok(())
     }
 
