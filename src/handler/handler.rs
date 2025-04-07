@@ -1,17 +1,21 @@
 use super::call::CallHandlerState;
+use crate::useragent::UserAgent;
 use axum::{
     extract::{Path, State},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use std::sync::Arc;
 use tracing::info;
 
-pub fn router() -> Router<CallHandlerState> {
+pub fn router(useragent: Arc<UserAgent>) -> Router<CallHandlerState> {
     Router::new()
         .route("/call/webrtc", get(super::webrtc::webrtc_handler))
         .route("/call/lists", get(list_calls))
         .route("/call/kill/{id}", post(kill_call))
+        .merge(super::sip::router())
+        .layer(axum::extract::Extension(useragent))
 }
 
 async fn list_calls(State(state): State<CallHandlerState>) -> Response {

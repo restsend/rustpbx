@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     }
 
     let app_builder = AppBuilder::new().config(config);
-    let app = app_builder.build().expect("Failed to build app");
+    let app = app_builder.build().await.expect("Failed to build app");
 
     info!("Starting rustpbx on {}", app.config.http_addr);
     select! {

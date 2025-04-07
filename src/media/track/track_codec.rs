@@ -23,6 +23,12 @@ pub struct TrackCodec {
 unsafe impl Send for TrackCodec {}
 unsafe impl Sync for TrackCodec {}
 
+impl Clone for TrackCodec {
+    fn clone(&self) -> Self {
+        Self::new() // Since each codec has its own state, create a fresh instance
+    }
+}
+
 impl TrackCodec {
     pub fn new() -> Self {
         Self {

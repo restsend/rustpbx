@@ -3,7 +3,6 @@ use crate::{
     event::{EventSender, SessionEvent},
     media::{
         codecs::CodecType,
-        jitter::JitterBuffer,
         negotiate::prefer_audio_codec,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
@@ -16,9 +15,8 @@ use futures::StreamExt;
 use std::{sync::Arc, time::SystemTime};
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
-use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::{
     api::{

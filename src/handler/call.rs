@@ -269,8 +269,12 @@ impl ActiveCall {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let tts_client = TencentCloudTtsClient::new(tts_config.clone());
-        let tts_track = TtsTrack::new("callee".to_string(), rx, tts_client)
-            .with_cancel_token(self.cancel_token.child_token());
+        let tts_track = TtsTrack::new(
+            self.track_config.server_side_track_id.clone(),
+            rx,
+            tts_client,
+        )
+        .with_cancel_token(self.cancel_token.child_token());
         match tts_track
             .start(
                 self.cancel_token.clone(),
@@ -294,7 +298,7 @@ impl ActiveCall {
 
     async fn do_play(&self, url: String) -> Result<()> {
         self.tts_command_tx.lock().await.take();
-        let file_track = FileTrack::new("callee".to_string())
+        let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
         self.media_stream.update_track(Box::new(file_track)).await;

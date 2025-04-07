@@ -90,10 +90,10 @@ impl MediaStream {
         select! {
             _ = self.cancel_token.cancelled() => {}
             r = self.handle_recorder() => {
-                info!("Recorder stopped {:?}", r);
+                info!("media_stream: Recorder stopped {:?}", r);
             }
             r = self.handle_forward_track(packet_receiver) => {
-                info!("Track packet receiver stopped {:?}", r);
+                info!("media_stream: Track packet receiver stopped {:?}", r);
             }
         }
         Ok(())
@@ -123,7 +123,7 @@ impl MediaStream {
                         .ok();
                 }
                 Err(e) => {
-                    error!("Failed to stop track: {}", e);
+                    error!("media_stream: Failed to stop track: {}", e);
                 }
             }
         }
@@ -143,7 +143,7 @@ impl MediaStream {
             .await
         {
             Ok(_) => {
-                info!("track started {:?}", track.id());
+                info!("media_stream: track started {:?}", track.id());
                 let track_id = track.id().clone();
                 self.tracks.lock().await.insert(track_id.clone(), track);
                 self.event_sender
@@ -203,7 +203,7 @@ impl MediaStream {
                     continue;
                 }
                 if let Err(e) = track.send_packet(&packet).await {
-                    error!("Failed to send packet to track: {}", e);
+                    error!("media_stream: Failed to send packet to track: {}", e);
                 }
             }
         }
