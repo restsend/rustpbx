@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 mod tencent_cloud;
 pub use tencent_cloud::TencentCloudTtsClient;
 
@@ -23,9 +25,14 @@ pub struct SynthesisConfig {
     pub speaker: Option<String>,
     pub codec: Option<String>,
 }
+
 #[async_trait]
 pub trait SynthesisClient: Send + Sync {
-    async fn synthesize(&self, text: &str) -> Result<Vec<u8>>;
+    /// Synthesize text to audio and return a stream of audio chunks
+    async fn synthesize<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>>;
 }
 
 impl Default for SynthesisConfig {

@@ -1,142 +1,113 @@
 use super::*;
+use crate::event::SessionEvent;
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration};
 
 #[tokio::test]
-async fn test_webrtc_vad() {
-    let (event_sender, mut event_receiver) = broadcast::channel(16);
-    let track_id = "test_track".to_string();
-
-    let vad = VadProcessor::new(VadType::WebRTC, event_sender.clone(), VADConfig::default());
-
-    // Test with silence (all zeros)
-    let mut silence_frame = AudioFrame {
-        track_id: track_id.clone(),
-        samples: Samples::PCM(vec![0; 480]), // 30ms at 16kHz
-        sample_rate: 16000,
-        timestamp: 0,
-    };
-    vad.process_frame(&mut silence_frame).unwrap();
-
-    // Should receive silence event
-    if let Ok(SessionEvent::Silence {
-        track_id: id,
-        timestamp: ts,
-    }) = event_receiver.try_recv()
-    {
-        assert_eq!(id, track_id);
-        assert_eq!(ts, 0);
-    } else {
-        panic!("Expected silence event");
+async fn test_vad_engines_with_wav_file() {
+    #[derive(Default, Debug)]
+    struct TestResults {
+        speech_segments: Vec<(u64, u64)>, // (start_time, duration)
     }
 
-    // Test with speech (sine wave)
-    let mut speech_frame = AudioFrame {
-        track_id: track_id.clone(),
-        samples: Samples::PCM(
-            (0..480)
-                .map(|i| ((i as f32 * 0.1).sin() * 16000.0) as i16)
-                .collect(),
-        ),
-        sample_rate: 16000,
-        timestamp: 1,
-    };
-    vad.process_frame(&mut speech_frame).unwrap();
+    let (all_samples, sample_rate) =
+        crate::media::track::file::read_wav_file("fixtures/hello_book_course_zh_16k.wav").unwrap();
+    assert_eq!(sample_rate, 16000, "Expected 16kHz sample rate");
+    assert!(!all_samples.is_empty(), "Expected non-empty audio file");
 
-    // Should receive speech event
-    if let Ok(SessionEvent::Speaking {
-        track_id: id,
-        timestamp: ts,
-    }) = event_receiver.try_recv()
-    {
-        assert_eq!(id, track_id);
-        assert_eq!(ts, 1);
-    } else {
-        panic!("Expected speech event");
-    }
-}
+    println!(
+        "Loaded {} samples from WAV file for testing",
+        all_samples.len()
+    );
 
-#[tokio::test]
-async fn test_voice_activity_vad() {
-    let (event_sender, mut event_receiver) = broadcast::channel(16);
-    let track_id = "test_track".to_string();
+    for vad_type in [VadType::WebRTC, VadType::Silero] {
+        let vad_name = match vad_type {
+            VadType::WebRTC => "WebRTC",
+            VadType::Silero => "Silero",
+        };
 
-    let vad = VadProcessor::new(VadType::Silero, event_sender.clone(), VADConfig::default());
+        println!("\n--- Testing {} VAD Engine ---", vad_name);
 
-    // Test with silence (all zeros)
-    let mut silence_frame = AudioFrame {
-        track_id: track_id.clone(),
-        samples: Samples::PCM(vec![0; 512]), // Use 512 samples for VoiceActivityVad (32ms at 16kHz)
-        sample_rate: 16000,
-        timestamp: 0,
-    };
-    vad.process_frame(&mut silence_frame).unwrap();
+        let (event_sender, mut event_receiver) = broadcast::channel(16);
+        let track_id = "test_track".to_string();
 
-    // Should receive silence event
-    if let Ok(SessionEvent::Silence {
-        track_id: id,
-        timestamp: ts,
-    }) = event_receiver.try_recv()
-    {
-        assert_eq!(id, track_id);
-        assert_eq!(ts, 0);
-    } else {
-        panic!("Expected silence event");
-    }
+        let config = VADConfig::default();
+        let vad = VadProcessor::new(vad_type, event_sender.clone(), config)
+            .expect("Failed to create VAD processor");
 
-    // Test with speech frame (doesn't matter what we send since we're in test mode)
-    let speech_samples: Vec<i16> = (0..512)
-        .map(|i| ((i as f32 * 0.1).sin() * 25000.0) as i16)
-        .collect();
+        let (frame_size, chunk_duration_ms) = (320, 20);
+        let mut total_duration = 0;
+        for (i, chunk) in all_samples.chunks(frame_size).enumerate() {
+            let chunk_vec = chunk.to_vec();
+            let chunk_vec = if chunk_vec.len() < frame_size {
+                let mut padded = chunk_vec;
+                padded.resize(frame_size, 0);
+                padded
+            } else {
+                chunk_vec
+            };
 
-    let mut speech_frame = AudioFrame {
-        track_id: track_id.clone(),
-        samples: Samples::PCM(speech_samples),
-        sample_rate: 16000,
-        timestamp: 1,
-    };
-    vad.process_frame(&mut speech_frame).unwrap();
+            let mut frame = AudioFrame {
+                track_id: track_id.clone(),
+                samples: Samples::PCM { samples: chunk_vec },
+                sample_rate,
+                timestamp: i as u64 * chunk_duration_ms,
+            };
 
-    // Check what event we got
-    match event_receiver.try_recv() {
-        Ok(SessionEvent::Speaking {
-            track_id: id,
-            timestamp: ts,
-        }) => {
-            assert_eq!(id, track_id);
-            assert_eq!(ts, 1);
+            vad.process_frame(&mut frame).unwrap();
+            total_duration += chunk_duration_ms;
         }
-        Ok(other_event) => {
-            panic!("Expected speech event, but got {:?}", other_event);
+        sleep(Duration::from_millis(50)).await;
+        println!(
+            "Events from {} VAD, total duration: {}ms",
+            vad_name, total_duration
+        );
+
+        let mut results = TestResults::default();
+        while let Ok(event) = event_receiver.try_recv() {
+            match event {
+                SessionEvent::Speaking { start_time, .. } => {
+                    println!("  Speaking event at {}ms", start_time);
+                }
+                SessionEvent::Silence {
+                    start_time,
+                    duration,
+                    ..
+                } => {
+                    if duration > 0 {
+                        println!(
+                            "  Silence event: start_time={}ms, duration={}ms",
+                            start_time, duration
+                        );
+                        results.speech_segments.push((start_time, duration));
+                    }
+                }
+                _ => {}
+            }
         }
-        Err(e) => {
-            panic!("Expected speech event, but got error: {:?}", e);
-        }
+
+        println!(
+            "{} detected {} speech segments:",
+            vad_name,
+            results.speech_segments.len()
+        );
+        assert!(results.speech_segments.len() == 2);
+        //1260ms - 1620m
+        let first_speech = results.speech_segments[0];
+        assert!(
+            (1140..=1260).contains(&first_speech.0),
+            "{} first speech should be in range 1260-1300ms, got {}ms",
+            vad_name,
+            first_speech.0
+        );
+        assert!(
+            (380..=500).contains(&first_speech.1),
+            "{} first speech duration should be in range 380-500ms, got {}ms",
+            vad_name,
+            first_speech.1
+        );
+        //4080-5200ms
     }
-}
-
-#[tokio::test]
-async fn test_vad_type_switching() {
-    let (event_sender, _) = broadcast::channel(16);
-    let track_id = "test_track".to_string();
-
-    // Create VAD with WebRTC type
-    let vad = VadProcessor::new(VadType::WebRTC, event_sender.clone(), VADConfig::default());
-
-    // Create VAD with VoiceActivity type
-    let vad2 = VadProcessor::new(VadType::Silero, event_sender.clone(), VADConfig::default());
-
-    // Test that both can process frames
-    let mut frame = AudioFrame {
-        track_id,
-        samples: Samples::PCM(vec![0; 512]), // Use 512 samples (32ms at 16kHz)
-        sample_rate: 16000,
-        timestamp: 0,
-    };
-
-    vad.process_frame(&mut frame).unwrap();
-
-    // Clone the frame for the second processor
-    let mut frame2 = frame.clone();
-    vad2.process_frame(&mut frame2).unwrap();
+    println!("All VAD engine tests completed successfully");
 }

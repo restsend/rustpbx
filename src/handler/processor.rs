@@ -13,7 +13,7 @@ impl<T: TranscriptionClient> AsrProcessor<T> {
 impl<T: TranscriptionClient> Processor for AsrProcessor<T> {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         match &frame.samples {
-            Samples::PCM(samples) => {
+            Samples::PCM { samples } => {
                 self.asr.send_audio(&samples)?;
             }
             _ => {}

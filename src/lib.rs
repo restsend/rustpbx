@@ -17,8 +17,14 @@ pub type TrackId = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Samples {
-    PCM(Vec<i16>),
-    RTP(u8, Vec<u8>),
+    PCM {
+        samples: Vec<i16>,
+    },
+    RTP {
+        sequence_number: u16,
+        payload_type: u8,
+        payload: Vec<u8>,
+    },
     Empty,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

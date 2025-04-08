@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
-
+/// API Tencent Cloud streaming ASR
+/// https://cloud.tencent.com/document/api/1073/94308
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudAsrResult {
     pub slice_type: u32,

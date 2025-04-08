@@ -56,14 +56,18 @@ async fn test_recorder() -> Result<()> {
 
         let left_frame = AudioFrame {
             track_id: left_channel_id.clone(),
-            samples: Samples::PCM(left_samples),
+            samples: Samples::PCM {
+                samples: left_samples,
+            },
             timestamp: (i * 100), // Increment timestamp by 100ms
             sample_rate: 16000,
         };
 
         let right_frame = AudioFrame {
             track_id: right_channel_id.clone(),
-            samples: Samples::PCM(right_samples),
+            samples: Samples::PCM {
+                samples: right_samples,
+            },
             timestamp: (i * 100), // Same timestamp for synchronized channels
             sample_rate: 16000,
         };

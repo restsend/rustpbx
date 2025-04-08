@@ -184,7 +184,7 @@ impl Recorder {
     }
     async fn append_frame(&self, frame: AudioFrame) -> Result<()> {
         let buffer = match frame.samples {
-            Samples::PCM(samples) => samples,
+            Samples::PCM { samples } => samples,
             _ => return Ok(()), // ignore non-PCM frames
         };
         let mut channels = self.channels.lock().unwrap();

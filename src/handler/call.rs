@@ -2,6 +2,7 @@ use super::{processor::AsrProcessor, Command, StreamOptions};
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
+        denoiser::NoiseReducer,
         negotiate::strip_ipv6_candidates,
         processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
@@ -31,6 +32,10 @@ pub type ActiveCallRef = Arc<ActiveCall>;
 pub struct CallHandlerState {
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub recorder_root: String,
+}
+#[derive(Deserialize)]
+pub struct CallParams {
+    pub id: Option<String>,
 }
 
 impl CallHandlerState {
@@ -123,14 +128,22 @@ impl ActiveCall {
             .flatten();
 
         let mut processors = vec![];
+        match options.denoise {
+            Some(true) => {
+                let noise_reducer = NoiseReducer::new();
+                processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
+            }
+            _ => {}
+        }
         match options.vad {
             Some(ref vad_config) => {
                 let vad_config = vad_config.to_owned();
+                info!("Vad processor added {:?}", vad_config);
                 let vad_processor = VadProcessor::new(
                     vad_config.r#type,
                     media_stream.get_event_sender(),
                     vad_config,
-                );
+                )?;
                 processors.push(Box::new(vad_processor) as Box<dyn Processor>);
             }
             None => {}

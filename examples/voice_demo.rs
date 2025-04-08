@@ -5,6 +5,7 @@ use cpal::{BufferSize, SampleFormat, SampleRate, SizedSample, StreamConfig};
 use dotenv::dotenv;
 use futures::StreamExt;
 use rustpbx::llm::LlmContent;
+use rustpbx::media::codecs::{convert_s16_to_u8, convert_u8_to_s16};
 use rustpbx::media::track::file::read_wav_file;
 use rustpbx::synthesis::SynthesisClient;
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
@@ -434,26 +435,28 @@ async fn main() -> Result<()> {
                                 if let Ok(LlmContent::Final(text)) = content {
                                     info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
                                     let st = Instant::now();
-                                    if let Ok(audio) = tts_client.synthesize(&text).await {
+                                    if let Ok(mut audio_stream) = tts_client.synthesize(&text).await
+                                    {
+                                        let mut total_bytes = 0;
+                                        while let Some(Ok(chunk)) = audio_stream.next().await {
+                                            total_bytes += chunk.len();
+                                            let audio_data: Vec<i16> = convert_u8_to_s16(&chunk);
+                                            let final_audio = if sample_rate != output_sample_rate {
+                                                resample::resample_mono(
+                                                    &audio_data,
+                                                    sample_rate,
+                                                    output_sample_rate,
+                                                )
+                                            } else {
+                                                audio_data
+                                            };
+                                            output_buffer.push(&final_audio);
+                                        }
                                         info!(
                                             "TTS synthesis: {}ms ({}) bytes",
                                             st.elapsed().as_millis(),
-                                            audio.len()
+                                            total_bytes
                                         );
-                                        let audio_data: Vec<i16> = audio
-                                            .chunks_exact(2)
-                                            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                                            .collect();
-                                        let final_audio = if sample_rate != output_sample_rate {
-                                            resample::resample_mono(
-                                                &audio_data,
-                                                sample_rate,
-                                                output_sample_rate,
-                                            )
-                                        } else {
-                                            audio_data
-                                        };
-                                        output_buffer.push(&final_audio);
                                     } else {
                                         error!("Error synthesizing TTS");
                                         break;
