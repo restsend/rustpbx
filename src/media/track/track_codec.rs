@@ -52,7 +52,7 @@ impl TrackCodec {
 
     pub fn encode(&self, payload_type: u8, frame: AudioFrame) -> Vec<u8> {
         match frame.samples {
-            Samples::PCM(mut pcm) => {
+            Samples::PCM { samples: mut pcm } => {
                 let target_samplerate = match payload_type {
                     0 => 8000,
                     8 => 8000,
@@ -71,7 +71,7 @@ impl TrackCodec {
                     _ => convert_s16_to_u8(&pcm),
                 }
             }
-            Samples::RTP(_, payload) => payload,
+            Samples::RTP { payload, .. } => payload,
             Samples::Empty => vec![],
         }
     }

@@ -2,10 +2,17 @@ function mainApp() {
     return {
         // Configuration state
         config: {
+            denoise: {
+                enabled: false,
+            },
             vad: {
                 type: 'webrtc',
                 enabled: false,
-                threshold: 0.5
+                voiceThreshold: 0.7,
+                ratio: 0.95,
+                speechPadding: 120,
+                silencePadding: 500,
+                noiseGating: 10,
             },
             recording: {
                 enabled: false,
@@ -117,6 +124,12 @@ function mainApp() {
             }
         },
 
+        // Clear all event log entries
+        clearEventLog() {
+            this.eventLog = [];
+            this.addLogEntry('SYSTEM', 'Console cleared');
+        },
+
         // Map legacy log types to new format
         mapLegacyLogType(type) {
             const typeMap = {
@@ -190,7 +203,7 @@ function mainApp() {
                         this.handleVadStatus({ active: true })
                         break
                     case 'silence':
-                        this.handleVadStatus({ active: false })
+                        this.handleVadStatus({ active: false, duration: event.duration, startTime: event.startTime })
                         break
                     case 'transcriptionFinal':
                         this.handleTranscriptionFinal(event)
@@ -235,7 +248,11 @@ function mainApp() {
         },
         // Handle VAD status update
         handleVadStatus(event) {
-            this.addLogEntry('VAD', `${event.active ? 'Speech detected' : 'Silence detected'}`);
+            if (event.active) {
+                this.addLogEntry('VAD', `Speech detected`);
+            } else {
+                this.addLogEntry('VAD', `Silence detected, duration: ${event.duration} ms, startTime: ${event.startTime} ms`);
+            }
         },
         async playWav(url) {
             const playCommand = {
@@ -495,11 +512,21 @@ function mainApp() {
                     samplerate: this.config.recording.samplerate,
                     ptime: this.config.recording.ptime
                 } : undefined;
+
+                let vad = this.config.vad.enabled ? {
+                    type: this.config.vad.type,
+                    voiceThreshold: this.config.vad.type == 'silero' ? parseFloat(this.config.vad.voiceThreshold) : undefined,
+                    ratio: parseFloat(this.config.vad.ratio),
+                    speechPadding: parseInt(this.config.vad.speechPadding),
+                    noiseGating: parseInt(this.config.vad.noiseGating)
+                } : undefined;
+                let denoise = this.config.denoise.enabled ? true : undefined;
                 const invite = {
                     command: 'invite',
                     options: {
                         offer: this.peerConnection.localDescription.sdp,
-                        vad: this.config.vad,
+                        vad,
+                        denoise,
                         asr: {
                             provider: this.config.asr.provider,
                             appId: this.config.asr.appId || undefined,

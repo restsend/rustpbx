@@ -5,6 +5,8 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::{stream, Stream};
+use std::pin::Pin;
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
@@ -16,26 +18,43 @@ struct MockSynthesisClient;
 
 #[async_trait]
 impl SynthesisClient for MockSynthesisClient {
-    async fn synthesize(&self, _text: &str) -> Result<Vec<u8>> {
-        // Generate 1 second of sine wave at 440Hz, 16kHz sample rate
+    async fn synthesize<'a>(
+        &'a self,
+        _text: &'a str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+        // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
         let duration_seconds = 1.0;
         let num_samples = (sample_rate as f64 * duration_seconds) as usize;
 
-        // Generate PCM audio data (16-bit)
-        let mut audio_data = Vec::with_capacity(num_samples * 2);
-        for i in 0..num_samples {
-            let t = i as f64 / sample_rate as f64;
-            let amplitude = 16384.0; // Half of 16-bit range (32768/2)
-            let sample = (amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()) as i16;
+        // Split into 4 chunks (250ms each)
+        let chunk_size = num_samples / 4;
+        let mut chunks = Vec::new();
 
-            // Convert to bytes (little endian)
-            audio_data.push((sample & 0xFF) as u8);
-            audio_data.push(((sample >> 8) & 0xFF) as u8);
+        for chunk_idx in 0..4 {
+            let start = chunk_idx * chunk_size;
+            let end = start + chunk_size;
+
+            // Generate PCM audio data for this chunk (16-bit)
+            let mut chunk_data = Vec::with_capacity(chunk_size * 2);
+            for i in start..end {
+                let t = i as f64 / sample_rate as f64;
+                let amplitude = 16384.0; // Half of 16-bit range (32768/2)
+                let sample =
+                    (amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()) as i16;
+
+                // Convert to bytes (little endian)
+                chunk_data.push((sample & 0xFF) as u8);
+                chunk_data.push(((sample >> 8) & 0xFF) as u8);
+            }
+
+            chunks.push(Ok(chunk_data));
         }
 
-        Ok(audio_data)
+        // Create a stream from the chunks
+        let stream = stream::iter(chunks);
+        Ok(Box::pin(stream))
     }
 }
 
@@ -82,7 +101,7 @@ async fn test_tts_track_basic() -> Result<()> {
 
     // Check that we have PCM samples
     match &frame.samples {
-        Samples::PCM(samples) => {
+        Samples::PCM { samples } => {
             assert!(!samples.is_empty(), "Expected non-empty samples");
             // Ensure we have some reasonable amount of samples
             assert!(samples.len() > 100, "Too few samples in the frame");
@@ -150,7 +169,7 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
 
         // Ensure each frame has valid PCM samples
         match &frame.samples {
-            Samples::PCM(samples) => {
+            Samples::PCM { samples } => {
                 assert!(!samples.is_empty(), "Expected non-empty samples");
             }
             _ => panic!("Expected PCM samples"),

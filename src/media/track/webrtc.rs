@@ -11,7 +11,6 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
 use std::{sync::Arc, time::SystemTime};
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
@@ -241,11 +240,12 @@ impl WebrtcTrack {
                         if let Some(sender) = packet_sender.as_ref() {
                             let frame = AudioFrame {
                                 track_id: track_id_clone.clone(),
-                                samples: crate::Samples::RTP(
-                                    packet.header.payload_type,
-                                    packet.payload.to_vec(),
-                                ),
-                                timestamp: packet.header.timestamp as u64,
+                                samples: crate::Samples::RTP {
+                                    payload_type: packet.header.payload_type,
+                                    payload: packet.payload.to_vec(),
+                                    sequence_number: packet.header.sequence_number,
+                                },
+                                timestamp: crate::get_timestamp(),
                                 sample_rate: track_samplerate,
                                 ..Default::default()
                             };

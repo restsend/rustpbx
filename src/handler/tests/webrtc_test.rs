@@ -4,7 +4,6 @@ use crate::media::codecs::resample::resample_mono;
 use crate::media::codecs::{CodecType, Encoder};
 use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
-use crate::media::vad::VadType;
 use crate::transcription::TranscriptionType;
 use crate::{
     handler::{call::CallHandlerState, Command, StreamOptions},
@@ -164,10 +163,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     // Create the invite command with proper options
     let options = StreamOptions {
         offer: Some(offer.sdp.clone()),
-        vad: Some(crate::media::vad::VADConfig {
-            r#type: VadType::WebRTC,
-            ..Default::default()
-        }),
+        vad: Some(crate::media::vad::VADConfig::default()),
         asr: Some(TranscriptionConfig {
             provider: Some(TranscriptionType::TencentCloud),
             ..Default::default()

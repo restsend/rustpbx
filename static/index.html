@@ -23,6 +23,13 @@
             <div class="w-full md:w-1/2 bg-white p-4 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4 border-b pb-2">Configuration</h2>
 
+                <div class="mb-6">
+                    <h3 class="text-lg font-semibold mb-2">Denoise Settings</h3>
+                    <div class="flex items-center mb-2">
+                        <input type="checkbox" id="enableDenoise" x-model="config.denoise.enabled" class="mr-2">
+                        <label for="enableDenoise">Enable Noise Denoiser</label>
+                    </div>
+                </div>
                 <!-- VAD Configuration -->
                 <div class="mb-6">
                     <h3 class="text-lg font-semibold mb-2">VAD Settings</h3>
@@ -38,10 +45,36 @@
                                 <option value="silero">Silero</option>
                             </select>
 
-                            <label for="vadThreshold" class="text-sm">Threshold</label>
-                            <input type="range" id="vadThreshold" x-model="config.vad.threshold" min="0" max="1"
-                                step="0.01" class="w-full">
-                            <span class="text-xs text-right" x-text="config.vad.threshold"></span>
+                            <template x-if="config.vad.type === 'silero'">
+                                <div>
+                                    <label for="vadVoiceThreshold" class="text-sm">Voice Threshold</label>
+                                    <input type="range" id="vad Voice Threshold" x-model="config.vad.voiceThreshold"
+                                        min="0" max="1" step="0.01" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.vad.voiceThreshold"></span>
+                                </div>
+                            </template>
+
+                            <label for="vadRatio" class="text-sm">Ratio</label>
+                            <input type="range" id="vadRatio" x-model="config.vad.ratio" min="0" max="1" step="0.01"
+                                class="w-full">
+                            <span class="text-xs text-right" x-text="config.vad.ratio"></span>
+
+                            <label for="vadSpeechPadding" class="text-sm">Speech Padding</label>
+                            <input type="range" id="vadSpeechPadding" x-model="config.vad.speechPadding" min="100"
+                                max="1000" step="50" class="w-full">
+                            <span class="text-xs text-right" x-text="config.vad.speechPadding"></span>
+
+                            <label for="vadSilencePadding" class="text-sm">Silence Padding</label>
+                            <input type="range" id="vadSilencePadding" x-model="config.vad.silencePadding" min="300"
+                                max="1000" step="50" class="w-full">
+                            <span class="text-xs text-right" x-text="config.vad.silencePadding"></span>
+
+                            <div class="pl-4 space-y-2">
+                                <label for="noiseGatingThreshold" class="text-sm">Noise gating threshold</label>
+                                <input type="range" id="noiseGatingThreshold" x-model="config.vad.noiseGating" min="0"
+                                    max="5000" step="50" class="w-full">
+                                <span class="text-xs text-right" x-text="config.vad.noiseGating"></span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -159,21 +192,28 @@
                 <h2 class="text-xl font-bold mb-4 border-b pb-2">Debug Console</h2>
 
                 <!-- Connection Status -->
-                <div class="mb-4 flex items-center space-x-4">
-                    <div class="flex items-center">
-                        <span class="mr-2">WebSocket:</span>
-                        <span :class="wsStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
-                            <i :class="wsStatus === 'connected' ? 'fas fa-plug' : 'fas fa-plug-circle-exclamation'"></i>
-                            <span x-text="wsStatus"></span>
-                        </span>
+                <div class="mb-4 flex items-center space-x-4 justify-between">
+                    <div class="flex items-center space-x-4">
+                        <div class="flex items-center">
+                            <span class="mr-2">WebSocket:</span>
+                            <span :class="wsStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
+                                <i
+                                    :class="wsStatus === 'connected' ? 'fas fa-plug' : 'fas fa-plug-circle-exclamation'"></i>
+                                <span x-text="wsStatus"></span>
+                            </span>
+                        </div>
+                        <div class="flex items-center">
+                            <span class="mr-2">WebRTC:</span>
+                            <span :class="rtcStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
+                                <i :class="rtcStatus === 'connected' ? 'fas fa-phone' : 'fas fa-phone-slash'"></i>
+                                <span x-text="rtcStatus"></span>
+                            </span>
+                        </div>
                     </div>
-                    <div class="flex items-center">
-                        <span class="mr-2">WebRTC:</span>
-                        <span :class="rtcStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
-                            <i :class="rtcStatus === 'connected' ? 'fas fa-phone' : 'fas fa-phone-slash'"></i>
-                            <span x-text="rtcStatus"></span>
-                        </span>
-                    </div>
+                    <button @click="clearEventLog"
+                        class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-1 px-3 rounded">
+                        Clear Console
+                    </button>
                 </div>
 
                 <!-- Timeline-style Debug Console -->

@@ -17,7 +17,7 @@ use std::time::Instant;
 use tokio::select;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct FileTrack {
     track_id: TrackId,
@@ -128,7 +128,7 @@ impl Track for FileTrack {
             };
 
             if let Err(e) = stream_result {
-                tracing::error!("filetrack: Error streaming audio: {}, {}", path, e);
+                error!("filetrack: Error streaming audio: {}, {}", path, e);
             }
             // Signal the end of the file
             event_sender
@@ -393,7 +393,9 @@ async fn process_wav_reader<R: std::io::Read + Send>(
             let packet = AudioFrame {
                 track_id: track_id.to_string(),
                 timestamp: crate::get_timestamp(),
-                samples: Samples::PCM(chunk.to_vec()),
+                samples: Samples::PCM {
+                    samples: chunk.to_vec(),
+                },
                 sample_rate: target_sample_rate,
             };
 

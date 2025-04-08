@@ -38,7 +38,7 @@ impl TestTrack {
         AudioFrame {
             track_id: self.id.clone(),
             timestamp,
-            samples: Samples::PCM(samples),
+            samples: Samples::PCM { samples: samples },
             sample_rate: 16000,
         }
     }
@@ -53,7 +53,11 @@ impl TestTrack {
         AudioFrame {
             track_id: self.id.clone(),
             timestamp,
-            samples: Samples::RTP(payload_type, payload),
+            samples: Samples::RTP {
+                payload_type,
+                payload,
+                sequence_number: 1,
+            },
             sample_rate: 16000,
         }
     }
@@ -154,10 +158,14 @@ mod tests {
     #[tokio::test]
     async fn test_stream_remove_track() {
         let event_sender = crate::event::create_event_sender();
-        let stream = MediaStreamBuilder::new(event_sender).build();
-        let track = Box::new(TestTrack::new("test1".to_string()));
-        stream.update_track(track).await;
-        stream.remove_track(&"test1".to_string()).await;
+        let stream = MediaStreamBuilder::new(event_sender.clone())
+            .with_id("ms:test".to_string())
+            .build();
+        let track_id = "test1".to_string();
+        stream
+            .update_track(Box::new(TestTrack::new(track_id.clone())))
+            .await;
+        stream.remove_track(&track_id).await;
     }
 }
 
@@ -242,7 +250,7 @@ async fn test_stream_forward_packets() -> Result<()> {
     let packet = AudioFrame {
         track_id: track2_id.clone(),
         timestamp: 1000,
-        samples: Samples::PCM(samples),
+        samples: Samples::PCM { samples: samples },
         sample_rate: 16000,
     };
 
@@ -305,14 +313,14 @@ async fn test_stream_recorder() -> Result<()> {
     let packet1 = AudioFrame {
         track_id: track2_id.clone(),
         timestamp: 1000,
-        samples: Samples::PCM(samples1),
+        samples: Samples::PCM { samples: samples1 },
         sample_rate: 16000,
     };
 
     let packet2 = AudioFrame {
         track_id: track2_id,
         timestamp: 1020,
-        samples: Samples::PCM(samples2),
+        samples: Samples::PCM { samples: samples2 },
         sample_rate: 16000,
     };
 
@@ -361,7 +369,11 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
     let rtp_packet = AudioFrame {
         track_id: "track2".to_string(),
         timestamp: 1000,
-        samples: Samples::RTP(0, vec![1, 2, 3, 4]), // Simple payload for testing
+        samples: Samples::RTP {
+            payload_type: 0,
+            payload: vec![1, 2, 3, 4],
+            sequence_number: 1,
+        },
         sample_rate: 16000,
     };
 
@@ -372,7 +384,9 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
     let pcm_packet = AudioFrame {
         track_id: "track1".to_string(),
         timestamp: 2000,
-        samples: Samples::PCM(vec![3000, 6000, 9000, 12000]),
+        samples: Samples::PCM {
+            samples: vec![3000, 6000, 9000, 12000],
+        },
         sample_rate: 16000,
     };
 

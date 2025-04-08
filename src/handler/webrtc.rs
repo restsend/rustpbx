@@ -1,3 +1,4 @@
+use super::call::CallParams;
 use crate::handler::{
     call::{ActiveCall, CallHandlerState},
     Command,
@@ -8,16 +9,11 @@ use axum::{
     response::Response,
 };
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
 use std::{sync::Arc, time::Instant};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
-#[derive(Deserialize)]
-pub struct CallParams {
-    id: Option<String>,
-}
 
 pub async fn webrtc_handler(
     ws: WebSocketUpgrade,

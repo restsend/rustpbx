@@ -1,5 +1,6 @@
 use crate::synthesis::{tencent_cloud::TencentCloudTtsClient, SynthesisClient, SynthesisConfig};
 use dotenv::dotenv;
+use futures::StreamExt;
 use std::env;
 use tokio::time::{timeout, Duration};
 
@@ -39,32 +40,65 @@ async fn test_tencent_cloud_tts() {
 
     let result_fut = async {
         match client.synthesize(text).await {
-            Ok(audio) => audio,
+            Ok(mut stream) => {
+                // Collect all chunks from the stream
+                let mut total_size = 0;
+                let mut chunks_count = 0;
+                let mut collected_audio = Vec::new();
+
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            total_size += chunk.len();
+                            chunks_count += 1;
+                            collected_audio.extend_from_slice(&chunk);
+                        }
+                        Err(e) => {
+                            println!("Error in audio stream chunk: {:?}", e);
+                            return (0, 0, vec![]);
+                        }
+                    }
+                }
+
+                (total_size, chunks_count, collected_audio)
+            }
             Err(e) => {
                 println!("TTS synthesis error: {:?}", e);
-                vec![] // Return empty vec on error to continue the test
+                (0, 0, vec![]) // Return empty vec on error to continue the test
             }
         }
     };
 
     let timeout_duration = Duration::from_secs(10);
     match timeout(timeout_duration, result_fut).await {
-        Ok(audio) => {
-            if audio.is_empty() {
+        Ok((total_size, chunks_count, audio)) => {
+            if total_size == 0 {
                 println!("Test skipped due to synthesis error");
                 return;
             }
 
-            assert!(!audio.is_empty(), "Expected non-empty audio data");
-            println!("Received audio data of size: {} bytes", audio.len());
+            assert!(total_size > 0, "Expected non-empty audio data from stream");
+            assert!(chunks_count > 0, "Expected at least one chunk from stream");
+            println!(
+                "Received {} audio chunks with total size: {} bytes",
+                chunks_count, total_size
+            );
 
             // Basic PCM validation - check that audio data length is reasonable
             // For PCM at 16kHz, 16-bit, mono, we expect ~32000 bytes per second
             // For a short phrase, we expect at least a few thousand bytes
             assert!(
-                audio.len() > 1000,
+                total_size > 1000,
                 "Audio data size too small: {} bytes",
-                audio.len()
+                total_size
+            );
+
+            // Verify the complete audio
+            assert!(!audio.is_empty(), "Expected non-empty audio data");
+            assert_eq!(
+                audio.len(),
+                total_size,
+                "Collected audio size should match total size"
             );
         }
         Err(_) => {

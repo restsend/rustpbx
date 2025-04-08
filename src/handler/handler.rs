@@ -12,9 +12,9 @@ use tracing::info;
 pub fn router(useragent: Arc<UserAgent>) -> Router<CallHandlerState> {
     Router::new()
         .route("/call/webrtc", get(super::webrtc::webrtc_handler))
+        .route("/call/sip", get(super::sip::sip_handler))
         .route("/call/lists", get(list_calls))
         .route("/call/kill/{id}", post(kill_call))
-        .merge(super::sip::router())
         .layer(axum::extract::Extension(useragent))
 }
 

@@ -132,7 +132,9 @@ async fn test_rtp_track_send_packet() -> Result<()> {
     // Create a test audio frame with silence
     let audio_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: Samples::PCM(vec![0; 160]), // 20ms of silence at 8kHz
+        samples: Samples::PCM {
+            samples: vec![0; 160],
+        },
         timestamp: 0,
         sample_rate: 8000,
     };
@@ -208,7 +210,9 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
     // Create an audio frame with PCM samples
     let audio_frame = AudioFrame {
         track_id: track_id.clone(),
-        samples: Samples::PCM(samples.clone()),
+        samples: Samples::PCM {
+            samples: samples.clone(),
+        },
         timestamp: 0,
         sample_rate,
     };
@@ -468,7 +472,9 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
         // Create a test frame - simple silence
         let frame = AudioFrame {
             track_id: track_id.clone(),
-            samples: Samples::PCM(vec![0; 160]), // 20ms of silence at 8kHz
+            samples: Samples::PCM {
+                samples: vec![0; 160],
+            },
             timestamp: i * 160,
             sample_rate: 8000,
         };
@@ -516,19 +522,25 @@ async fn test_jitter_buffer_integration() -> Result<()> {
     let frames = vec![
         AudioFrame {
             track_id: track_id.clone(),
-            samples: Samples::PCM(vec![0; 160]),
+            samples: Samples::PCM {
+                samples: vec![0; 160],
+            },
             timestamp: 30, // Out of order
             sample_rate,
         },
         AudioFrame {
             track_id: track_id.clone(),
-            samples: Samples::PCM(vec![0; 160]),
+            samples: Samples::PCM {
+                samples: vec![0; 160],
+            },
             timestamp: 10, // First in order
             sample_rate,
         },
         AudioFrame {
             track_id: track_id.clone(),
-            samples: Samples::PCM(vec![0; 160]),
+            samples: Samples::PCM {
+                samples: vec![0; 160],
+            },
             timestamp: 20, // Second in order
             sample_rate,
         },

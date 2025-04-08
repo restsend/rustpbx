@@ -1,9 +1,9 @@
 pub mod cache;
 pub mod codecs;
+pub mod denoiser;
 pub mod dtmf;
 pub mod jitter;
 pub mod negotiate;
-pub mod noise;
 pub mod processor;
 pub mod recorder;
 pub mod stream;

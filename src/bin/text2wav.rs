@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use dotenv::dotenv;
+use futures::StreamExt;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
+use rustpbx::media::codecs::{convert_s16_to_u8, convert_u8_to_s16};
 use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, SynthesisType, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
@@ -222,23 +224,28 @@ async fn main() -> Result<()> {
             info!("Synthesizing text: {}", segment.text);
 
             match tts_client.synthesize(&segment.text).await {
-                Ok(audio_data) => {
-                    debug!("Received {} bytes of audio data", audio_data.len());
-
-                    // Convert PCM data to i16 samples
-                    let samples: Vec<i16> = audio_data
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                        .collect();
-
-                    debug!("Converted to {} i16 samples", samples.len());
-
-                    // Write the samples to WAV file
-                    for &sample in &samples {
-                        writer.write_sample(sample)?;
+                Ok(mut audio_stream) => {
+                    let mut total_bytes = 0;
+                    while let Some(chunk_result) = audio_stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                debug!("Received chunk of {} bytes", chunk.len());
+                                total_bytes += chunk.len();
+                                let samples: Vec<i16> = convert_u8_to_s16(&chunk);
+                                for &sample in &samples {
+                                    writer.write_sample(sample)?;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error in audio stream chunk: {:?}", e);
+                                return Err(anyhow::anyhow!(
+                                    "Failed to process audio chunk: {}",
+                                    e
+                                ));
+                            }
+                        }
                     }
-
-                    debug!("Added {} samples of speech", samples.len());
+                    debug!("Received total of {} bytes of audio data", total_bytes);
                 }
                 Err(e) => {
                     error!("Failed to synthesize text: {}", e);

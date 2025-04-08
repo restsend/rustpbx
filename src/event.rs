@@ -30,11 +30,17 @@ pub enum SessionEvent {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+        start_time: u64,
     },
     Silence {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+        #[serde(rename = "startTime")]
+        start_time: u64,
+        duration: u64,
+        #[serde(skip)]
+        samples: Option<Vec<i16>>,
     },
     DTMF {
         #[serde(rename = "trackId")]

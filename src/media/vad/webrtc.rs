@@ -1,38 +1,35 @@
-use super::{ThreadSafeVad, VadEngine};
+use super::VadEngine;
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
-use std::sync::Mutex;
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
 pub struct WebRtcVad {
-    vad: ThreadSafeVad,
+    vad: Vad,
 }
 
 impl WebRtcVad {
-    pub fn new() -> Self {
-        Self {
-            vad: ThreadSafeVad(Mutex::new(Vad::new_with_rate_and_mode(
-                SampleRate::Rate16kHz,
-                VadMode::Quality,
-            ))),
-        }
+    pub fn new(samplerate: u32) -> Result<Self> {
+        let sample_rate = match samplerate {
+            8000 => SampleRate::Rate8kHz,
+            16000 => SampleRate::Rate16kHz,
+            _ => return Err(anyhow::anyhow!("Unsupported sample rate: {}", samplerate)),
+        };
+
+        Ok(Self {
+            vad: Vad::new_with_rate_and_mode(sample_rate, VadMode::VeryAggressive),
+        })
     }
 }
+unsafe impl Send for WebRtcVad {}
+unsafe impl Sync for WebRtcVad {}
 
 impl VadEngine for WebRtcVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
-        // Process in chunks of 30ms (480 samples at 16kHz)
         let samples = match &frame.samples {
-            Samples::PCM(samples) => samples,
+            Samples::PCM { samples } => samples,
             _ => return Ok(false),
         };
 
-        Ok(self
-            .vad
-            .0
-            .lock()
-            .unwrap()
-            .is_voice_segment(samples)
-            .unwrap_or(false))
+        Ok(self.vad.is_voice_segment(samples).unwrap_or(false))
     }
 }

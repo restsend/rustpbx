@@ -2,14 +2,17 @@ use super::{SynthesisClient, SynthesisConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use futures::{stream, Stream};
 use hmac::{Hmac, Mac};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::pin::Pin;
 use tracing::debug;
 use uuid;
 
-// TencentCloud TTS Response structure
+/// TencentCloud TTS Response structure
+/// https://cloud.tencent.com/document/api/1073/37995
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudTtsResponse {
     #[serde(rename = "Response")]
@@ -216,7 +219,11 @@ impl TencentCloudTtsClient {
 
 #[async_trait]
 impl SynthesisClient for TencentCloudTtsClient {
-    async fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
-        self.synthesize_text(&text).await
+    async fn synthesize<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+        let audio = self.synthesize_text(text).await?;
+        Ok(Box::pin(stream::once(async move { Ok(audio) })))
     }
 }

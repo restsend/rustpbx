@@ -11,6 +11,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use std::{sync::Arc, time::Instant};
 use tokio::{
     select,
@@ -141,8 +142,47 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 }
 
                 let start_time = Instant::now();
-                match client.synthesize(&text).await {
-                    Ok(audio) => {
+
+                // Use synthesize which now returns a stream directly
+                match client.synthesize(&text.to_string()).await {
+                    Ok(mut stream) => {
+                        let mut total_audio_len = 0;
+                        let mut audio_chunks = Vec::new();
+
+                        // Process each audio chunk as it arrives
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(audio_chunk) => {
+                                    // Process the audio chunk
+                                    total_audio_len += audio_chunk.len();
+
+                                    // Strip wav header if present (only for the first chunk)
+                                    let processed_chunk = if audio_chunks.is_empty()
+                                        && audio_chunk.len() > 44
+                                        && audio_chunk[..4] == [0x52, 0x49, 0x46, 0x46]
+                                    {
+                                        audio_chunk[44..].to_vec()
+                                    } else {
+                                        audio_chunk
+                                    };
+
+                                    // Store the processed chunk for caching later if needed
+                                    audio_chunks.push(processed_chunk.clone());
+
+                                    // Convert to s16 and add to buffer immediately for streaming playback
+                                    buffer_clone
+                                        .lock()
+                                        .await
+                                        .extend(convert_u8_to_s16(&processed_chunk));
+                                }
+                                Err(e) => {
+                                    warn!("Error in audio stream chunk: {:?}", e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Send metrics event after all chunks are received
                         event_sender
                             .send(SessionEvent::Metrics {
                                 timestamp: crate::get_timestamp(),
@@ -150,27 +190,28 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                 metrics: serde_json::json!({
                                         "speaker": speaker,
                                         "playId": play_id,
-                                        "length": audio.len(),
+                                        "length": total_audio_len,
                                         "duration": start_time.elapsed().as_millis() as u32,
                                 }),
                             })
                             .ok();
+
                         info!(
                             "tts: synthesize audio {} bytes -> {}ms {}",
-                            audio.len(),
+                            total_audio_len,
                             start_time.elapsed().as_millis(),
                             text
                         );
-                        // strip wav header
-                        let audio = if audio.len() > 44 && audio[..4] == [0x52, 0x49, 0x46, 0x46] {
-                            audio[44..].to_vec()
-                        } else {
-                            audio
-                        };
-                        if use_cache {
-                            cache::store_in_cache(&cache_key, &audio).await.ok();
+
+                        // Cache the complete audio if caching is enabled
+                        if use_cache && !audio_chunks.is_empty() {
+                            // Combine all chunks for caching
+                            let complete_audio: Vec<u8> =
+                                audio_chunks.into_iter().flatten().collect();
+                            cache::store_in_cache(&cache_key, &complete_audio)
+                                .await
+                                .ok();
                         }
-                        buffer_clone.lock().await.extend(convert_u8_to_s16(&audio));
                     }
                     Err(e) => {
                         warn!("Error synthesizing text: {}", e);
@@ -204,7 +245,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 if let Some(packet) = packet {
                     let packet = AudioFrame {
                         track_id: track_id.clone(),
-                        samples: Samples::PCM(packet),
+                        samples: Samples::PCM { samples: packet },
                         timestamp: crate::get_timestamp(),
                         sample_rate,
                     };

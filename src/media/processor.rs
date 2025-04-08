@@ -21,8 +21,8 @@ impl Default for AudioFrame {
 impl Samples {
     pub fn is_empty(&self) -> bool {
         match self {
-            Samples::PCM(samples) => samples.is_empty(),
-            Samples::RTP(_, payload) => payload.is_empty(),
+            Samples::PCM { samples } => samples.is_empty(),
+            Samples::RTP { payload, .. } => payload.is_empty(),
             Samples::Empty => true,
         }
     }
@@ -57,7 +57,12 @@ impl ProcessorChain {
         }
 
         let mut frame = frame.clone();
-        if let Samples::RTP(payload_type, payload) = &frame.samples {
+        if let Samples::RTP {
+            payload_type,
+            payload,
+            ..
+        } = &frame.samples
+        {
             let samples = self.codec.lock().unwrap().decode(*payload_type, &payload);
             frame.sample_rate = match payload_type {
                 0 => 8000,
@@ -70,7 +75,7 @@ impl ProcessorChain {
             } else {
                 samples
             };
-            frame.samples = Samples::PCM(samples);
+            frame.samples = Samples::PCM { samples };
         }
         // Process the frame with all processors
         for processor in processors.iter() {

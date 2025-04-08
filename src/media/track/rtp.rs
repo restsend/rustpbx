@@ -422,7 +422,11 @@ impl RtpTrack {
                                     // Regular RTP audio packet
                                     let frame = AudioFrame {
                                         track_id: track_id.clone(),
-                                        samples: Samples::RTP(payload_type, payload),
+                                        samples: Samples::RTP {
+                                            payload_type,
+                                            payload,
+                                            sequence_number: reader.sequence_number().into(),
+                                        },
                                         timestamp: timestamp as u64,
                                         sample_rate: config.sample_rate,
                                     };

@@ -212,7 +212,11 @@ impl MediaStream {
     async fn process_dtmf(&self, packet: &AudioFrame) {
         match &packet.samples {
             // Check if the packet contains RTP data (our focus for DTMF detection)
-            Samples::RTP(payload_type, payload) => {
+            Samples::RTP {
+                payload_type,
+                payload,
+                ..
+            } => {
                 // Check for DTMF events in RTP payload
                 let mut dtmf_detector = self.dtmf_detector.lock().await;
                 if let Some(digit) =

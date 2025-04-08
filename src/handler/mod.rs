@@ -17,6 +17,7 @@ pub use handler::router;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamOptions {
+    pub denoise: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,6 +39,7 @@ pub struct StreamOptions {
 impl Default for StreamOptions {
     fn default() -> Self {
         Self {
+            denoise: None,
             offer: None,
             callee: None,
             caller: None,

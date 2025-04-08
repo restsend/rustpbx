@@ -1,5 +1,5 @@
 use crate::{
-    media::{noise::NoiseReducer, processor::Processor},
+    media::{denoiser::NoiseReducer, processor::Processor},
     AudioFrame, Samples,
 };
 
@@ -10,11 +10,16 @@ fn test_noise_reducer_frame_sizes() {
     // Test different frame sizes
     for size in [160, 320, 480, 960] {
         let mut frame = AudioFrame {
-            samples: Samples::PCM(vec![0; size]),
+            samples: Samples::PCM {
+                samples: vec![0; size],
+            },
             ..Default::default()
         };
         reducer.process_frame(&mut frame).unwrap();
-        assert!(matches!(frame.samples, Samples::PCM(samples) if samples.len() == size));
+        assert!(matches!(
+            frame.samples,
+            Samples::PCM { samples } if samples.len() == size
+        ));
     }
 }
 
@@ -25,7 +30,9 @@ fn test_noise_reducer_sample_rates() {
     // Test different sample rates
     for rate in [8000, 16000, 32000, 48000] {
         let mut frame = AudioFrame {
-            samples: Samples::PCM(vec![0; 480]),
+            samples: Samples::PCM {
+                samples: vec![0; 480],
+            },
             sample_rate: rate,
             ..Default::default()
         };
