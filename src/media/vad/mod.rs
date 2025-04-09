@@ -24,7 +24,6 @@ pub struct VADConfig {
     pub ratio: f32,
     pub voice_threshold: f32,
     pub max_buffer_duration_secs: u64,
-    pub noise_gating: u16,
 }
 
 impl Default for VADConfig {
@@ -32,12 +31,11 @@ impl Default for VADConfig {
         Self {
             r#type: VadType::WebRTC,
             samplerate: 16000,
-            speech_padding: 200,
-            silence_padding: 500,
-            ratio: 0.95,
-            voice_threshold: 0.6,
+            speech_padding: 160,
+            silence_padding: 200,
+            ratio: 0.5,
+            voice_threshold: 0.5,
             max_buffer_duration_secs: 50,
-            noise_gating: 0,
         }
     }
 }
@@ -72,34 +70,26 @@ pub struct VadProcessor {
 }
 
 pub trait VadEngine: Send + Sync + Any {
-    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool>;
+    fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)>;
 }
 
 impl VadProcessorInner {
     pub fn process_frame(&mut self, frame: &mut AudioFrame) -> Result<()> {
-        let frame = match self.config.noise_gating {
-            0 => frame,
-            _ => {
-                let mut samples = match &frame.samples {
-                    Samples::PCM { samples } => samples.to_owned(),
-                    _ => return Ok(()),
-                };
-                samples.iter_mut().for_each(|sample| {
-                    if sample.unsigned_abs() < self.config.noise_gating {
-                        *sample = 0;
-                    }
-                });
-                frame
-            }
-        };
         let samples = match &frame.samples {
             Samples::PCM { samples } => samples,
             _ => return Ok(()),
         };
+
+        let samples = samples.to_owned();
+        let (is_speaking, timestamp) = match self.vad.process(frame) {
+            Some((is_speaking, timestamp)) => (is_speaking, timestamp),
+            None => return Ok(()),
+        };
+
         let current_buf = SpeechBuf {
-            samples: samples.to_owned(),
-            timestamp: frame.timestamp,
-            is_speaking: self.vad.process(frame)?,
+            samples,
+            timestamp,
+            is_speaking,
         };
 
         self.window_bufs.push(current_buf);
@@ -135,10 +125,19 @@ impl VadProcessorInner {
             }
         }
 
-        let speaking_threshold = speaking_check_count * self.config.ratio as usize;
-        let silence_threshold = silence_check_count * (1.0 - self.config.ratio) as usize;
-
-        if speaking_count > speaking_threshold {
+        let speaking_threshold = (speaking_check_count as f32 * self.config.ratio) as usize;
+        let silence_threshold = (silence_check_count as f32 * self.config.ratio) as usize;
+        // trace!(
+        //     "timestamp: {}, speaking: {}/{} silence: {}/{}  time: {} is_speaking: {}",
+        //     self.window_bufs.first().unwrap().timestamp,
+        //     speaking_count,
+        //     speaking_threshold,
+        //     silence_count,
+        //     silence_threshold,
+        //     self.window_bufs.last().unwrap().timestamp,
+        //     self.window_bufs.last().unwrap().is_speaking,
+        // );
+        if speaking_count >= speaking_threshold {
             match self.state {
                 VadState::Silence => {
                     self.window_bufs
@@ -156,7 +155,7 @@ impl VadProcessorInner {
                 }
                 _ => {}
             }
-        } else if silence_count > silence_threshold {
+        } else if silence_count >= silence_threshold {
             match self.state {
                 VadState::Speaking => {
                     self.state = VadState::Silence;
