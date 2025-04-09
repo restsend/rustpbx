@@ -8,11 +8,10 @@ function mainApp() {
             vad: {
                 type: 'webrtc',
                 enabled: false,
-                voiceThreshold: 0.7,
-                ratio: 0.95,
-                speechPadding: 120,
-                silencePadding: 500,
-                noiseGating: 10,
+                voiceThreshold: 0.6,
+                ratio: 0.5,
+                speechPadding: 160,
+                silencePadding: 300,
             },
             recording: {
                 enabled: false,
@@ -518,7 +517,6 @@ function mainApp() {
                     voiceThreshold: this.config.vad.type == 'silero' ? parseFloat(this.config.vad.voiceThreshold) : undefined,
                     ratio: parseFloat(this.config.vad.ratio),
                     speechPadding: parseInt(this.config.vad.speechPadding),
-                    noiseGating: parseInt(this.config.vad.noiseGating)
                 } : undefined;
                 let denoise = this.config.denoise.enabled ? true : undefined;
                 const invite = {

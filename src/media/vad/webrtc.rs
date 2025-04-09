@@ -24,12 +24,15 @@ unsafe impl Send for WebRtcVad {}
 unsafe impl Sync for WebRtcVad {}
 
 impl VadEngine for WebRtcVad {
-    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
+    fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
         let samples = match &frame.samples {
             Samples::PCM { samples } => samples,
-            _ => return Ok(false),
+            _ => return Some((false, frame.timestamp)),
         };
 
-        Ok(self.vad.is_voice_segment(samples).unwrap_or(false))
+        Some((
+            self.vad.is_voice_segment(samples).unwrap_or(false),
+            frame.timestamp,
+        ))
     }
 }

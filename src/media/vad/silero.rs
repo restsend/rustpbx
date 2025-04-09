@@ -7,6 +7,7 @@ pub struct SileroVad {
     detector: VoiceActivityDetector,
     config: VADConfig,
     buffer: Vec<i16>,
+    last_timestamp: u64,
     chunk_size: usize,
 }
 
@@ -35,28 +36,32 @@ impl SileroVad {
             config,
             buffer: Vec::new(),
             chunk_size,
+            last_timestamp: 0,
         })
     }
 }
 
 impl VadEngine for SileroVad {
-    fn process(&mut self, frame: &mut AudioFrame) -> Result<bool> {
+    fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
         let samples = match &frame.samples {
             Samples::PCM { samples } => samples,
-            _ => return Ok(false),
+            _ => return Some((false, frame.timestamp)),
         };
-
-        self.buffer.extend_from_slice(samples);
-
-        while self.buffer.len() >= self.chunk_size {
+        if self.buffer.len() < self.chunk_size {
+            self.buffer.extend_from_slice(samples);
+            if self.last_timestamp == 0 {
+                self.last_timestamp = frame.timestamp;
+            } else {
+                self.last_timestamp = (self.last_timestamp + frame.timestamp) / 2;
+            }
+        }
+        if self.buffer.len() >= self.chunk_size {
             let chunk = self.buffer[..self.chunk_size].to_vec();
             let score = self.detector.predict(chunk);
             let is_voice = score > self.config.voice_threshold;
             self.buffer.drain(..self.chunk_size);
-            if is_voice {
-                return Ok(true);
-            }
+            return Some((is_voice, self.last_timestamp));
         }
-        Ok(false)
+        None
     }
 }
