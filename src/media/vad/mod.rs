@@ -4,6 +4,7 @@ use crate::{AudioFrame, Samples};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::cell::RefCell;
 use std::sync::Mutex;
 
 mod silero;
@@ -66,8 +67,10 @@ struct VadProcessorInner {
     window_bufs: Vec<SpeechBuf>,
 }
 pub struct VadProcessor {
-    inner: Mutex<VadProcessorInner>,
+    inner: RefCell<VadProcessorInner>,
 }
+unsafe impl Send for VadProcessor {}
+unsafe impl Sync for VadProcessor {}
 
 pub trait VadEngine: Send + Sync + Any {
     fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)>;
@@ -210,13 +213,13 @@ impl VadProcessor {
             window_bufs: Vec::new(),
         };
         Ok(Self {
-            inner: Mutex::new(inner),
+            inner: RefCell::new(inner),
         })
     }
 }
 
 impl Processor for VadProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        self.inner.lock().unwrap().process_frame(frame)
+        self.inner.borrow_mut().process_frame(frame)
     }
 }

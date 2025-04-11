@@ -1,4 +1,4 @@
-use super::{codecs::resample::resample_mono, track::track_codec::TrackCodec};
+use super::track::track_codec::TrackCodec;
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -63,18 +63,11 @@ impl ProcessorChain {
             ..
         } = &frame.samples
         {
-            let samples = self.codec.lock().unwrap().decode(*payload_type, &payload);
-            frame.sample_rate = match payload_type {
-                0 => 8000,
-                8 => 8000,
-                9 => 16000,
-                _ => frame.sample_rate,
-            };
-            let samples = if frame.sample_rate != self.sample_rate {
-                resample_mono(&samples, frame.sample_rate, self.sample_rate)
-            } else {
-                samples
-            };
+            let samples =
+                self.codec
+                    .lock()
+                    .unwrap()
+                    .decode(*payload_type, &payload, self.sample_rate);
             frame.samples = Samples::PCM { samples };
         }
         // Process the frame with all processors
