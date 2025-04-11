@@ -108,12 +108,18 @@ impl ActiveCall {
         }
 
         let media_stream = media_stream_builder.build();
-        let offer = strip_ipv6_candidates(
-            options
+        let offer = match options.enable_ipv6 {
+            Some(false) | None => strip_ipv6_candidates(
+                options
+                    .offer
+                    .as_ref()
+                    .ok_or(anyhow::anyhow!("SDP is required"))?,
+            ),
+            _ => options
                 .offer
-                .as_ref()
+                .clone()
                 .ok_or(anyhow::anyhow!("SDP is required"))?,
-        );
+        };
 
         let mut webrtc_track = WebrtcTrack::new(track_id.clone());
         let timeout = options
@@ -130,7 +136,7 @@ impl ActiveCall {
         let mut processors = vec![];
         match options.denoise {
             Some(true) => {
-                let noise_reducer = NoiseReducer::new();
+                let noise_reducer = NoiseReducer::new(16000)?;
                 processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
             }
             _ => {}

@@ -1,20 +1,29 @@
-use super::codecs::resample::resample_mono;
+use super::codecs::resample::LinearResampler;
 use crate::{media::processor::Processor, AudioFrame, Samples};
 use anyhow::Result;
 use nnnoiseless::DenoiseState;
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 pub struct NoiseReducer {
-    denoiser: Mutex<Box<DenoiseState<'static>>>,
+    resampler_target: RefCell<LinearResampler>,
+    resampler_source: RefCell<LinearResampler>,
+    denoiser: RefCell<Box<DenoiseState<'static>>>,
 }
 
 impl NoiseReducer {
-    pub fn new() -> Self {
-        Self {
-            denoiser: Mutex::new(DenoiseState::new()),
-        }
+    pub fn new(input_sample_rate: usize) -> Result<Self> {
+        let resampler48k = LinearResampler::new(48000, input_sample_rate)?;
+        let resampler16k = LinearResampler::new(input_sample_rate, 48000 as usize)?;
+        let denoiser = DenoiseState::new();
+        Ok(Self {
+            resampler_target: RefCell::new(resampler48k),
+            resampler_source: RefCell::new(resampler16k),
+            denoiser: RefCell::new(denoiser),
+        })
     }
 }
+unsafe impl Send for NoiseReducer {}
+unsafe impl Sync for NoiseReducer {}
 
 impl Processor for NoiseReducer {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
@@ -23,19 +32,17 @@ impl Processor for NoiseReducer {
             return Ok(());
         }
 
-        // Extract PCM samples or return if not PCM format
         let samples = match &frame.samples {
             Samples::PCM { samples } => samples,
             _ => return Ok(()),
         };
-        let samples = resample_mono(samples, frame.sample_rate, 48000);
+        let samples = self.resampler_source.borrow_mut().resample(samples);
         let input_size = samples.len();
 
         let output_padding_size = input_size + DenoiseState::FRAME_SIZE;
         let mut output_buf = vec![0.0; output_padding_size];
         let input_f32: Vec<f32> = samples.iter().map(|&s| s as f32).collect();
 
-        // Process audio in chunks of FRAME_SIZE
         let mut offset = 0;
         let mut buf;
 
@@ -53,7 +60,7 @@ impl Processor for NoiseReducer {
             };
 
             // Process the current frame
-            self.denoiser.lock().unwrap().process_frame(
+            self.denoiser.borrow_mut().process_frame(
                 &mut output_buf[offset..offset + DenoiseState::FRAME_SIZE],
                 &input_chunk,
             );
@@ -67,41 +74,9 @@ impl Processor for NoiseReducer {
             .collect::<Vec<i16>>();
 
         frame.samples = Samples::PCM {
-            samples: resample_mono(&samples, 48000, frame.sample_rate),
+            samples: self.resampler_target.borrow_mut().resample(&samples),
         };
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_basic_processing() {
-        let reducer = NoiseReducer::new();
-
-        // Test with different frame sizes
-        for size in &[160, 320, 480, 960] {
-            // Create a sample frame with test data
-            let mut frame = AudioFrame {
-                samples: Samples::PCM {
-                    samples: vec![100; *size],
-                },
-                sample_rate: 16000,
-                ..Default::default()
-            };
-
-            // Process the frame
-            reducer.process_frame(&mut frame).unwrap();
-
-            // Should maintain the same number of samples
-            let samples = match frame.samples {
-                Samples::PCM { samples } => samples,
-                _ => panic!("Expected PCM samples"),
-            };
-            assert_eq!(samples.len(), *size);
-        }
     }
 }

@@ -23,14 +23,17 @@ static MULAW_DECODE_TABLE: [i16; 256] = [
     196, 180, 164, 148, 132, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0,
 ];
 
-// Function to decode μ-law encoded audio
+/// Decodes a single μ-law encoded byte to a 16-bit PCM sample
 fn decode_mu_law(mu_law_sample: u8) -> i16 {
     MULAW_DECODE_TABLE[mu_law_sample as usize]
 }
 
+/// Decoder for μ-law (PCMU) format
+#[derive(Default)]
 pub struct PcmuDecoder {}
 
 impl PcmuDecoder {
+    /// Creates a new PcmuDecoder instance
     pub fn new() -> Self {
         Self {}
     }
@@ -38,7 +41,7 @@ impl PcmuDecoder {
 
 impl Decoder for PcmuDecoder {
     fn decode(&mut self, data: &[u8]) -> Vec<i16> {
-        data.iter().map(|sample| decode_mu_law(*sample)).collect()
+        data.iter().map(|&sample| decode_mu_law(sample)).collect()
     }
 
     fn sample_rate(&self) -> u32 {
@@ -50,13 +53,17 @@ impl Decoder for PcmuDecoder {
     }
 }
 
+/// Encoder for μ-law (PCMU) format
+#[derive(Default)]
 pub struct PcmuEncoder {}
 
 impl PcmuEncoder {
+    /// Creates a new PcmuEncoder instance
     pub fn new() -> Self {
         Self {}
     }
 
+    /// Converts a linear 16-bit PCM sample to a μ-law encoded byte
     fn linear2ulaw(&self, sample: i16) -> u8 {
         // Clip the sample to prevent overflow
         let mut sample = if sample > CLIP {
@@ -101,8 +108,8 @@ impl Encoder for PcmuEncoder {
     fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
         samples
             .iter()
-            .map(|sample| self.linear2ulaw(*sample))
-            .collect::<Vec<u8>>()
+            .map(|&sample| self.linear2ulaw(sample))
+            .collect()
     }
 
     fn sample_rate(&self) -> u32 {

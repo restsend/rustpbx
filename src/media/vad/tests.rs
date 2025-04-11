@@ -1,5 +1,9 @@
+use std::fs::File;
+use std::io::Write;
+
 use super::*;
 use crate::event::SessionEvent;
+use crate::media::codecs::convert_s16_to_u8;
 use crate::media::denoiser::NoiseReducer;
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
@@ -19,7 +23,7 @@ async fn test_vad_with_noise_denoise() {
         "Loaded {} samples from WAV file for testing",
         all_samples.len()
     );
-    let nr = NoiseReducer::new();
+    let nr = NoiseReducer::new(sample_rate as usize).expect("Failed to create reducer");
     let (event_sender, mut event_receiver) = broadcast::channel(128);
     let track_id = "test_track".to_string();
 
@@ -28,6 +32,7 @@ async fn test_vad_with_noise_denoise() {
         .expect("Failed to create VAD processor");
     let mut total_duration = 0;
     let (frame_size, chunk_duration_ms) = (320, 20);
+    let mut out_file = File::create("fixtures/noise_gating_zh_16k_denoised.pcm.decoded").unwrap();
     for (i, chunk) in all_samples.chunks(frame_size).enumerate() {
         let chunk_vec = chunk.to_vec();
         let chunk_vec = if chunk_vec.len() < frame_size {
@@ -46,6 +51,11 @@ async fn test_vad_with_noise_denoise() {
         };
         nr.process_frame(&mut frame).unwrap();
         vad.process_frame(&mut frame).unwrap();
+        let samples = match frame.samples {
+            Samples::PCM { samples } => samples,
+            _ => panic!("Expected PCM samples"),
+        };
+        out_file.write_all(&convert_s16_to_u8(&samples)).unwrap();
         total_duration += chunk_duration_ms;
     }
     sleep(Duration::from_millis(50)).await;
@@ -78,7 +88,7 @@ async fn test_vad_with_noise_denoise() {
         results.speech_segments.len(),
         total_duration
     );
-    assert!(results.speech_segments.len() == 1);
+    assert!(results.speech_segments.len() == 8);
 }
 #[tokio::test]
 async fn test_vad_engines_with_wav_file() {

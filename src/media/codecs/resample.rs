@@ -1,84 +1,84 @@
-use rubato::{Resampler, SincFixedIn, SincInterpolationType, WindowFunction};
+use anyhow::Result;
+use rubato::{FftFixedOut, Resampler};
 
-pub fn resample(
-    input: &[i16],
-    input_sample_rate: u32,
-    output_sample_rate: u32,
-    channels: usize,
-) -> Vec<i16> {
-    if input_sample_rate == output_sample_rate {
-        return input.to_vec();
+pub struct LinearResampler {
+    resampler: FftFixedOut<f64>,
+    input_sample_rate: usize,
+    output_sample_rate: usize,
+    input_chunk_size: usize,
+}
+
+impl LinearResampler {
+    pub fn new(input_sample_rate: usize, output_sample_rate: usize) -> Result<Self> {
+        let rate = output_sample_rate as f64 / input_sample_rate as f64;
+        let input_chunk_size = match input_sample_rate {
+            8000 => 160,
+            16000 => 320,
+            48000 => 960,
+            _ => 160,
+        };
+        let output_chunk_size = (input_chunk_size as f64 * rate) as usize;
+        let resampler = FftFixedOut::<f64>::new(
+            input_sample_rate,
+            output_sample_rate,
+            output_chunk_size,
+            1,
+            1,
+        )?;
+        Ok(Self {
+            resampler,
+            input_sample_rate,
+            output_sample_rate,
+            input_chunk_size,
+        })
     }
 
-    if input.len() % channels != 0 {
-        return Vec::new();
-    }
-
-    let frames = input.len() / channels;
-    let expected_output_frames =
-        (frames as f64 * output_sample_rate as f64 / input_sample_rate as f64).round() as usize;
-
-    let params = rubato::SincInterpolationParameters {
-        sinc_len: 64,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 128,
-        window: WindowFunction::Blackman,
-    };
-
-    let mut resampler = match SincFixedIn::<f64>::new(
-        output_sample_rate as f64 / input_sample_rate as f64,
-        1.0,
-        params,
-        frames,
-        channels,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            return Vec::new();
+    pub fn resample(&mut self, input: &[i16]) -> Vec<i16> {
+        if self.input_sample_rate == self.output_sample_rate {
+            return input.to_vec();
         }
-    };
 
-    let mut channel_data: Vec<Vec<f64>> = vec![Vec::with_capacity(frames); channels];
-
-    for (i, &sample) in input.iter().enumerate() {
-        let channel = i % channels;
-        channel_data[channel].push(sample as f64 / i16::MAX as f64);
-    }
-
-    let resampled = match resampler.process(&channel_data, None) {
-        Ok(res) => res,
-        Err(_) => {
-            return Vec::new();
+        let mut input_f64 = Vec::with_capacity(input.len());
+        for sample in input {
+            input_f64.push(*sample as f64 / i16::MAX as f64);
         }
-    };
 
-    let mut result = Vec::with_capacity(expected_output_frames * channels);
-    let actual_frames = resampled[0].len().min(expected_output_frames);
+        let channel_data = input_f64.chunks(self.input_chunk_size).collect::<Vec<_>>();
+        let resampled = match self.resampler.process(&channel_data, None) {
+            Ok(res) => res,
+            Err(_) => {
+                return input.to_vec();
+            }
+        };
 
-    for frame in 0..actual_frames {
-        for channel in 0..channels {
-            let value = resampled[channel][frame];
-            let clamped = if value > 1.0 {
-                1.0
-            } else if value < -1.0 {
-                -1.0
-            } else {
-                value
-            };
-            result.push((clamped * i16::MAX as f64) as i16);
+        let mut result = Vec::with_capacity(resampled[0].len());
+        for sample in resampled[0].iter() {
+            result.push((sample * i16::MAX as f64) as i16);
         }
-    }
 
-    while result.len() < expected_output_frames * channels {
-        result.push(0);
+        result
     }
-
-    result
 }
 
 pub fn resample_mono(input: &[i16], input_sample_rate: u32, output_sample_rate: u32) -> Vec<i16> {
-    resample(input, input_sample_rate, output_sample_rate, 1)
+    if input_sample_rate == output_sample_rate {
+        return input.to_vec();
+    }
+    let mut resampler =
+        match LinearResampler::new(input_sample_rate as usize, output_sample_rate as usize) {
+            Ok(resampler) => resampler,
+            Err(_) => {
+                return input.to_vec();
+            }
+        };
+
+    let mut result =
+        Vec::with_capacity(input.len() * output_sample_rate as usize / input_sample_rate as usize);
+    for chunk in input.chunks(resampler.input_chunk_size) {
+        let resampled = resampler.resample(chunk);
+        result.extend_from_slice(&resampled);
+    }
+    result
 }
 
 #[cfg(test)]

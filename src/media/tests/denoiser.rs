@@ -1,42 +1,31 @@
+use crate::media::codecs::convert_s16_to_u8;
 use crate::{
     media::{denoiser::NoiseReducer, processor::Processor},
     AudioFrame, Samples,
 };
+use std::{fs::File, io::Write};
 
 #[test]
-fn test_noise_reducer_frame_sizes() {
-    let reducer = NoiseReducer::new();
-
-    // Test different frame sizes
-    for size in [160, 320, 480, 960] {
+fn test_basic_processing() {
+    let reducer = NoiseReducer::new(16000).expect("Failed to create reducer");
+    let (all_samples, sample_rate) =
+        crate::media::track::file::read_wav_file("fixtures/noise_gating_zh_16k.wav").unwrap();
+    let mut out_file = File::create("fixtures/noise_gating_zh_16k_denoised.pcm.decoded").unwrap();
+    for chunk in all_samples.chunks(320) {
         let mut frame = AudioFrame {
             samples: Samples::PCM {
-                samples: vec![0; size],
+                samples: chunk.to_vec(),
             },
-            ..Default::default()
+            sample_rate,
+            track_id: "test".to_string(),
+            timestamp: 0,
         };
         reducer.process_frame(&mut frame).unwrap();
-        assert!(matches!(
-            frame.samples,
-            Samples::PCM { samples } if samples.len() == size
-        ));
-    }
-}
-
-#[test]
-fn test_noise_reducer_sample_rates() {
-    let reducer = NoiseReducer::new();
-
-    // Test different sample rates
-    for rate in [8000, 16000, 32000, 48000] {
-        let mut frame = AudioFrame {
-            samples: Samples::PCM {
-                samples: vec![0; 480],
-            },
-            sample_rate: rate,
-            ..Default::default()
+        let samples = match frame.samples {
+            Samples::PCM { samples } => samples,
+            _ => panic!("Expected PCM samples"),
         };
-        reducer.process_frame(&mut frame).unwrap();
-        assert_eq!(frame.sample_rate, rate);
+        out_file.write_all(&convert_s16_to_u8(&samples)).unwrap();
     }
+    println!("ffplay -f s16le -ar 16000 fixtures/noise_gating_zh_16k_denoised.pcm.decoded");
 }

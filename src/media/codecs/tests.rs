@@ -310,3 +310,67 @@ fn test_codec_encode_decode() {
         println!("ffplay -f s16le -ar 8000 -i fixtures/sample.pcma.decoded");
     }
 }
+
+#[test]
+fn test_pcmu_edge_cases() {
+    let mut encoder = pcmu::PcmuEncoder::new();
+    let mut decoder = pcmu::PcmuDecoder::new();
+
+    // Test with extreme values including i16::MIN
+    let samples = vec![
+        i16::MIN,
+        i16::MIN + 1,
+        -32000,
+        -1,
+        0,
+        1,
+        32000,
+        i16::MAX - 1,
+        i16::MAX,
+    ];
+
+    // Check that encoding doesn't panic
+    let encoded = encoder.encode(&samples);
+
+    // Check that we can decode what we encoded
+    let decoded = decoder.decode(&encoded);
+
+    // Verify we got the right number of samples back
+    assert_eq!(samples.len(), decoded.len());
+
+    // Print for debugging
+    println!("Original: {:?}", samples);
+    println!("Decoded: {:?}", decoded);
+}
+
+#[test]
+fn test_pcma_edge_cases() {
+    let mut encoder = pcma::PcmaEncoder::new();
+    let mut decoder = pcma::PcmaDecoder::new();
+
+    // Test with extreme values including i16::MIN
+    let samples = vec![
+        i16::MIN,
+        i16::MIN + 1,
+        -32000,
+        -1,
+        0,
+        1,
+        32000,
+        i16::MAX - 1,
+        i16::MAX,
+    ];
+
+    // Check that encoding doesn't panic
+    let encoded = encoder.encode(&samples);
+
+    // Check that we can decode what we encoded
+    let decoded = decoder.decode(&encoded);
+
+    // Verify we got the right number of samples back
+    assert_eq!(samples.len(), decoded.len());
+
+    // Print for debugging
+    println!("Original: {:?}", samples);
+    println!("Decoded: {:?}", decoded);
+}

@@ -225,7 +225,7 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
     assert_eq!(encoded.len(), samples.len());
 
     // Now decode
-    let decoded = encoder.decode(payload_type, &encoded);
+    let decoded = encoder.decode(payload_type, &encoded, sample_rate);
 
     // Verify that decoding approximately reverses encoding
     // We can't expect exact matches due to lossy compression

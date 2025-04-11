@@ -34,6 +34,8 @@ pub struct StreamOptions {
     pub tts: Option<SynthesisConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_ipv6: Option<bool>,
 }
 
 impl Default for StreamOptions {
@@ -48,6 +50,7 @@ impl Default for StreamOptions {
             vad: None,
             tts: None,
             handshake_timeout: None,
+            enable_ipv6: None,
         }
     }
 }

@@ -26,9 +26,12 @@ static ALAW_DECODE_TABLE: [i16; 256] = [
     784, 880, 848,
 ];
 
+/// Decoder for A-law (PCMA) format
+#[derive(Default)]
 pub struct PcmaDecoder {}
 
 impl PcmaDecoder {
+    /// Creates a new PcmaDecoder instance
     pub fn new() -> Self {
         Self {}
     }
@@ -36,7 +39,7 @@ impl PcmaDecoder {
 
 impl Decoder for PcmaDecoder {
     fn decode(&mut self, samples: &[u8]) -> Vec<i16> {
-        samples.iter().map(|sample| decode_a_law(*sample)).collect()
+        samples.iter().map(|&sample| decode_a_law(sample)).collect()
     }
 
     fn sample_rate(&self) -> u32 {
@@ -48,18 +51,22 @@ impl Decoder for PcmaDecoder {
     }
 }
 
-// Function to decode A-law encoded audio
+/// Decodes a single A-law encoded byte to a 16-bit PCM sample
 fn decode_a_law(a_law_sample: u8) -> i16 {
     ALAW_DECODE_TABLE[a_law_sample as usize]
 }
 
+/// Encoder for A-law (PCMA) format
+#[derive(Default)]
 pub struct PcmaEncoder {}
 
 impl PcmaEncoder {
+    /// Creates a new PcmaEncoder instance
     pub fn new() -> Self {
         Self {}
     }
 
+    /// Finds the segment in which a value falls within a table
     fn search(&self, val: i16, table: &[i16], size: usize) -> usize {
         for i in 0..size {
             if val <= table[i] {
@@ -69,6 +76,7 @@ impl PcmaEncoder {
         size
     }
 
+    /// Converts a linear 16-bit PCM sample to an A-law encoded byte
     fn linear2alaw(&self, pcm_val: i16) -> u8 {
         // Special case handling for small negative values [-8, -1]
         if pcm_val < 0 && pcm_val >= -8 {
@@ -79,7 +87,12 @@ impl PcmaEncoder {
         let (mask, abs_val) = if pcm_val >= 0 {
             (0xD5, pcm_val) // sign bit = 1
         } else {
-            (0x55, -pcm_val - 8) // sign bit = 0
+            // Handle the edge case of -32768 (i16::MIN), which would overflow when negated
+            if pcm_val == i16::MIN {
+                (0x55, i16::MAX) // Use the maximum positive value
+            } else {
+                (0x55, -pcm_val - 8) // sign bit = 0
+            }
         };
 
         // Convert the scaled magnitude to segment number
@@ -104,11 +117,10 @@ impl PcmaEncoder {
 
 impl Encoder for PcmaEncoder {
     fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
-        let mut output = Vec::with_capacity(samples.len());
-        for &sample in samples {
-            output.push(self.linear2alaw(sample));
-        }
-        output
+        samples
+            .iter()
+            .map(|&sample| self.linear2alaw(sample))
+            .collect()
     }
 
     fn sample_rate(&self) -> u32 {
