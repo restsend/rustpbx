@@ -21,16 +21,27 @@ pub enum SessionEvent {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+        #[serde(rename = "earlyMedia")]
         early_media: bool,
     },
     Hangup {
         timestamp: u64,
         reason: String,
     },
+    AnswerMachineDetection {
+        // Answer machine detection
+        timestamp: u64,
+        #[serde(rename = "startTime")]
+        start_time: u64,
+        #[serde(rename = "endTime")]
+        end_time: u64,
+        text: String,
+    },
     Speaking {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+        #[serde(rename = "startTime")]
         start_time: u64,
     },
     Silence {
@@ -42,6 +53,14 @@ pub enum SessionEvent {
         duration: u64,
         #[serde(skip)]
         samples: Option<PcmBuf>,
+    },
+    Noisy {
+        // Track is noisy, no need to process
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        #[serde(rename = "startTime")]
+        start_time: u64,
     },
     DTMF {
         #[serde(rename = "trackId")]
@@ -59,8 +78,8 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
     },
-    /// track_id, timestamp, text
-    TranscriptionFinal {
+    AsrFinal {
+        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         index: u32,
@@ -72,8 +91,7 @@ pub enum SessionEvent {
         end_time: Option<u32>,
         text: String,
     },
-    /// track_id, timestamp, text
-    TranscriptionDelta {
+    AsrDelta {
         #[serde(rename = "trackId")]
         track_id: String,
         index: u32,
@@ -95,11 +113,6 @@ pub enum SessionEvent {
     LLMDelta {
         timestamp: u64,
         word: String,
-    },
-    /// timestamp, audio
-    Synthesis {
-        timestamp: u64,
-        audio: Vec<u8>,
     },
     /// timestamp, metrics
     Metrics {

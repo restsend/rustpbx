@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         let mut result = String::new();
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::TranscriptionFinal { text, end_time, .. } => {
+                SessionEvent::AsrFinal { text, end_time, .. } => {
                     result.push_str(&text);
                     if end_time.unwrap_or(0) > duration.as_millis() as u32 {
                         break;

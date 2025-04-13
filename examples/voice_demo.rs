@@ -9,7 +9,7 @@ use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
 use rustpbx::synthesis::SynthesisClient;
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
-use rustpbx::{Sample, PcmBuf};
+use rustpbx::{PcmBuf, Sample};
 use std::collections::VecDeque;
 /// This is a demo application which reads wav file from command line
 /// and processes it with ASR, LLM and TTS. It also supports local microphone input
@@ -427,7 +427,7 @@ async fn main() -> Result<()> {
     let transcription_loop = async move {
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::TranscriptionFinal { text, .. } => {
+                SessionEvent::AsrFinal { text, .. } => {
                     info!("Transcription: {}", text);
                     let st = Instant::now();
                     match llm_client.generate(&text).await {

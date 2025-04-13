@@ -91,7 +91,7 @@ async fn test_tencent_cloud_asr() {
         let mut fulltext = String::new();
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::TranscriptionDelta { text, .. } => {
+                SessionEvent::AsrDelta { text, .. } => {
                     fulltext += &text;
                 }
                 _ => {}

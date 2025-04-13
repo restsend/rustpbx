@@ -204,10 +204,10 @@ function mainApp() {
                     case 'silence':
                         this.handleVadStatus({ active: false, duration: event.duration, startTime: event.startTime })
                         break
-                    case 'transcriptionFinal':
+                    case 'asrFinal':
                         this.handleTranscriptionFinal(event)
                         break
-                    case 'transcriptionDelta':
+                    case 'asrDelta':
                         this.handleTranscriptionDelta(event)
                         break
                     default:

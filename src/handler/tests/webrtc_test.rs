@@ -6,7 +6,7 @@ use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::transcription::TranscriptionType;
 use crate::{
-    handler::{call::CallHandlerState, Command, StreamOptions},
+    handler::{call::CallHandlerState, Command, StreamOption},
     synthesis::{SynthesisConfig, SynthesisType},
     transcription::TranscriptionConfig,
 };
@@ -161,7 +161,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     tts_config.secret_key = Some(tencent_secret_key);
 
     // Create the invite command with proper options
-    let options = StreamOptions {
+    let options = StreamOption {
         offer: Some(offer.sdp.clone()),
         vad: Some(crate::media::vad::VADConfig::default()),
         asr: Some(TranscriptionConfig {

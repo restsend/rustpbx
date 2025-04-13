@@ -1,4 +1,4 @@
-use super::{processor::AsrProcessor, Command, StreamOptions};
+use super::{processor::AsrProcessor, Command, ReferOption, StreamOption};
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
@@ -81,7 +81,7 @@ pub struct ActiveCall {
     pub cancel_token: CancellationToken,
     pub call_type: ActiveCallType,
     pub session_id: String,
-    pub options: StreamOptions,
+    pub options: StreamOption,
     pub created_at: DateTime<Utc>,
     pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
@@ -96,7 +96,7 @@ impl ActiveCall {
         event_sender: EventSender,
         track_id: TrackId,
         session_id: &String,
-        options: &StreamOptions,
+        options: &StreamOption,
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
@@ -203,7 +203,7 @@ impl ActiveCall {
         event_sender: EventSender,
         track_id: TrackId,
         session_id: String,
-        options: StreamOptions,
+        options: StreamOption,
     ) -> Result<Self> {
         let media_stream = Self::create_stream(
             state,
@@ -247,10 +247,11 @@ impl ActiveCall {
                 text,
                 speaker,
                 play_id,
-            } => self.do_tts(text, speaker, play_id).await,
-            Command::Play { url } => self.do_play(url).await,
+                auto_hangup,
+            } => self.do_tts(text, speaker, play_id, auto_hangup).await,
+            Command::Play { url, auto_hangup } => self.do_play(url, auto_hangup).await,
             Command::Hangup {} => self.do_hangup().await,
-            Command::Refer { target } => self.do_refer(target).await,
+            Command::Refer { target, options } => self.do_refer(target, options).await,
             Command::Mute { track_id } => self.do_mute(track_id).await,
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
             _ => {
@@ -269,6 +270,7 @@ impl ActiveCall {
         text: String,
         speaker: Option<String>,
         play_id: Option<String>,
+        _auto_hangup: Option<bool>,
     ) -> Result<()> {
         let tts_config = match self.tts_config {
             Some(ref config) => config,
@@ -315,7 +317,7 @@ impl ActiveCall {
         }
     }
 
-    async fn do_play(&self, url: String) -> Result<()> {
+    async fn do_play(&self, url: String, _auto_hangup: Option<bool>) -> Result<()> {
         self.tts_command_tx.lock().await.take();
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_path(url)
@@ -330,7 +332,7 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn do_refer(&self, _target: String) -> Result<()> {
+    async fn do_refer(&self, _target: String, _options: Option<ReferOption>) -> Result<()> {
         Ok(())
     }
 
