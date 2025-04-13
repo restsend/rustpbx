@@ -1,6 +1,6 @@
 use crate::{
     media::recorder::{Recorder, RecorderConfig},
-    AudioFrame, Samples,
+    AudioFrame, Sample, PcmBuf, Samples,
 };
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
@@ -39,18 +39,18 @@ async fn test_recorder() -> Result<()> {
     for i in 0..5 {
         // Send 5 frames (500ms total)
         // Left channel (lower frequency sine wave)
-        let left_samples: Vec<i16> = (0..sample_count)
+        let left_samples: PcmBuf = (0..sample_count)
             .map(|j| {
                 let t = (i * sample_count + j) as f32 / 16000.0;
-                ((t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16384.0) as i16
+                ((t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16384.0) as Sample
             })
             .collect();
 
         // Right channel (higher frequency sine wave)
-        let right_samples: Vec<i16> = (0..sample_count)
+        let right_samples: PcmBuf = (0..sample_count)
             .map(|j| {
                 let t = (i * sample_count + j) as f32 / 16000.0;
-                ((t * 880.0 * 2.0 * std::f32::consts::PI).sin() * 16384.0) as i16
+                ((t * 880.0 * 2.0 * std::f32::consts::PI).sin() * 16384.0) as Sample
             })
             .collect();
 

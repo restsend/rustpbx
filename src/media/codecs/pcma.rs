@@ -1,3 +1,5 @@
+use crate::{Sample, PcmBuf};
+
 use super::{Decoder, Encoder};
 
 const SEG_SHIFT: i16 = 4;
@@ -38,7 +40,7 @@ impl PcmaDecoder {
 }
 
 impl Decoder for PcmaDecoder {
-    fn decode(&mut self, samples: &[u8]) -> Vec<i16> {
+    fn decode(&mut self, samples: &[u8]) -> PcmBuf {
         samples.iter().map(|&sample| decode_a_law(sample)).collect()
     }
 
@@ -116,7 +118,7 @@ impl PcmaEncoder {
 }
 
 impl Encoder for PcmaEncoder {
-    fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
+    fn encode(&mut self, samples: &[Sample]) -> Vec<u8> {
         samples
             .iter()
             .map(|&sample| self.linear2alaw(sample))

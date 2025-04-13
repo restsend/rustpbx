@@ -1,4 +1,4 @@
-use crate::media::track::file::read_wav_file;
+use crate::{media::track::file::read_wav_file, PcmBuf};
 
 use super::*;
 use hound::WavReader;
@@ -13,8 +13,8 @@ fn test_pcmu_codec() {
     let mut decoder = pcmu::PcmuDecoder::new();
 
     // Test with a simple sine wave
-    let samples: Vec<i16> = (0..160)
-        .map(|i| ((i as f32 * 0.1).sin() * 32767.0) as i16)
+    let samples: PcmBuf = (0..160)
+        .map(|i| ((i as f32 * 0.1).sin() * 32767.0) as Sample)
         .collect();
 
     // Encode
@@ -42,7 +42,7 @@ fn test_pcma_codec() {
     let mut decoder = pcma::PcmaDecoder::new();
 
     // Test with a simple sine wave
-    let samples: Vec<i16> = (0..160)
+    let samples: PcmBuf = (0..160)
         .map(|i| ((i as f32 * 0.1).sin() * 32767.0) as i16)
         .collect();
 
@@ -71,8 +71,8 @@ fn test_g722_codec() {
     let mut decoder = g722::G722Decoder::new();
 
     // Test with a simple sine wave at 16kHz
-    let samples: Vec<i16> = (0..320)
-        .map(|i| ((i as f32 * 0.1).sin() * 32767.0) as i16)
+    let samples: PcmBuf = (0..320)
+        .map(|i| ((i as f32 * 0.1).sin() * 32767.0) as Sample)
         .collect();
 
     // Encode
@@ -218,7 +218,7 @@ fn test_g722_encode() {
         // Decode the encoded chunk
         let decoded = decoder.decode(&encoded);
         decoded_file
-            .write_all(&convert_s16_to_u8(&decoded))
+            .write_all(&samples_to_bytes(&decoded))
             .expect("Failed to write decoded sample");
     }
     println!("ffplay -f g722 -ar 16000 -i fixtures/sample.g722.chunk.encoded");
@@ -257,7 +257,7 @@ fn test_codec_encode_decode() {
             decoded.len()
         );
         let mut file = File::create("fixtures/sample.g722.decoded").expect("Failed to create file");
-        file.write_all(&convert_s16_to_u8(&decoded))
+        file.write_all(&samples_to_bytes(&decoded))
             .expect("Failed to write file");
         println!("ffplay -f s16le -ar 16000  -i fixtures/sample.g722.decoded");
     }
@@ -281,7 +281,7 @@ fn test_codec_encode_decode() {
             decoded.len()
         );
         let mut file = File::create("fixtures/sample.pcmu.decoded").expect("Failed to create file");
-        file.write_all(&convert_s16_to_u8(&decoded))
+        file.write_all(&samples_to_bytes(&decoded))
             .expect("Failed to write file");
         println!("ffplay -f s16le -ar 8000 -i fixtures/sample.pcmu.decoded");
     }
@@ -305,7 +305,7 @@ fn test_codec_encode_decode() {
             decoded.len()
         );
         let mut file = File::create("fixtures/sample.pcma.decoded").expect("Failed to create file");
-        file.write_all(&convert_s16_to_u8(&decoded))
+        file.write_all(&samples_to_bytes(&decoded))
             .expect("Failed to write file");
         println!("ffplay -f s16le -ar 8000 -i fixtures/sample.pcma.decoded");
     }

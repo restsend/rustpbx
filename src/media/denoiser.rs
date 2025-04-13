@@ -1,5 +1,5 @@
 use super::codecs::resample::LinearResampler;
-use crate::{media::processor::Processor, AudioFrame, Samples};
+use crate::{media::processor::Processor, AudioFrame, Sample, PcmBuf, Samples};
 use anyhow::Result;
 use nnnoiseless::DenoiseState;
 use std::cell::RefCell;
@@ -41,7 +41,7 @@ impl Processor for NoiseReducer {
 
         let output_padding_size = input_size + DenoiseState::FRAME_SIZE;
         let mut output_buf = vec![0.0; output_padding_size];
-        let input_f32: Vec<f32> = samples.iter().map(|&s| s as f32).collect();
+        let input_f32: Vec<f32> = samples.iter().map(|&s| s.into()).collect();
 
         let mut offset = 0;
         let mut buf;
@@ -70,8 +70,8 @@ impl Processor for NoiseReducer {
 
         let samples = output_buf[..input_size]
             .iter()
-            .map(|&s| s as i16)
-            .collect::<Vec<i16>>();
+            .map(|&s| s as Sample)
+            .collect::<PcmBuf>();
 
         frame.samples = Samples::PCM {
             samples: self.resampler_target.borrow_mut().resample(&samples),

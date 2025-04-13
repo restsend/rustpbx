@@ -1,3 +1,5 @@
+use crate::{Sample, PcmBuf};
+
 pub mod g722;
 pub mod pcma;
 pub mod pcmu;
@@ -14,7 +16,7 @@ pub enum CodecType {
 
 pub trait Decoder: Send + Sync {
     /// Decode encoded audio data into PCM samples
-    fn decode(&mut self, data: &[u8]) -> Vec<i16>;
+    fn decode(&mut self, data: &[u8]) -> PcmBuf;
 
     /// Get the sample rate of the decoded audio
     fn sample_rate(&self) -> u32;
@@ -25,7 +27,7 @@ pub trait Decoder: Send + Sync {
 
 pub trait Encoder: Send + Sync {
     /// Encode PCM samples into codec-specific format
-    fn encode(&mut self, samples: &[i16]) -> Vec<u8>;
+    fn encode(&mut self, samples: &[Sample]) -> Vec<u8>;
 
     /// Get the sample rate expected for input samples
     fn sample_rate(&self) -> u32;
@@ -81,11 +83,11 @@ impl CodecType {
     }
 }
 
-pub fn convert_s16_to_u8(s16_data: &[i16]) -> Vec<u8> {
-    s16_data.iter().flat_map(|s| s.to_le_bytes()).collect()
+pub fn samples_to_bytes(samples: &[Sample]) -> Vec<u8> {
+    samples.iter().flat_map(|s| s.to_le_bytes()).collect()
 }
 
-pub fn convert_u8_to_s16(u8_data: &[u8]) -> Vec<i16> {
+pub fn bytes_to_samples(u8_data: &[u8]) -> PcmBuf {
     u8_data
         .chunks(2)
         .map(|chunk| (chunk[0] as i16) | ((chunk[1] as i16) << 8))

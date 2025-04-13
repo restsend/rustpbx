@@ -1,6 +1,8 @@
 use anyhow::Result;
 use rubato::{FftFixedOut, Resampler};
 
+use crate::{PcmBuf, Sample};
+
 pub struct LinearResampler {
     resampler: FftFixedOut<f64>,
     input_sample_rate: usize,
@@ -33,7 +35,7 @@ impl LinearResampler {
         })
     }
 
-    pub fn resample(&mut self, input: &[i16]) -> Vec<i16> {
+    pub fn resample(&mut self, input: &[Sample]) -> PcmBuf {
         if self.input_sample_rate == self.output_sample_rate {
             return input.to_vec();
         }
@@ -60,7 +62,7 @@ impl LinearResampler {
     }
 }
 
-pub fn resample_mono(input: &[i16], input_sample_rate: u32, output_sample_rate: u32) -> Vec<i16> {
+pub fn resample_mono(input: &[Sample], input_sample_rate: u32, output_sample_rate: u32) -> PcmBuf {
     if input_sample_rate == output_sample_rate {
         return input.to_vec();
     }
@@ -84,7 +86,7 @@ pub fn resample_mono(input: &[i16], input_sample_rate: u32, output_sample_rate: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::codecs::convert_s16_to_u8;
+    use crate::media::codecs::samples_to_bytes;
     use crate::media::track::file::read_wav_file;
     use std::fs::File;
     use std::io::Write;
@@ -98,7 +100,7 @@ mod tests {
 
         let resampled = resample_mono(&all_samples, samplerate, 8000);
         let mut file = File::create("fixtures/sample.8k.decoded").expect("Failed to create file");
-        let decoded_bytes = convert_s16_to_u8(&resampled);
+        let decoded_bytes = samples_to_bytes(&resampled);
         file.write_all(&decoded_bytes)
             .expect("Failed to write file");
         let rate = resampled.len() as f64 / all_samples.len() as f64;

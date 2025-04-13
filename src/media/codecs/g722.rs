@@ -1,3 +1,5 @@
+use crate::{PcmBuf, Sample};
+
 use super::{Decoder, Encoder};
 pub enum Bitrate {
     Mode1_64000,
@@ -655,7 +657,7 @@ impl G722Decoder {
 
     /// Decodes a G.722 frame and returns PCM samples
     /// This is the main decoding function that processes G.722 encoded data
-    pub fn decode_frame(&mut self, data: &[u8]) -> Vec<i16> {
+    pub fn decode_frame(&mut self, data: &[u8]) -> PcmBuf {
         let mut output = Vec::with_capacity(data.len() * 2);
         let mut idx = 0;
 
@@ -687,7 +689,7 @@ impl G722Decoder {
 }
 
 impl Encoder for G722Encoder {
-    fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
+    fn encode(&mut self, samples: &[Sample]) -> Vec<u8> {
         self.g722_encode(samples)
     }
 
@@ -701,7 +703,7 @@ impl Encoder for G722Encoder {
 }
 
 impl Decoder for G722Decoder {
-    fn decode(&mut self, data: &[u8]) -> Vec<i16> {
+    fn decode(&mut self, data: &[u8]) -> PcmBuf {
         self.decode_frame(data)
     }
 

@@ -2,7 +2,7 @@ use crate::{
     event::{EventSender, SessionEvent},
     media::{
         cache,
-        codecs::convert_u8_to_s16,
+        codecs::bytes_to_samples,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
@@ -130,7 +130,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
                                 info!("tts: Using cached audio for {}", cache_key);
-                                buffer_clone.lock().await.extend(convert_u8_to_s16(&audio));
+                                buffer_clone.lock().await.extend(bytes_to_samples(&audio));
                                 continue;
                             }
                             Err(e) => {
@@ -173,7 +173,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                     buffer_clone
                                         .lock()
                                         .await
-                                        .extend(convert_u8_to_s16(&processed_chunk));
+                                        .extend(bytes_to_samples(&processed_chunk));
                                 }
                                 Err(e) => {
                                     warn!("Error in audio stream chunk: {:?}", e);

@@ -1,3 +1,4 @@
+use crate::PcmBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +41,7 @@ pub enum SessionEvent {
         start_time: u64,
         duration: u64,
         #[serde(skip)]
-        samples: Option<Vec<i16>>,
+        samples: Option<PcmBuf>,
     },
     DTMF {
         #[serde(rename = "trackId")]

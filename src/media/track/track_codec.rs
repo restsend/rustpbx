@@ -1,13 +1,13 @@
 use crate::{
     media::codecs::{
-        convert_s16_to_u8, convert_u8_to_s16,
+        bytes_to_samples,
         g722::{G722Decoder, G722Encoder},
         pcma::{PcmaDecoder, PcmaEncoder},
         pcmu::{PcmuDecoder, PcmuEncoder},
         resample::LinearResampler,
-        Decoder, Encoder,
+        samples_to_bytes, Decoder, Encoder,
     },
-    AudioFrame, Samples,
+    AudioFrame, PcmBuf, Samples,
 };
 use std::{cell::RefCell, collections::HashMap};
 
@@ -43,12 +43,12 @@ impl TrackCodec {
         }
     }
 
-    pub fn decode(&self, payload_type: u8, payload: &[u8], target_sample_rate: u32) -> Vec<i16> {
+    pub fn decode(&self, payload_type: u8, payload: &[u8], target_sample_rate: u32) -> PcmBuf {
         let payload = match payload_type {
             0 => self.pcmu_decoder.borrow_mut().decode(payload),
             8 => self.pcma_decoder.borrow_mut().decode(payload),
             9 => self.g722_decoder.borrow_mut().decode(payload),
-            _ => convert_u8_to_s16(payload),
+            _ => bytes_to_samples(payload),
         };
         let sample_rate = match payload_type {
             0 => 8000,
@@ -99,7 +99,7 @@ impl TrackCodec {
                     0 => self.pcmu_encoder.borrow_mut().encode(&pcm),
                     8 => self.pcma_encoder.borrow_mut().encode(&pcm),
                     9 => self.g722_encoder.borrow_mut().encode(&pcm),
-                    _ => convert_s16_to_u8(&pcm),
+                    _ => samples_to_bytes(&pcm),
                 }
             }
             Samples::RTP { payload, .. } => payload,

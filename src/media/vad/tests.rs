@@ -3,7 +3,7 @@ use std::io::Write;
 
 use super::*;
 use crate::event::SessionEvent;
-use crate::media::codecs::convert_s16_to_u8;
+use crate::media::codecs::samples_to_bytes;
 use crate::media::denoiser::NoiseReducer;
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
@@ -55,7 +55,7 @@ async fn test_vad_with_noise_denoise() {
             Samples::PCM { samples } => samples,
             _ => panic!("Expected PCM samples"),
         };
-        out_file.write_all(&convert_s16_to_u8(&samples)).unwrap();
+        out_file.write_all(&samples_to_bytes(&samples)).unwrap();
         total_duration += chunk_duration_ms;
     }
     sleep(Duration::from_millis(50)).await;

@@ -1,4 +1,4 @@
-use crate::media::codecs::convert_s16_to_u8;
+use crate::media::codecs::samples_to_bytes;
 use crate::{
     media::{denoiser::NoiseReducer, processor::Processor},
     AudioFrame, Samples,
@@ -25,7 +25,7 @@ fn test_basic_processing() {
             Samples::PCM { samples } => samples,
             _ => panic!("Expected PCM samples"),
         };
-        out_file.write_all(&convert_s16_to_u8(&samples)).unwrap();
+        out_file.write_all(&samples_to_bytes(&samples)).unwrap();
     }
     println!("ffplay -f s16le -ar 16000 fixtures/noise_gating_zh_16k_denoised.pcm.decoded");
 }

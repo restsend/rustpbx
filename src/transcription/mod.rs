@@ -1,4 +1,5 @@
 use crate::AudioFrame;
+use crate::Sample;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,7 @@ pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 // Unified transcription client trait with async_trait support
 #[async_trait]
 pub trait TranscriptionClient: Send + Sync {
-    fn send_audio(&self, data: &[i16]) -> Result<()>;
+    fn send_audio(&self, samples: &[Sample]) -> Result<()>;
 }
 
 #[cfg(test)]

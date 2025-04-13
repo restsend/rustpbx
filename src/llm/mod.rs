@@ -236,33 +236,6 @@ impl OpenAiClient {
         self
     }
 
-    fn prepare_messages(
-        &mut self,
-        system_prompt: &str,
-        input: &str,
-    ) -> Result<Vec<ChatCompletionRequestMessage>> {
-        // Add the new user message to the conversation
-        self.conversation.push_back(Message::user(input));
-
-        // Ensure we don't exceed max_conversation_turns
-        while self.conversation.len() > self.max_conversation_turns {
-            self.conversation.pop_front();
-        }
-
-        // Convert to OpenAI format
-        let mut messages = Vec::new();
-
-        // Add system prompt
-        messages.push(Message::system(system_prompt).to_openai_message()?);
-
-        // Add conversation history
-        for message in &self.conversation {
-            messages.push(message.to_openai_message()?);
-        }
-
-        Ok(messages)
-    }
-
     pub fn add_assistant_response(&mut self, response: &str) {
         self.conversation.push_back(Message::assistant(response));
 

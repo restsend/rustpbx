@@ -1,7 +1,7 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionConfig};
-use crate::TrackId;
+use crate::{Sample, TrackId};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
@@ -44,7 +44,6 @@ pub struct TencentCloudAsrWord {
 pub struct TencentCloudAsrResponse {
     pub code: i32,
     pub message: String,
-    pub voice_id: String,
     pub result: Option<TencentCloudAsrResult>,
 }
 
@@ -348,8 +347,8 @@ impl TencentCloudAsrClient {
 
 #[async_trait]
 impl TranscriptionClient for TencentCloudAsrClient {
-    fn send_audio(&self, samples: &[i16]) -> Result<()> {
-        self.audio_tx.send(codecs::convert_s16_to_u8(samples))?;
+    fn send_audio(&self, samples: &[Sample]) -> Result<()> {
+        self.audio_tx.send(codecs::samples_to_bytes(samples))?;
         Ok(())
     }
 }

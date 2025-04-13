@@ -6,7 +6,7 @@ use crate::media::{
     processor::Processor,
     track::{Track, TrackConfig, TrackPacketSender},
 };
-use crate::{AudioFrame, Samples, TrackId};
+use crate::{AudioFrame, PcmBuf, Samples, TrackId};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hound::WavReader;
@@ -246,7 +246,7 @@ pub(crate) async fn stream_from_memory(
     .await
 }
 
-pub fn read_wav_file(path: &str) -> Result<(Vec<i16>, u32)> {
+pub fn read_wav_file(path: &str) -> Result<(PcmBuf, u32)> {
     let reader = BufReader::new(File::open(path)?);
     let mut wav_reader = WavReader::new(reader)?;
     let spec = wav_reader.spec();

@@ -5,7 +5,7 @@ use crate::{
         processor::Processor,
         track::{rtp::*, track_codec::TrackCodec, Track, TrackConfig},
     },
-    AudioFrame, Samples,
+    AudioFrame, Sample, PcmBuf, Samples,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -203,8 +203,8 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
 
     // Create sample PCM data (sine wave pattern for easy verification)
     let sample_rate = 8000;
-    let samples: Vec<i16> = (0..160)
-        .map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16)
+    let samples: PcmBuf = (0..160)
+        .map(|i| ((i as f32 * 0.1).sin() * 10000.0) as Sample)
         .collect();
 
     // Create an audio frame with PCM samples
@@ -510,10 +510,7 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
 // Test jitter buffer integration
 #[tokio::test]
 async fn test_jitter_buffer_integration() -> Result<()> {
-    // Create a track with jitter buffer
-    let cancel_token = CancellationToken::new();
     let track_id = "test-jitter-buffer".to_string();
-
     // Create a jitter buffer directly for testing
     let jitter_buffer = Arc::new(Mutex::new(JitterBuffer::with_max_size(100)));
 

@@ -5,10 +5,11 @@ use cpal::{BufferSize, SampleFormat, SampleRate, SizedSample, StreamConfig};
 use dotenv::dotenv;
 use futures::StreamExt;
 use rustpbx::llm::LlmContent;
-use rustpbx::media::codecs::{convert_s16_to_u8, convert_u8_to_s16};
+use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
 use rustpbx::synthesis::SynthesisClient;
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
+use rustpbx::{Sample, PcmBuf};
 use std::collections::VecDeque;
 /// This is a demo application which reads wav file from command line
 /// and processes it with ASR, LLM and TTS. It also supports local microphone input
@@ -41,7 +42,7 @@ use rustpbx::{
 
 /// Audio processing buffer for handling real-time audio samples
 struct AudioBuffer {
-    buffer: Mutex<VecDeque<i16>>,
+    buffer: Mutex<VecDeque<Sample>>,
     max_size: usize,
 }
 
@@ -53,7 +54,7 @@ impl AudioBuffer {
         }
     }
 
-    fn push(&self, samples: &[i16]) {
+    fn push(&self, samples: &[Sample]) {
         let mut buffer = self.buffer.lock().unwrap();
         for &sample in samples {
             buffer.push_back(sample);
@@ -63,7 +64,7 @@ impl AudioBuffer {
         }
     }
 
-    fn drain(&self, max_samples: usize) -> Vec<i16> {
+    fn drain(&self, max_samples: usize) -> PcmBuf {
         let mut buffer = self.buffer.lock().unwrap();
         let count = std::cmp::min(max_samples, buffer.len());
         let mut result = Vec::with_capacity(count);
@@ -104,7 +105,7 @@ fn build_input_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     audio_buffer: Arc<AudioBuffer>,
-    audio_sender: mpsc::Sender<Vec<i16>>,
+    audio_sender: mpsc::Sender<PcmBuf>,
 ) -> Result<cpal::Stream>
 where
     T: cpal::Sample + SizedSample + 'static,
@@ -117,7 +118,7 @@ where
         "i16" => {
             let stream = device.build_input_stream(
                 config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                move |data: &[Sample], _: &cpal::InputCallbackInfo| {
                     // Already i16, just need to clone
                     let samples_i16 = data.to_vec();
                     audio_buffer.push(&samples_i16);
@@ -133,7 +134,7 @@ where
                 config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     // Convert f32 to i16
-                    let samples_i16: Vec<i16> = data
+                    let samples_i16: PcmBuf = data
                         .iter()
                         .map(|&sample| (sample * 32767.0).round() as i16)
                         .collect();
@@ -180,7 +181,7 @@ where
         "i16" => {
             let stream = device.build_output_stream(
                 &config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
                     let samples = audio_buffer.drain(data.len());
                     for (i, out) in data.iter_mut().enumerate() {
                         *out = if i < samples.len() { samples[i] } else { 0 };
@@ -229,7 +230,7 @@ async fn main() -> Result<()> {
 
     let audio_buffer = Arc::new(AudioBuffer::new(args.sample_rate as usize * 10)); // 10 seconds at specified sample rate
     let output_buffer = Arc::new(AudioBuffer::new(args.sample_rate as usize * 10));
-    let (audio_sender, mut audio_receiver) = mpsc::channel::<Vec<i16>>(100);
+    let (audio_sender, mut audio_receiver) = mpsc::channel::<PcmBuf>(100);
 
     let secret_id = match std::env::var("TENCENT_SECRET_ID") {
         Ok(id) if !id.is_empty() => id,
@@ -440,7 +441,7 @@ async fn main() -> Result<()> {
                                         let mut total_bytes = 0;
                                         while let Some(Ok(chunk)) = audio_stream.next().await {
                                             total_bytes += chunk.len();
-                                            let audio_data: Vec<i16> = convert_u8_to_s16(&chunk);
+                                            let audio_data: PcmBuf = bytes_to_samples(&chunk);
                                             let final_audio = if sample_rate != output_sample_rate {
                                                 resample::resample_mono(
                                                     &audio_data,
