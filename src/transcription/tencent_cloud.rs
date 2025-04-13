@@ -272,7 +272,7 @@ impl TencentCloudAsrClient {
                                 }
                                 response.result.map(|result| {
                                     let event = if result.slice_type == 2 {
-                                        SessionEvent::TranscriptionFinal {
+                                        SessionEvent::AsrFinal {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
@@ -281,7 +281,7 @@ impl TencentCloudAsrClient {
                                             end_time: Some(result.end_time),
                                         }
                                     } else {
-                                        SessionEvent::TranscriptionDelta {
+                                        SessionEvent::AsrDelta {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
