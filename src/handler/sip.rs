@@ -1,21 +1,9 @@
-use crate::event::create_event_sender;
-use crate::handler::call::{ActiveCall, ActiveCallType, CallHandlerState};
-use crate::media::stream::MediaStreamBuilder;
-use crate::media::track::TrackConfig;
-use crate::useragent::useragent::{InviteOptions, UserAgent};
+use crate::handler::call::CallHandlerState;
 use axum::extract::{Query, WebSocketUpgrade};
-use axum::{
-    extract::{Path, State},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Extension, Json, Router,
-};
-use rsipstack::dialog::authenticate::Credential;
+use axum::{extract::State, response::Response};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::info;
 use uuid::Uuid;
 
 use super::call::CallParams;
@@ -53,7 +41,7 @@ pub async fn sip_handler(
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
-    ws.on_upgrade(|socket| async move {
+    ws.on_upgrade(|_socket| async move {
         info!("sip call: {session_id}");
         let start_time = Instant::now();
 

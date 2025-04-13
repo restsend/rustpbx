@@ -1,11 +1,10 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::processor::Processor;
-use crate::{AudioFrame, Samples};
+use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
-use std::sync::Mutex;
 
 mod silero;
 #[cfg(test)]
@@ -54,7 +53,7 @@ enum VadState {
 }
 
 struct SpeechBuf {
-    samples: Vec<i16>,
+    samples: PcmBuf,
     timestamp: u64,
     is_speaking: bool,
 }

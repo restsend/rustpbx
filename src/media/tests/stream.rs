@@ -32,58 +32,6 @@ impl TestTrack {
             received_packets: Arc::new(Mutex::new(Vec::new())),
         }
     }
-
-    // Helper method to create a PCM packet
-    pub fn create_pcm_packet(&self, samples: Vec<i16>, timestamp: u64) -> AudioFrame {
-        AudioFrame {
-            track_id: self.id.clone(),
-            timestamp,
-            samples: Samples::PCM { samples: samples },
-            sample_rate: 16000,
-        }
-    }
-
-    // Helper method to create an RTP packet
-    pub fn create_rtp_packet(
-        &self,
-        payload_type: u8,
-        payload: Vec<u8>,
-        timestamp: u64,
-    ) -> AudioFrame {
-        AudioFrame {
-            track_id: self.id.clone(),
-            timestamp,
-            samples: Samples::RTP {
-                payload_type,
-                payload,
-                sequence_number: 1,
-            },
-            sample_rate: 16000,
-        }
-    }
-
-    // Method to send PCM data through the track
-    pub async fn send_pcm(&self, samples: Vec<i16>, timestamp: u64) -> Result<()> {
-        if let Some(sender) = &self.sender {
-            let packet = self.create_pcm_packet(samples, timestamp);
-            sender.send(packet)?;
-        }
-        Ok(())
-    }
-
-    // Method to send RTP data through the track
-    pub async fn send_rtp(&self, payload_type: u8, payload: Vec<u8>, timestamp: u64) -> Result<()> {
-        if let Some(sender) = &self.sender {
-            let packet = self.create_rtp_packet(payload_type, payload, timestamp);
-            sender.send(packet)?;
-        }
-        Ok(())
-    }
-
-    // Method to get received packets
-    pub async fn get_received_packets(&self) -> Vec<AudioFrame> {
-        self.received_packets.lock().await.clone()
-    }
 }
 
 #[async_trait]

@@ -4,10 +4,11 @@ use dotenv::dotenv;
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
+use rustpbx::PcmBuf;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
-use rustpbx::media::codecs::{convert_s16_to_u8, convert_u8_to_s16};
+use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, SynthesisType, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
@@ -94,7 +95,7 @@ fn parse_input(input: &str) -> Vec<TextSegment> {
 }
 
 /// Generate silence samples for a specified duration
-fn generate_silence(duration_ms: u32) -> Vec<i16> {
+fn generate_silence(duration_ms: u32) -> PcmBuf {
     let num_samples = (SAMPLE_RATE * duration_ms) / 1000;
     vec![0; num_samples as usize]
 }
@@ -231,7 +232,7 @@ async fn main() -> Result<()> {
                             Ok(chunk) => {
                                 debug!("Received chunk of {} bytes", chunk.len());
                                 total_bytes += chunk.len();
-                                let samples: Vec<i16> = convert_u8_to_s16(&chunk);
+                                let samples: PcmBuf = bytes_to_samples(&chunk);
                                 for &sample in &samples {
                                     writer.write_sample(sample)?;
                                 }

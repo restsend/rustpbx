@@ -1,4 +1,4 @@
-use crate::{media::codecs::convert_s16_to_u8, AudioFrame, Samples};
+use crate::{media::codecs::samples_to_bytes, AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
@@ -47,8 +47,8 @@ pub struct Recorder {
     cancel_token: CancellationToken,
     channel_idx: AtomicUsize,
     channels: Mutex<HashMap<String, usize>>,
-    stereo_buf: Mutex<Vec<i16>>,
-    mono_buf: Mutex<Vec<i16>>,
+    stereo_buf: Mutex<PcmBuf>,
+    mono_buf: Mutex<PcmBuf>,
 }
 
 impl Recorder {
@@ -165,7 +165,7 @@ impl Recorder {
                     }
 
                     file.seek(std::io::SeekFrom::End(0)).await?;
-                    file.write_all(&convert_s16_to_u8(&mix_buff)).await?;
+                    file.write_all(&samples_to_bytes(&mix_buff)).await?;
 
                     self.samples_written.fetch_add(max_len as usize, Ordering::SeqCst);
                     count += 1;
@@ -204,7 +204,7 @@ impl Recorder {
         Ok(())
     }
 
-    async fn pop(&self, chunk_size: usize) -> (Vec<i16>, Vec<i16>) {
+    async fn pop(&self, chunk_size: usize) -> (PcmBuf, PcmBuf) {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 

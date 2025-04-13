@@ -1,3 +1,5 @@
+use crate::{Sample, PcmBuf};
+
 use super::{Decoder, Encoder};
 
 const BIAS: i16 = 0x84;
@@ -40,7 +42,7 @@ impl PcmuDecoder {
 }
 
 impl Decoder for PcmuDecoder {
-    fn decode(&mut self, data: &[u8]) -> Vec<i16> {
+    fn decode(&mut self, data: &[u8]) -> PcmBuf {
         data.iter().map(|&sample| decode_mu_law(sample)).collect()
     }
 
@@ -105,7 +107,7 @@ impl PcmuEncoder {
 }
 
 impl Encoder for PcmuEncoder {
-    fn encode(&mut self, samples: &[i16]) -> Vec<u8> {
+    fn encode(&mut self, samples: &[Sample]) -> Vec<u8> {
         samples
             .iter()
             .map(|&sample| self.linear2ulaw(sample))

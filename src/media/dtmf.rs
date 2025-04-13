@@ -1,3 +1,4 @@
+use crate::PcmBuf;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
@@ -110,7 +111,7 @@ impl DTMFDetector {
     }
 
     // Generate DTMF tone samples for a given character
-    pub fn generate_tone(digit: &str, sample_rate: u32, duration_ms: u32) -> Vec<i16> {
+    pub fn generate_tone(digit: &str, sample_rate: u32, duration_ms: u32) -> PcmBuf {
         let digit_index = match digit {
             "1" => 0,
             "2" => 1,

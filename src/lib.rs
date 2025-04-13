@@ -14,16 +14,19 @@ pub mod transcription;
 pub mod useragent;
 pub use error::Error;
 pub type TrackId = String;
+pub type Sample = i16;
+pub type PcmBuf = Vec<Sample>;
+pub type PayloadBuf = Vec<u8>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Samples {
     PCM {
-        samples: Vec<i16>,
+        samples: PcmBuf,
     },
     RTP {
         sequence_number: u16,
         payload_type: u8,
-        payload: Vec<u8>,
+        payload: PayloadBuf,
     },
     Empty,
 }
@@ -34,6 +37,7 @@ pub struct AudioFrame {
     pub timestamp: u64,
     pub sample_rate: u32,
 }
+
 // get timestamp in milliseconds
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
