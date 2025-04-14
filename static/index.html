@@ -14,7 +14,7 @@
 
 <body class="bg-gray-100 min-h-screen pb-20" x-data="mainApp()" x-init="init()">
     <div class="container mx-auto p-4">
-        <header class="bg-blue-600 text-white p-4 rounded-t-lg shadow">
+        <header class="bg-gradient-to-r from-gray-700 to-gray-600 text-white p-4 rounded-t-lg shadow">
             <h1 class="text-2xl font-bold">RustPBX WebRTC Interface</h1>
         </header>
 
@@ -22,55 +22,6 @@
             <!-- Configuration Column -->
             <div class="w-full md:w-1/2 bg-white p-4 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4 border-b pb-2">Configuration</h2>
-
-                <div class="mb-6">
-                    <h3 class="text-lg font-semibold mb-2">Denoise Settings</h3>
-                    <div class="flex items-center mb-2">
-                        <input type="checkbox" id="enableDenoise" x-model="config.denoise.enabled" class="mr-2">
-                        <label for="enableDenoise">Enable Noise Denoiser</label>
-                    </div>
-                </div>
-                <!-- VAD Configuration -->
-                <div class="mb-6">
-                    <h3 class="text-lg font-semibold mb-2">VAD Settings</h3>
-                    <div class="flex items-center mb-2">
-                        <input type="checkbox" id="enableVad" x-model="config.vad.enabled" class="mr-2">
-                        <label for="enableVad">Enable Voice Activity Detection (VAD)</label>
-                    </div>
-                    <div x-show="config.vad.enabled" class="pl-4 space-y-2">
-                        <div class="flex flex-col">
-                            <label for="vadType" class="text-sm">Vad type</label>
-                            <select id="vadType" x-model="config.vad.type" class="border p-2 rounded w-full">
-                                <option value="webrtc">WebRTC</option>
-                                <option value="silero">Silero</option>
-                            </select>
-
-                            <template x-if="config.vad.type === 'silero'">
-                                <div>
-                                    <label for="vadVoiceThreshold" class="text-sm">Voice Threshold</label>
-                                    <input type="range" id="vad Voice Threshold" x-model="config.vad.voiceThreshold"
-                                        min="0" max="1" step="0.01" class="w-full">
-                                    <span class="text-xs text-right" x-text="config.vad.voiceThreshold"></span>
-                                </div>
-                            </template>
-
-                            <label for="vadRatio" class="text-sm">Ratio</label>
-                            <input type="range" id="vadRatio" x-model="config.vad.ratio" min="0" max="1" step="0.01"
-                                class="w-full">
-                            <span class="text-xs text-right" x-text="config.vad.ratio"></span>
-
-                            <label for="vadSpeechPadding" class="text-sm">Speech Padding</label>
-                            <input type="range" id="vadSpeechPadding" x-model="config.vad.speechPadding" min="100"
-                                max="1000" step="50" class="w-full">
-                            <span class="text-xs text-right" x-text="config.vad.speechPadding"></span>
-
-                            <label for="vadSilencePadding" class="text-sm">Silence Padding</label>
-                            <input type="range" id="vadSilencePadding" x-model="config.vad.silencePadding" min="300"
-                                max="1000" step="50" class="w-full">
-                            <span class="text-xs text-right" x-text="config.vad.silencePadding"></span>
-                        </div>
-                    </div>
-                </div>
 
                 <!-- Recording Configuration -->
                 <div class="mb-6">
@@ -100,6 +51,21 @@
                             class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
                             :class="config.uiState.activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
                             LLM
+                        </button>
+                        <button @click="config.uiState.activeTab = 'denoise'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'denoise' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            Denoise
+                        </button>
+                        <button @click="config.uiState.activeTab = 'vad'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'vad' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            VAD
+                        </button>
+                        <button @click="config.uiState.activeTab = 'metrics'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'metrics' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            Metrics
                         </button>
                     </div>
 
@@ -176,6 +142,96 @@
                             <textarea id="llmPrompt" x-model="config.llm.prompt"
                                 class="border p-2 rounded w-full h-24"></textarea>
                         </div>
+
+                        <!-- Denoise Tab -->
+                        <div x-show="config.uiState.activeTab === 'denoise'" class="space-y-2">
+                            <div class="flex items-center mb-2">
+                                <input type="checkbox" id="enableDenoise" x-model="config.denoise.enabled" class="mr-2">
+                                <label for="enableDenoise">Enable Noise Denoiser</label>
+                            </div>
+                        </div>
+
+                        <!-- VAD Tab -->
+                        <div x-show="config.uiState.activeTab === 'vad'" class="space-y-2">
+                            <div class="flex items-center mb-2">
+                                <input type="checkbox" id="enableVad" x-model="config.vad.enabled" class="mr-2">
+                                <label for="enableVad">Enable Voice Activity Detection (VAD)</label>
+                            </div>
+                            <div x-show="config.vad.enabled" class="pl-4 space-y-2">
+                                <div class="flex flex-col">
+                                    <label for="vadType" class="text-sm">Vad type</label>
+                                    <select id="vadType" x-model="config.vad.type" class="border p-2 rounded w-full">
+                                        <option value="webrtc">WebRTC</option>
+                                        <option value="silero">Silero</option>
+                                    </select>
+
+                                    <template x-if="config.vad.type === 'silero'">
+                                        <div>
+                                            <label for="vadVoiceThreshold" class="text-sm">Voice Threshold</label>
+                                            <input type="range" id="vad Voice Threshold"
+                                                x-model="config.vad.voiceThreshold" min="0" max="1" step="0.01"
+                                                class="w-full">
+                                            <span class="text-xs text-right" x-text="config.vad.voiceThreshold"></span>
+                                        </div>
+                                    </template>
+
+                                    <label for="vadRatio" class="text-sm">Ratio</label>
+                                    <input type="range" id="vadRatio" x-model="config.vad.ratio" min="0" max="1"
+                                        step="0.01" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.vad.ratio"></span>
+
+                                    <label for="vadSpeechPadding" class="text-sm">Speech Padding</label>
+                                    <input type="range" id="vadSpeechPadding" x-model="config.vad.speechPadding"
+                                        min="100" max="1000" step="50" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.vad.speechPadding"></span>
+
+                                    <label for="vadSilencePadding" class="text-sm">Silence Padding</label>
+                                    <input type="range" id="vadSilencePadding" x-model="config.vad.silencePadding"
+                                        min="300" max="1000" step="50" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.vad.silencePadding"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Metrics Tab -->
+                        <div x-show="config.uiState.activeTab === 'metrics'" class="space-y-2">
+                            <div class="bg-gray-100 p-4 rounded">
+                                <h3 class="text-lg font-semibold mb-2">Performance Metrics</h3>
+                                <p class="text-sm text-gray-600 mb-4">This tab shows performance metrics for various
+                                    operations.</p>
+
+                                <div class="overflow-x-auto">
+                                    <table class="min-w-full bg-white border border-gray-200">
+                                        <thead>
+                                            <tr class="bg-gray-100">
+                                                <th class="py-2 px-4 border-b text-left">Time</th>
+                                                <th class="py-2 px-4 border-b text-left">Service</th>
+                                                <th class="py-2 px-4 border-b text-left">Metric</th>
+                                                <th class="py-2 px-4 border-b text-right">Duration (ms)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <template
+                                                x-for="(entry, index) in eventLog.filter(e => e.type === 'METRICS')"
+                                                :key="index">
+                                                <tr class="hover:bg-gray-50">
+                                                    <td class="py-2 px-4 border-b text-gray-700 font-mono"
+                                                        x-text="formatTime(entry.timestamp)"></td>
+                                                    <td class="py-2 px-4 border-b"
+                                                        x-text="entry.metricsKey ? entry.metricsKey.split('.')[2] : ''">
+                                                    </td>
+                                                    <td class="py-2 px-4 border-b"
+                                                        x-text="entry.metricsKey ? entry.metricsKey.split('.')[0] + '.' + entry.metricsKey.split('.')[1] : ''">
+                                                    </td>
+                                                    <td class="py-2 px-4 border-b text-right font-medium"
+                                                        x-text="entry.metricsDuration"></td>
+                                                </tr>
+                                            </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -204,8 +260,11 @@
                         </div>
                     </div>
                     <button @click="clearEventLog"
-                        class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-1 px-3 rounded">
-                        Clear Console
+                        class="bg-gray-200 hover:bg-gray-300 text-gray-700 py-1 px-3 rounded flex items-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
                     </button>
                 </div>
 
@@ -216,27 +275,33 @@
                         <template x-for="(entry, index) in eventLog" :key="index">
                             <div class="border-b border-gray-200 last:border-0">
                                 <div class="flex items-start">
-                                    <span class="text-gray-500 mr-2 shrink-0"
+                                    <span class="text-gray-700 mr-2 shrink-0 font-medium"
                                         x-text="formatTime(entry.timestamp)"></span>
                                     <span class="mr-2 font-semibold px-2 py-0.5 rounded text-xs"
                                         :class="getLogEntryClass(entry.type)">
                                         <span x-text="entry.type"></span>
                                     </span>
-                                    <span x-text="entry.message" class="whitespace-pre-wrap break-words"></span>
+                                    <span x-text="entry.message"
+                                        class="whitespace-pre-wrap break-words text-gray-800"></span>
                                 </div>
                                 <template x-if="entry.type==='ASR'">
-                                    <div class=" ml-12 mt-1 text-blue-600">
+                                    <div class="ml-12 mt-1 text-blue-700 font-medium">
                                         <span x-text="entry.asrResult || ''"></span>
                                     </div>
                                 </template>
                                 <template x-if="entry.type === 'LLM'">
-                                    <div class="ml-12 mt-1 text-purple-600">
+                                    <div class="ml-12 mt-1 text-purple-700 font-medium">
                                         <span x-text="entry.llmResponse || ''"></span>
                                     </div>
                                 </template>
                                 <template x-if="entry.type === 'TTS'">
-                                    <div class="ml-12 mt-1 text-green-600">
+                                    <div class="ml-12 mt-1 text-green-700 font-medium">
                                         <span x-text="entry.ttsMessage || ''"></span>
+                                    </div>
+                                </template>
+                                <template x-if="entry.type === 'METRICS'">
+                                    <div class="ml-12 mt-1 text-indigo-700 font-medium">
+                                        <span x-text="entry.message"></span>
                                     </div>
                                 </template>
                             </div>
