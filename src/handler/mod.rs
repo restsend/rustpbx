@@ -72,17 +72,23 @@ pub struct ReferOption {
 // WebSocket Commands
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "command")]
+#[serde(rename_all = "camelCase")]
 pub enum Command {
-    /// Invite a call
-    #[serde(rename = "invite")]
-    Invite { options: StreamOption },
-    /// Update the candidate for WebRTC
-    #[serde(rename = "candidate")]
-    Candidate { candidates: Vec<String> },
-    /// Play a text to speech
-    #[serde(rename = "tts")]
+    Invite {
+        options: StreamOption,
+    },
+    Accept {
+        options: StreamOption,
+    },
+    Reject {
+        reason: String,
+    },
+    Candidate {
+        candidates: Vec<String>,
+    },
     Tts {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "playId")]
@@ -91,32 +97,25 @@ pub enum Command {
         #[serde(rename = "autoHangup")]
         auto_hangup: Option<bool>,
     },
-    /// Play a wav file
-    #[serde(rename = "play")]
     Play {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "autoHangup")]
         auto_hangup: Option<bool>,
     },
-    /// Hangup the call
-    #[serde(rename = "hangup")]
+    Interrupt {},
+    Pause {},
+    Resume {},
     Hangup {},
-    /// Refer to a target
-    #[serde(rename = "refer")]
     Refer {
         target: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<ReferOption>,
     },
-    /// Mute a track
-    #[serde(rename = "mute")]
     Mute {
         #[serde(rename = "trackId")]
         track_id: Option<String>,
     },
-    /// Unmute a track
-    #[serde(rename = "unmute")]
     Unmute {
         #[serde(rename = "trackId")]
         track_id: Option<String>,
