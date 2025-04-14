@@ -24,6 +24,10 @@ pub struct SynthesisConfig {
     pub volume: Option<i32>,
     pub speaker: Option<String>,
     pub codec: Option<String>,
+    pub subtitle: Option<bool>,
+    /// emotion: neutral、sad、happy、angry、fear、news、story、radio、poetry、
+    /// call、sajiao、disgusted、amaze、peaceful、exciting、aojiao、jieshuo
+    pub emotion: Option<String>,
 }
 
 #[async_trait]
@@ -46,6 +50,8 @@ impl Default for SynthesisConfig {
             volume: Some(5), // 0-10
             speaker: None,
             codec: Some("pcm".to_string()),
+            subtitle: None,
+            emotion: None,
         }
     }
 }

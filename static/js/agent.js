@@ -540,6 +540,7 @@ function mainApp() {
                             appId: this.config.tts.appId || undefined,
                             secretId: this.config.tts.secretId || undefined,
                             secretKey: this.config.tts.secretKey || undefined,
+                            speaker: this.config.tts.speaker || undefined,
                         }
                     },
                 };

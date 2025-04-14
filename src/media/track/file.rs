@@ -165,7 +165,7 @@ async fn stream_from_url(
     use_cache: bool,
 ) -> Result<()> {
     // Generate cache key from URL
-    let cache_key = cache::generate_cache_key(url, target_sample_rate);
+    let cache_key = cache::generate_cache_key(url, target_sample_rate, &"".to_string());
 
     // Check if file is in cache and use_cache is enabled
     if use_cache && cache::is_cached(&cache_key).await? {
@@ -494,7 +494,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // Get the cache key and verify it exists
-        let cache_key = cache::generate_cache_key(&file_path, 16000);
+        let cache_key = cache::generate_cache_key(&file_path, 16000, &"".to_string());
         let wav_data = tokio::fs::read(&file_path).await?;
         // Manually store the file in cache if it's not already there, to make the test more reliable
         if !cache::is_cached(&cache_key).await? {
