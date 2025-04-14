@@ -66,7 +66,11 @@ function mainApp() {
         // Format timestamp for log entries
         formatTime(timestamp) {
             const date = new Date(timestamp);
-            return date.toLocaleTimeString('en-US', { hour12: false });
+            const hours = date.getHours().toString().padStart(2, '0');
+            const minutes = date.getMinutes().toString().padStart(2, '0');
+            const seconds = date.getSeconds().toString().padStart(2, '0');
+            const milliseconds = date.getMilliseconds().toString().padStart(3, '0');
+            return `${hours}:${minutes}:${seconds}.${milliseconds}`;
         },
 
         // Get CSS class for log entry based on type
@@ -78,7 +82,8 @@ function mainApp() {
                 'LLM': 'bg-purple-100 text-purple-800',
                 'TTS': 'bg-green-100 text-green-800',
                 'ERROR': 'bg-red-100 text-red-800',
-                'WARNING': 'bg-yellow-100 text-yellow-800'
+                'WARNING': 'bg-yellow-100 text-yellow-800',
+                'METRICS': 'bg-indigo-100 text-indigo-800'
             };
             return classes[type] || 'bg-gray-100 text-gray-800';
         },
@@ -209,6 +214,9 @@ function mainApp() {
                         break
                     case 'asrDelta':
                         this.handleTranscriptionDelta(event)
+                        break
+                    case 'metrics':
+                        this.handleMetrics(event)
                         break
                     default:
                         this.handleOther(event)
@@ -581,6 +589,38 @@ function mainApp() {
             }
 
             return result;
-        }
+        },
+
+        // Handle metrics events
+        handleMetrics(event) {
+            // Format the metrics data for display
+            let formattedMessage = '';
+
+            // Extract the key parts from the metrics key (e.g., "ttfb.tts.tencent" -> "TTS Tencent TTFB")
+            const keyParts = event.key.split('.');
+            let metricType = '';
+            let service = '';
+            let metricName = '';
+
+            if (keyParts.length >= 3) {
+                metricName = keyParts[0].toUpperCase();
+                service = keyParts[2].charAt(0).toUpperCase() + keyParts[2].slice(1);
+                metricType = keyParts[1].toUpperCase();
+            } else {
+                formattedMessage = `Metrics: ${event.key}`;
+            }
+
+            if (metricName && service && metricType) {
+                formattedMessage = `${service} ${metricName} ${metricType}`;
+            }
+
+            // Add duration information
+            formattedMessage += ` (${event.duration}ms)`;
+            // Log the formatted metrics
+            this.logEvent('METRICS', formattedMessage, {
+                metricsKey: event.key,
+                metricsDuration: event.duration,
+            });
+        },
     }
 }
