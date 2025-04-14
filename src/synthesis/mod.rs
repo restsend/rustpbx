@@ -15,9 +15,11 @@ pub enum SynthesisType {
 mod tests;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct SynthesisConfig {
+    pub samplerate: i32,
     pub provider: Option<SynthesisType>,
-    pub rate: Option<f32>,
+    pub speed: Option<f32>,
     pub app_id: Option<String>,
     pub secret_id: Option<String>,
     pub secret_key: Option<String>,
@@ -42,8 +44,9 @@ pub trait SynthesisClient: Send + Sync {
 impl Default for SynthesisConfig {
     fn default() -> Self {
         Self {
+            samplerate: 16000,
             provider: None,
-            rate: Some(1.0),
+            speed: Some(1.0),
             app_id: None,
             secret_id: None,
             secret_key: None,

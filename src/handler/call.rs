@@ -294,7 +294,7 @@ impl ActiveCall {
             return Ok(());
         }
         let (tx, rx) = mpsc::unbounded_channel();
-
+        info!("Tts config: {:?}", tts_config);
         let tts_client = TencentCloudTtsClient::new(tts_config.clone());
         let tts_track = TtsTrack::new(
             self.track_config.server_side_track_id.clone(),

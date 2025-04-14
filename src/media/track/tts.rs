@@ -147,19 +147,35 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 }
 
                 let start_time = Instant::now();
-
                 // Use synthesize which now returns a stream directly
                 match client.synthesize(&text.to_string()).await {
                     Ok(mut stream) => {
                         let mut total_audio_len = 0;
                         let mut audio_chunks = Vec::new();
-
+                        let mut first_chunk = true;
                         // Process each audio chunk as it arrives
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
                                 Ok(audio_chunk) => {
                                     // Process the audio chunk
                                     total_audio_len += audio_chunk.len();
+
+                                    if first_chunk {
+                                        first_chunk = false;
+                                        // Send metrics event after the first chunk
+                                        event_sender
+                                            .send(SessionEvent::Metrics {
+                                                timestamp: crate::get_timestamp(),
+                                                key: "ttfb.tts.tencent".to_string(),
+                                                data: serde_json::json!({
+                                                        "speaker": speaker,
+                                                        "playId": play_id,
+                                                        "length": audio_chunk.len(),
+                                                }),
+                                                duration: start_time.elapsed().as_millis() as u32,
+                                            })
+                                            .ok();
+                                    }
 
                                     // Strip wav header if present (only for the first chunk)
                                     let processed_chunk = if audio_chunks.is_empty()
@@ -182,7 +198,14 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                 }
                                 Err(e) => {
                                     warn!("Error in audio stream chunk: {:?}", e);
-                                    break;
+                                    event_sender
+                                        .send(SessionEvent::Error {
+                                            timestamp: crate::get_timestamp(),
+                                            track_id: track_id.clone(),
+                                            sender: "tts.tencent".to_string(),
+                                            error: e.to_string(),
+                                        })
+                                        .ok();
                                 }
                             }
                         }
@@ -191,13 +214,13 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         event_sender
                             .send(SessionEvent::Metrics {
                                 timestamp: crate::get_timestamp(),
-                                sender: "tts.tencent".to_string(),
-                                metrics: serde_json::json!({
+                                key: "completed.tts.tencent".to_string(),
+                                data: serde_json::json!({
                                         "speaker": speaker,
                                         "playId": play_id,
                                         "length": total_audio_len,
-                                        "duration": start_time.elapsed().as_millis() as u32,
                                 }),
+                                duration: start_time.elapsed().as_millis() as u32,
                             })
                             .ok();
 

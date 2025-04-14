@@ -1,18 +1,21 @@
 use super::{SynthesisClient, SynthesisConfig};
 use anyhow::Result;
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use futures::{stream, Stream};
-use hmac::{Hmac, Mac};
-use reqwest::Client as HttpClient;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures::{stream, Stream, StreamExt};
+use ring::hmac;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::pin::Pin;
-use tracing::debug;
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{client::IntoClientRequest, protocol::Message},
+};
+use tracing::{debug, warn};
+use urlencoding;
 use uuid;
 
 /// TencentCloud TTS Response structure
-/// https://cloud.tencent.com/document/api/1073/37995
+/// https://cloud.tencent.com/document/product/1073/94308   
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudTtsResponse {
     #[serde(rename = "Response")]
@@ -34,6 +37,7 @@ pub struct Subtitle {
     #[serde(rename = "Phoneme")]
     pub phoneme: Option<String>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudTtsResult {
     #[serde(rename = "Audio")]
@@ -43,6 +47,31 @@ pub struct TencentCloudTtsResult {
     #[serde(rename = "RequestId")]
     pub request_id: String,
     #[serde(rename = "Subtitle")]
+    pub subtitles: Option<Vec<Subtitle>>,
+}
+
+/// WebSocket response structure for real-time TTS
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSocketResponse {
+    #[serde(rename = "code")]
+    pub code: i32,
+    #[serde(rename = "message")]
+    pub message: String,
+    #[serde(rename = "session_id")]
+    pub session_id: String,
+    #[serde(rename = "request_id")]
+    pub request_id: String,
+    #[serde(rename = "message_id")]
+    pub message_id: String,
+    #[serde(rename = "final")]
+    pub final_: i32,
+    #[serde(rename = "result")]
+    pub result: WebSocketResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebSocketResult {
+    #[serde(rename = "subtitles")]
     pub subtitles: Option<Vec<Subtitle>>,
 }
 
@@ -61,182 +90,179 @@ impl TencentCloudTtsClient {
         self.config = config;
         self
     }
-    // Generate authentication signature for TencentCloud API
-    fn generate_signature(
-        &self,
-        secret_key: &str,
-        host: &str,
-        method: &str,
-        timestamp: u64,
-        request_body: &str,
-    ) -> Result<String> {
-        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        // Step 1: Build canonical request
-        let canonical_headers = format!(
-            "content-type:application/json\nhost:{}\nx-tc-action:texttovoice\n",
-            host
-        );
-        let signed_headers = "content-type;host;x-tc-action";
-        let hashed_request_payload =
-            hex::encode(sha2::Sha256::digest(request_body.as_bytes()).as_slice());
-
-        let canonical_request = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
-            method,
-            "/",
-            "", // canonical query string
-            canonical_headers,
-            signed_headers,
-            hashed_request_payload
-        );
-
-        // Step 2: Build string to sign
-        let credential_scope = format!("{}/tts/tc3_request", date);
-        let hashed_canonical_request =
-            hex::encode(sha2::Sha256::digest(canonical_request.as_bytes()).as_slice());
-
-        let string_to_sign = format!(
-            "TC3-HMAC-SHA256\n{}\n{}\n{}",
-            timestamp, credential_scope, hashed_canonical_request
-        );
-
-        // Step 3: Calculate signature
-        let tc3_secret = format!("TC3{}", secret_key);
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(tc3_secret.as_bytes())?;
-        mac.update(date.as_bytes());
-        let secret_date = mac.finalize().into_bytes();
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_date)?;
-        mac.update(b"tts");
-        let secret_service = mac.finalize().into_bytes();
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_service)?;
-        mac.update(b"tc3_request");
-        let secret_signing = mac.finalize().into_bytes();
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_signing)?;
-        mac.update(string_to_sign.as_bytes());
-        let signature = mac.finalize().into_bytes();
-
-        Ok(hex::encode(&signature))
-    }
-
-    // Internal function to synthesize text to audio
-    async fn synthesize_text(&self, text: &str) -> Result<Vec<u8>> {
+    // Generate WebSocket URL for real-time TTS
+    fn generate_websocket_url(&self, text: &str) -> Result<String> {
         let secret_id = self.config.secret_id.clone().unwrap_or_default();
         let secret_key = self.config.secret_key.clone().unwrap_or_default();
+        let app_id = self.config.app_id.clone().unwrap_or_default();
 
         let volume = self.config.volume.unwrap_or(0);
-        let speed = self.config.rate.unwrap_or(0.0);
+        let speed = self.config.speed.unwrap_or(0.0);
         let codec = self
             .config
             .codec
             .clone()
             .unwrap_or_else(|| "pcm".to_string());
-
+        let sample_rate = self.config.samplerate;
+        let session_id = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().timestamp() as u64;
-        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let mut request_data = serde_json::json!({
-            "Text": text,
-            "Volume": volume,
-            "Speed": speed,
-            "ProjectId": 0,
-            "ModelType": 1,
-            "PrimaryLanguage": 1,
-            "SampleRate": 16000,
-            "Codec": codec,
-            "SessionId": uuid::Uuid::new_v4().to_string()
-        });
+        let expired = timestamp + 24 * 60 * 60; // 24 hours expiration
 
-        if let Some(ref s) = self.config.speaker {
-            if let Ok(v) = s.parse::<u32>() {
-                request_data["VoiceType"] = v.into();
+        let expired_str = expired.to_string();
+        let sample_rate_str = sample_rate.to_string();
+        let speed_str = speed.to_string();
+        let timestamp_str = timestamp.to_string();
+        let volume_str = volume.to_string();
+        let voice_type = self
+            .config
+            .speaker
+            .clone()
+            .unwrap_or_else(|| "101001".to_string());
+        let mut query_params = vec![
+            ("Action", "TextToStreamAudioWS"),
+            ("AppId", app_id.as_str()),
+            ("Codec", codec.as_str()),
+            ("EnableSubtitle", "true"),
+            ("Expired", &expired_str),
+            ("ModelType", "0"),
+            ("FastVoiceType", ""),
+            ("SegmentRate", "0"),
+            ("EmotionCategory", ""),
+            ("EmotionIntensity", "0"),
+            ("SampleRate", &sample_rate_str),
+            ("SecretId", secret_id.as_str()),
+            ("SessionId", &session_id),
+            ("Speed", &speed_str),
+            ("Text", text),
+            ("Timestamp", &timestamp_str),
+            ("VoiceType", &voice_type),
+            ("Volume", &volume_str),
+        ];
+
+        // Sort query parameters by key
+        query_params.sort_by(|a, b| a.0.cmp(b.0));
+
+        // Build query string without URL encoding
+        let query_string = query_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let string_to_sign = format!("GETtts.cloud.tencent.com/stream_ws?{}", query_string);
+
+        // Calculate signature using HMAC-SHA1
+        let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
+        let tag = hmac::sign(&key, string_to_sign.as_bytes());
+        let signature = STANDARD.encode(tag.as_ref());
+
+        // URL encode parameters for final URL
+        let encoded_query_string = query_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // Build final WebSocket URL
+        let url = format!(
+            "wss://tts.cloud.tencent.com/stream_ws?{}&Signature={}",
+            encoded_query_string,
+            urlencoding::encode(&signature)
+        );
+        Ok(url)
+    }
+
+    // Internal function to synthesize text to audio using WebSocket
+    async fn synthesize_text_stream(
+        &self,
+        text: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
+        let url = self.generate_websocket_url(text)?;
+        debug!("tencent_tts: Connecting to WebSocket URL: {}", url);
+
+        // Create a request with custom headers
+        let request = url.into_client_request()?;
+
+        // Connect to WebSocket with custom configuration
+        let (ws_stream, resp) = connect_async_with_config(request, None, false).await?;
+        match resp.status() {
+            reqwest::StatusCode::SWITCHING_PROTOCOLS => (),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "WebSocket connection failed: {}",
+                    resp.status()
+                ));
             }
         }
-        if let Some(ref v) = self.config.subtitle {
-            request_data["Subtitle"] = v.clone().into();
-        }
-        if let Some(ref v) = self.config.emotion {
-            request_data["Emotion"] = v.clone().into();
-        }
-        let host = "tts.tencentcloudapi.com";
-        let signature = self.generate_signature(
-            &secret_key,
-            host,
-            "POST",
-            timestamp,
-            &request_data.to_string(),
-        )?;
 
-        // Create authorization header
-        let authorization = format!(
-            "TC3-HMAC-SHA256 Credential={}/{}/tts/tc3_request, SignedHeaders=content-type;host;x-tc-action, Signature={}",
-            secret_id,
-            date,
-            signature
-        );
+        // Create a stream that will yield audio chunks
+        let stream = Box::pin(stream::unfold(
+            (ws_stream, false),
+            move |(mut ws_stream, is_final)| async move {
+                // If we've received the final message, end the stream
+                if is_final {
+                    return None;
+                }
 
-        // Record request start time for TTFB measurement
-        let request_start_time = std::time::Instant::now();
-        debug!("Sending TTS request with data: {:?}", request_data);
+                // Receive message from WebSocket
+                match ws_stream.next().await {
+                    Some(Ok(Message::Binary(data))) => {
+                        // Binary data is audio
+                        Some((Ok(data.to_vec()), (ws_stream, false)))
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        // Text data is metadata
+                        match serde_json::from_str::<WebSocketResponse>(&text) {
+                            Ok(response) => {
+                                if response.code != 0 {
+                                    return Some((
+                                        Err(anyhow::anyhow!(
+                                            "WebSocket error: {}",
+                                            response.message
+                                        )),
+                                        (ws_stream, true),
+                                    ));
+                                }
+                                // Check if this is the final message
+                                if response.final_ == 1 {
+                                    Some((Ok(Vec::new()), (ws_stream, true)))
+                                } else {
+                                    // Continue receiving data
+                                    Some((Ok(Vec::new()), (ws_stream, false)))
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse WebSocket response: {}", e);
+                                Some((Ok(Vec::new()), (ws_stream, false)))
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        // Connection closed
+                        None
+                    }
+                    Some(Err(e)) => {
+                        warn!("WebSocket error: {:?}", e);
+                        // Error occurred
+                        Some((
+                            Err(anyhow::anyhow!("WebSocket error: {}", e)),
+                            (ws_stream, true),
+                        ))
+                    }
+                    None => {
+                        // Stream ended
+                        None
+                    }
+                    _ => {
+                        // Ignore other message types
+                        Some((Ok(Vec::new()), (ws_stream, false)))
+                    }
+                }
+            },
+        ));
 
-        // Send request to TencentCloud TTS API
-        let response = HttpClient::new()
-            .post(format!("https://{}", host))
-            .header("Content-Type", "application/json")
-            .header("Authorization", authorization)
-            .header("Host", host)
-            .header("X-TC-Action", "TextToVoice")
-            .header("X-TC-Version", "2019-08-23")
-            .header("X-TC-Timestamp", timestamp.to_string())
-            .header("X-TC-Region", "ap-guangzhou")
-            .json(&request_data)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let response_text = response.text().await?;
-        debug!(
-            "TTS API Response status: {}, body: {}",
-            status, response_text
-        );
-
-        if !status.is_success() {
-            return Err(anyhow::anyhow!(
-                "TTS API request failed with status {}: {}",
-                status,
-                response_text
-            ));
-        }
-
-        let response: TencentCloudTtsResponse =
-            serde_json::from_str(&response_text).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to parse response: {}. Response text: {}",
-                    e,
-                    response_text
-                )
-            })?;
-
-        // Check if audio field exists and handle it safely
-        let audio = response.response.audio.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No audio data in response. Full response: {}",
-                response_text
-            )
-        })?;
-
-        let audio_bytes = BASE64_STANDARD.decode(audio)?;
-        let duration = request_start_time.elapsed().as_millis();
-        debug!(
-            "TencentCloud TTS response: {} bytes in {}ms, text: {} ",
-            audio_bytes.len(),
-            duration,
-            text,
-        );
-        Ok(audio_bytes)
+        Ok(stream)
     }
 }
 
@@ -246,7 +272,7 @@ impl SynthesisClient for TencentCloudTtsClient {
         &'a self,
         text: &'a str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
-        let audio = self.synthesize_text(text).await?;
-        Ok(Box::pin(stream::once(async move { Ok(audio) })))
+        // Use the new WebSocket streaming implementation
+        self.synthesize_text_stream(text).await
     }
 }

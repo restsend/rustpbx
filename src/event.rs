@@ -126,8 +126,9 @@ pub enum SessionEvent {
     /// timestamp, metrics
     Metrics {
         timestamp: u64,
-        sender: String,
-        metrics: serde_json::Value,
+        key: String,
+        duration: u32,
+        data: serde_json::Value,
     },
     /// timestamp, error message
     Error {
