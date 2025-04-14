@@ -14,6 +14,8 @@ use tracing::{debug, warn};
 use urlencoding;
 use uuid;
 
+const HOST: &str = "tts.cloud.tencent.com";
+const PATH: &str = "/stream_ws";
 /// TencentCloud TTS Response structure
 /// https://cloud.tencent.com/document/product/1073/94308   
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,11 +127,6 @@ impl TencentCloudTtsClient {
             ("Codec", codec.as_str()),
             ("EnableSubtitle", "true"),
             ("Expired", &expired_str),
-            ("ModelType", "0"),
-            ("FastVoiceType", ""),
-            ("SegmentRate", "0"),
-            ("EmotionCategory", ""),
-            ("EmotionIntensity", "0"),
             ("SampleRate", &sample_rate_str),
             ("SecretId", secret_id.as_str()),
             ("SessionId", &session_id),
@@ -150,7 +147,7 @@ impl TencentCloudTtsClient {
             .collect::<Vec<_>>()
             .join("&");
 
-        let string_to_sign = format!("GETtts.cloud.tencent.com/stream_ws?{}", query_string);
+        let string_to_sign = format!("GET{}{}?{}", HOST, PATH, query_string);
 
         // Calculate signature using HMAC-SHA1
         let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
@@ -166,7 +163,9 @@ impl TencentCloudTtsClient {
 
         // Build final WebSocket URL
         let url = format!(
-            "wss://tts.cloud.tencent.com/stream_ws?{}&Signature={}",
+            "wss://{}{}?{}&Signature={}",
+            HOST,
+            PATH,
             encoded_query_string,
             urlencoding::encode(&signature)
         );
