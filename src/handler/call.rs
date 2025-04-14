@@ -254,6 +254,9 @@ impl ActiveCall {
             Command::Refer { target, options } => self.do_refer(target, options).await,
             Command::Mute { track_id } => self.do_mute(track_id).await,
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
+            Command::Pause {} => self.do_pause().await,
+            Command::Resume {} => self.do_resume().await,
+            Command::Interrupt {} => self.do_interrupt().await,
             _ => {
                 info!("Invalid command: {:?}", command);
                 Ok(())
@@ -325,7 +328,17 @@ impl ActiveCall {
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
-
+    async fn do_interrupt(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn do_pause(&self) -> Result<()> {
+        //self.media_stream.pause().await;
+        Ok(())
+    }
+    async fn do_resume(&self) -> Result<()> {
+        //self.media_stream.resume().await;
+        Ok(())
+    }
     async fn do_hangup(&self) -> Result<()> {
         self.cancel_token.cancel();
         info!("Call {} do_hangup", self.session_id);

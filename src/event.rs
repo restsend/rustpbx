@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "event")]
 #[serde(rename_all = "camelCase")]
 pub enum SessionEvent {
+    Incoming {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        caller: String,
+        callee: String,
+        sdp: String,
+    },
     Answer {
         #[serde(rename = "trackId")]
         track_id: String,
@@ -27,6 +35,7 @@ pub enum SessionEvent {
     Hangup {
         timestamp: u64,
         reason: String,
+        initiator: String,
     },
     AnswerMachineDetection {
         // Answer machine detection
@@ -55,12 +64,12 @@ pub enum SessionEvent {
         samples: Option<PcmBuf>,
     },
     Noisy {
-        // Track is noisy, no need to process
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         #[serde(rename = "startTime")]
         start_time: u64,
+        r#type: String, // loud, music, unclear
     },
     DTMF {
         #[serde(rename = "trackId")]
@@ -77,6 +86,12 @@ pub enum SessionEvent {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+    },
+    Interruption {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        position: u64, // current playback position at the time of interruption
     },
     AsrFinal {
         #[serde(rename = "trackId")]
@@ -105,15 +120,9 @@ pub enum SessionEvent {
         text: String,
     },
     /// timestamp, text
-    LLMFinal {
-        timestamp: u64,
-        text: String,
-    },
+    LLMFinal { timestamp: u64, text: String },
     /// track_id, timestamp,  word
-    LLMDelta {
-        timestamp: u64,
-        word: String,
-    },
+    LLMDelta { timestamp: u64, word: String },
     /// timestamp, metrics
     Metrics {
         timestamp: u64,
@@ -121,10 +130,7 @@ pub enum SessionEvent {
         metrics: serde_json::Value,
     },
     /// timestamp, error message
-    Error {
-        timestamp: u64,
-        error: String,
-    },
+    Error { timestamp: u64, error: String },
 }
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;
