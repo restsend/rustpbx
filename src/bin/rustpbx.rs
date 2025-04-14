@@ -39,7 +39,8 @@ async fn main() -> Result<()> {
     log_fmt = log_fmt.with_file(true).with_line_number(true);
     if let Some(ref log_file) = config.log_file {
         let file = File::create(log_file).expect("Failed to create log file");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file);
+        std::mem::forget(guard);
         log_fmt.with_writer(non_blocking).try_init().ok();
     } else {
         log_fmt.try_init().ok();
