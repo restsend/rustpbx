@@ -11,7 +11,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    services::ServeDir,
+};
 use tracing::info;
 
 pub struct App {
@@ -148,12 +151,7 @@ fn create_router(useragent: Arc<UserAgent>) -> Router {
 
     // CORS configuration to allow cross-origin requests
     let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost:3000".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-            "http://localhost:8080".parse().unwrap(),
-            "http://127.0.0.1:8080".parse().unwrap(),
-        ])
+        .allow_origin(AllowOrigin::any())
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -166,8 +164,7 @@ fn create_router(useragent: Arc<UserAgent>) -> Router {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
-        ])
-        .allow_credentials(true);
+        ]);
 
     // Merge call and WebSocket handlers with static file serving
     let call_routes = crate::handler::router(useragent).with_state(call_state);
