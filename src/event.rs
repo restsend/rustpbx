@@ -130,7 +130,13 @@ pub enum SessionEvent {
         metrics: serde_json::Value,
     },
     /// timestamp, error message
-    Error { timestamp: u64, error: String },
+    Error {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        sender: String,
+        error: String,
+    },
 }
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;

@@ -35,7 +35,7 @@ struct Args {
     output_file: PathBuf,
 
     /// Speaker ID (default: 1)
-    #[arg(short, long, default_value = "1")]
+    #[arg(short, long, default_value = "1005")]
     speaker: String,
 
     /// Speech rate (0.5-2.0, default: 1.0)
@@ -166,9 +166,9 @@ async fn main() -> Result<()> {
         app_id: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
-        volume: Some(args.volume),      // Volume level (0-10)
-        speaker: Some(args.speaker),    // Speaker type
-        codec: Some("pcm".to_string()), // PCM format
+        volume: Some(args.volume),   // Volume level (0-10)
+        speaker: Some(args.speaker), // Speaker type
+        ..Default::default()
     };
     info!("Created TTS configuration {:?}", synthesis_config);
     let tts_client = TencentCloudTtsClient::new(synthesis_config);

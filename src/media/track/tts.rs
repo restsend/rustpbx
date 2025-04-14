@@ -113,6 +113,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         let buffer_clone = buffer.clone();
         let sample_rate = self.config.sample_rate;
         let use_cache = self.use_cache;
+        let track_id = self.track_id.clone();
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -124,7 +125,11 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     buffer_clone.lock().await.clear();
                 }
                 let cache_key = format!("tts:{:?}{}", speaker, text);
-                let cache_key = cache::generate_cache_key(&cache_key, sample_rate) + ".pcm";
+                let cache_key = cache::generate_cache_key(
+                    &cache_key,
+                    sample_rate,
+                    speaker.as_ref().unwrap_or(&"".to_string()),
+                );
                 if use_cache {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
@@ -215,6 +220,14 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     }
                     Err(e) => {
                         warn!("Error synthesizing text: {}", e);
+                        event_sender
+                            .send(SessionEvent::Error {
+                                timestamp: crate::get_timestamp(),
+                                track_id: track_id.clone(),
+                                sender: "tts.tencent".to_string(),
+                                error: e.to_string(),
+                            })
+                            .ok();
                         continue;
                     }
                 }

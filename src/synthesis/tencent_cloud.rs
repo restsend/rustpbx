@@ -19,6 +19,21 @@ pub struct TencentCloudTtsResponse {
     pub response: TencentCloudTtsResult,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Subtitle {
+    #[serde(rename = "Text")]
+    pub text: String,
+    #[serde(rename = "BeginTime")]
+    pub begin_time: u32,
+    #[serde(rename = "EndTime")]
+    pub end_time: u32,
+    #[serde(rename = "BeginIndex")]
+    pub begin_index: u32,
+    #[serde(rename = "EndIndex")]
+    pub end_index: u32,
+    #[serde(rename = "Phoneme")]
+    pub phoneme: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudTtsResult {
     #[serde(rename = "Audio")]
@@ -27,6 +42,8 @@ pub struct TencentCloudTtsResult {
     pub session_id: Option<String>,
     #[serde(rename = "RequestId")]
     pub request_id: String,
+    #[serde(rename = "Subtitle")]
+    pub subtitles: Option<Vec<Subtitle>>,
 }
 
 #[derive(Debug)]
@@ -110,13 +127,7 @@ impl TencentCloudTtsClient {
     async fn synthesize_text(&self, text: &str) -> Result<Vec<u8>> {
         let secret_id = self.config.secret_id.clone().unwrap_or_default();
         let secret_key = self.config.secret_key.clone().unwrap_or_default();
-        let speaker = self
-            .config
-            .speaker
-            .as_ref()
-            .map(|s| s.parse().ok())
-            .flatten()
-            .unwrap_or(1);
+
         let volume = self.config.volume.unwrap_or(0);
         let speed = self.config.rate.unwrap_or(0.0);
         let codec = self
@@ -127,19 +138,29 @@ impl TencentCloudTtsClient {
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let request_data = serde_json::json!({
+        let mut request_data = serde_json::json!({
             "Text": text,
             "Volume": volume,
             "Speed": speed,
             "ProjectId": 0,
             "ModelType": 1,
-            "VoiceType": speaker,
             "PrimaryLanguage": 1,
             "SampleRate": 16000,
             "Codec": codec,
             "SessionId": uuid::Uuid::new_v4().to_string()
         });
 
+        if let Some(ref s) = self.config.speaker {
+            if let Ok(v) = s.parse::<u32>() {
+                request_data["VoiceType"] = v.into();
+            }
+        }
+        if let Some(ref v) = self.config.subtitle {
+            request_data["Subtitle"] = v.clone().into();
+        }
+        if let Some(ref v) = self.config.emotion {
+            request_data["Emotion"] = v.clone().into();
+        }
         let host = "tts.tencentcloudapi.com";
         let signature = self.generate_signature(
             &secret_key,
@@ -200,18 +221,20 @@ impl TencentCloudTtsClient {
             })?;
 
         // Check if audio field exists and handle it safely
-        let response_str = serde_json::to_string_pretty(&response).unwrap_or_default();
         let audio = response.response.audio.ok_or_else(|| {
-            anyhow::anyhow!("No audio data in response. Full response: {}", response_str)
+            anyhow::anyhow!(
+                "No audio data in response. Full response: {}",
+                response_text
+            )
         })?;
 
         let audio_bytes = BASE64_STANDARD.decode(audio)?;
-
         let duration = request_start_time.elapsed().as_millis();
         debug!(
-            "TencentCloud TTS response: {} bytes in {}ms",
+            "TencentCloud TTS response: {} bytes in {}ms, text: {} ",
             audio_bytes.len(),
-            duration
+            duration,
+            text,
         );
         Ok(audio_bytes)
     }

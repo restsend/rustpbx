@@ -279,7 +279,10 @@ impl ActiveCall {
             Some(ref config) => config,
             None => return Ok(()),
         };
-
+        let speaker = match speaker {
+            Some(s) => Some(s),
+            None => tts_config.speaker.clone(),
+        };
         let play_command = TtsCommand {
             text,
             speaker,
