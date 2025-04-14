@@ -139,7 +139,10 @@ fn create_router(useragent: Arc<UserAgent>) -> Router {
     // Create router with empty state
     let router = Router::new();
     let call_state = CallHandlerState::new();
-
+    // check if static/index.html exists
+    if !std::path::Path::new("static/index.html").exists() {
+        tracing::error!("static/index.html does not exist");
+    }
     // Serve static files
     let static_files_service = ServeDir::new("static");
 
