@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
     // Create TTS client and config
     let synthesis_config = SynthesisConfig {
         provider: Some(SynthesisType::TencentCloud),
-        rate: Some(args.rate), // Speech rate
+        speed: Some(args.rate), // Speech rate
         app_id: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
