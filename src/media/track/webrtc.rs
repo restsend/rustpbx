@@ -284,7 +284,7 @@ impl WebrtcTrack {
         self.config.codec = codec;
 
         info!(
-            "webrtctrack: set remote description codec:{} {}",
+            "webrtctrack: set remote description codec:{}\noffer:\n{}",
             codec.mime_type(),
             remote_desc.sdp
         );
@@ -310,10 +310,6 @@ impl WebrtcTrack {
             .ok_or(anyhow::anyhow!(
                 "webrtctrack: Failed to get local description"
             ))?;
-        info!(
-            "webrtctrack: Peer connection established answer: {}",
-            answer.sdp
-        );
         Ok(answer)
     }
 }

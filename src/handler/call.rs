@@ -14,7 +14,7 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::{SynthesisConfig, TencentCloudTtsClient},
+    synthesis::{SynthesisConfig, SynthesisType, TencentCloudTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
     TrackId,
 };
@@ -157,7 +157,17 @@ impl ActiveCall {
         match options.asr {
             Some(ref asr_config) => match asr_config.provider {
                 Some(TranscriptionType::TencentCloud) => {
-                    let asr_config = asr_config.clone();
+                    let mut asr_config = asr_config.clone();
+                    if asr_config.app_id.is_none() {
+                        asr_config.app_id = std::env::var("TENCENT_APPID").ok();
+                    }
+                    if asr_config.secret_id.is_none() {
+                        asr_config.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
+                    }
+                    if asr_config.secret_key.is_none() {
+                        asr_config.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
+                    }
+
                     let event_sender = media_stream.get_event_sender();
                     let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
                         .with_track_id(track_id.clone())
@@ -179,7 +189,7 @@ impl ActiveCall {
         match webrtc_track.setup_webrtc_track(offer, timeout).await {
             Ok(answer) => {
                 let sdp = strip_ipv6_candidates(&answer.sdp);
-                info!("Webrtc track setup complete {}", sdp);
+                info!("Webrtc track setup complete answer: {}", sdp);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id: track_id.clone(),
@@ -215,7 +225,24 @@ impl ActiveCall {
         )
         .await?;
         let track_config = TrackConfig::default();
-        let tts_config = options.tts.clone();
+        let mut tts_config = options.tts.clone();
+        match tts_config {
+            Some(ref mut tts_config) => match tts_config.provider {
+                Some(SynthesisType::TencentCloud) => {
+                    if tts_config.app_id.is_none() {
+                        tts_config.app_id = std::env::var("TENCENT_APPID").ok();
+                    }
+                    if tts_config.secret_id.is_none() {
+                        tts_config.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
+                    }
+                    if tts_config.secret_key.is_none() {
+                        tts_config.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
+                    }
+                }
+                _ => {}
+            },
+            None => {}
+        }
         let active_call = ActiveCall {
             cancel_token,
             call_type: ActiveCallType::Webrtc,
