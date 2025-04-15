@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use dotenv::dotenv;
 use rustpbx::{app::AppBuilder, config::Config};
 use std::fs::File;
 use tokio::select;
@@ -22,7 +23,7 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-
+    dotenv().ok();
     let cli = Cli::parse();
 
     let config = cli
