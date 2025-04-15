@@ -126,13 +126,13 @@ impl WebrtcTrack {
     }
 
     pub async fn get_ice_servers() -> Vec<RTCIceServer> {
-        let servers = vec![RTCIceServer {
-            urls: vec![
-                "stun:stun.l.google.com:19302".to_string(),
-                "stun:restsend.com:3478".to_string(),
-            ],
-            ..Default::default()
-        }];
+        let mut servers = vec![];
+        if let Ok(server) = std::env::var("STUN_SERVER") {
+            servers.push(RTCIceServer {
+                urls: vec![server],
+                ..Default::default()
+            });
+        }
         servers
     }
 
