@@ -183,22 +183,12 @@ impl WebrtcTrack {
         };
 
         let cancel_token = self.cancel_token.clone();
-
-        let (candidate_tx, candidate_rx) = oneshot::channel();
-        let candidate_tx = Arc::new(Mutex::new(Some(candidate_tx)));
-
         let peer_connection = api.new_peer_connection(config).await?;
+
         peer_connection.on_ice_candidate(Box::new(
             move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
                 info!("webrtctrack: ICE candidate received: {:?}", candidate);
-                let candidate_tx = candidate_tx.clone();
-                Box::pin(async move {
-                    if candidate.is_none() {
-                        if let Some(tx) = candidate_tx.lock().await.take() {
-                            tx.send(()).ok();
-                        }
-                    }
-                })
+                Box::pin(async move {})
             },
         ));
         peer_connection.on_peer_connection_state_change(Box::new(
@@ -233,7 +223,7 @@ impl WebrtcTrack {
                     _ => 8000,  // PCMU, PCMA, TELEPHONE_EVENT
                 };
                 info!(
-                    "webrtctrack: received: {} track_samplerate:{}",
+                    "webrtctrack: on_track received: {} track_samplerate: {}",
                     track.codec().capability.mime_type,
                     track_samplerate,
                 );
@@ -291,12 +281,11 @@ impl WebrtcTrack {
         peer_connection.set_remote_description(remote_desc).await?;
 
         let answer = peer_connection.create_answer(None).await?;
-        peer_connection
-            .set_local_description(answer.clone())
-            .await?;
 
+        let mut gather_complete = peer_connection.gathering_complete_promise().await;
+        peer_connection.set_local_description(answer).await?;
         select! {
-            _ = candidate_rx => {
+            _ = gather_complete.recv() => {
                 info!("webrtctrack: ICE candidate received");
             }
             _ = sleep(timeout.unwrap_or(HANDSHAKE_TIMEOUT)) => {
