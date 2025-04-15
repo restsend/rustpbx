@@ -318,11 +318,11 @@ impl TencentCloudAsrClient {
             let mut total_bytes_sent = 0;
             while let Some(samples) = audio_rx.recv().await {
                 total_bytes_sent += samples.len();
-                debug!(
-                    "Sending audio chunk: {} bytes (total sent: {} bytes)",
-                    samples.len(),
-                    total_bytes_sent
-                );
+                // debug!(
+                //     "Sending audio chunk: {} bytes (total sent: {} bytes)",
+                //     samples.len(),
+                //     total_bytes_sent
+                // );
                 match ws_sender.send(Message::Binary(samples.into())).await {
                     Ok(_) => {}
                     Err(e) => {
