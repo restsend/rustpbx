@@ -24,9 +24,9 @@ pub struct TranscriptionConfig {
     pub app_id: Option<String>,
     pub secret_id: Option<String>,
     pub secret_key: Option<String>,
-    pub model_type: String,
-    pub buffer_size: usize,
-    pub sample_rate: u32,
+    pub model_type: Option<String>,
+    pub buffer_size: Option<usize>,
+    pub sample_rate: Option<u32>,
 }
 
 // Default config for backward compatibility
@@ -39,9 +39,9 @@ impl Default for TranscriptionConfig {
             app_id: None,
             secret_id: None,
             secret_key: None,
-            model_type: "16k_zh".to_string(),
-            buffer_size: 8000, // 500ms at 16kHz
-            sample_rate: 16000,
+            model_type: None,
+            buffer_size: None,
+            sample_rate: None,
         }
     }
 }

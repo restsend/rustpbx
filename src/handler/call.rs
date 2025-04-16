@@ -171,7 +171,7 @@ impl ActiveCall {
                     let event_sender = media_stream.get_event_sender();
                     let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
                         .with_track_id(track_id.clone())
-                        .with_cancellation_token(cancel_token.clone())
+                        .with_cancellation_token(cancel_token.child_token())
                         .build()
                         .await?;
                     let asr_processor = AsrProcessor::new(asr_client);
@@ -217,7 +217,7 @@ impl ActiveCall {
     ) -> Result<Self> {
         let media_stream = Self::create_stream(
             state,
-            cancel_token.clone(),
+            cancel_token.child_token(),
             event_sender,
             track_id,
             &session_id,

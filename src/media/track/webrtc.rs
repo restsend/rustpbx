@@ -12,8 +12,8 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{sync::Arc, time::SystemTime};
+use tokio::time::sleep;
 use tokio::{select, sync::Mutex, time::Duration};
-use tokio::{sync::oneshot, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
@@ -36,6 +36,7 @@ use webrtc::{
     },
     track::{track_local::TrackLocal, track_remote::TrackRemote},
 };
+
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 // Configuration for integrating a webrtc crate track with our WebrtcTrack
 #[derive(Clone)]
@@ -161,7 +162,7 @@ impl WebrtcTrack {
     }
 
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
-        self.config = self.config.with_sample_rate(sample_rate);
+        self.config = self.config.clone().with_sample_rate(sample_rate);
         self.processor_chain = ProcessorChain::new(sample_rate);
         self
     }
@@ -183,18 +184,20 @@ impl WebrtcTrack {
         };
 
         let cancel_token = self.cancel_token.clone();
-        let peer_connection = api.new_peer_connection(config).await?;
-
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let peer_connection_clone = peer_connection.clone();
         peer_connection.on_ice_candidate(Box::new(
             move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
                 info!("webrtctrack: ICE candidate received: {:?}", candidate);
                 Box::pin(async move {})
             },
         ));
+        let cancel_token_clone = cancel_token.clone();
         peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
                 info!("webrtctrack: Peer connection state changed: {}", s);
                 let cancel_token = cancel_token.clone();
+                let peer_connection_clone = peer_connection_clone.clone();
                 Box::pin(async move {
                     match s {
                         RTCPeerConnectionState::Connected => {}
@@ -202,6 +205,7 @@ impl WebrtcTrack {
                         | RTCPeerConnectionState::Failed
                         | RTCPeerConnectionState::Disconnected => {
                             cancel_token.cancel();
+                            peer_connection_clone.close().await.ok();
                         }
                         _ => {}
                     }
@@ -227,30 +231,39 @@ impl WebrtcTrack {
                     track.codec().capability.mime_type,
                     track_samplerate,
                 );
-
+                let cancel_token_clone = cancel_token_clone.clone();
                 Box::pin(async move {
-                    while let Ok((packet, _)) = track.read_rtp().await {
-                        let packet_sender = packet_sender_clone.lock().await;
-                        if let Some(sender) = packet_sender.as_ref() {
-                            let frame = AudioFrame {
-                                track_id: track_id_clone.clone(),
-                                samples: crate::Samples::RTP {
-                                    payload_type: packet.header.payload_type,
-                                    payload: packet.payload.to_vec(),
-                                    sequence_number: packet.header.sequence_number,
-                                },
-                                timestamp: crate::get_timestamp(),
-                                sample_rate: track_samplerate,
-                                ..Default::default()
-                            };
-                            if let Err(e) = processor_chain.process_frame(&frame) {
-                                error!("webrtctrack: Failed to process frame: {}", e);
+                    loop {
+                        select! {
+                            _ = cancel_token_clone.cancelled() => {
+                                info!("webrtctrack: track cancelled");
+                                break;
                             }
-                            match sender.send(frame) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    error!("webrtctrack: Failed to send packet: {}", e);
+                            Ok((packet, _)) = track.read_rtp() => {
+                                let packet_sender = packet_sender_clone.lock().await;
+                            if let Some(sender) = packet_sender.as_ref() {
+                                let frame = AudioFrame {
+                                    track_id: track_id_clone.clone(),
+                                    samples: crate::Samples::RTP {
+                                        payload_type: packet.header.payload_type,
+                                        payload: packet.payload.to_vec(),
+                                        sequence_number: packet.header.sequence_number,
+                                    },
+                                    timestamp: crate::get_timestamp(),
+                                    sample_rate: track_samplerate,
+                                    ..Default::default()
+                                };
+                                if let Err(e) = processor_chain.process_frame(&frame) {
+                                    error!("webrtctrack: Failed to process frame: {}", e);
                                     break;
+                                }
+                                match sender.send(frame) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("webrtctrack: Failed to send packet: {}", e);
+                                        break;
+                                        }
+                                    }
                                 }
                             }
                         }

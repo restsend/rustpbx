@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
 /// API Tencent Cloud streaming ASR
-/// https://cloud.tencent.com/document/api/1073/94308
+/// https://cloud.tencent.com/document/api/1093/48982
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentCloudAsrResult {
     pub slice_type: u32,
@@ -88,7 +88,7 @@ impl TencentCloudAsrClientBuilder {
     }
 
     pub fn with_model_type(mut self, model_type: String) -> Self {
-        self.config.model_type = model_type;
+        self.config.model_type = Some(model_type);
         self
     }
     pub fn with_track_id(mut self, track_id: String) -> Self {
@@ -107,6 +107,10 @@ impl TencentCloudAsrClientBuilder {
         let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
         let track_id = voice_id.clone();
+        info!(
+            "tencent_asr: start track_id: {} voice_id: {} config: {:?}",
+            track_id, voice_id, client.config
+        );
         tokio::spawn(async move {
             match TencentCloudAsrClient::handle_websocket_message(
                 track_id,
@@ -173,7 +177,7 @@ impl TencentCloudAsrClient {
             .as_ref()
             .ok_or_else(|| anyhow!("No appid provided"))?;
 
-        let engine_type = self.config.model_type.as_str();
+        let engine_model_type = self.config.model_type.as_deref().unwrap_or("16k_zh_en");
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let nonce = timestamp.to_string(); // Use timestamp as nonce
@@ -187,7 +191,7 @@ impl TencentCloudAsrClient {
             ("timestamp", timestamp_str.as_str()),
             ("expired", expired_str.as_str()),
             ("nonce", nonce.as_str()),
-            ("engine_model_type", engine_type),
+            ("engine_model_type", engine_model_type),
             ("voice_id", voice_id),
             ("voice_format", "1"), // PCM format
             ("needvad", "1"),
@@ -223,7 +227,7 @@ impl TencentCloudAsrClient {
             "wss://{}{}?{}&signature={}",
             host, url_path, query_string, signature
         );
-        debug!("Connecting to WebSocket URL: {}", ws_url);
+        info!("tencent_asr: Connecting to WebSocket URL: {}", ws_url);
         let ws_key = STANDARD.encode(random::<[u8; 16]>());
 
         let request = Request::builder()
@@ -268,7 +272,11 @@ impl TencentCloudAsrClient {
                                         "Error from ASR service: {} ({})",
                                         response.message, response.code
                                     );
-                                    break;
+                                    return Err(anyhow!(
+                                        "Error from ASR service: {} ({})",
+                                        response.message,
+                                        response.code
+                                    ));
                                 }
                                 response.result.map(|result| {
                                     let event = if result.slice_type == 2 {
@@ -318,11 +326,6 @@ impl TencentCloudAsrClient {
             let mut total_bytes_sent = 0;
             while let Some(samples) = audio_rx.recv().await {
                 total_bytes_sent += samples.len();
-                // debug!(
-                //     "Sending audio chunk: {} bytes (total sent: {} bytes)",
-                //     samples.len(),
-                //     total_bytes_sent
-                // );
                 match ws_sender.send(Message::Binary(samples.into())).await {
                     Ok(_) => {}
                     Err(e) => {
@@ -336,9 +339,8 @@ impl TencentCloudAsrClient {
             );
             Result::<(), anyhow::Error>::Ok(())
         };
-
         tokio::select! {
-            r = recv_loop => {r} ,
+            r = recv_loop => {r},
             r = send_loop => {r},
             _ = cancellation_token.cancelled() => {Ok(())}
         }
