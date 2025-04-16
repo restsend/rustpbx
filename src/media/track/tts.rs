@@ -12,7 +12,13 @@ use crate::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::{
     select,
     sync::{mpsc, Mutex},
@@ -114,6 +120,9 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         let sample_rate = self.config.sample_rate;
         let use_cache = self.use_cache;
         let track_id = self.track_id.clone();
+        let event_sender_clone = event_sender.clone();
+        let synthesize_done = Arc::new(AtomicBool::new(false));
+        let synthesize_done_clone = synthesize_done.clone();
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -130,12 +139,15 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     sample_rate,
                     speaker.as_ref().unwrap_or(&"".to_string()),
                 );
+                synthesize_done.store(false, Ordering::Relaxed);
+
                 if use_cache {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
                                 info!("tts: Using cached audio for {}", cache_key);
                                 buffer_clone.lock().await.extend(bytes_to_samples(&audio));
+                                synthesize_done.store(true, Ordering::Relaxed);
                                 continue;
                             }
                             Err(e) => {
@@ -147,7 +159,6 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                 }
 
                 let start_time = Instant::now();
-                // Use synthesize which now returns a stream directly
                 match client.synthesize(&text.to_string()).await {
                     Ok(mut stream) => {
                         let mut total_audio_len = 0;
@@ -209,7 +220,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                                 }
                             }
                         }
-
+                        synthesize_done.store(true, Ordering::Relaxed);
                         // Send metrics event after all chunks are received
                         event_sender
                             .send(SessionEvent::Metrics {
@@ -262,12 +273,13 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         let packet_duration = 1000.0 / sample_rate as f64 * max_pcm_chunk_size as f64;
         let packet_duration_ms = packet_duration as u32;
         info!(
-            "TTS track {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
+            "tts_track: track started {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
             track_id, sample_rate, max_pcm_chunk_size, packet_duration_ms
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let processor_chain = self.processor_chain.clone();
         let emit_loop = async move {
+            let start_time = Instant::now();
             loop {
                 let packet = {
                     let mut buffer = buffer.lock().await;
@@ -275,7 +287,11 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                         let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
                         Some(s16_data)
                     } else {
-                        None
+                        if synthesize_done_clone.load(Ordering::Relaxed) {
+                            break;
+                        } else {
+                            None
+                        }
                     }
                 };
                 if let Some(packet) = packet {
@@ -287,23 +303,38 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     };
                     // Process the frame with processor chain
                     if let Err(e) = processor_chain.process_frame(&packet) {
-                        warn!("Error processing frame: {}", e);
+                        warn!("tts_track: Error processing frame: {}", e);
                     }
                     // Send the packet
                     packet_sender.send(packet).ok();
                 }
                 ptimer.tick().await;
             }
+            info!(
+                "tts_track: emit done {}ms",
+                start_time.elapsed().as_millis()
+            );
         };
-
+        let track_id = self.track_id.clone();
         tokio::spawn(async move {
             select! {
-                _ = command_loop => {}
-                _ = emit_loop => {}
-                _ = token.cancelled() => {}
+                _ = command_loop => {
+                    info!("tts_track: command loop done");
+                }
+                _ = emit_loop => {
+                    info!("tts_track: emit loop done");
+                }
+                _ = token.cancelled() => {
+                }
             }
+            event_sender_clone
+                .send(SessionEvent::TrackEnd {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                })
+                .ok();
         });
-        info!("TTS track {} shutdown", self.track_id);
+
         Ok(())
     }
 

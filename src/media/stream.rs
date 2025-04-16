@@ -99,7 +99,14 @@ impl MediaStream {
         Ok(())
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self, reason: Option<String>, initiator: Option<String>) {
+        self.event_sender
+            .send(SessionEvent::Hangup {
+                timestamp: crate::get_timestamp(),
+                reason,
+                initiator,
+            })
+            .ok();
         self.cancel_token.cancel()
     }
 

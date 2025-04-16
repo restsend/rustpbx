@@ -22,9 +22,12 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    select,
+    sync::{mpsc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
 // Session state for active calls
@@ -87,6 +90,7 @@ pub struct ActiveCall {
     pub track_config: TrackConfig,
     pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
     pub tts_config: Option<SynthesisConfig>,
+    pub auto_hangup: Arc<Mutex<Option<bool>>>,
 }
 
 impl ActiveCall {
@@ -253,20 +257,54 @@ impl ActiveCall {
             track_config,
             tts_command_tx: Mutex::new(None),
             tts_config,
+            auto_hangup: Arc::new(Mutex::new(None)),
         };
         Ok(active_call)
     }
 
     pub async fn process_stream(&self) -> Result<()> {
-        match self.media_stream.serve().await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                warn!("Failed to serve media stream: {}", e);
-                Err(e)
+        let mut event_receiver = self.media_stream.subscribe();
+        let auto_hangup = self.auto_hangup.clone();
+        let event_loop = async move {
+            loop {
+                match event_receiver.recv().await {
+                    Ok(event) => match event {
+                        SessionEvent::TrackEnd { track_id, .. } => {
+                            if let Some(auto_hangup) = auto_hangup.lock().await.take() {
+                                if auto_hangup {
+                                    info!(
+                                        "Auto hangup when track end track_id:{} session_id:{}",
+                                        track_id, self.session_id
+                                    );
+                                    self.do_hangup(Some("autohangup".to_string()), Some(track_id))
+                                        .await
+                                        .ok();
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        warn!("Failed to receive event: {}", e);
+                        break;
+                    }
+                }
+            }
+        };
+        select! {
+            _ = event_loop => {
+                info!("Event loop done, id:{}", self.session_id);
+            }
+            _ = self.media_stream.serve() => {
+                info!("Media stream serve done, id:{}", self.session_id);
+            }
+            _ = self.cancel_token.cancelled() => {
+                info!("Event loop cancelled, id:{}", self.session_id);
             }
         }
+        Ok(())
     }
-
+    #[instrument(skip(self, command), fields(session_id = self.session_id))]
     pub async fn dispatch(&self, command: Command) -> Result<()> {
         match command {
             Command::Candidate { candidates } => self.do_candidate(candidates).await,
@@ -277,7 +315,7 @@ impl ActiveCall {
                 auto_hangup,
             } => self.do_tts(text, speaker, play_id, auto_hangup).await,
             Command::Play { url, auto_hangup } => self.do_play(url, auto_hangup).await,
-            Command::Hangup {} => self.do_hangup().await,
+            Command::Hangup { reason, initiator } => self.do_hangup(reason, initiator).await,
             Command::Refer { target, options } => self.do_refer(target, options).await,
             Command::Mute { track_id } => self.do_mute(track_id).await,
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
@@ -300,7 +338,7 @@ impl ActiveCall {
         text: String,
         speaker: Option<String>,
         play_id: Option<String>,
-        _auto_hangup: Option<bool>,
+        auto_hangup: Option<bool>,
     ) -> Result<()> {
         let tts_config = match self.tts_config {
             Some(ref config) => config,
@@ -310,18 +348,29 @@ impl ActiveCall {
             Some(s) => Some(s),
             None => tts_config.speaker.clone(),
         };
-        let play_command = TtsCommand {
+        let mut play_command = TtsCommand {
             text,
             speaker,
             play_id,
         };
+        info!(
+            "active_call: new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
+            play_command.text, play_command.speaker, auto_hangup
+        );
+        if let Some(auto_hangup) = auto_hangup {
+            *self.auto_hangup.lock().await = Some(auto_hangup);
+        }
         let mut tts_command_tx = self.tts_command_tx.lock().await;
-        if let Some(tts_command_tx) = tts_command_tx.as_ref() {
-            tts_command_tx.send(play_command)?;
-            return Ok(());
+        if let Some(tx) = tts_command_tx.as_ref() {
+            match tx.send(play_command) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    tts_command_tx.take();
+                    play_command = e.0;
+                }
+            }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        info!("Tts config: {:?}", tts_config);
         let tts_client = TencentCloudTtsClient::new(tts_config.clone());
         let tts_track = TtsTrack::new(
             self.track_config.server_side_track_id.clone(),
@@ -329,6 +378,7 @@ impl ActiveCall {
             tts_client,
         )
         .with_cancel_token(self.cancel_token.child_token());
+
         match tts_track
             .start(
                 self.cancel_token.clone(),
@@ -338,7 +388,6 @@ impl ActiveCall {
             .await
         {
             Ok(_) => {
-                info!("Tts track started");
                 tx.send(play_command)?;
                 tts_command_tx.replace(tx);
                 Ok(())
@@ -350,28 +399,34 @@ impl ActiveCall {
         }
     }
 
-    async fn do_play(&self, url: String, _auto_hangup: Option<bool>) -> Result<()> {
+    async fn do_play(&self, url: String, auto_hangup: Option<bool>) -> Result<()> {
         self.tts_command_tx.lock().await.take();
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
+
+        if let Some(auto_hangup) = auto_hangup {
+            *self.auto_hangup.lock().await = Some(auto_hangup);
+        }
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
     async fn do_interrupt(&self) -> Result<()> {
+        self.media_stream
+            .remove_track(&self.track_config.server_side_track_id)
+            .await;
         Ok(())
     }
     async fn do_pause(&self) -> Result<()> {
-        //self.media_stream.pause().await;
         Ok(())
     }
     async fn do_resume(&self) -> Result<()> {
-        //self.media_stream.resume().await;
         Ok(())
     }
-    async fn do_hangup(&self) -> Result<()> {
+    async fn do_hangup(&self, reason: Option<String>, initiator: Option<String>) -> Result<()> {
         self.cancel_token.cancel();
         info!("Call {} do_hangup", self.session_id);
+        self.media_stream.stop(reason, initiator);
         Ok(())
     }
 

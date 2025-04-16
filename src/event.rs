@@ -34,8 +34,10 @@ pub enum SessionEvent {
     },
     Hangup {
         timestamp: u64,
-        reason: String,
-        initiator: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        initiator: Option<String>,
     },
     AnswerMachineDetection {
         // Answer machine detection
