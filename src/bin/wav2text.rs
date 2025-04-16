@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
             app_id: Some(tencent_appid),
             secret_id: Some(tencent_secret_id),
             secret_key: Some(tencent_secret_key),
-            model_type: args.engine,
+            model_type: Some(args.engine),
             ..Default::default()
         },
         event_sender,

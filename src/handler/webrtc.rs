@@ -32,11 +32,18 @@ pub async fn webrtc_handler(
             }
         }
         let mut active_calls = state_clone.active_calls.lock().await;
-        active_calls.remove(&session_id);
-        info!(
-            "webrtc call: hangup, duration {}s",
-            start_time.elapsed().as_secs_f32()
-        );
+        match active_calls.remove(&session_id) {
+            Some(call) => {
+                info!(
+                    "webrtc call: hangup, duration {}s",
+                    start_time.elapsed().as_secs_f32()
+                );
+                call.cancel_token.cancel();
+            }
+            None => {
+                error!("webrtc call: call not found");
+            }
+        }
     })
 }
 
