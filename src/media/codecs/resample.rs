@@ -1,7 +1,6 @@
+use crate::{PcmBuf, Sample};
 use anyhow::Result;
 use rubato::{FftFixedOut, Resampler};
-
-use crate::{PcmBuf, Sample};
 
 pub struct LinearResampler {
     resampler: FftFixedOut<f64>,
