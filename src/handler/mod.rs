@@ -106,7 +106,11 @@ pub enum Command {
     Interrupt {},
     Pause {},
     Resume {},
-    Hangup {},
+    Hangup {
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        initiator: Option<String>,
+    },
     Refer {
         target: String,
         #[serde(skip_serializing_if = "Option::is_none")]
