@@ -120,7 +120,7 @@ impl TencentCloudTtsClient {
             .config
             .speaker
             .clone()
-            .unwrap_or_else(|| "101001".to_string());
+            .unwrap_or_else(|| "301030".to_string());
         let mut query_params = vec![
             ("Action", "TextToStreamAudioWS"),
             ("AppId", app_id.as_str()),

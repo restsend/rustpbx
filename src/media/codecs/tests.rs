@@ -1,6 +1,5 @@
-use crate::{media::track::file::read_wav_file, PcmBuf};
-
 use super::*;
+use crate::{media::track::file::read_wav_file, PcmBuf};
 use hound::WavReader;
 use std::{
     fs::File,

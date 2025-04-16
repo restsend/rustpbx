@@ -28,7 +28,7 @@ function mainApp() {
                 appId: '',
                 secretId: '',
                 secretKey: '',
-                speaker: '1005',
+                speaker: '301030',
             },
             llm: {
                 baseurl: '',

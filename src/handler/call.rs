@@ -265,7 +265,7 @@ impl ActiveCall {
     pub async fn process_stream(&self) -> Result<()> {
         let mut event_receiver = self.media_stream.subscribe();
         let auto_hangup = self.auto_hangup.clone();
-        let event_loop = async move {
+        let event_hook_loop = async move {
             loop {
                 match event_receiver.recv().await {
                     Ok(event) => match event {
@@ -292,7 +292,7 @@ impl ActiveCall {
             }
         };
         select! {
-            _ = event_loop => {
+            _ = event_hook_loop => {
                 info!("Event loop done, id:{}", self.session_id);
             }
             _ = self.media_stream.serve() => {

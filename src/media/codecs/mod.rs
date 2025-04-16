@@ -1,5 +1,4 @@
-use crate::{Sample, PcmBuf};
-
+use crate::{PcmBuf, Sample};
 pub mod g722;
 pub mod pcma;
 pub mod pcmu;
