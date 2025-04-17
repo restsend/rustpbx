@@ -18,17 +18,12 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'tencent',
-                appId: '',
-                secretId: '',
-                secretKey: ''
+                provider: 'tencent'
             },
             tts: {
                 provider: 'tencent',
-                appId: '',
-                secretId: '',
-                secretKey: '',
                 speaker: '301030',
+                greeting: "Hello, how can I help you today?"
             },
             llm: {
                 useProxy: true,
@@ -39,7 +34,7 @@ function mainApp() {
             },
             // Add UI state for tabbed interface
             uiState: {
-                activeTab: 'asr'
+                activeTab: 'llm'
             }
         },
 
@@ -234,7 +229,17 @@ function mainApp() {
             this.peerConnection.setRemoteDescription(new RTCSessionDescription({
                 type: 'answer',
                 sdp: event.sdp
-            })).then()
+            })).then(() => {
+                // Play greeting message when call is established
+                if (this.config.tts.greeting && this.config.tts.greeting.trim() !== '') {
+                    this.addLogEntry('info', 'Playing greeting message');
+                    this.sendTtsRequest(this.config.tts.greeting);
+                }
+            })
+        },
+        handleHangup(event) {
+            this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
+            this.endCall();
         },
         handleTrackStart(event) {
             //this.addLogEntry('info', `track start`)
@@ -309,12 +314,26 @@ function mainApp() {
 
             // Prepare the request payload
             const payload = {
-                model: this.config.llm.model,
+                model: this.config.llm.useProxy ? 'qwen-turbo' : this.config.llm.model,
                 messages: [
                     { role: 'system', content: this.config.llm.prompt },
                     { role: 'user', content: text }
                 ],
-                stream: true
+                stream: true,
+                tools: [
+                    {
+                        type: "function",
+                        function: {
+                            name: "hangup",
+                            description: "End the call with the user",
+                            parameters: {
+                                type: "object",
+                                properties: {},
+                                required: []
+                            }
+                        }
+                    }
+                ]
             };
 
             // Log request information
@@ -369,7 +388,18 @@ function mainApp() {
                                     // Parse the JSON data
                                     const jsonData = JSON.parse(data);
 
-                                    // Extract the content
+                                    // Check for tool calls (especially hangup)
+                                    if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.tool_calls) {
+                                        const toolCalls = jsonData.choices[0].delta.tool_calls;
+                                        toolCalls.forEach(toolCall => {
+                                            if (toolCall.function && toolCall.function.name === 'hangup') {
+                                                this.addLogEntry('LLM', 'LLM requested to hang up the call');
+                                                this.endCall();
+                                            }
+                                        });
+                                    }
+
+                                    // Extract the content as before
                                     if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
                                         const content = jsonData.choices[0].delta.content;
                                         fullLlmResponse += content;
@@ -548,18 +578,12 @@ function mainApp() {
                         vad,
                         denoise,
                         asr: {
-                            provider: this.config.asr.provider,
-                            appId: this.config.asr.appId || undefined,
-                            secretId: this.config.asr.secretId || undefined,
-                            secretKey: this.config.asr.secretKey || undefined,
+                            provider: this.config.asr.provider
                         },
                         recorder,
                         tts: {
                             provider: this.config.tts.provider,
-                            appId: this.config.tts.appId || undefined,
-                            secretId: this.config.tts.secretId || undefined,
-                            secretKey: this.config.tts.secretKey || undefined,
-                            speaker: this.config.tts.speaker || undefined,
+                            speaker: this.config.tts.speaker || '301030'
                         }
                     },
                 };
