@@ -1,4 +1,4 @@
-use super::call::CallParams;
+use super::{call::CallParams, middleware::clientip::ClientIp};
 use crate::handler::{
     call::{ActiveCall, CallHandlerState},
     Command,
@@ -27,7 +27,10 @@ pub struct IceServer {
     credential: Option<String>,
 }
 
-pub(crate) async fn get_iceservers(State(_state): State<CallHandlerState>) -> Response {
+pub(crate) async fn get_iceservers(
+    client_ip: ClientIp,
+    State(_state): State<CallHandlerState>,
+) -> Response {
     let rs_token = env::var("RESTSEND_TOKEN").unwrap_or_default();
     let default_stun_server =
         env::var("STUN_SERVER").unwrap_or_else(|_| "stun:restsend.com:3478".to_string());
@@ -44,7 +47,6 @@ pub(crate) async fn get_iceservers(State(_state): State<CallHandlerState>) -> Re
 
     let start_time = Instant::now();
     let user_id = ""; // TODO: Get user ID from state if needed
-    let client_ip = ""; // TODO: Get client IP if needed
     let timeout = std::time::Duration::from_secs(5);
     let url = format!(
         "https://restsend.com/api/iceservers?token={}&user={}&client={}",

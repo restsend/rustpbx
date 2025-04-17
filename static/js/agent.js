@@ -542,7 +542,6 @@ function mainApp() {
                 this.peerConnection.close();
             }
             let iceServers = await fetch('/iceservers').then(res => res.json())
-            console.log(iceServers)
             const configuration = {
                 iceServers
             };

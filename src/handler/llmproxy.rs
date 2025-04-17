@@ -12,7 +12,6 @@ use reqwest::header;
 use serde::{Deserialize, Serialize};
 use std::{env, time::Instant};
 use tracing::{error, info};
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenAIConfig {
     pub endpoint: String,
@@ -96,7 +95,7 @@ async fn forward_request(state: &CallHandlerState, req: Request<Body>) -> Result
         resp_builder = resp_builder.header(name, value);
     }
     info!(
-        "llm_proxy: response time: {:?} status: {}",
+        "llm_proxy: ttfb time: {:?} status: {}",
         start_time.elapsed(),
         status
     );

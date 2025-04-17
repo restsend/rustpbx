@@ -60,7 +60,6 @@ impl AppBuilder {
 
             Arc::new(ua_builder.build().await?)
         };
-
         Ok(App {
             config,
             useragent,
@@ -97,7 +96,10 @@ impl App {
         // Run HTTP server and SIP server in parallel
         info!("Starting server on {}", addr);
 
-        let http_task = axum::serve(listener, app);
+        let http_task = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        );
 
         tokio::select! {
             http_result = http_task => {

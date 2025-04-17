@@ -17,7 +17,7 @@ transcription-only = []
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
-axum = { version = "0.8.1", features = ["ws"] }
+axum = { version = "0.8.1", features = ["ws", "tokio"] }
 tower-http = { version = "0.6.2", features = ["fs", "cors"] }
 bytes = "1.5"
 futures = "0.3"
