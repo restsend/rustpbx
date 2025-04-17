@@ -16,6 +16,7 @@ pub fn router(useragent: Arc<UserAgent>) -> Router<CallHandlerState> {
         .route("/call/lists", get(list_calls))
         .route("/call/kill/{id}", post(kill_call))
         .nest("/llm/v1", super::llmproxy::router())
+        .route("/iceservers", get(super::webrtc::get_iceservers))
         .layer(axum::extract::Extension(useragent))
 }
 
