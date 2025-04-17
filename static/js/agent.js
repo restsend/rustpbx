@@ -31,9 +31,10 @@ function mainApp() {
                 speaker: '301030',
             },
             llm: {
+                useProxy: true,
                 baseurl: '',
                 apiKey: '',
-                model: '',
+                model: 'qwen-14b',
                 prompt: 'You are a helpful assistant.'
             },
             // Add UI state for tabbed interface
@@ -271,9 +272,32 @@ function mainApp() {
         },
         // Process text with LLM
         async processWithLlm(text) {
-            if (!this.config.llm.baseurl) {
-                this.addLogEntry('warning', 'LLM configuration is incomplete');
-                return;
+            // When using proxy, we use the internal endpoint directly
+            let apiEndpoint;
+            let headers = { 'Content-Type': 'application/json' };
+
+            if (this.config.llm.useProxy) {
+                // Use internal proxy
+                apiEndpoint = '/llm/v1/chat/completions';
+                // No Authorization header needed for proxy
+            } else {
+                // Use direct external endpoint
+                if (!this.config.llm.baseurl) {
+                    this.addLogEntry('warning', 'LLM configuration is incomplete');
+                    return;
+                }
+
+                // Make the fetch request to the configured LLM endpoint
+                let baseurl = this.config.llm.baseurl;
+                if (!baseurl.endsWith('/')) {
+                    baseurl += '/';
+                }
+                apiEndpoint = baseurl + 'chat/completions';
+
+                // Add API key if present
+                if (this.config.llm.apiKey) {
+                    headers['Authorization'] = `Bearer ${this.config.llm.apiKey}`;
+                }
             }
 
             // Create abort controller for the fetch request
@@ -293,23 +317,11 @@ function mainApp() {
                 stream: true
             };
 
-            // Set up headers
-            const headers = {
-                'Content-Type': 'application/json'
-            };
+            // Log request information
+            this.addLogEntry('LLM', `Sending request to ${this.config.llm.useProxy ? 'local proxy' : 'external API'}`);
 
-            // Add API key if present
-            if (this.config.llm.apiKey) {
-                headers['Authorization'] = `Bearer ${this.config.llm.apiKey}`;
-            }
-
-            // Make the fetch request to the LLM endpoint
-            let baseurl = this.config.llm.baseurl;
-            if (!baseurl.endsWith('/')) {
-                baseurl += '/';
-            }
             let start = new Date();
-            fetch(baseurl + 'chat/completions', {
+            fetch(apiEndpoint, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(payload),

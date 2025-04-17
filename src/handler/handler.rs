@@ -15,6 +15,7 @@ pub fn router(useragent: Arc<UserAgent>) -> Router<CallHandlerState> {
         .route("/call/sip", get(super::sip::sip_handler))
         .route("/call/lists", get(list_calls))
         .route("/call/kill/{id}", post(kill_call))
+        .nest("/llm/v1", super::llmproxy::router())
         .layer(axum::extract::Extension(useragent))
 }
 

@@ -35,6 +35,7 @@ pub type ActiveCallRef = Arc<ActiveCall>;
 pub struct CallHandlerState {
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub recorder_root: String,
+    pub llm_proxy: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct CallParams {
@@ -45,9 +46,11 @@ impl CallHandlerState {
     pub fn new() -> Self {
         let recorder_root =
             std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
+        let llm_proxy = std::env::var("LLM_PROXY").ok();
         Self {
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             recorder_root,
+            llm_proxy,
         }
     }
 

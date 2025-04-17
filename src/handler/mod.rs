@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod call;
 pub mod handler;
+pub mod llmproxy;
 pub mod processor;
 pub mod sip;
 #[cfg(test)]

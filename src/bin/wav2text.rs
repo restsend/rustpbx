@@ -113,8 +113,8 @@ async fn main() -> Result<()> {
     .await?;
     // Send the samples to the transcription client
     transcription_client.send_audio(&all_samples)?;
+    transcription_client.send_audio(&[])?;
     let duration = Duration::from_secs(all_samples.len() as u64 / sample_rate as u64);
-    let duration = duration;
     info!(
         "Sending samples to transcription client for processing {} seconds",
         duration.as_secs()
