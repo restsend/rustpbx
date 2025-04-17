@@ -18,7 +18,8 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'tencent'
+                provider: 'tencent',
+                inactivityTimeout: 15000 // 15 seconds timeout for ASR inactivity
             },
             tts: {
                 provider: 'tencent',
@@ -46,6 +47,10 @@ function mainApp() {
         peerConnection: null,
         rtcStatus: 'disconnected',
         callActive: false,
+
+        // ASR inactivity tracking
+        asrLastActivityTime: null,
+        asrInactivityTimer: null,
 
         // Debug information
         eventLog: [],
@@ -145,6 +150,41 @@ function mainApp() {
             return typeMap[type] || 'SYSTEM';
         },
 
+        // Start monitoring ASR inactivity
+        startAsrInactivityMonitor() {
+            // Clear any existing timer
+            this.stopAsrInactivityMonitor();
+
+            // Set the initial activity timestamp
+            this.asrLastActivityTime = Date.now();
+
+            // Set up the timer to check for inactivity
+            this.asrInactivityTimer = setInterval(() => {
+                const currentTime = Date.now();
+                const inactivityDuration = currentTime - this.asrLastActivityTime;
+
+                // If inactivity exceeds the timeout, hang up
+                if (inactivityDuration > this.config.asr.inactivityTimeout) {
+                    this.addLogEntry('warning', `ASR inactivity timeout (${this.config.asr.inactivityTimeout}ms) exceeded. Hanging up.`);
+                    this.endCall();
+                    this.stopAsrInactivityMonitor();
+                }
+            }, 1000); // Check every second
+        },
+
+        // Stop monitoring ASR inactivity
+        stopAsrInactivityMonitor() {
+            if (this.asrInactivityTimer) {
+                clearInterval(this.asrInactivityTimer);
+                this.asrInactivityTimer = null;
+            }
+        },
+
+        // Update ASR activity timestamp
+        updateAsrActivity() {
+            this.asrLastActivityTime = Date.now();
+        },
+
         // Connect to WebSocket server
         connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -166,7 +206,8 @@ function mainApp() {
                 this.ws.onclose = () => {
                     this.wsStatus = 'disconnected';
                     this.addLogEntry('warning', 'WebSocket disconnected');
-                    this.endCall()
+                    this.stopAsrInactivityMonitor();
+                    this.endCall();
                 };
 
                 this.ws.onerror = (error) => {
@@ -206,9 +247,11 @@ function mainApp() {
                         this.handleVadStatus({ active: false, duration: event.duration, startTime: event.startTime })
                         break
                     case 'asrFinal':
+                        this.updateAsrActivity();
                         this.handleTranscriptionFinal(event)
                         break
                     case 'asrDelta':
+                        this.updateAsrActivity();
                         this.handleTranscriptionDelta(event)
                         break
                     case 'metrics':
@@ -230,6 +273,9 @@ function mainApp() {
                 type: 'answer',
                 sdp: event.sdp
             })).then(() => {
+                // Start ASR inactivity monitor after call is established
+                this.startAsrInactivityMonitor();
+
                 // Play greeting message when call is established
                 if (this.config.tts.greeting && this.config.tts.greeting.trim() !== '') {
                     this.addLogEntry('info', 'Playing greeting message');
@@ -239,6 +285,7 @@ function mainApp() {
         },
         handleHangup(event) {
             this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
+            this.stopAsrInactivityMonitor();
             this.endCall();
         },
         handleTrackStart(event) {
@@ -263,6 +310,8 @@ function mainApp() {
         handleVadStatus(event) {
             if (event.active) {
                 this.addLogEntry('VAD', `Speech detected`);
+                // Reset ASR activity timer when speech is detected
+                this.updateAsrActivity();
             } else {
                 this.addLogEntry('VAD', `Silence detected, duration: ${event.duration} ms, startTime: ${event.startTime} ms`);
             }
@@ -469,6 +518,8 @@ function mainApp() {
 
         // End a call
         endCall() {
+            this.stopAsrInactivityMonitor();
+
             if (this.peerConnection) {
                 this.peerConnection.close();
                 this.peerConnection = null;
