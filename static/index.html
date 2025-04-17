@@ -127,15 +127,26 @@
 
                         <!-- LLM Tab -->
                         <div x-show="config.uiState.activeTab === 'llm'" class="space-y-2">
-                            <label for="llmBaseurl" class="text-sm">Baseurl</label>
-                            <input type="text" id="llmBaseurl" x-model="config.llm.baseurl"
-                                class="border p-2 rounded w-full">
-                            <label for="llmApiKey" class="text-sm">API Key</label>
-                            <input type="password" id="llmApiKey" x-model="config.llm.apiKey"
-                                class="border p-2 rounded w-full">
+                            <div class="flex items-center mb-4">
+                                <input type="checkbox" id="useLlmProxy" x-model="config.llm.useProxy" class="mr-2">
+                                <label for="useLlmProxy" class="font-medium">Use Server LLM Proxy</label>
+                                <span class="ml-2 text-xs text-gray-600">(Recommended)</span>
+                            </div>
 
+                            <!-- LLM API Settings (shown only when not using proxy) -->
+                            <div x-show="!config.llm.useProxy" class="border-t pt-3 mb-3">
+                                <p class="text-xs text-gray-600 mb-2">External API settings</p>
+                                <label for="llmBaseurl" class="text-sm">API Endpoint</label>
+                                <input type="text" id="llmBaseurl" x-model="config.llm.baseurl"
+                                    class="border p-2 rounded w-full mb-2">
+                                <label for="llmApiKey" class="text-sm">API Key</label>
+                                <input type="password" id="llmApiKey" x-model="config.llm.apiKey"
+                                    class="border p-2 rounded w-full mb-2">
+                            </div>
+
+                            <!-- Always shown LLM settings -->
                             <label for="llmModel" class="text-sm">Model</label>
-                            <input type="text" id="llmModel" x-model="config.llm.model"
+                            <input type="text" id="llmModel" x-model="config.llm.model" placeholder="qwen-32b"
                                 class="border p-2 rounded w-full">
 
                             <label for="llmPrompt" class="text-sm">System Prompt</label>

@@ -325,6 +325,12 @@ impl TencentCloudAsrClient {
         let send_loop = async move {
             let mut total_bytes_sent = 0;
             while let Some(samples) = audio_rx.recv().await {
+                if samples.len() == 0 {
+                    ws_sender
+                        .send(Message::Text("{\"type\": \"end\"}".into()))
+                        .await?;
+                    continue;
+                }
                 total_bytes_sent += samples.len();
                 match ws_sender.send(Message::Binary(samples.into())).await {
                     Ok(_) => {}
