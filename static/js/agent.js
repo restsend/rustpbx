@@ -458,11 +458,10 @@ function mainApp() {
             if (this.peerConnection) {
                 this.peerConnection.close();
             }
-
+            let iceServers = await fetch('/iceservers').then(res => res.json())
+            console.log(iceServers)
             const configuration = {
-                iceServers: [{
-                    urls: ['stun:stun.l.google.com:19302', 'stun:restsend.com:3478']
-                }]
+                iceServers
             };
 
             let mediaStream = await navigator.mediaDevices.getUserMedia({
