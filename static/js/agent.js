@@ -311,10 +311,10 @@ function mainApp() {
 
             // Store the full LLM response
             let fullLlmResponse = '';
-
+            let autoHangup = undefined;
             // Prepare the request payload
             const payload = {
-                model: this.config.llm.useProxy ? 'qwen-turbo' : this.config.llm.model,
+                model: this.config.llm.useProxy ? 'qwen-14b' : this.config.llm.model,
                 messages: [
                     { role: 'system', content: this.config.llm.prompt },
                     { role: 'user', content: text }
@@ -387,14 +387,15 @@ function mainApp() {
                                 try {
                                     // Parse the JSON data
                                     const jsonData = JSON.parse(data);
-
+                                    //let autoHangup = undefined
                                     // Check for tool calls (especially hangup)
                                     if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.tool_calls) {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
                                                 this.addLogEntry('LLM', 'LLM requested to hang up the call');
-                                                this.endCall();
+                                                autoHangup = true
+                                                //this.endCall();
                                             }
                                         });
                                     }
@@ -425,13 +426,13 @@ function mainApp() {
 
                     // If there was already some response, send that for TTS
                     if (fullLlmResponse) {
-                        this.sendTtsRequest(fullLlmResponse);
+                        this.sendTtsRequest(fullLlmResponse, autoHangup);
                     }
                 });
         },
 
         // Send TTS request to the WebSocket
-        sendTtsRequest(text) {
+        sendTtsRequest(text, autoHangup) {
             if (!text || text.trim() === '') {
                 this.addLogEntry('warning', 'Cannot send empty text to TTS');
                 return;
@@ -441,6 +442,7 @@ function mainApp() {
                 const ttsCommand = {
                     command: 'tts',
                     text: text,
+                    autoHangup
                 };
 
                 this.ws.send(JSON.stringify(ttsCommand));
