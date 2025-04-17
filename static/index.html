@@ -37,20 +37,15 @@
 
                     <!-- Tab Navigation -->
                     <div class="flex border-b">
-                        <button @click="config.uiState.activeTab = 'asr'"
+                        <button @click="config.uiState.activeTab = 'llm'"
                             class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
-                            :class="config.uiState.activeTab === 'asr' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
-                            ASR
+                            :class="config.uiState.activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            LLM
                         </button>
                         <button @click="config.uiState.activeTab = 'tts'"
                             class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
                             :class="config.uiState.activeTab === 'tts' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
                             TTS
-                        </button>
-                        <button @click="config.uiState.activeTab = 'llm'"
-                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
-                            :class="config.uiState.activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
-                            LLM
                         </button>
                         <button @click="config.uiState.activeTab = 'denoise'"
                             class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
@@ -71,58 +66,13 @@
 
                     <!-- Tab Content -->
                     <div class="py-4">
-                        <!-- ASR Tab -->
-                        <div x-show="config.uiState.activeTab === 'asr'" class="space-y-2">
-                            <label for="asrProvider" class="text-sm">Provider</label>
-                            <select id="asrProvider" x-model="config.asr.provider" class="border p-2 rounded w-full">
-                                <option value="tencent">Tencent Cloud</option>
-                                <option value="azure">Azure</option>
-                                <option value="google">Google</option>
-                            </select>
-
-                            <div x-show="config.asr.provider !== ''">
-                                <label for="asrAppId" class="text-sm">App ID</label>
-                                <input type="text" id="asrAppId" x-model="config.asr.appId"
-                                    class="border p-2 rounded w-full">
-
-                                <label for="asrSecretId" class="text-sm">Secret ID</label>
-                                <input type="text" id="asrSecretId" x-model="config.asr.secretId"
-                                    class="border p-2 rounded w-full">
-
-                                <label for="asrSecretKey" class="text-sm">Secret Key</label>
-                                <input type="password" id="asrSecretKey" x-model="config.asr.secretKey"
-                                    class="border p-2 rounded w-full">
-                            </div>
-                        </div>
-
                         <!-- TTS Tab -->
                         <div x-show="config.uiState.activeTab === 'tts'" class="space-y-2">
-                            <label for="ttsProvider" class="text-sm">Provider</label>
-                            <select id="ttsProvider" x-model="config.tts.provider" class="border p-2 rounded w-full">
-                                <option value="tencent">Tencent Cloud</option>
-                                <option value="azure">Azure</option>
-                                <option value="google">Google</option>
+                            <label for="ttsSpeaker" class="text-sm">Speaker</label>
+                            <select id="ttsSpeaker" x-model="config.tts.speaker" class="border p-2 rounded w-full">
+                                <option value="301030">Female</option>
+                                <option value="301031">Male</option>
                             </select>
-
-                            <div x-show="config.tts.provider !== ''">
-                                <label for="ttsAppId" class="text-sm">App ID</label>
-                                <input type="text" id="ttsAppId" x-model="config.tts.appId"
-                                    class="border p-2 rounded w-full">
-
-                                <label for="ttsSecretId" class="text-sm">Secret ID</label>
-                                <input type="text" id="ttsSecretId" x-model="config.tts.secretId"
-                                    class="border p-2 rounded w-full">
-
-                                <label for="ttsSecretKey" class="text-sm">Secret Key</label>
-                                <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
-                                    class="border p-2 rounded w-full">
-
-                                <label for="ttsSpeaker" class="text-sm">Speaker</label>
-                                <select id="ttsSpeaker" x-model="config.tts.speaker" class="border p-2 rounded w-full">
-                                    <option value="301030">Female</option>
-                                    <option value="301025">Male</option>
-                                </select>
-                            </div>
                         </div>
 
                         <!-- LLM Tab -->
@@ -142,12 +92,17 @@
                                 <label for="llmApiKey" class="text-sm">API Key</label>
                                 <input type="password" id="llmApiKey" x-model="config.llm.apiKey"
                                     class="border p-2 rounded w-full mb-2">
+                                <!-- Always shown LLM settings -->
+                                <label for="llmModel" class="text-sm">Model</label>
+                                <input type="text" id="llmModel" x-model="config.llm.model" placeholder="qwen-turbo"
+                                    class="border p-2 rounded w-full">
                             </div>
 
-                            <!-- Always shown LLM settings -->
-                            <label for="llmModel" class="text-sm">Model</label>
-                            <input type="text" id="llmModel" x-model="config.llm.model" placeholder="qwen-32b"
-                                class="border p-2 rounded w-full">
+                            <label for="ttsGreeting" class="text-sm mt-4">Greeting Message</label>
+                            <textarea id="ttsGreeting" x-model="config.tts.greeting"
+                                placeholder="Hello, how can I help you today?"
+                                class="border p-2 rounded w-full h-20"></textarea>
+                            <p class="text-xs text-gray-600 mt-1">This message will be played when the call connects</p>
 
                             <label for="llmPrompt" class="text-sm">System Prompt</label>
                             <textarea id="llmPrompt" x-model="config.llm.prompt"
