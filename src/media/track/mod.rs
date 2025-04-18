@@ -80,6 +80,7 @@ pub trait Track: Send + Sync {
     fn id(&self) -> &TrackId;
     fn insert_processor(&mut self, processor: Box<dyn Processor>);
     fn append_processor(&mut self, processor: Box<dyn Processor>);
+    async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String>;
     async fn start(
         &self,
         token: CancellationToken,

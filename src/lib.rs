@@ -8,6 +8,7 @@ pub mod event;
 pub mod handler;
 pub mod llm;
 pub mod media;
+pub mod net_tool;
 pub mod proxy;
 pub mod synthesis;
 pub mod transcription;

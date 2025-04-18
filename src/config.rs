@@ -20,6 +20,12 @@ pub struct Config {
     pub sip: Option<SipConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtp_start_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_server: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +106,9 @@ impl Default for Config {
             console: Some(ConsoleConfig::default()),
             sip: Some(SipConfig::default()),
             proxy: Some(ProxyConfig::default()),
+            rtp_start_port: None,
+            external_ip: None,
+            stun_server: None,
         }
     }
 }

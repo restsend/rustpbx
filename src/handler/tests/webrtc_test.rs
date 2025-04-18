@@ -1,3 +1,4 @@
+use crate::app::AppState;
 use crate::event::SessionEvent;
 use crate::media::codecs::g722::G722Encoder;
 use crate::media::codecs::resample::resample_mono;
@@ -5,6 +6,7 @@ use crate::media::codecs::{CodecType, Encoder};
 use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::transcription::TranscriptionType;
+use crate::useragent::{UserAgent, UserAgentBuilder};
 use crate::{
     handler::{call::CallHandlerState, Command, StreamOption},
     synthesis::{SynthesisConfig, SynthesisType},
@@ -34,7 +36,7 @@ use webrtc::{
 
 // Error handling middleware
 async fn handle_error(
-    State(_state): State<CallHandlerState>,
+    State(_state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Response {
     error!("Error handling request: {:?}", request);
@@ -60,7 +62,9 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             axum::routing::get(crate::handler::webrtc::webrtc_handler),
         )
         .fallback(handle_error)
-        .with_state(CallHandlerState::new());
+        .with_state(AppState::new(Arc::new(
+            UserAgentBuilder::new().build().await?,
+        )));
 
     // Start the server
     let listener = TcpListener::bind("127.0.0.1:0").await?;

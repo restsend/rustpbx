@@ -1,58 +1,49 @@
+use super::registration::RegistrationHandle;
 use anyhow::{anyhow, Result};
-use rsip::message::HeadersExt;
-use rsipstack::dialog::authenticate::Credential;
+use rsip::prelude::HeadersExt;
+use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender};
 use rsipstack::dialog::dialog_layer::DialogLayer;
-use rsipstack::dialog::invitation::InviteOption;
-use rsipstack::dialog::registration::Registration;
-use rsipstack::transaction::Endpoint;
-use rsipstack::transaction::TransactionReceiver;
+use rsipstack::dialog::DialogId;
+use rsipstack::transaction::{Endpoint, TransactionReceiver};
 use rsipstack::transport::{udp::UdpConnection, TransportLayer};
 use rsipstack::EndpointBuilder;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 pub struct UserAgentBuilder {
+    pub sip_addr: Option<String>,
     pub external_ip: Option<String>,
     pub stun_server: Option<String>,
     pub rtp_start_port: u16,
+    pub sip_port: u16,
+    pub token: Option<CancellationToken>,
 }
-
 pub struct UserAgent {
     pub token: CancellationToken,
     pub external_ip: Option<String>,
     pub stun_server: Option<String>,
     pub rtp_start_port: u16,
     pub endpoint: Endpoint,
+    pub registration_handles: Mutex<HashMap<String, RegistrationHandle>>,
     pub dialog_layer: Arc<DialogLayer>,
-    pub incoming_txs: Mutex<Option<TransactionReceiver>>,
-    registration_tx: Mutex<Option<mpsc::Sender<RegistrationCommand>>>,
-}
-
-pub struct InviteOptions {
-    pub callee: String,
-    pub credential: Option<Credential>,
-}
-
-pub struct RegisterOptions {
-    pub sip_server: String,
-    pub credential: Option<Credential>,
-}
-
-enum RegistrationCommand {
-    Unregister,
+    pub dialogs: Mutex<HashMap<DialogId, Dialog>>,
 }
 
 impl UserAgentBuilder {
     pub fn new() -> Self {
         Self {
+            sip_addr: None,
+            token: None,
+            sip_port: 5060,
             external_ip: None,
             stun_server: None,
-            rtp_start_port: 5000,
+            rtp_start_port: 12000,
         }
     }
 
@@ -71,348 +62,211 @@ impl UserAgentBuilder {
         self
     }
 
-    pub async fn build(&self) -> Result<UserAgent> {
-        let token = CancellationToken::new();
+    pub fn sip_port(mut self, port: u16) -> Self {
+        self.sip_port = port;
+        self
+    }
 
-        // Get local IP address
-        let local_ip = if let Some(ip) = &self.external_ip {
+    pub fn token(mut self, token: Option<CancellationToken>) -> Self {
+        self.token = token;
+        self
+    }
+
+    pub fn sip_addr(mut self, sip_addr: String) -> Self {
+        self.sip_addr = Some(sip_addr);
+        self
+    }
+
+    pub async fn build(mut self) -> Result<UserAgent> {
+        let token = self
+            .token
+            .take()
+            .unwrap_or_else(|| CancellationToken::new());
+
+        let local_ip = if let Some(ip) = &self.sip_addr {
             IpAddr::from_str(ip)?
         } else {
-            crate::useragent::stun::get_first_non_loopback_interface()?
+            crate::net_tool::get_first_non_loopback_interface()?
         };
 
-        // Create transport layer
         let transport_layer = TransportLayer::new(token.clone());
+        let local_addr: SocketAddr = format!("{}:{}", local_ip, self.sip_port).parse()?;
 
-        // Setup UDP connection
-        let local_addr: SocketAddr = format!("{}:5060", local_ip).parse()?;
         let udp_conn = UdpConnection::create_connection(local_addr, None)
             .await
             .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
 
         transport_layer.add_transport(udp_conn.into());
 
-        // Create SIP endpoint
         let endpoint = EndpointBuilder::new()
-            .cancel_token(token.clone())
+            .cancel_token(token.child_token())
             .transport_layer(transport_layer)
             .build();
-
-        let incoming_txs = endpoint.incoming_transactions();
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
-
         Ok(UserAgent {
             token,
             external_ip: self.external_ip.clone(),
             stun_server: self.stun_server.clone(),
             rtp_start_port: self.rtp_start_port,
             endpoint,
+            registration_handles: Mutex::new(HashMap::new()),
             dialog_layer,
-            incoming_txs: Mutex::new(Some(incoming_txs)),
-            registration_tx: Mutex::new(None),
+            dialogs: Mutex::new(HashMap::new()),
         })
     }
 }
 
 impl UserAgent {
-    pub async fn register(&self, user: String, options: RegisterOptions) -> Result<()> {
-        // First perform initial registration
-        let mut registration =
-            Registration::new(self.endpoint.inner.clone(), options.credential.clone());
-
-        // Register and wait for response
-        let resp = registration
-            .register(&options.sip_server)
-            .await
-            .map_err(|e| anyhow!("Registration failed: {}", e))?;
-        debug!("Register response: {}", resp);
-
-        if resp.status_code != rsip::StatusCode::OK {
-            return Err(anyhow!("Failed to register: {}", resp.status_code));
-        }
-
-        info!("Successfully registered user {}", user);
-
-        // Start registration renewal task
-        self.start_registration_renewal(user, options).await;
-
-        Ok(())
-    }
-
-    // Helper function to send an unregister request (REGISTER with expires=0)
-    async fn send_unregister(
-        server: &str,
-        endpoint_inner: Arc<rsipstack::transaction::endpoint::EndpointInner>,
-        credential: Option<Credential>,
+    async fn process_incoming_request(
+        &self,
+        dialog_layer: Arc<DialogLayer>,
+        mut incoming: TransactionReceiver,
+        state_sender: DialogStateSender,
     ) -> Result<()> {
-        let mut registration = Registration::new(endpoint_inner.clone(), credential);
-
-        // Get the first address for contact
-        // Using transport layer's get_addrs method via endpoint
-        let first_addr = match endpoint_inner.transport_layer.get_addrs().first() {
-            Some(addr) => addr.clone(),
-            None => return Err(anyhow!("No local address found for unregistration")),
-        };
-
-        // Create the contact header using the URI format
-        let uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: None,
-            host_with_port: first_addr.addr.into(),
-            params: vec![],
-            headers: vec![],
-        };
-
-        // Create a contact with expires=0 parameter
-        let contact = rsip::typed::Contact {
-            display_name: None,
-            uri,
-            params: vec![rsip::Param::Expires(
-                rsip::common::uri::param::Expires::from("0".to_string()),
-            )],
-        };
-
-        // Store the contact in the registration object
-        registration.contact = Some(contact);
-
-        // Send the unregister request
-        let resp = registration
-            .register(&server.to_string())
-            .await
-            .map_err(|e| anyhow!("Unregistration failed: {}", e))?;
-
-        if resp.status_code != rsip::StatusCode::OK {
-            return Err(anyhow!("Failed to unregister: {}", resp.status_code));
-        }
-
-        Ok(())
-    }
-
-    async fn start_registration_renewal(&self, user: String, options: RegisterOptions) {
-        // Create command channel
-        let (tx, rx) = mpsc::channel::<RegistrationCommand>(1);
-
-        // Store sender in UserAgent
-        {
-            let mut registration_tx = self.registration_tx.lock().await;
-            *registration_tx = Some(tx);
-        }
-
-        // Create a token for this registration task
-        let token = self.token.child_token();
-        let endpoint_inner = self.endpoint.inner.clone();
-        let credential = options.credential.clone();
-        let sip_server = options.sip_server.clone();
-
-        // Spawn renewal task
-        tokio::spawn(async move {
-            let mut registration = Registration::new(endpoint_inner.clone(), credential.clone());
-            let mut rx = rx;
-
-            // Initial registration is already done - get the expiration time
-            let mut expiration_seconds = registration.expires().max(50) as u64;
-
-            loop {
-                // Calculate when to send the next registration
-                // Send renewal a bit before expiration (80% of expiration time)
-                let renewal_delay = Duration::from_secs((expiration_seconds * 80) / 100);
-
-                tokio::select! {
-                    _ = sleep(renewal_delay) => {
-                        match registration.register(&sip_server).await {
-                            Ok(resp) => {
-                                if resp.status_code == rsip::StatusCode::OK {
-                                    info!("Successfully renewed registration for {}", user);
-                                    // Update expiration based on response
-                                    expiration_seconds = registration.expires().max(50) as u64;
-                                } else {
-                                    warn!("Failed to renew registration: {}", resp.status_code);
+        while let Some(mut tx) = incoming.recv().await {
+            info!("useragent: received transaction: {:?}", tx.key);
+            match tx.original.to_header()?.tag()?.as_ref() {
+                Some(_) => match dialog_layer.match_dialog(&tx.original) {
+                    Some(mut d) => {
+                        tokio::spawn(async move {
+                            match d.handle(tx).await {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    info!("useragent: error handling transaction: {:?}", e);
                                 }
                             }
+                        });
+                        continue;
+                    }
+                    None => {
+                        info!("useragent: dialog not found: {}", tx.original);
+                        match tx
+                            .reply(rsip::StatusCode::CallTransactionDoesNotExist)
+                            .await
+                        {
+                            Ok(_) => (),
                             Err(e) => {
-                                warn!("Registration renewal error: {}", e);
+                                info!("useragent: error replying to request: {:?}", e);
                             }
                         }
+                        continue;
                     }
-                    _ = token.cancelled() => {
-                        info!("Registration renewal task canceled");
-                        break;
-                    }
-                    cmd = rx.recv() => {
-                        match cmd {
-                            Some(RegistrationCommand::Unregister) => {
-                                info!("Unregistering user {}", user);
-                                // To unregister in SIP, we send a REGISTER with expires=0
-                                match Self::send_unregister(&sip_server, endpoint_inner.clone(),
-                                    credential.clone()).await {
-                                    Ok(_) => info!("Successfully unregistered user {}", user),
-                                    Err(e) => warn!("Unregister failed: {}", e),
+                },
+                None => {}
+            }
+            // out dialog, new server dialog
+            match tx.original.method {
+                rsip::Method::Invite | rsip::Method::Ack => {
+                    let mut dialog = match dialog_layer.get_or_create_server_invite(
+                        &tx,
+                        state_sender.clone(),
+                        None,
+                        None,
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            // 481 Dialog/Transaction Does Not Exist
+                            info!("useragent: failed to obtain dialog: {:?}", e);
+                            match tx
+                                .reply(rsip::StatusCode::CallTransactionDoesNotExist)
+                                .await
+                            {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    info!("useragent: error replying to request: {:?}", e);
                                 }
-                                break;
                             }
-                            None => {
-                                debug!("Registration command channel closed");
-                                break;
-                            }
+                            continue;
+                        }
+                    };
+                    tokio::spawn(async move { dialog.handle(tx).await });
+                }
+                _ => {
+                    info!("useragent: received request: {:?}", tx.original.method);
+                    match tx.reply(rsip::StatusCode::OK).await {
+                        Ok(_) => (),
+                        Err(e) => {
+                            info!("useragent: error replying to request: {:?}", e);
                         }
                     }
                 }
             }
-
-            info!("Registration renewal task for {} completed", user);
-        });
-    }
-
-    pub async fn unregister(&self, user: String) -> Result<()> {
-        info!("Requesting unregistration for user {}", user);
-
-        let mut registration_tx = self.registration_tx.lock().await;
-        if let Some(tx) = registration_tx.as_ref() {
-            if let Err(e) = tx.send(RegistrationCommand::Unregister).await {
-                warn!("Failed to send unregister command: {}", e);
-                return Err(anyhow!("Failed to send unregister command: {}", e));
-            }
-            // Remove the sender to prevent further commands
-            *registration_tx = None;
-            Ok(())
-        } else {
-            warn!("No active registration found for {}", user);
-            Err(anyhow!("No active registration found"))
         }
+        Ok(())
     }
 
-    pub async fn invite(&self, callee: String, options: InviteOptions) -> Result<()> {
-        // Get the first local address to use for contact
-        let first_addr = self
-            .endpoint
-            .get_addrs()
-            .first()
-            .ok_or(anyhow!("No local address found"))?
-            .clone();
-
-        // Create contact URI
-        let contact = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: None, // No auth in contact
-            host_with_port: first_addr.addr.into(),
-            params: vec![],
-            headers: vec![],
-        };
-
-        // Convert callee to URI
-        let callee_copy = callee.clone();
-        let callee_uri: rsip::Uri = callee
-            .try_into()
-            .map_err(|e| anyhow!("Invalid callee URI: {}", e))?;
-
-        // Create invitation options
-        let invite_option = InviteOption {
-            callee: callee_uri,
-            caller: contact.clone(),
-            content_type: None,
-            offer: None,
-            contact: contact.clone(),
-            credential: options.credential,
-        };
-
-        // Create dialogue state channel
-        let (state_sender, _state_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        // Send the INVITE
-        let (_dialog, resp) = self
-            .dialog_layer
-            .do_invite(invite_option, state_sender)
-            .await
-            .map_err(|e| anyhow!("Invite failed: {}", e))?;
-
-        // Check response
-        if let Some(resp) = resp {
-            debug!("Invite response: {}", resp);
-
-            if resp.status_code != rsip::StatusCode::OK {
-                return Err(anyhow!("Failed to invite: {}", resp.status_code));
+    async fn process_dialog(
+        &self,
+        dialog_layer: Arc<DialogLayer>,
+        state_receiver: DialogStateReceiver,
+    ) -> Result<()> {
+        let mut state_receiver = state_receiver;
+        while let Some(state) = state_receiver.recv().await {
+            match state {
+                DialogState::Calling(id) => {
+                    info!("useragent: calling dialog {}", id);
+                    let dialog = match dialog_layer.get_dialog(&id) {
+                        Some(d) => d,
+                        None => {
+                            info!("useragent: dialog not found {}", id);
+                            continue;
+                        }
+                    };
+                    match dialog {
+                        Dialog::ServerInvite(d) => match self.handle_server_invite(d).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                info!("useragent: error handling server invite: {:?}", e);
+                            }
+                        },
+                        Dialog::ClientInvite(_) => {
+                            info!("useragent: client invite dialog {}", id);
+                        }
+                    }
+                }
+                DialogState::Early(id, resp) => {
+                    info!("useragent: early dialog {} {}", id, resp);
+                }
+                DialogState::Terminated(id, status_code) => {
+                    info!("useragent: dialog terminated {} {:?}", id, status_code);
+                    dialog_layer.remove_dialog(&id);
+                }
+                _ => {
+                    info!("useragent: received dialog state: {}", state);
+                }
             }
-
-            info!("Call established with {}", callee_copy);
-        } else {
-            return Err(anyhow!("No response received"));
         }
         Ok(())
     }
 
     pub async fn serve(&self) -> Result<()> {
-        let mut incoming = self
-            .incoming_txs
-            .lock()
-            .await
-            .take()
-            .ok_or(anyhow!("TransactionReceiver already taken"))?;
-
-        let dialog_layer = self.dialog_layer.clone();
+        let incoming_txs = self.endpoint.incoming_transactions();
         let token = self.token.child_token();
         let endpoint_inner = self.endpoint.inner.clone();
+        let (state_sender, state_receiver) = unbounded_channel();
+        let dialog_layer = self.dialog_layer.clone();
 
         tokio::select! {
             _ = token.cancelled() => {
-                debug!("User agent cancelled");
+                info!("useragent: cancelled");
             }
             result = endpoint_inner.serve() => {
                 if let Err(e) = result {
-                    debug!("Endpoint serve error: {:?}", e);
+                    info!("useragent: endpoint serve error: {:?}", e);
                 }
             }
-            _ = async {
-                loop {
-                    tokio::select! {
-                        Some(mut tx) = incoming.recv() => {
-                            debug!("Received transaction: {:?}", tx.key);
-
-                            // Check if it's for an existing dialog
-                            match tx.original.to_header().ok().and_then(|h| h.tag().ok()).flatten() {
-                                Some(_) => match dialog_layer.match_dialog(&tx.original) {
-                                    Some(mut d) => {
-                                        // Clone the transaction and handle it without spawning a separate task
-                                        if let Err(e) = d.handle(tx).await {
-                                            debug!("Error handling dialog: {:?}", e);
-                                        }
-                                    }
-                                    None => {
-                                        debug!("No dialog found for transaction");
-                                        if let Err(e) = tx.reply(rsip::StatusCode::CallTransactionDoesNotExist).await {
-                                            debug!("Error replying to transaction: {:?}", e);
-                                        }
-                                    }
-                                },
-                                None => {
-                                    // This is a new incoming request
-                                    // Handle new incoming calls or other requests here
-                                    match tx.original.method {
-                                        rsip::Method::Invite => {
-                                            // Handle incoming INVITE request
-                                            debug!("Received new INVITE request");
-                                            if let Err(e) = tx.reply(rsip::StatusCode::OK).await {
-                                                debug!("Error replying to INVITE: {:?}", e);
-                                            }
-                                        }
-                                        _ => {
-                                            // Reply with method not allowed for other methods
-                                            if let Err(e) = tx.reply(rsip::StatusCode::MethodNotAllowed).await {
-                                                debug!("Error replying to transaction: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ = token.cancelled() => {
-                            debug!("Cancellation requested, stopping transaction processor");
-                            break;
-                        }
-                    }
+            result = self.process_incoming_request(dialog_layer.clone(), incoming_txs, state_sender) => {
+                if let Err(e) = result {
+                    info!("useragent: process incoming request error: {:?}", e);
                 }
-            } => {}
+            },
+            result = self.process_dialog(dialog_layer.clone(), state_receiver) => {
+                if let Err(e) = result {
+                    info!("useragent: process dialog error: {:?}", e);
+                }
+            },
         }
-
+        info!("useragent: stopping");
         Ok(())
     }
 

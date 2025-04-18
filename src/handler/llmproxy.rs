@@ -1,4 +1,4 @@
-use crate::handler::call::CallHandlerState;
+use crate::{app::AppState, handler::call::CallHandlerState};
 use anyhow::Result;
 use axum::{
     body::Body,
@@ -28,11 +28,11 @@ impl Default for OpenAIConfig {
     }
 }
 
-pub fn router() -> Router<CallHandlerState> {
+pub fn router() -> Router<AppState> {
     Router::new().route("/{*path}", post(proxy_handler))
 }
 
-async fn proxy_handler(State(state): State<CallHandlerState>, req: Request<Body>) -> Response {
+async fn proxy_handler(State(state): State<AppState>, req: Request<Body>) -> Response {
     match forward_request(&state, req).await {
         Ok(response) => response,
         Err(e) => {
@@ -46,7 +46,7 @@ async fn proxy_handler(State(state): State<CallHandlerState>, req: Request<Body>
     }
 }
 
-async fn forward_request(state: &CallHandlerState, req: Request<Body>) -> Result<Response> {
+async fn forward_request(state: &AppState, req: Request<Body>) -> Result<Response> {
     // Get configuration from environment variables
     let config = OpenAIConfig::default();
 

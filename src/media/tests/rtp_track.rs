@@ -5,7 +5,7 @@ use crate::{
         processor::Processor,
         track::{rtp::*, track_codec::TrackCodec, Track, TrackConfig},
     },
-    AudioFrame, Sample, PcmBuf, Samples,
+    AudioFrame, PcmBuf, Sample, Samples,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -36,33 +36,22 @@ impl Processor for TestProcessor {
 #[tokio::test]
 async fn test_rtp_track_creation() -> Result<()> {
     let track_id = "test-rtp-track".to_string();
-    let track = RtpTrack::new(track_id.clone());
+    let cancel_token = CancellationToken::new();
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone());
+    let _track = builder.build().await?;
 
     // Check track ID is set correctly
-    assert_eq!(track.id(), &track_id);
+    assert_eq!(_track.id(), &track_id);
 
     // Test with modified sample rate
     let sample_rate = 16000;
-    let track = RtpTrack::new(track_id.clone())
-        .with_sample_rate(sample_rate)
-        .with_config(TrackConfig::default().with_sample_rate(sample_rate));
+    let config = TrackConfig::default().with_sample_rate(sample_rate);
+    let builder =
+        RtpTrackBuilder::new(track_id.clone(), config).with_cancel_token(cancel_token.clone());
+    let _track = builder.build().await?;
 
-    // Test with RTP configuration
-    let rtp_config = RtpTrackConfig {
-        local_addr: "127.0.0.1:0".parse().unwrap(),
-        remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        payload_type: 0,
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-
-    let track = track.with_rtp_config(rtp_config);
-
-    // Verify default cancel token is used
-    let cancel_token = CancellationToken::new();
-    let _track = track.with_cancel_token(cancel_token.clone());
-
-    // Testing cancel token works
+    // Test that cancel token works
     cancel_token.cancel();
     assert!(cancel_token.is_cancelled());
 
@@ -73,7 +62,10 @@ async fn test_rtp_track_creation() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_track_processor() -> Result<()> {
     let track_id = "test-rtp-track-processor".to_string();
-    let mut track = RtpTrack::new(track_id);
+    let cancel_token = CancellationToken::new();
+    let builder =
+        RtpTrackBuilder::new(track_id, TrackConfig::default()).with_cancel_token(cancel_token);
+    let mut track = builder.build().await?;
 
     // Insert processor at the beginning of the chain
     let processor = Box::new(TestProcessor);
@@ -90,21 +82,11 @@ async fn test_rtp_track_processor() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_socket_setup() -> Result<()> {
     let track_id = "test-rtp-socket".to_string();
-    let mut track = RtpTrack::new(track_id);
-
-    // Configure with random local port
-    let rtp_config = RtpTrackConfig {
-        local_addr: "127.0.0.1:0".parse().unwrap(),
-        remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        payload_type: 0,
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-
-    track = track.with_rtp_config(rtp_config);
-
-    // Set up RTP socket
-    track.setup_rtp_socket().await?;
+    let cancel_token = CancellationToken::new();
+    let builder = RtpTrackBuilder::new(track_id, TrackConfig::default())
+        .with_cancel_token(cancel_token)
+        .with_rtp_start_port(12000);
+    let _track = builder.build().await?;
 
     Ok(())
 }
@@ -114,20 +96,9 @@ async fn test_rtp_track_send_packet() -> Result<()> {
     // Set up a track with a real local socket
     let cancel_token = CancellationToken::new();
     let track_id = "test-rtp-send".to_string();
-    let mut track = RtpTrack::new(track_id.clone()).with_cancel_token(cancel_token.clone());
-
-    // Configure with loopback address to a non-zero port that we don't expect to connect to
-    let rtp_config = RtpTrackConfig {
-        local_addr: "127.0.0.1:0".parse().unwrap(),
-        remote_addr: "127.0.0.1:12345".parse().unwrap(), // Using a port we don't expect to be listening
-        payload_type: 0,                                 // PCMU
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-    track = track.with_rtp_config(rtp_config);
-
-    // Set up the socket
-    track.setup_rtp_socket().await?;
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone());
+    let track = builder.build().await?;
 
     // Create a test audio frame with silence
     let audio_frame = AudioFrame {
@@ -158,20 +129,9 @@ async fn test_rtp_track_send_packet() -> Result<()> {
 async fn test_rtp_track_start_stop() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let track_id = "test-rtp-start-stop".to_string();
-    let mut track = RtpTrack::new(track_id.clone()).with_cancel_token(cancel_token.clone());
-
-    // Set up RTP configuration with a port we won't actually use
-    let config = RtpTrackConfig {
-        local_addr: "127.0.0.1:0".parse().unwrap(),
-        remote_addr: "127.0.0.1:9998".parse().unwrap(),
-        payload_type: 0,
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-    track = track.with_rtp_config(config);
-
-    // Set up socket - this will actually bind to a real port
-    track.setup_rtp_socket().await?;
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone());
+    let track = builder.build().await?;
 
     // Create a channel to receive audio frames
     let (sender, _receiver) = mpsc::unbounded_channel();
@@ -264,20 +224,9 @@ async fn test_rtp_track_send_dtmf() -> Result<()> {
     // Set up a track with a real local socket
     let cancel_token = CancellationToken::new();
     let track_id = "test-rtp-dtmf".to_string();
-    let mut track = RtpTrack::new(track_id.clone()).with_cancel_token(cancel_token.clone());
-
-    // Configure with loopback address
-    let rtp_config = RtpTrackConfig {
-        local_addr: "127.0.0.1:0".parse().unwrap(),
-        remote_addr: "127.0.0.1:12346".parse().unwrap(),
-        payload_type: 0,
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-    track = track.with_rtp_config(rtp_config);
-
-    // Set up the socket
-    track.setup_rtp_socket().await?;
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone());
+    let track = builder.build().await?;
 
     // Try sending a DTMF digit
     // This will likely fail to send since we're not actually connecting to a real endpoint,
@@ -398,28 +347,17 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
     // Create a pair of connected UDP sockets for testing
     let (send_socket, recv_socket) = create_connected_sockets().await?;
     let send_addr = send_socket.local_addr()?;
-    let recv_addr = recv_socket.local_addr()?;
+    let _recv_addr = recv_socket.local_addr()?;
 
     // Create a cancel token that we'll use to stop everything
-    let _cancel_token = CancellationToken::new();
+    let cancel_token = CancellationToken::new();
 
-    // Set up a track with the send socket
+    // Set up a track with configured address
     let track_id = "test-e2e-jitter".to_string();
-    let rtp_config = RtpTrackConfig {
-        local_addr: send_addr,
-        remote_addr: recv_addr,
-        payload_type: 0, // PCMU
-        ssrc: 12345,
-        dtmf_payload_type: 101,
-    };
-
-    let track = RtpTrack::new(track_id.clone())
-        .with_rtp_config(rtp_config)
-        .with_cancel_token(_cancel_token.clone())
-        .with_socket(
-            send_socket,
-            Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?),
-        );
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone())
+        .with_local_addr(send_addr);
+    let track = builder.build().await?;
 
     // Create channel to receive processed audio frames
     let (packet_sender, _packet_receiver) = mpsc::unbounded_channel();
@@ -491,7 +429,7 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
 
     // Stop the track
     track.stop().await?;
-    _cancel_token.cancel();
+    cancel_token.cancel();
 
     // Check that we received packets
     let received = received_packets.lock().unwrap();
@@ -500,7 +438,7 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
     if !received.is_empty() {
         // Verify the SSRC of the received packets
         for (_, ssrc, _, _) in received.iter() {
-            assert_eq!(*ssrc, 12345);
+            assert_eq!(*ssrc, 0); // Default SSRC
         }
     }
 
@@ -566,6 +504,68 @@ async fn test_jitter_buffer_integration() -> Result<()> {
         // Should be empty now
         assert!(jb.pop().is_none());
     }
+
+    Ok(())
+}
+
+// Test set_remote_description
+#[tokio::test]
+async fn test_rtp_track_set_remote_description() -> Result<()> {
+    // Setup a new RTP track
+    let cancel_token = CancellationToken::new();
+    let track_id = "test-remote-desc".to_string();
+    let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
+        .with_cancel_token(cancel_token.clone());
+    let track = builder.build().await?;
+
+    // Create valid SDP for testing
+    let test_sdp = r#"v=0
+o=- 1622825643 1622825643 IN IP4 192.168.1.100
+s=rustpbx
+c=IN IP4 192.168.1.100
+t=0 0
+m=audio 12345 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv"#;
+
+    // Set the remote description
+    let result = track.set_remote_description(test_sdp);
+    assert!(
+        result.is_ok(),
+        "Failed to set remote description: {:?}",
+        result
+    );
+
+    // Try to send a packet - it should now have the remote address set
+    let audio_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: Samples::PCM {
+            samples: vec![0; 160],
+        },
+        timestamp: 0,
+        sample_rate: 8000,
+    };
+
+    // Send a packet to verify the remote address was set correctly
+    // This should not return the "Remote address not set" error
+    let send_result = track.send_packet(&audio_frame).await;
+
+    // If it fails, it should be for a different reason than "Remote address not set"
+    if let Err(e) = &send_result {
+        assert!(
+            !e.to_string().contains("Remote address not set"),
+            "Remote address was not set properly: {}",
+            e
+        );
+    }
+
+    // Test with invalid SDP
+    let invalid_sdp = "invalid sdp data";
+    let result = track.set_remote_description(invalid_sdp);
+    assert!(result.is_err(), "Should fail with invalid SDP");
+
+    // Cleanup
+    cancel_token.cancel();
 
     Ok(())
 }

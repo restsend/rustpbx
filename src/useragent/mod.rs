@@ -1,3 +1,7 @@
-mod stun;
 pub mod useragent;
-pub use useragent::{InviteOptions, RegisterOptions, UserAgent, UserAgentBuilder};
+pub use useragent::{UserAgent, UserAgentBuilder};
+mod registration;
+pub use registration::RegisterOptions;
+pub mod invitation;
+#[cfg(test)]
+mod tests;

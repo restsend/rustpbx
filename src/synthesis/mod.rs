@@ -58,3 +58,23 @@ impl Default for SynthesisConfig {
         }
     }
 }
+
+impl SynthesisConfig {
+    pub fn check_default(mut self) -> Self {
+        match self.provider {
+            Some(SynthesisType::TencentCloud) => {
+                if self.app_id.is_none() {
+                    self.app_id = std::env::var("TENCENT_APPID").ok();
+                }
+                if self.secret_id.is_none() {
+                    self.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
+                }
+                if self.secret_key.is_none() {
+                    self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
+                }
+            }
+            _ => {}
+        }
+        self
+    }
+}
