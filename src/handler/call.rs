@@ -1,6 +1,7 @@
 use super::{processor::AsrProcessor, Command, ReferOption, StreamOption};
 use crate::{
-    event::{EventSender, SessionEvent},
+    app::AppState,
+    event::{EventReceiver, EventSender, SessionEvent},
     media::{
         denoiser::NoiseReducer,
         negotiate::strip_ipv6_candidates,
@@ -14,12 +15,15 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::{SynthesisConfig, SynthesisType, TencentCloudTtsClient},
+    synthesis::{SynthesisConfig, TencentCloudTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
+    useragent::UserAgent,
     TrackId,
 };
 use anyhow::Result;
+use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
+use futures::{stream::SplitSink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -27,128 +31,81 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
+
 // Session state for active calls
 #[derive(Clone)]
 pub struct CallHandlerState {
-    pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
-    pub recorder_root: String,
-    pub llm_proxy: Option<String>,
+    pub user_agent: Arc<UserAgent>,
 }
 #[derive(Deserialize)]
 pub struct CallParams {
     pub id: Option<String>,
 }
 
-impl CallHandlerState {
-    pub fn new() -> Self {
-        let recorder_root =
-            std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
-        let llm_proxy = std::env::var("LLM_PROXY").ok();
-        Self {
-            active_calls: Arc::new(Mutex::new(HashMap::new())),
-            recorder_root,
-            llm_proxy,
-        }
-    }
-
-    pub fn get_recorder_file(&self, session_id: &String) -> String {
-        let root = Path::new(&self.recorder_root);
-        if !root.exists() {
-            match std::fs::create_dir_all(root) {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        "Failed to create recorder root: {} {}",
-                        e,
-                        root.to_string_lossy()
-                    );
-                }
-            }
-        }
-        root.join(session_id)
-            .with_extension("wav")
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ActiveCallType {
-    #[serde(rename = "webrtc")]
     Webrtc,
-    #[serde(rename = "sip")]
     Sip,
+    WebSocket,
 }
-
 pub struct ActiveCall {
     pub cancel_token: CancellationToken,
     pub call_type: ActiveCallType,
     pub session_id: String,
-    pub options: StreamOption,
     pub created_at: DateTime<Utc>,
-    pub media_stream: Arc<MediaStream>,
+    pub media_stream: MediaStream,
     pub track_config: TrackConfig,
     pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
     pub tts_config: Option<SynthesisConfig>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
+    pub event_sender: EventSender,
 }
 
 impl ActiveCall {
     pub async fn create_stream(
-        state: &CallHandlerState,
+        call_type: &ActiveCallType,
+        state: AppState,
         cancel_token: CancellationToken,
         event_sender: EventSender,
         track_id: TrackId,
         session_id: &String,
-        options: &StreamOption,
+        option: StreamOption,
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
             .cancel_token(cancel_token.clone());
 
-        if let Some(_) = options.recorder {
+        if let Some(_) = option.recorder {
             let recorder_file = state.get_recorder_file(session_id);
             media_stream_builder = media_stream_builder.recorder(recorder_file);
         }
 
         let media_stream = media_stream_builder.build();
-        let offer = match options.enable_ipv6 {
+
+        let offer = match option.enable_ipv6 {
             Some(false) | None => strip_ipv6_candidates(
-                options
+                option
                     .offer
                     .as_ref()
                     .ok_or(anyhow::anyhow!("SDP is required"))?,
             ),
-            _ => options
+            _ => option
                 .offer
                 .clone()
                 .ok_or(anyhow::anyhow!("SDP is required"))?,
         };
-
-        let mut webrtc_track = WebrtcTrack::new(track_id.clone());
-        let timeout = options
-            .handshake_timeout
-            .as_ref()
-            .map(|d| {
-                d.clone()
-                    .parse::<u64>()
-                    .map(|d| Duration::from_secs(d))
-                    .ok()
-            })
-            .flatten();
-
         let mut processors = vec![];
-        match options.denoise {
+        match option.denoise {
             Some(true) => {
                 let noise_reducer = NoiseReducer::new(16000)?;
                 processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
             }
             _ => {}
         }
-        match options.vad {
+        match option.vad {
             Some(ref vad_config) => {
                 let vad_config = vad_config.to_owned();
                 info!("Vad processor added {:?}", vad_config);
@@ -161,20 +118,10 @@ impl ActiveCall {
             }
             None => {}
         }
-        match options.asr {
+        match option.asr {
             Some(ref asr_config) => match asr_config.provider {
                 Some(TranscriptionType::TencentCloud) => {
-                    let mut asr_config = asr_config.clone();
-                    if asr_config.app_id.is_none() {
-                        asr_config.app_id = std::env::var("TENCENT_APPID").ok();
-                    }
-                    if asr_config.secret_id.is_none() {
-                        asr_config.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
-                    }
-                    if asr_config.secret_key.is_none() {
-                        asr_config.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
-                    }
-
+                    let asr_config = asr_config.clone().check_default();
                     let event_sender = media_stream.get_event_sender();
                     let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
                         .with_track_id(track_id.clone())
@@ -190,12 +137,43 @@ impl ActiveCall {
             None => {}
         }
 
+        let track_config = TrackConfig::default();
+        let mut caller_track: Box<dyn Track> = match call_type {
+            ActiveCallType::Webrtc | ActiveCallType::WebSocket => {
+                let webrtc_track = WebrtcTrack::new(track_id.clone(), track_config);
+                Box::new(webrtc_track)
+            }
+            ActiveCallType::Sip => {
+                let rtp_track = super::sip::new_rtp_track_with_sip(
+                    state.clone(),
+                    cancel_token.child_token(),
+                    track_id.clone(),
+                    track_config,
+                    &option,
+                )
+                .await?;
+                Box::new(rtp_track)
+            }
+        };
+
         for processor in processors {
-            webrtc_track.append_processor(processor);
+            caller_track.append_processor(processor);
         }
-        match webrtc_track.setup_webrtc_track(offer, timeout).await {
+
+        let timeout = option
+            .handshake_timeout
+            .as_ref()
+            .map(|d| {
+                d.clone()
+                    .parse::<u64>()
+                    .map(|d| Duration::from_secs(d))
+                    .ok()
+            })
+            .flatten();
+
+        match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
-                let sdp = strip_ipv6_candidates(&answer.sdp);
+                let sdp = strip_ipv6_candidates(&answer);
                 info!("Webrtc track setup complete answer: {}", sdp);
                 event_sender
                     .send(SessionEvent::Answer {
@@ -204,7 +182,7 @@ impl ActiveCall {
                         sdp,
                     })
                     .ok();
-                media_stream.update_track(Box::new(webrtc_track)).await;
+                media_stream.update_track(caller_track).await;
                 Ok(media_stream)
             }
             Err(e) => {
@@ -214,58 +192,31 @@ impl ActiveCall {
         }
     }
 
-    pub async fn new_webrtc(
-        state: &CallHandlerState,
+    pub async fn new(
+        call_type: ActiveCallType,
         cancel_token: CancellationToken,
         event_sender: EventSender,
-        track_id: TrackId,
         session_id: String,
-        options: StreamOption,
+        media_stream: MediaStream,
+        tts_config: Option<SynthesisConfig>,
     ) -> Result<Self> {
-        let media_stream = Self::create_stream(
-            state,
-            cancel_token.child_token(),
-            event_sender,
-            track_id,
-            &session_id,
-            &options,
-        )
-        .await?;
-        let track_config = TrackConfig::default();
-        let mut tts_config = options.tts.clone();
-        match tts_config {
-            Some(ref mut tts_config) => match tts_config.provider {
-                Some(SynthesisType::TencentCloud) => {
-                    if tts_config.app_id.is_none() {
-                        tts_config.app_id = std::env::var("TENCENT_APPID").ok();
-                    }
-                    if tts_config.secret_id.is_none() {
-                        tts_config.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
-                    }
-                    if tts_config.secret_key.is_none() {
-                        tts_config.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
-                    }
-                }
-                _ => {}
-            },
-            None => {}
-        }
+        let tts_config = tts_config.and_then(|cfg| Some(cfg.check_default()));
         let active_call = ActiveCall {
             cancel_token,
-            call_type: ActiveCallType::Webrtc,
+            call_type,
             session_id,
-            options,
             created_at: Utc::now(),
-            media_stream: Arc::new(media_stream),
-            track_config,
+            media_stream,
+            track_config: TrackConfig::default(),
             tts_command_tx: Mutex::new(None),
             tts_config,
             auto_hangup: Arc::new(Mutex::new(None)),
+            event_sender,
         };
         Ok(active_call)
     }
 
-    pub async fn process_stream(&self) -> Result<()> {
+    pub async fn serve(&self) -> Result<()> {
         let mut event_receiver = self.media_stream.subscribe();
         let auto_hangup = self.auto_hangup.clone();
         let event_hook_loop = async move {
@@ -294,6 +245,7 @@ impl ActiveCall {
                 }
             }
         };
+
         select! {
             _ = event_hook_loop => {
                 info!("Event loop done, id:{}", self.session_id);
@@ -331,7 +283,6 @@ impl ActiveCall {
             }
         }
     }
-
     async fn do_candidate(&self, _candidates: Vec<String>) -> Result<()> {
         Ok(())
     }
@@ -343,8 +294,8 @@ impl ActiveCall {
         play_id: Option<String>,
         auto_hangup: Option<bool>,
     ) -> Result<()> {
-        let tts_config = match self.tts_config {
-            Some(ref config) => config,
+        let tts_config = match self.tts_config.as_ref() {
+            Some(config) => config,
             None => return Ok(()),
         };
         let speaker = match speaker {
@@ -385,7 +336,7 @@ impl ActiveCall {
         match tts_track
             .start(
                 self.cancel_token.clone(),
-                self.media_stream.get_event_sender(),
+                self.event_sender.clone(),
                 self.media_stream.packet_sender.clone(),
             )
             .await
@@ -444,4 +395,149 @@ impl ActiveCall {
     async fn do_unmute(&self, _track_id: Option<String>) -> Result<()> {
         Ok(())
     }
+}
+
+#[instrument(name = "ws_call", skip(socket, state))]
+pub async fn handle_call(
+    call_type: ActiveCallType,
+    session_id: String,
+    socket: axum::extract::ws::WebSocket,
+    state: AppState,
+) -> Result<()> {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let cancel_token = CancellationToken::new();
+    let event_sender = crate::event::create_event_sender();
+    let mut event_receiver = event_sender.subscribe();
+
+    let track_id = session_id.clone();
+    let cancel_token_ref = cancel_token.clone();
+    let event_sender_ref = event_sender.clone();
+    let state_clone = state.clone();
+    let send_to_ws_loop = async |ws_sender: &mut SplitSink<WebSocket, Message>,
+                                 event_receiver: &mut EventReceiver| {
+        while let Ok(event) = event_receiver.recv().await {
+            let data = match serde_json::to_string(&event) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("webrtc call: error serializing event: {} {:?}", e, event);
+                    continue;
+                }
+            };
+            if let Err(e) = ws_sender.send(data.into()).await {
+                error!("webrtc call: error sending event to WebSocket: {}", e);
+            }
+        }
+    };
+
+    let prepare_call = async move {
+        let options = match ws_receiver.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let command = serde_json::from_str::<Command>(&text)?;
+                match command {
+                    Command::Invite { options } => options,
+                    _ => {
+                        info!("call: the first message must be an invite {:?}", command);
+                        return Err(anyhow::anyhow!("the first message must be an invite"));
+                    }
+                }
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Invalid message type"));
+            }
+        };
+        let tts_config = options.tts.clone();
+        let media_stream = ActiveCall::create_stream(
+            &call_type,
+            state_clone,
+            cancel_token.child_token(),
+            event_sender_ref.clone(),
+            track_id,
+            &session_id,
+            options,
+        )
+        .await?;
+
+        let active_call = ActiveCall::new(
+            call_type,
+            cancel_token.child_token(),
+            event_sender_ref,
+            session_id,
+            media_stream,
+            tts_config,
+        )
+        .await?;
+        Ok((Arc::new(active_call), ws_receiver))
+    };
+
+    let (active_call, mut ws_receiver) = select! {
+        _ = cancel_token_ref.cancelled() => {
+            info!("webrtc call: prepare call cancelled");
+            return Err(anyhow::anyhow!("Cancelled"));
+        },
+        r = prepare_call => {
+            match r {
+                Ok((active_call, ws_receiver)) => (active_call, ws_receiver),
+                Err(e) => {
+                    error!("webrtc call: prepare call failed: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
+            info!("webrtc call: prepare call send to ws");
+            return Err(anyhow::anyhow!("WebSocket closed"));
+        }
+    };
+
+    let active_call_clone = active_call.clone();
+    let active_calls_len = {
+        let mut active_calls = state.active_calls.lock().await;
+        active_calls.insert(active_call.session_id.clone(), active_call.clone());
+        active_calls.len()
+    };
+
+    info!(
+        "call: new call: {} -> {:?}, {} active calls",
+        active_call.session_id, active_call.call_type, active_calls_len
+    );
+
+    let recv_from_ws = async move {
+        while let Some(msg) = ws_receiver.next().await {
+            let command = match msg {
+                Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
+                    Ok(command) => Some(command),
+                    Err(e) => {
+                        error!("webrtc call: error deserializing command: {} {}", e, text);
+                        None
+                    }
+                },
+                _ => None,
+            };
+
+            match command {
+                Some(command) => match active_call.dispatch(command).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        error!("webrtc call: Error dispatching command: {}", e);
+                    }
+                },
+                None => {}
+            }
+        }
+    };
+    select! {
+        _ = cancel_token_ref.cancelled() => {
+            info!("webrtc call: cancelled");
+        },
+        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
+            info!("send_to_ws: websocket disconnected");
+        },
+        _ = recv_from_ws => {
+            info!("recv_from_ws: websocket disconnected");
+        },
+        r = active_call_clone.serve() => {
+            info!("webrtc call: call loop disconnected {:?}", r);
+        },
+    }
+    Ok(())
 }

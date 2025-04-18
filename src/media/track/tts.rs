@@ -100,7 +100,9 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
     fn append_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain.append_processor(processor);
     }
-
+    async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
+        Ok("".to_string())
+    }
     async fn start(
         &self,
         token: CancellationToken,

@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let app_builder = AppBuilder::new().config(config);
     let app = app_builder.build().await.expect("Failed to build app");
 
-    info!("Starting rustpbx on {}", app.config.http_addr);
+    info!("Starting rustpbx on {}", app.state.config.http_addr);
     select! {
         _ = app.run() => {}
         _ = tokio::signal::ctrl_c() => {

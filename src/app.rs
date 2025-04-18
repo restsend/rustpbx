@@ -1,26 +1,35 @@
-use crate::config::Config;
 use crate::handler::call::CallHandlerState;
 use crate::useragent::UserAgent;
+use crate::{config::Config, handler::call::ActiveCallRef};
 use anyhow::Result;
 use axum::{
     response::{Html, IntoResponse},
     routing::get,
     Router,
 };
-use std::net::SocketAddr;
+use futures::lock::Mutex;
+use std::path::Path;
 use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
 };
-use tracing::info;
+use tracing::{info, warn};
 
-pub struct App {
-    pub config: Config,
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
     pub token: CancellationToken,
+    pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
+    pub recorder_root: String,
+    pub llm_proxy: Option<String>,
+}
+pub struct App {
+    pub state: AppState,
 }
 
 pub struct AppBuilder {
@@ -28,6 +37,38 @@ pub struct AppBuilder {
     pub useragent: Option<Arc<UserAgent>>,
 }
 
+impl AppState {
+    pub fn new(useragent: Arc<UserAgent>) -> Self {
+        Self {
+            config: Arc::new(Config::default()),
+            useragent,
+            token: CancellationToken::new(),
+            active_calls: Arc::new(Mutex::new(HashMap::new())),
+            recorder_root: std::env::var("RECORDER_ROOT")
+                .unwrap_or_else(|_| "/tmp/recorder".to_string()),
+            llm_proxy: std::env::var("LLM_PROXY").ok(),
+        }
+    }
+    pub fn get_recorder_file(&self, session_id: &String) -> String {
+        let root = Path::new(&self.recorder_root);
+        if !root.exists() {
+            match std::fs::create_dir_all(root) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Failed to create recorder root: {} {}",
+                        e,
+                        root.to_string_lossy()
+                    );
+                }
+            }
+        }
+        root.join(session_id)
+            .with_extension("pcm")
+            .to_string_lossy()
+            .to_string()
+    }
+}
 impl AppBuilder {
     pub fn new() -> Self {
         Self {
@@ -47,7 +88,7 @@ impl AppBuilder {
     }
 
     pub async fn build(self) -> Result<App> {
-        let config = self.config.unwrap_or_default();
+        let config = Arc::new(self.config.unwrap_or_default());
         let token = CancellationToken::new();
 
         let useragent = if let Some(ua) = self.useragent {
@@ -60,10 +101,20 @@ impl AppBuilder {
 
             Arc::new(ua_builder.build().await?)
         };
+
+        let recorder_root =
+            std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
+        let llm_proxy = std::env::var("LLM_PROXY").ok();
+
         Ok(App {
-            config,
-            useragent,
-            token,
+            state: AppState {
+                config,
+                useragent,
+                token,
+                active_calls: Arc::new(Mutex::new(HashMap::new())),
+                recorder_root,
+                llm_proxy,
+            },
         })
     }
 }
@@ -71,14 +122,14 @@ impl AppBuilder {
 impl App {
     pub async fn run(self) -> Result<()> {
         // Get components ready
-        let ua = self.useragent.clone();
-        let token = self.token.child_token();
+        let ua = self.state.useragent.clone();
+        let token = self.state.token.child_token();
 
         // Create router with empty state
-        let app = create_router(self.useragent.clone());
+        let app = create_router(self.state.clone());
 
         // Bind to address
-        let addr: SocketAddr = self.config.http_addr.parse()?;
+        let addr: SocketAddr = self.state.config.http_addr.parse()?;
         info!("Attempting to bind to {}", addr);
 
         // Start HTTP server with Axum 0.8.1
@@ -123,7 +174,7 @@ impl App {
         }
 
         // Clean shutdown
-        self.useragent.stop();
+        self.state.useragent.stop();
 
         Ok(())
     }
@@ -140,10 +191,8 @@ async fn index_handler() -> impl IntoResponse {
     }
 }
 
-fn create_router(useragent: Arc<UserAgent>) -> Router {
-    // Create router with empty state
+fn create_router(state: AppState) -> Router {
     let router = Router::new();
-    let call_state = CallHandlerState::new();
     // check if static/index.html exists
     if !std::path::Path::new("static/index.html").exists() {
         tracing::error!("static/index.html does not exist");
@@ -169,7 +218,7 @@ fn create_router(useragent: Arc<UserAgent>) -> Router {
         ]);
 
     // Merge call and WebSocket handlers with static file serving
-    let call_routes = crate::handler::router(useragent).with_state(call_state);
+    let call_routes = crate::handler::router().with_state(state);
 
     router
         .route("/", get(index_handler))

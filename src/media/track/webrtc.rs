@@ -47,7 +47,6 @@ pub struct WebrtcTrackConfig {
 
 pub struct WebrtcTrack {
     track_id: TrackId,
-    stream_id: String,
     config: TrackConfig,
     processor_chain: ProcessorChain,
     packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
@@ -137,38 +136,17 @@ impl WebrtcTrack {
         servers
     }
 
-    pub fn new(id: TrackId) -> Self {
-        let config = TrackConfig::default().with_sample_rate(16000);
+    pub fn new(id: TrackId, track_config: TrackConfig) -> Self {
+        let processor_chain = ProcessorChain::new(track_config.sample_rate);
         Self {
             track_id: id,
-            stream_id: "rustpbx-stream".to_string(),
-            config: config.clone(),
-            processor_chain: ProcessorChain::new(config.sample_rate),
+            config: track_config,
+            processor_chain,
             packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
             local_track: None,
             encoder: TrackCodec::new(),
         }
-    }
-
-    pub fn with_config(mut self, config: TrackConfig) -> Self {
-        self.config = config.clone();
-        self
-    }
-
-    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
-        self.cancel_token = cancel_token;
-        self
-    }
-
-    pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
-        self.config = self.config.clone().with_sample_rate(sample_rate);
-        self.processor_chain = ProcessorChain::new(sample_rate);
-        self
-    }
-    pub fn with_stream_id(mut self, stream_id: String) -> Self {
-        self.stream_id = stream_id;
-        self
     }
 
     pub async fn setup_webrtc_track(
@@ -279,7 +257,7 @@ impl WebrtcTrack {
             }
         };
 
-        let track = Self::create_audio_track(codec, Some(self.stream_id.clone()));
+        let track = Self::create_audio_track(codec, Some(self.track_id.clone()));
         peer_connection
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
@@ -328,6 +306,11 @@ impl Track for WebrtcTrack {
 
     fn append_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain.append_processor(processor);
+    }
+
+    async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String> {
+        let answer = self.setup_webrtc_track(offer, timeout).await?;
+        Ok(answer.sdp)
     }
 
     async fn start(

@@ -86,6 +86,9 @@ impl Track for FileTrack {
         self.processor_chain.append_processor(processor);
     }
 
+    async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
+        Ok("".to_string())
+    }
     async fn start(
         &self,
         token: CancellationToken,
