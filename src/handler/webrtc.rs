@@ -2,10 +2,7 @@ use super::{
     call::{ActiveCallType, CallParams},
     middleware::clientip::ClientIp,
 };
-use crate::{
-    app::AppState,
-    handler::call::{handle_call, CallHandlerState},
-};
+use crate::{app::AppState, handler::call::handle_call};
 use axum::{
     extract::{Query, State, WebSocketUpgrade},
     response::{IntoResponse, Response},

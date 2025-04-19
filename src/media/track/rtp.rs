@@ -140,6 +140,7 @@ pub struct RtpTrack {
     state: Arc<RtpTrackState>,
     dtmf_payload_type: u8,
     payload_type: AtomicU8,
+    remote_description: Mutex<Option<String>>,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -287,6 +288,7 @@ impl RtpTrackBuilder {
             state: Arc::new(RtpTrackState::new()),
             dtmf_payload_type: 101,
             payload_type: AtomicU8::new(9),
+            remote_description: Mutex::new(None),
         };
         Ok(track)
     }
@@ -294,6 +296,11 @@ impl RtpTrackBuilder {
 
 impl RtpTrack {
     pub fn set_remote_description(&self, answer: &str) -> Result<()> {
+        self.remote_description
+            .lock()
+            .unwrap()
+            .replace(answer.to_string());
+
         let answer = match sdp_rs::SessionDescription::try_from(answer) {
             Ok(s) => s,
             Err(e) => {
@@ -314,7 +321,13 @@ impl RtpTrack {
         for media in answer.media_descriptions.iter() {
             if matches!(media.media.media, MediaType::Audio) {
                 peer_port = media.media.port;
-                payload_type = media.media.fmt.parse::<u8>()?;
+                payload_type = media
+                    .media
+                    .fmt
+                    .split_ascii_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse::<u8>()?;
                 break;
             }
         }
@@ -344,7 +357,7 @@ s=rustpbx\r\n\
 c=IN IP4 {}\r\n\
 t=0 0\r\n\
 m=audio {} RTP/AVP 9 0 101\r\n\
-a=rtpmap:9 PCMU/8000\r\n\
+a=rtpmap:9 G722/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:101 telephone-event/8000\r\n\
@@ -451,7 +464,7 @@ a=sendrecv\r\n",
         Ok(())
     }
 
-    async fn process_rtp_packets(
+    async fn recv_rtp_packets(
         rtp_socket: UdpConnection,
         track_id: TrackId,
         processor_chain: ProcessorChain,
@@ -500,7 +513,6 @@ a=sendrecv\r\n",
                 error!("webrtctrack: Failed to process frame: {}", e);
                 break;
             }
-
             match packet_sender.send(frame) {
                 Ok(_) => {}
                 Err(e) => {
@@ -562,9 +574,16 @@ impl Track for RtpTrack {
         self.processor_chain.append_processor(processor);
     }
 
-    async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String> {
-        Ok("".to_string())
+    async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
+        let answer = self
+            .remote_description
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or("".to_string());
+        Ok(answer)
     }
+
     async fn start(
         &self,
         token: CancellationToken,
@@ -592,7 +611,7 @@ impl Track for RtpTrack {
                 r = Self::send_rtcp_reports(state, rtcp_socket, ssrc, rtcp_addr) => {
                     info!("rtptrack: RTCP sender process completed {:?}", r);
                 }
-                r = Self::process_rtp_packets(rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
+                r = Self::recv_rtp_packets(rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
                     info!("rtptrack: RTP processor completed {:?}", r);
                 }
             };
@@ -622,15 +641,13 @@ impl Track for RtpTrack {
         if payload.is_empty() {
             return Ok(());
         }
-
         let remote_addr = match self.remote_addr.lock().unwrap().as_ref() {
             Some(addr) => addr.clone(),
             None => return Err(anyhow::anyhow!("rtptrack: Remote address not set")),
         };
 
         let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
-        let samples_per_packet =
-            (self.config.sample_rate as f32 * self.config.ptime.as_secs_f32()) as u32;
+        let samples_per_packet = payload.len() as u32;
         let ts = self
             .state
             .timestamp

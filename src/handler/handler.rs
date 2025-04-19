@@ -1,11 +1,10 @@
-use crate::{app::AppState, useragent::UserAgent};
+use crate::app::AppState;
 use axum::{
     extract::{Path, State},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use std::sync::Arc;
 use tracing::info;
 
 pub fn router() -> Router<AppState> {
