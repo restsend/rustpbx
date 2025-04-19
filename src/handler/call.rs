@@ -378,6 +378,63 @@ impl ActiveCall {
     }
 }
 
+async fn sip_event_loop(
+    track_id: TrackId,
+    event_sender: &mut EventSender,
+    dlg_state_receiver: &mut DialogStateReceiver,
+) -> Result<()> {
+    while let Some(event) = dlg_state_receiver.recv().await {
+        match event {
+            DialogState::Trying(dialog_id) => {
+                info!("sip_call: dialog trying: {}", dialog_id);
+            }
+            DialogState::Early(dialog_id, _) => {
+                info!("sip_call: dialog early: {}", dialog_id);
+                event_sender.send(crate::event::SessionEvent::Ringing {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    early_media: true,
+                })?;
+            }
+            DialogState::Calling(dialog_id) => {
+                info!("sip_call: dialog calling: {}", dialog_id);
+                event_sender.send(crate::event::SessionEvent::Ringing {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    early_media: false,
+                })?;
+            }
+            DialogState::Confirmed(dialog_id) => {
+                info!("sip_call: dialog confirmed: {}", dialog_id);
+            }
+            DialogState::Terminated(dialog_id, _) => {
+                info!("sip_call: dialog terminated: {}", dialog_id);
+                break;
+            }
+            _ => (),
+        }
+    }
+    Ok(())
+}
+
+async fn send_to_ws_loop(
+    ws_sender: &mut SplitSink<WebSocket, Message>,
+    event_receiver: &mut EventReceiver,
+) -> Result<()> {
+    while let Ok(event) = event_receiver.recv().await {
+        let data = match serde_json::to_string(&event) {
+            Ok(data) => data,
+            Err(e) => {
+                error!("webrtc call: error serializing event: {} {:?}", e, event);
+                continue;
+            }
+        };
+        if let Err(e) = ws_sender.send(data.into()).await {
+            error!("webrtc call: error sending event to WebSocket: {}", e);
+        }
+    }
+    Ok(())
+}
 #[instrument(name = "ws_call", skip(socket, state))]
 pub async fn handle_call(
     call_type: ActiveCallType,
@@ -394,60 +451,9 @@ pub async fn handle_call(
     let cancel_token_ref = cancel_token.clone();
     let event_sender_ref = event_sender.clone();
     let state_clone = state.clone();
-    let send_to_ws_loop = async |ws_sender: &mut SplitSink<WebSocket, Message>,
-                                 event_receiver: &mut EventReceiver| {
-        while let Ok(event) = event_receiver.recv().await {
-            let data = match serde_json::to_string(&event) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("webrtc call: error serializing event: {} {:?}", e, event);
-                    continue;
-                }
-            };
-            if let Err(e) = ws_sender.send(data.into()).await {
-                error!("webrtc call: error sending event to WebSocket: {}", e);
-            }
-        }
-    };
     let (dlg_state_sender, mut dlg_state_receiver) = mpsc::unbounded_channel();
     let track_id_clone = track_id.clone();
     let call_type_ref = call_type.clone();
-    let sip_event_loop =
-        async move |event_sender: &mut EventSender,
-                    dlg_state_receiver: &mut DialogStateReceiver| {
-            while let Some(event) = dlg_state_receiver.recv().await {
-                match event {
-                    DialogState::Trying(dialog_id) => {
-                        info!("sip_call: dialog trying: {}", dialog_id);
-                    }
-                    DialogState::Early(dialog_id, _) => {
-                        info!("sip_call: dialog early: {}", dialog_id);
-                        event_sender.send(crate::event::SessionEvent::Ringing {
-                            track_id: track_id_clone.clone(),
-                            timestamp: crate::get_timestamp(),
-                            early_media: true,
-                        })?;
-                    }
-                    DialogState::Calling(dialog_id) => {
-                        info!("sip_call: dialog calling: {}", dialog_id);
-                        event_sender.send(crate::event::SessionEvent::Ringing {
-                            track_id: track_id_clone.clone(),
-                            timestamp: crate::get_timestamp(),
-                            early_media: false,
-                        })?;
-                    }
-                    DialogState::Confirmed(dialog_id) => {
-                        info!("sip_call: dialog confirmed: {}", dialog_id);
-                    }
-                    DialogState::Terminated(dialog_id, _) => {
-                        info!("sip_call: dialog terminated: {}", dialog_id);
-                        break;
-                    }
-                    _ => (),
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        };
 
     let prepare_call = async move {
         let mut options = match ws_receiver.next().await {
@@ -534,9 +540,10 @@ pub async fn handle_call(
         }
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
-                sip_event_loop(&mut event_sender, &mut dlg_state_receiver).await.ok();
+                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver).await
             } else {
                 cancel_token_ref.cancelled().await;
+                Ok(())
             }
         } => {
             info!("webrtc call: sip event loop");
@@ -595,9 +602,10 @@ pub async fn handle_call(
         },
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
-                sip_event_loop(&mut event_sender, &mut dlg_state_receiver).await.ok();
+                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver).await
             } else {
                 cancel_token_ref.cancelled().await;
+                Ok(())
             }
         } => {
             info!("webrtc call: sip event loop");
