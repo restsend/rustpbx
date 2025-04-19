@@ -1,8 +1,11 @@
 use super::UserAgent;
 use anyhow::{anyhow, Result};
 use rsipstack::dialog::{
-    client_dialog::ClientInviteDialog, dialog::Dialog, invitation::InviteOption,
-    server_dialog::ServerInviteDialog, DialogId,
+    client_dialog::ClientInviteDialog,
+    dialog::{Dialog, DialogStateSender},
+    invitation::InviteOption,
+    server_dialog::ServerInviteDialog,
+    DialogId,
 };
 use tracing::info;
 
@@ -48,8 +51,11 @@ impl UserAgent {
         Ok(())
     }
 
-    pub async fn invite(&self, invite_option: InviteOption) -> Result<(DialogId, Option<Vec<u8>>)> {
-        let (state_sender, _state_receiver) = tokio::sync::mpsc::unbounded_channel();
+    pub async fn invite(
+        &self,
+        invite_option: InviteOption,
+        state_sender: DialogStateSender,
+    ) -> Result<(DialogId, Option<Vec<u8>>)> {
         let (dialog, resp) = self
             .dialog_layer
             .do_invite(invite_option, state_sender)

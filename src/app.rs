@@ -1,4 +1,3 @@
-use crate::handler::call::CallHandlerState;
 use crate::useragent::UserAgent;
 use crate::{config::Config, handler::call::ActiveCallRef};
 use anyhow::Result;
@@ -19,8 +18,7 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
-#[derive(Clone)]
-pub struct AppState {
+pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
     pub token: CancellationToken,
@@ -28,6 +26,9 @@ pub struct AppState {
     pub recorder_root: String,
     pub llm_proxy: Option<String>,
 }
+
+pub type AppState = Arc<AppStateInner>;
+
 pub struct App {
     pub state: AppState,
 }
@@ -37,7 +38,7 @@ pub struct AppBuilder {
     pub useragent: Option<Arc<UserAgent>>,
 }
 
-impl AppState {
+impl AppStateInner {
     pub fn new(useragent: Arc<UserAgent>) -> Self {
         Self {
             config: Arc::new(Config::default()),
@@ -107,14 +108,14 @@ impl AppBuilder {
         let llm_proxy = std::env::var("LLM_PROXY").ok();
 
         Ok(App {
-            state: AppState {
+            state: Arc::new(AppStateInner {
                 config,
                 useragent,
                 token,
                 active_calls: Arc::new(Mutex::new(HashMap::new())),
                 recorder_root,
                 llm_proxy,
-            },
+            }),
         })
     }
 }

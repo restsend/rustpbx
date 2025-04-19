@@ -17,15 +17,19 @@ use crate::{
     },
     synthesis::{SynthesisConfig, TencentCloudTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
-    useragent::UserAgent,
     TrackId,
 };
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
 use futures::{stream::SplitSink, SinkExt, StreamExt};
+use rsipstack::dialog::{
+    client_dialog::ClientInviteDialog,
+    dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender},
+    DialogId,
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     select,
     sync::{mpsc, Mutex},
@@ -34,12 +38,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
-
-// Session state for active calls
-#[derive(Clone)]
-pub struct CallHandlerState {
-    pub user_agent: Arc<UserAgent>,
-}
 #[derive(Deserialize)]
 pub struct CallParams {
     pub id: Option<String>,
@@ -62,11 +60,12 @@ pub struct ActiveCall {
     pub tts_config: Option<SynthesisConfig>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
     pub event_sender: EventSender,
+    pub dialog_id: Mutex<Option<DialogId>>,
 }
 
 impl ActiveCall {
     pub async fn create_stream(
-        call_type: &ActiveCallType,
+        mut caller_track: Box<dyn Track>,
         state: AppState,
         cancel_token: CancellationToken,
         event_sender: EventSender,
@@ -137,25 +136,6 @@ impl ActiveCall {
             None => {}
         }
 
-        let track_config = TrackConfig::default();
-        let mut caller_track: Box<dyn Track> = match call_type {
-            ActiveCallType::Webrtc | ActiveCallType::WebSocket => {
-                let webrtc_track = WebrtcTrack::new(track_id.clone(), track_config);
-                Box::new(webrtc_track)
-            }
-            ActiveCallType::Sip => {
-                let rtp_track = super::sip::new_rtp_track_with_sip(
-                    state.clone(),
-                    cancel_token.child_token(),
-                    track_id.clone(),
-                    track_config,
-                    &option,
-                )
-                .await?;
-                Box::new(rtp_track)
-            }
-        };
-
         for processor in processors {
             caller_track.append_processor(processor);
         }
@@ -174,7 +154,7 @@ impl ActiveCall {
         match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
                 let sdp = strip_ipv6_candidates(&answer);
-                info!("Webrtc track setup complete answer: {}", sdp);
+                info!("Webrtc track setup complete answer: {}", answer);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id: track_id.clone(),
@@ -199,6 +179,7 @@ impl ActiveCall {
         session_id: String,
         media_stream: MediaStream,
         tts_config: Option<SynthesisConfig>,
+        dialog_id: Option<DialogId>,
     ) -> Result<Self> {
         let tts_config = tts_config.and_then(|cfg| Some(cfg.check_default()));
         let active_call = ActiveCall {
@@ -212,6 +193,7 @@ impl ActiveCall {
             tts_config,
             auto_hangup: Arc::new(Mutex::new(None)),
             event_sender,
+            dialog_id: Mutex::new(dialog_id),
         };
         Ok(active_call)
     }
@@ -406,7 +388,7 @@ pub async fn handle_call(
 ) -> Result<()> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let cancel_token = CancellationToken::new();
-    let event_sender = crate::event::create_event_sender();
+    let mut event_sender = crate::event::create_event_sender();
     let mut event_receiver = event_sender.subscribe();
 
     let track_id = session_id.clone();
@@ -428,9 +410,48 @@ pub async fn handle_call(
             }
         }
     };
+    let (dlg_state_sender, mut dlg_state_receiver) = mpsc::unbounded_channel();
+    let track_id_clone = track_id.clone();
+
+    let sip_event_loop =
+        async move |event_sender: &mut EventSender,
+                    dlg_state_receiver: &mut DialogStateReceiver| {
+            while let Some(event) = dlg_state_receiver.recv().await {
+                match event {
+                    DialogState::Trying(dialog_id) => {
+                        info!("sip_call: dialog trying: {}", dialog_id);
+                    }
+                    DialogState::Early(dialog_id, _) => {
+                        info!("sip_call: dialog early: {}", dialog_id);
+                        event_sender.send(crate::event::SessionEvent::Ringing {
+                            track_id: track_id_clone.clone(),
+                            timestamp: crate::get_timestamp(),
+                            early_media: true,
+                        })?;
+                    }
+                    DialogState::Calling(dialog_id) => {
+                        info!("sip_call: dialog calling: {}", dialog_id);
+                        event_sender.send(crate::event::SessionEvent::Ringing {
+                            track_id: track_id_clone.clone(),
+                            timestamp: crate::get_timestamp(),
+                            early_media: false,
+                        })?;
+                    }
+                    DialogState::Confirmed(dialog_id) => {
+                        info!("sip_call: dialog confirmed: {}", dialog_id);
+                    }
+                    DialogState::Terminated(dialog_id, _) => {
+                        info!("sip_call: dialog terminated: {}", dialog_id);
+                        break;
+                    }
+                    _ => (),
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
 
     let prepare_call = async move {
-        let options = match ws_receiver.next().await {
+        let mut options = match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
                 let command = serde_json::from_str::<Command>(&text)?;
                 match command {
@@ -445,9 +466,33 @@ pub async fn handle_call(
                 return Err(anyhow::anyhow!("Invalid message type"));
             }
         };
+
+        let track_config = TrackConfig::default();
+        let mut dialog_id = None;
+        let caller_track: Box<dyn Track> = match call_type {
+            ActiveCallType::Webrtc | ActiveCallType::WebSocket => {
+                let webrtc_track = WebrtcTrack::new(track_id.clone(), track_config);
+                Box::new(webrtc_track)
+            }
+            ActiveCallType::Sip => {
+                let (dlg_id, rtp_track) = super::sip::new_rtp_track_with_sip(
+                    state_clone.clone(),
+                    cancel_token.child_token(),
+                    track_id.clone(),
+                    track_config,
+                    &options,
+                    dlg_state_sender,
+                )
+                .await?;
+                dialog_id.replace(dlg_id);
+                options.offer = rtp_track.local_description().ok();
+                Box::new(rtp_track)
+            }
+        };
+
         let tts_config = options.tts.clone();
         let media_stream = ActiveCall::create_stream(
-            &call_type,
+            caller_track,
             state_clone,
             cancel_token.child_token(),
             event_sender_ref.clone(),
@@ -464,6 +509,7 @@ pub async fn handle_call(
             session_id,
             media_stream,
             tts_config,
+            dialog_id,
         )
         .await?;
         Ok((Arc::new(active_call), ws_receiver))
@@ -486,6 +532,10 @@ pub async fn handle_call(
         _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
             info!("webrtc call: prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
+        }
+        _ = sip_event_loop(&mut event_sender, &mut dlg_state_receiver) => {
+            info!("webrtc call: sip event loop");
+            return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     };
 
@@ -538,6 +588,29 @@ pub async fn handle_call(
         r = active_call_clone.serve() => {
             info!("webrtc call: call loop disconnected {:?}", r);
         },
+        _ = sip_event_loop(&mut event_sender, &mut dlg_state_receiver) => {
+            info!("webrtc call: sip event loop");
+            return Err(anyhow::anyhow!("Sip event loop failed"));
+        }
+    }
+
+    if let Some(dialog_id) = active_call_clone.dialog_id.lock().await.take() {
+        let r = match state.useragent.dialog_layer.get_dialog(&dialog_id) {
+            Some(dialog) => match dialog {
+                Dialog::ClientInvite(dialog) => dialog.bye().await,
+                Dialog::ServerInvite(dialog) => dialog.bye().await,
+            },
+            None => {
+                error!("webrtc call: dialog not found");
+                return Err(anyhow::anyhow!("dialog not found"));
+            }
+        };
+        match r {
+            Ok(_) => (),
+            Err(e) => {
+                error!("webrtc call: error closing dialog: {}", e);
+            }
+        }
     }
     Ok(())
 }

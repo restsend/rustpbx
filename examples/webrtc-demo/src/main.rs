@@ -8,7 +8,7 @@ use axum::{
 };
 use rustpbx::media::{
     stream::MediaStreamBuilder,
-    track::{file::FileTrack, webrtc::WebrtcTrack},
+    track::{file::FileTrack, webrtc::WebrtcTrack, TrackConfig},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -119,7 +119,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
             .build(),
     );
     let track_id = format!("webrtc-{}", Uuid::new_v4());
-    let mut webrtc_track = WebrtcTrack::new(track_id.clone());
+    let mut webrtc_track = WebrtcTrack::new(track_id.clone(), TrackConfig::default());
     let sample_path = state
         .root_dir
         .join("assets/sample.wav")
