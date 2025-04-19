@@ -2,6 +2,11 @@ function mainApp() {
     return {
         // Configuration state
         config: {
+            callType: 'webrtc', // Default to WebRTC, can be 'webrtc' or 'sip'
+            sip: {
+                caller: '',
+                callee: ''
+            },
             denoise: {
                 enabled: false,
             },
@@ -188,7 +193,7 @@ function mainApp() {
         // Connect to WebSocket server
         connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/call/webrtc`;
+            const wsUrl = `${protocol}//${window.location.host}/call/${this.config.callType}`;
 
             this.addLogEntry('info', `Connecting to WebSocket at ${wsUrl}`);
 
@@ -269,11 +274,25 @@ function mainApp() {
         },
         handleAnswer(event) {
             this.addLogEntry('info', `Call answered`);
-            this.peerConnection.setRemoteDescription(new RTCSessionDescription({
-                type: 'answer',
-                sdp: event.sdp
-            })).then(() => {
-                // Start ASR inactivity monitor after call is established
+
+            // For WebRTC calls, set the remote SDP
+            if (this.config.callType === 'webrtc' && this.peerConnection) {
+                this.peerConnection.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: event.sdp
+                })).then(() => {
+                    // Start ASR inactivity monitor after call is established
+                    this.startAsrInactivityMonitor();
+
+                    // Play greeting message when call is established
+                    if (this.config.tts.greeting && this.config.tts.greeting.trim() !== '') {
+                        this.addLogEntry('info', 'Playing greeting message');
+                        this.sendTtsRequest(this.config.tts.greeting);
+                    }
+                });
+            } else {
+                // For SIP calls, we don't need to set remote SDP
+                this.rtcStatus = 'connected';
                 this.startAsrInactivityMonitor();
 
                 // Play greeting message when call is established
@@ -281,7 +300,10 @@ function mainApp() {
                     this.addLogEntry('info', 'Playing greeting message');
                     this.sendTtsRequest(this.config.tts.greeting);
                 }
-            })
+            }
+        },
+        handleRinging(event) {
+            this.addLogEntry('info', `Call is ringing`);
         },
         handleHangup(event) {
             this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
@@ -507,13 +529,27 @@ function mainApp() {
             this.saveConfigToLocalStorage();
             this.connectWebSocket();
         },
-        async prepareCall() {
-            await this.setupPeerConnection();
-            this.callActive = true;
-            this.addLogEntry('info', 'Starting call...');
 
-            // Create and send offer
-            this.createOffer();
+        async prepareCall() {
+            if (this.config.callType === 'webrtc') {
+                // For WebRTC calls, set up peer connection
+                await this.setupPeerConnection();
+            } else {
+                // For SIP calls, we don't need to set up peer connection
+                // Just proceed with the call
+                this.addLogEntry('info', 'Setting up SIP call');
+            }
+
+            this.callActive = true;
+            this.addLogEntry('info', `Starting ${this.config.callType.toUpperCase()} call...`);
+
+            if (this.config.callType === 'webrtc') {
+                // Create and send offer for WebRTC call
+                this.createOffer();
+            } else {
+                // For SIP calls, just send the invite with SIP details
+                this.sendInvite();
+            }
         },
 
         // End a call
@@ -623,12 +659,10 @@ function mainApp() {
                     speechPadding: parseInt(this.config.vad.speechPadding),
                 } : undefined;
                 let denoise = this.config.denoise.enabled ? true : undefined;
+
                 const invite = {
                     command: 'invite',
                     options: {
-                        offer: this.peerConnection.localDescription.sdp,
-                        vad,
-                        denoise,
                         asr: {
                             provider: this.config.asr.provider
                         },
@@ -636,11 +670,31 @@ function mainApp() {
                         tts: {
                             provider: this.config.tts.provider,
                             speaker: this.config.tts.speaker || '301030'
-                        }
+                        },
+                        vad,
+                        denoise
                     },
                 };
+
+                // Add different parameters based on call type
+                if (this.config.callType === 'webrtc') {
+                    // For WebRTC calls, add the offer SDP
+                    invite.options.offer = this.peerConnection.localDescription.sdp;
+                } else if (this.config.callType === 'sip') {
+                    // For SIP calls, add the caller and callee information
+                    invite.callType = 'sip';
+                    invite.options.caller = this.config.sip.caller;
+                    invite.options.callee = this.config.sip.callee;
+
+                    // Validate SIP parameters
+                    if (!invite.options.caller || !invite.options.callee) {
+                        this.addLogEntry('error', 'SIP call requires both caller and callee to be specified');
+                        return;
+                    }
+                }
+
                 this.ws.send(JSON.stringify(invite));
-                //this.addLogEntry('info', 'Sent WebRTC offer');
+                this.addLogEntry('info', `Sent ${this.config.callType.toUpperCase()} invite`);
             }
         },
         // Save configuration to local storage

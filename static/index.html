@@ -39,6 +39,37 @@
             <div class="w-full md:w-1/2 bg-white p-4 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4 border-b pb-2">Configuration</h2>
 
+                <!-- Call Type Selection -->
+                <div class="mb-6">
+                    <h3 class="text-lg font-semibold mb-2">Call Type</h3>
+                    <div class="flex space-x-4 mb-4">
+                        <label class="inline-flex items-center">
+                            <input type="radio" name="callType" value="webrtc" x-model="config.callType"
+                                class="form-radio">
+                            <span class="ml-2">WebRTC</span>
+                        </label>
+                        <label class="inline-flex items-center">
+                            <input type="radio" name="callType" value="sip" x-model="config.callType"
+                                class="form-radio">
+                            <span class="ml-2">SIP</span>
+                        </label>
+                    </div>
+
+                    <!-- SIP Configuration (shown only when SIP is selected) -->
+                    <div x-show="config.callType === 'sip'" class="border p-4 rounded mb-4">
+                        <div class="mb-3">
+                            <label for="sipCaller" class="block text-sm font-medium mb-1">Caller</label>
+                            <input type="text" id="sipCaller" x-model="config.sip.caller"
+                                placeholder="e.g. sip:user@example.com" class="border p-2 rounded w-full">
+                        </div>
+                        <div class="mb-3">
+                            <label for="sipCallee" class="block text-sm font-medium mb-1">Callee</label>
+                            <input type="text" id="sipCallee" x-model="config.sip.callee"
+                                placeholder="e.g. sip:destination@example.com" class="border p-2 rounded w-full">
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Recording Configuration -->
                 <div class="mb-6">
                     <div class="flex items-center mb-2">
@@ -234,7 +265,7 @@
                             </span>
                         </div>
                         <div class="flex items-center">
-                            <span class="mr-2">WebRTC:</span>
+                            <span class="mr-2">Call Status:</span>
                             <span :class="rtcStatus === 'connected' ? 'text-green-500' : 'text-red-500'">
                                 <i :class="rtcStatus === 'connected' ? 'fas fa-phone' : 'fas fa-phone-slash'"></i>
                                 <span x-text="rtcStatus"></span>
