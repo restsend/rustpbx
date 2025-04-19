@@ -2,9 +2,6 @@ use super::track_codec::TrackCodec;
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
-        dtmf::DTMFDetector,
-        jitter::JitterBuffer,
-        negotiate::prefer_audio_codec,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackPacketSender},
     },
@@ -27,7 +24,6 @@ use std::{
 use tokio::{select, time::interval_at, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const RTP_MTU: usize = 1500; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
