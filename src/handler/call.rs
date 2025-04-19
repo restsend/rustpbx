@@ -24,8 +24,7 @@ use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use rsipstack::dialog::{
-    client_dialog::ClientInviteDialog,
-    dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender},
+    dialog::{Dialog, DialogState, DialogStateReceiver},
     DialogId,
 };
 use serde::{Deserialize, Serialize};
@@ -43,7 +42,7 @@ pub struct CallParams {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActiveCallType {
     Webrtc,
     Sip,
@@ -412,7 +411,7 @@ pub async fn handle_call(
     };
     let (dlg_state_sender, mut dlg_state_receiver) = mpsc::unbounded_channel();
     let track_id_clone = track_id.clone();
-
+    let call_type_ref = call_type.clone();
     let sip_event_loop =
         async move |event_sender: &mut EventSender,
                     dlg_state_receiver: &mut DialogStateReceiver| {
@@ -533,7 +532,13 @@ pub async fn handle_call(
             info!("webrtc call: prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
-        _ = sip_event_loop(&mut event_sender, &mut dlg_state_receiver) => {
+        _ = async {
+            if matches!(call_type_ref, ActiveCallType::Sip) {
+                sip_event_loop(&mut event_sender, &mut dlg_state_receiver).await.ok();
+            } else {
+                cancel_token_ref.cancelled().await;
+            }
+        } => {
             info!("webrtc call: sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
@@ -588,7 +593,13 @@ pub async fn handle_call(
         r = active_call_clone.serve() => {
             info!("webrtc call: call loop disconnected {:?}", r);
         },
-        _ = sip_event_loop(&mut event_sender, &mut dlg_state_receiver) => {
+        _ = async {
+            if matches!(call_type_ref, ActiveCallType::Sip) {
+                sip_event_loop(&mut event_sender, &mut dlg_state_receiver).await.ok();
+            } else {
+                cancel_token_ref.cancelled().await;
+            }
+        } => {
             info!("webrtc call: sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
