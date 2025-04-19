@@ -78,6 +78,7 @@ impl ActiveCall {
 
         if let Some(_) = option.recorder {
             let recorder_file = state.get_recorder_file(session_id);
+            info!("recorder: created recording file: {}", recorder_file);
             media_stream_builder = media_stream_builder.recorder(recorder_file);
         }
 
@@ -153,7 +154,7 @@ impl ActiveCall {
         match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
                 let sdp = strip_ipv6_candidates(&answer);
-                info!("Webrtc track setup complete answer: {}", answer);
+                info!("track setup complete answer: {}", answer);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id: track_id.clone(),
@@ -165,7 +166,7 @@ impl ActiveCall {
                 Ok(media_stream)
             }
             Err(e) => {
-                warn!("Failed to setup webrtc track: {}", e);
+                warn!("Failed to setup track: {}", e);
                 Err(e)
             }
         }
@@ -425,17 +426,17 @@ async fn send_to_ws_loop(
         let data = match serde_json::to_string(&event) {
             Ok(data) => data,
             Err(e) => {
-                error!("webrtc call: error serializing event: {} {:?}", e, event);
+                error!("call: error serializing event: {} {:?}", e, event);
                 continue;
             }
         };
         if let Err(e) = ws_sender.send(data.into()).await {
-            error!("webrtc call: error sending event to WebSocket: {}", e);
+            error!("call: error sending event to WebSocket: {}", e);
         }
     }
     Ok(())
 }
-#[instrument(name = "ws_call", skip(socket, state))]
+
 pub async fn handle_call(
     call_type: ActiveCallType,
     session_id: String,
@@ -471,7 +472,7 @@ pub async fn handle_call(
                 return Err(anyhow::anyhow!("Invalid message type"));
             }
         };
-
+        info!("call: prepare call options: {:?}", options);
         let track_config = TrackConfig::default();
         let mut dialog_id = None;
         let caller_track: Box<dyn Track> = match call_type {
@@ -522,20 +523,20 @@ pub async fn handle_call(
 
     let (active_call, mut ws_receiver) = select! {
         _ = cancel_token_ref.cancelled() => {
-            info!("webrtc call: prepare call cancelled");
+            info!("call: prepare call cancelled");
             return Err(anyhow::anyhow!("Cancelled"));
         },
         r = prepare_call => {
             match r {
                 Ok((active_call, ws_receiver)) => (active_call, ws_receiver),
                 Err(e) => {
-                    error!("webrtc call: prepare call failed: {}", e);
+                    error!("call: prepare call failed: {}", e);
                     return Err(e);
                 }
             }
         }
         _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("webrtc call: prepare call send to ws");
+            info!("call: prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
         _ = async {
@@ -546,7 +547,7 @@ pub async fn handle_call(
                 Ok(())
             }
         } => {
-            info!("webrtc call: sip event loop");
+            info!("call: sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     };
@@ -569,7 +570,7 @@ pub async fn handle_call(
                 Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
                     Ok(command) => Some(command),
                     Err(e) => {
-                        error!("webrtc call: error deserializing command: {} {}", e, text);
+                        error!("call: error deserializing command: {} {}", e, text);
                         None
                     }
                 },
@@ -580,7 +581,7 @@ pub async fn handle_call(
                 Some(command) => match active_call.dispatch(command).await {
                     Ok(_) => (),
                     Err(e) => {
-                        error!("webrtc call: Error dispatching command: {}", e);
+                        error!("call: Error dispatching command: {}", e);
                     }
                 },
                 None => {}
@@ -589,16 +590,16 @@ pub async fn handle_call(
     };
     select! {
         _ = cancel_token_ref.cancelled() => {
-            info!("webrtc call: cancelled");
+            info!("call: cancelled");
         },
         _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("send_to_ws: websocket disconnected");
+            info!("call: send_to_ws websocket disconnected");
         },
         _ = recv_from_ws => {
-            info!("recv_from_ws: websocket disconnected");
+            info!("call: recv_from_ws websocket disconnected");
         },
         r = active_call_clone.serve() => {
-            info!("webrtc call: call loop disconnected {:?}", r);
+            info!("call: call loop disconnected {:?}", r);
         },
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
@@ -608,7 +609,7 @@ pub async fn handle_call(
                 Ok(())
             }
         } => {
-            info!("webrtc call: sip event loop");
+            info!("call: sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     }
@@ -620,14 +621,14 @@ pub async fn handle_call(
                 Dialog::ServerInvite(dialog) => dialog.bye().await,
             },
             None => {
-                error!("webrtc call: dialog not found");
+                error!("call: dialog not found");
                 return Err(anyhow::anyhow!("dialog not found"));
             }
         };
         match r {
             Ok(_) => (),
             Err(e) => {
-                error!("webrtc call: error closing dialog: {}", e);
+                error!("call: error closing dialog: {}", e);
             }
         }
     }

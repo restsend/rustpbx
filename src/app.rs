@@ -54,7 +54,9 @@ impl AppStateInner {
         let root = Path::new(&self.recorder_root);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
-                Ok(_) => {}
+                Ok(_) => {
+                    info!("created recorder root: {}", root.to_string_lossy());
+                }
                 Err(e) => {
                     warn!(
                         "Failed to create recorder root: {} {}",

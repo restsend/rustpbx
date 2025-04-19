@@ -133,7 +133,7 @@ impl Recorder {
                 return Err(anyhow::anyhow!("Failed to create recording file"));
             }
         };
-
+        info!("recorder: created recording file: {}", file_path.display());
         // Create an initial WAV header
         self.update_wav_header(&mut file).await?;
         let chunk_size =
