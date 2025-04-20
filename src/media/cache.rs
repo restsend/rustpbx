@@ -63,7 +63,7 @@ pub fn generate_cache_key(input: &str, sample_rate: u32, speaker: &str) -> Strin
 /// Get the full path for a cached file
 pub fn get_cache_path(key: &str) -> Result<PathBuf> {
     let cache_dir = get_cache_dir()?;
-    Ok(cache_dir.join(key).with_extension("wav"))
+    Ok(cache_dir.join(key).with_extension("pcm"))
 }
 
 /// Check if a file exists in the cache

@@ -315,24 +315,10 @@ impl ActiveCall {
         )
         .with_cancel_token(self.cancel_token.child_token());
 
-        match tts_track
-            .start(
-                self.cancel_token.clone(),
-                self.event_sender.clone(),
-                self.media_stream.packet_sender.clone(),
-            )
-            .await
-        {
-            Ok(_) => {
-                tx.send(play_command)?;
-                tts_command_tx.replace(tx);
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Failed to start tts track: {}", e);
-                Err(e)
-            }
-        }
+        tx.send(play_command)?;
+        tts_command_tx.replace(tx);
+        self.media_stream.update_track(Box::new(tts_track)).await;
+        Ok(())
     }
 
     async fn do_play(&self, url: String, auto_hangup: Option<bool>) -> Result<()> {
