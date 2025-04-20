@@ -67,7 +67,7 @@ impl AppStateInner {
             }
         }
         root.join(session_id)
-            .with_extension("pcm")
+            .with_extension("wav")
             .to_string_lossy()
             .to_string()
     }
