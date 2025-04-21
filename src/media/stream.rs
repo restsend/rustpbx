@@ -2,7 +2,7 @@ use crate::event::{EventReceiver, EventSender, SessionEvent};
 use crate::media::{
     dtmf::DTMFDetector,
     processor::Processor,
-    recorder::{Recorder, RecorderConfig},
+    recorder::{Recorder, RecorderOption},
     track::{Track, TrackPacketReceiver, TrackPacketSender},
 };
 use crate::{AudioFrame, Samples, TrackId};
@@ -189,7 +189,7 @@ impl Processor for RecorderProcessor {
 impl MediaStream {
     async fn handle_recorder(&self) -> Result<()> {
         if let Some(ref recorder_path) = self.recorder {
-            let config = RecorderConfig::default();
+            let config = RecorderOption::default();
             let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
             let recorder = Recorder::new(self.cancel_token.child_token(), config);
             recorder

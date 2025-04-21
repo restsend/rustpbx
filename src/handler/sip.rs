@@ -8,6 +8,7 @@ use crate::TrackId;
 use anyhow::Result;
 use axum::extract::{Query, WebSocketUpgrade};
 use axum::{extract::State, response::Response};
+use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::DialogStateSender;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
@@ -17,30 +18,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SipCallRequest {
-    pub callee: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    #[serde(default = "default_media_type")]
-    pub media_type: MediaType,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaType {
-    WebRtc,
-    Rtp,
-}
-
-fn default_media_type() -> MediaType {
-    MediaType::WebRtc
-}
-
-#[derive(Debug, Serialize)]
-pub struct SipCallResponse {
-    pub call_id: String,
-    pub status: String,
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct SipOption {
+    pub username: String,
+    pub password: String,
+    pub domain: String,
 }
 
 pub async fn sip_handler(
@@ -108,7 +91,10 @@ pub(super) async fn new_rtp_track_with_sip(
         content_type: Some("application/sdp".to_string()),
         offer: offer.as_ref().map(|s| s.as_bytes().to_vec()),
         contact: caller.try_into()?,
-        credential: None,
+        credential: option.sip.as_ref().map(|opt| Credential {
+            username: opt.username.clone(),
+            password: opt.password.clone(),
+        }),
     };
     info!(
         "sip_call: invite {} -> {} offer: {:?}",

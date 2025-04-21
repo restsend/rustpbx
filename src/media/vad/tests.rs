@@ -27,7 +27,7 @@ async fn test_vad_with_noise_denoise() {
     let (event_sender, mut event_receiver) = broadcast::channel(128);
     let track_id = "test_track".to_string();
 
-    let config = VADConfig::default();
+    let config = VADOption::default();
     let vad = VadProcessor::new(VadType::Silero, event_sender.clone(), config)
         .expect("Failed to create VAD processor");
     let mut total_duration = 0;
@@ -113,7 +113,7 @@ async fn test_vad_engines_with_wav_file() {
         let (event_sender, mut event_receiver) = broadcast::channel(16);
         let track_id = "test_track".to_string();
 
-        let config = VADConfig::default();
+        let config = VADOption::default();
         let vad = VadProcessor::new(vad_type, event_sender.clone(), config)
             .expect("Failed to create VAD processor");
 

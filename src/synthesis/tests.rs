@@ -1,4 +1,4 @@
-use crate::synthesis::{tencent_cloud::TencentCloudTtsClient, SynthesisClient, SynthesisConfig};
+use crate::synthesis::{tencent_cloud::TencentCloudTtsClient, SynthesisClient, SynthesisOption};
 use dotenv::dotenv;
 use futures::StreamExt;
 use std::env;
@@ -25,7 +25,7 @@ async fn test_tencent_cloud_tts() {
         }
     };
 
-    let config = SynthesisConfig {
+    let config = SynthesisOption {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
         app_id: Some(app_id),

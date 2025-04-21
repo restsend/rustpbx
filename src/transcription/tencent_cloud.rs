@@ -1,6 +1,6 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
-use crate::transcription::{TranscriptionClient, TranscriptionConfig};
+use crate::transcription::{TranscriptionClient, TranscriptionOption};
 use crate::{Sample, TrackId};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -48,21 +48,21 @@ pub struct TencentCloudAsrResponse {
 }
 
 pub struct TencentCloudAsrClient {
-    config: TranscriptionConfig,
+    option: TranscriptionOption,
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 pub struct TencentCloudAsrClientBuilder {
-    config: TranscriptionConfig,
+    option: TranscriptionOption,
     track_id: Option<String>,
     cancellation_token: Option<CancellationToken>,
     event_sender: EventSender,
 }
 
 impl TencentCloudAsrClientBuilder {
-    pub fn new(config: TranscriptionConfig, event_sender: EventSender) -> Self {
+    pub fn new(option: TranscriptionOption, event_sender: EventSender) -> Self {
         Self {
-            config,
+            option,
             cancellation_token: None,
             track_id: None,
             event_sender,
@@ -73,22 +73,22 @@ impl TencentCloudAsrClientBuilder {
         self
     }
     pub fn with_secret_id(mut self, secret_id: String) -> Self {
-        self.config.secret_id = Some(secret_id);
+        self.option.secret_id = Some(secret_id);
         self
     }
 
     pub fn with_secret_key(mut self, secret_key: String) -> Self {
-        self.config.secret_key = Some(secret_key);
+        self.option.secret_key = Some(secret_key);
         self
     }
 
     pub fn with_appid(mut self, appid: String) -> Self {
-        self.config.app_id = Some(appid);
+        self.option.app_id = Some(appid);
         self
     }
 
     pub fn with_model_type(mut self, model_type: String) -> Self {
-        self.config.model_type = Some(model_type);
+        self.option.model_type = Some(model_type);
         self
     }
     pub fn with_track_id(mut self, track_id: String) -> Self {
@@ -99,7 +99,7 @@ impl TencentCloudAsrClientBuilder {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
 
         let client = TencentCloudAsrClient {
-            config: self.config,
+            option: self.option,
             audio_tx,
         };
         let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -109,7 +109,7 @@ impl TencentCloudAsrClientBuilder {
         let track_id = voice_id.clone();
         info!(
             "tencent_asr: start track_id: {} voice_id: {} config: {:?}",
-            track_id, voice_id, client.config
+            track_id, voice_id, client.option
         );
         tokio::spawn(async move {
             match TencentCloudAsrClient::handle_websocket_message(
@@ -136,7 +136,7 @@ impl TencentCloudAsrClientBuilder {
 impl TencentCloudAsrClient {
     pub fn new() -> Self {
         Self {
-            config: TranscriptionConfig::default(),
+            option: TranscriptionOption::default(),
             audio_tx: mpsc::unbounded_channel().0,
         }
     }
@@ -162,22 +162,22 @@ impl TencentCloudAsrClient {
         voice_id: &str,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         let secret_id = self
-            .config
+            .option
             .secret_id
             .as_ref()
             .ok_or_else(|| anyhow!("No secret_id provided"))?;
         let secret_key = self
-            .config
+            .option
             .secret_key
             .as_ref()
             .ok_or_else(|| anyhow!("No secret_key provided"))?;
         let appid = self
-            .config
+            .option
             .app_id
             .as_ref()
             .ok_or_else(|| anyhow!("No appid provided"))?;
 
-        let engine_model_type = self.config.model_type.as_deref().unwrap_or("16k_zh_en");
+        let engine_model_type = self.option.model_type.as_deref().unwrap_or("16k_zh_en");
 
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let nonce = timestamp.to_string(); // Use timestamp as nonce

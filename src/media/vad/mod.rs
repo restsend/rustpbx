@@ -14,7 +14,7 @@ mod webrtc;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
-pub struct VADConfig {
+pub struct VADOption {
     pub r#type: VadType,
     pub samplerate: u32,
     /// Padding before speech detection
@@ -26,7 +26,7 @@ pub struct VADConfig {
     pub max_buffer_duration_secs: u64,
 }
 
-impl Default for VADConfig {
+impl Default for VADOption {
     fn default() -> Self {
         Self {
             r#type: VadType::WebRTC,
@@ -61,7 +61,7 @@ struct SpeechBuf {
 struct VadProcessorInner {
     vad: Box<dyn VadEngine>,
     event_sender: EventSender,
-    config: VADConfig,
+    option: VADOption,
     state: VadState,
     window_bufs: Vec<SpeechBuf>,
 }
@@ -97,17 +97,17 @@ impl VadProcessorInner {
         self.window_bufs.push(current_buf);
         let diff_duration = self.window_bufs.last().unwrap().timestamp
             - self.window_bufs.first().unwrap().timestamp;
-        if diff_duration < self.config.speech_padding {
+        if diff_duration < self.option.speech_padding {
             return Ok(());
         }
         let mut speaking_count = 0;
         let mut silence_count = 0;
-        let max_padding = self.config.speech_padding.max(self.config.silence_padding);
+        let max_padding = self.option.speech_padding.max(self.option.silence_padding);
 
         let mut speaking_check_count = 0;
         let mut silence_check_count = 0;
-        let speech_duration = frame.timestamp - self.config.speech_padding.min(frame.timestamp);
-        let silence_duration = frame.timestamp - self.config.silence_padding.min(frame.timestamp);
+        let speech_duration = frame.timestamp - self.option.speech_padding.min(frame.timestamp);
+        let silence_duration = frame.timestamp - self.option.silence_padding.min(frame.timestamp);
 
         for buf in self.window_bufs.iter().rev() {
             if frame.timestamp > max_padding && buf.timestamp < frame.timestamp - max_padding {
@@ -127,8 +127,8 @@ impl VadProcessorInner {
             }
         }
 
-        let speaking_threshold = (speaking_check_count as f32 * self.config.ratio) as usize;
-        let silence_threshold = (silence_check_count as f32 * self.config.ratio) as usize;
+        let speaking_threshold = (speaking_check_count as f32 * self.option.ratio) as usize;
+        let silence_threshold = (silence_check_count as f32 * self.option.ratio) as usize;
         // trace!(
         //     "timestamp: {}, speaking: {}/{} silence: {}/{}  time: {} is_speaking: {}",
         //     self.window_bufs.first().unwrap().timestamp,
@@ -143,7 +143,7 @@ impl VadProcessorInner {
             match self.state {
                 VadState::Silence => {
                     self.window_bufs
-                        .retain(|b| b.timestamp > frame.timestamp - self.config.speech_padding);
+                        .retain(|b| b.timestamp > frame.timestamp - self.option.speech_padding);
                     if self.window_bufs.len() == 0 {
                         return Ok(());
                     }
@@ -199,15 +199,15 @@ impl VadProcessorInner {
 }
 
 impl VadProcessor {
-    pub fn new(vad_type: VadType, event_sender: EventSender, config: VADConfig) -> Result<Self> {
+    pub fn new(vad_type: VadType, event_sender: EventSender, option: VADOption) -> Result<Self> {
         let vad: Box<dyn VadEngine> = match vad_type {
-            VadType::WebRTC => Box::new(webrtc::WebRtcVad::new(config.samplerate)?),
-            VadType::Silero => Box::new(silero::SileroVad::new(config.samplerate)?),
+            VadType::WebRTC => Box::new(webrtc::WebRtcVad::new(option.samplerate)?),
+            VadType::Silero => Box::new(silero::SileroVad::new(option.samplerate)?),
         };
         let inner = VadProcessorInner {
             vad,
             event_sender,
-            config,
+            option,
             state: VadState::Silence,
             window_bufs: Vec::new(),
         };

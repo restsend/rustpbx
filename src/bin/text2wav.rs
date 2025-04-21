@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
-use rustpbx::synthesis::{SynthesisClient, SynthesisConfig, SynthesisType, TencentCloudTtsClient};
+use rustpbx::synthesis::{SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
 
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     info!("Found TENCENT_APPID in environment");
 
     // Create TTS client and config
-    let synthesis_config = SynthesisConfig {
+    let synthesis_config = SynthesisOption {
         provider: Some(SynthesisType::TencentCloud),
         speed: Some(args.rate), // Speech rate
         app_id: Some(appid),

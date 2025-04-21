@@ -1,6 +1,6 @@
 use crate::{
-    media::recorder::{Recorder, RecorderConfig},
-    AudioFrame, Sample, PcmBuf, Samples,
+    media::recorder::{Recorder, RecorderOption},
+    AudioFrame, PcmBuf, Sample, Samples,
 };
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
@@ -15,7 +15,7 @@ async fn test_recorder() -> Result<()> {
     let file_path = temp_dir.path().join("test_recording.wav");
     let file_path_clone = file_path.clone(); // Clone for the spawned task
     let cancel_token = CancellationToken::new();
-    let config = RecorderConfig::default();
+    let config = RecorderOption::default();
 
     let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
 

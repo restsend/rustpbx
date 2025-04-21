@@ -26,13 +26,13 @@ use tracing::{info, warn};
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
-pub struct RecorderConfig {
+pub struct RecorderOption {
     pub samplerate: u32,
     #[serde(skip)]
     pub ptime: Duration,
 }
 
-impl Default for RecorderConfig {
+impl Default for RecorderOption {
     fn default() -> Self {
         Self {
             samplerate: 16000,
@@ -42,7 +42,7 @@ impl Default for RecorderConfig {
 }
 
 pub struct Recorder {
-    config: RecorderConfig,
+    config: RecorderOption,
     samples_written: AtomicUsize,
     cancel_token: CancellationToken,
     channel_idx: AtomicUsize,
@@ -52,7 +52,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn new(cancel_token: CancellationToken, config: RecorderConfig) -> Self {
+    pub fn new(cancel_token: CancellationToken, config: RecorderOption) -> Self {
         Self {
             config,
             samples_written: AtomicUsize::new(0),

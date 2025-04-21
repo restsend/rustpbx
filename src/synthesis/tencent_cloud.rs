@@ -1,4 +1,4 @@
-use super::{SynthesisClient, SynthesisConfig};
+use super::{SynthesisClient, SynthesisOption};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -79,34 +79,34 @@ pub struct WebSocketResult {
 
 #[derive(Debug)]
 pub struct TencentCloudTtsClient {
-    config: SynthesisConfig,
+    option: SynthesisOption,
 }
 
 impl TencentCloudTtsClient {
-    pub fn new(config: SynthesisConfig) -> Self {
-        Self { config }
+    pub fn new(option: SynthesisOption) -> Self {
+        Self { option }
     }
 
     // Build with specific configuration
-    pub fn with_config(mut self, config: SynthesisConfig) -> Self {
-        self.config = config;
+    pub fn with_option(mut self, option: SynthesisOption) -> Self {
+        self.option = option;
         self
     }
 
     // Generate WebSocket URL for real-time TTS
     fn generate_websocket_url(&self, text: &str) -> Result<String> {
-        let secret_id = self.config.secret_id.clone().unwrap_or_default();
-        let secret_key = self.config.secret_key.clone().unwrap_or_default();
-        let app_id = self.config.app_id.clone().unwrap_or_default();
+        let secret_id = self.option.secret_id.clone().unwrap_or_default();
+        let secret_key = self.option.secret_key.clone().unwrap_or_default();
+        let app_id = self.option.app_id.clone().unwrap_or_default();
 
-        let volume = self.config.volume.unwrap_or(0);
-        let speed = self.config.speed.unwrap_or(0.0);
+        let volume = self.option.volume.unwrap_or(0);
+        let speed = self.option.speed.unwrap_or(0.0);
         let codec = self
-            .config
+            .option
             .codec
             .clone()
             .unwrap_or_else(|| "pcm".to_string());
-        let sample_rate = self.config.samplerate;
+        let sample_rate = self.option.samplerate;
         let session_id = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let expired = timestamp + 24 * 60 * 60; // 24 hours expiration
@@ -117,7 +117,7 @@ impl TencentCloudTtsClient {
         let timestamp_str = timestamp.to_string();
         let volume_str = volume.to_string();
         let voice_type = self
-            .config
+            .option
             .speaker
             .clone()
             .unwrap_or_else(|| "301030".to_string());
