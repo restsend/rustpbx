@@ -36,8 +36,8 @@ use rustpbx::{
     event::SessionEvent,
     llm::{LlmClient, OpenAiClientBuilder},
     media::codecs::resample,
-    synthesis::{SynthesisConfig, TencentCloudTtsClient},
-    transcription::{TranscriptionClient, TranscriptionConfig},
+    synthesis::{SynthesisOption, TencentCloudTtsClient},
+    transcription::{TranscriptionClient, TranscriptionOption},
 };
 
 /// Audio processing buffer for handling real-time audio samples
@@ -260,7 +260,7 @@ async fn main() -> Result<()> {
     };
     info!("Found TENCENT_APPID in environment");
 
-    let transcription_config = TranscriptionConfig {
+    let transcription_config = TranscriptionOption {
         app_id: Some(appid.clone()),
         secret_id: Some(secret_id.clone()),
         secret_key: Some(secret_key.clone()),
@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
 
     let llm_client = OpenAiClientBuilder::from_env().build()?;
     // Set up TTS pipeline
-    let synthesis_config = SynthesisConfig {
+    let synthesis_config = SynthesisOption {
         app_id: Some(appid),
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),

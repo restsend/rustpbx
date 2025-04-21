@@ -9,8 +9,8 @@ use crate::transcription::TranscriptionType;
 use crate::useragent::UserAgentBuilder;
 use crate::{
     handler::{Command, StreamOption},
-    synthesis::{SynthesisConfig, SynthesisType},
-    transcription::TranscriptionConfig,
+    synthesis::{SynthesisOption, SynthesisType},
+    transcription::TranscriptionOption,
 };
 use anyhow::Result;
 use axum::{
@@ -150,8 +150,8 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     };
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-    let mut asr_config = TranscriptionConfig::default();
-    let mut tts_config = SynthesisConfig::default();
+    let mut asr_config = TranscriptionOption::default();
+    let mut tts_config = SynthesisOption::default();
     let tencent_appid = std::env::var("TENCENT_APPID").unwrap();
     let tencent_secret_id = std::env::var("TENCENT_SECRET_ID").unwrap();
     let tencent_secret_key = std::env::var("TENCENT_SECRET_KEY").unwrap();
@@ -167,12 +167,12 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     // Create the invite command with proper options
     let options = StreamOption {
         offer: Some(offer.sdp.clone()),
-        vad: Some(crate::media::vad::VADConfig::default()),
-        asr: Some(TranscriptionConfig {
+        vad: Some(crate::media::vad::VADOption::default()),
+        asr: Some(TranscriptionOption {
             provider: Some(TranscriptionType::TencentCloud),
             ..Default::default()
         }),
-        tts: Some(SynthesisConfig {
+        tts: Some(SynthesisOption {
             provider: Some(SynthesisType::TencentCloud),
             ..Default::default()
         }),

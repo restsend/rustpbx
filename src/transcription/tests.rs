@@ -2,7 +2,7 @@ use crate::{
     event::SessionEvent,
     media::track::file::read_wav_file,
     transcription::{
-        tencent_cloud::TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig,
+        tencent_cloud::TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionOption,
     },
 };
 use dotenv::dotenv;
@@ -48,7 +48,7 @@ async fn test_tencent_cloud_asr() {
     );
 
     // Configure the client
-    let config = TranscriptionConfig {
+    let config = TranscriptionOption {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
         app_id: Some(app_id),

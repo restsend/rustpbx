@@ -16,7 +16,7 @@ mod tests;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
-pub struct SynthesisConfig {
+pub struct SynthesisOption {
     pub samplerate: i32,
     pub provider: Option<SynthesisType>,
     pub speed: Option<f32>,
@@ -41,7 +41,7 @@ pub trait SynthesisClient: Send + Sync {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>>;
 }
 
-impl Default for SynthesisConfig {
+impl Default for SynthesisOption {
     fn default() -> Self {
         Self {
             samplerate: 16000,
@@ -59,7 +59,7 @@ impl Default for SynthesisConfig {
     }
 }
 
-impl SynthesisConfig {
+impl SynthesisOption {
     pub fn check_default(mut self) -> Self {
         match self.provider {
             Some(SynthesisType::TencentCloud) => {

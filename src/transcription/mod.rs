@@ -17,7 +17,7 @@ pub enum TranscriptionType {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
-pub struct TranscriptionConfig {
+pub struct TranscriptionOption {
     pub provider: Option<TranscriptionType>,
     pub model: Option<String>,
     pub language: Option<String>,
@@ -30,7 +30,7 @@ pub struct TranscriptionConfig {
 }
 
 // Default config for backward compatibility
-impl Default for TranscriptionConfig {
+impl Default for TranscriptionOption {
     fn default() -> Self {
         Self {
             provider: None,
@@ -46,7 +46,7 @@ impl Default for TranscriptionConfig {
     }
 }
 
-impl TranscriptionConfig {
+impl TranscriptionOption {
     pub fn check_default(mut self) -> Self {
         match self.provider {
             Some(TranscriptionType::TencentCloud) => {

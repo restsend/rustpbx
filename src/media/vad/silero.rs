@@ -1,11 +1,11 @@
-use super::{VADConfig, VadEngine};
+use super::{VADOption, VadEngine};
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use voice_activity_detector::VoiceActivityDetector;
 
 pub struct SileroVad {
     detector: VoiceActivityDetector,
-    config: VADConfig,
+    config: VADOption,
     buffer: PcmBuf,
     last_timestamp: u64,
     chunk_size: usize,
@@ -29,7 +29,7 @@ impl SileroVad {
             .expect("Failed to build voice activity detector");
 
         // Use a custom config with a lower threshold specifically tuned for the voice_activity_detector
-        let config = VADConfig::default();
+        let config = VADOption::default();
 
         Ok(Self {
             detector,

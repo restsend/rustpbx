@@ -1,7 +1,7 @@
 use crate::{
-    media::{recorder::RecorderConfig, vad::VADConfig},
-    synthesis::SynthesisConfig,
-    transcription::TranscriptionConfig,
+    media::{recorder::RecorderOption, vad::VADOption},
+    synthesis::SynthesisOption,
+    transcription::TranscriptionOption,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,7 @@ pub mod sip;
 mod tests;
 pub mod webrtc;
 pub use handler::router;
+use sip::SipOption;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,17 +28,19 @@ pub struct StreamOption {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recorder: Option<RecorderConfig>,
+    pub recorder: Option<RecorderOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub vad: Option<VADConfig>,
+    pub vad: Option<VADOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub asr: Option<TranscriptionConfig>,
+    pub asr: Option<TranscriptionOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tts: Option<SynthesisConfig>,
+    pub tts: Option<SynthesisOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_ipv6: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip: Option<SipOption>,
 }
 
 impl Default for StreamOption {
@@ -53,6 +56,7 @@ impl Default for StreamOption {
             tts: None,
             handshake_timeout: None,
             enable_ipv6: None,
+            sip: None,
         }
     }
 }

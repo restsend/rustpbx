@@ -15,7 +15,7 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::{SynthesisConfig, TencentCloudTtsClient},
+    synthesis::{SynthesisOption, TencentCloudTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
     TrackId,
 };
@@ -56,7 +56,7 @@ pub struct ActiveCall {
     pub media_stream: MediaStream,
     pub track_config: TrackConfig,
     pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
-    pub tts_config: Option<SynthesisConfig>,
+    pub tts_option: Option<SynthesisOption>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
     pub event_sender: EventSender,
     pub dialog_id: Mutex<Option<DialogId>>,
@@ -105,24 +105,24 @@ impl ActiveCall {
             _ => {}
         }
         match option.vad {
-            Some(ref vad_config) => {
-                let vad_config = vad_config.to_owned();
-                info!("Vad processor added {:?}", vad_config);
+            Some(ref vad_option) => {
+                let vad_option = vad_option.to_owned();
+                info!("Vad processor added {:?}", vad_option);
                 let vad_processor = VadProcessor::new(
-                    vad_config.r#type,
+                    vad_option.r#type,
                     media_stream.get_event_sender(),
-                    vad_config,
+                    vad_option,
                 )?;
                 processors.push(Box::new(vad_processor) as Box<dyn Processor>);
             }
             None => {}
         }
         match option.asr {
-            Some(ref asr_config) => match asr_config.provider {
+            Some(ref asr_option) => match asr_option.provider {
                 Some(TranscriptionType::TencentCloud) => {
-                    let asr_config = asr_config.clone().check_default();
+                    let asr_option = asr_option.clone().check_default();
                     let event_sender = media_stream.get_event_sender();
-                    let asr_client = TencentCloudAsrClientBuilder::new(asr_config, event_sender)
+                    let asr_client = TencentCloudAsrClientBuilder::new(asr_option, event_sender)
                         .with_track_id(track_id.clone())
                         .with_cancellation_token(cancel_token.child_token())
                         .build()
@@ -178,10 +178,10 @@ impl ActiveCall {
         event_sender: EventSender,
         session_id: String,
         media_stream: MediaStream,
-        tts_config: Option<SynthesisConfig>,
+        tts_option: Option<SynthesisOption>,
         dialog_id: Option<DialogId>,
     ) -> Result<Self> {
-        let tts_config = tts_config.and_then(|cfg| Some(cfg.check_default()));
+        let tts_option = tts_option.and_then(|cfg| Some(cfg.check_default()));
         let active_call = ActiveCall {
             cancel_token,
             call_type,
@@ -190,7 +190,7 @@ impl ActiveCall {
             media_stream,
             track_config: TrackConfig::default(),
             tts_command_tx: Mutex::new(None),
-            tts_config,
+            tts_option,
             auto_hangup: Arc::new(Mutex::new(None)),
             event_sender,
             dialog_id: Mutex::new(dialog_id),
@@ -276,13 +276,13 @@ impl ActiveCall {
         play_id: Option<String>,
         auto_hangup: Option<bool>,
     ) -> Result<()> {
-        let tts_config = match self.tts_config.as_ref() {
-            Some(config) => config,
+        let tts_option = match self.tts_option.as_ref() {
+            Some(option) => option,
             None => return Ok(()),
         };
         let speaker = match speaker {
             Some(s) => Some(s),
-            None => tts_config.speaker.clone(),
+            None => tts_option.speaker.clone(),
         };
         let mut play_command = TtsCommand {
             text,
@@ -307,7 +307,7 @@ impl ActiveCall {
             }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let tts_client = TencentCloudTtsClient::new(tts_config.clone());
+        let tts_client = TencentCloudTtsClient::new(tts_option.clone());
         let tts_track = TtsTrack::new(
             self.track_config.server_side_track_id.clone(),
             rx,
@@ -482,7 +482,7 @@ pub async fn handle_call(
             }
         };
 
-        let tts_config = options.tts.clone();
+        let tts_option = options.tts.clone();
         let media_stream = ActiveCall::create_stream(
             caller_track,
             state_clone,
@@ -500,7 +500,7 @@ pub async fn handle_call(
             event_sender_ref,
             session_id,
             media_stream,
-            tts_config,
+            tts_option,
             dialog_id,
         )
         .await?;

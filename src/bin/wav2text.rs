@@ -3,7 +3,7 @@ use clap::Parser;
 use rustpbx::{
     event::SessionEvent,
     media::track::file::read_wav_file,
-    transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionConfig},
+    transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionOption},
 };
 use std::{path::PathBuf, time::Duration};
 use tracing::{debug, info};
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
     // Create ASR client
     let transcription_client = TencentCloudAsrClientBuilder::new(
-        TranscriptionConfig {
+        TranscriptionOption {
             language: Some(args.language),
             app_id: Some(tencent_appid),
             secret_id: Some(tencent_secret_id),
