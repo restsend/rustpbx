@@ -291,8 +291,8 @@ impl ActiveCall {
         play_id: Option<String>,
         auto_hangup: Option<bool>,
     ) -> Result<()> {
-        let tts_option = match self.tts_option.as_ref() {
-            Some(option) => option,
+        let tts_option = match self.tts_option.clone() {
+            Some(option) => option.check_default(),
             None => return Ok(()),
         };
         let speaker = match speaker {
