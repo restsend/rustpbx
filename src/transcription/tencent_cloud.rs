@@ -228,15 +228,13 @@ impl TencentCloudAsrClient {
             host, url_path, query_string, signature
         );
         info!("tencent_asr: Connecting to WebSocket URL: {}", ws_url);
-        let ws_key = STANDARD.encode(random::<[u8; 16]>());
-
         let request = Request::builder()
             .uri(ws_url.parse::<Uri>()?)
             .header("Host", host)
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", ws_key)
+            .header("Sec-WebSocket-Key", STANDARD.encode(random::<[u8; 16]>()))
             .header("X-TC-Version", "2019-06-14")
             .header("X-TC-Region", "ap-guangzhou")
             .header("Content-Type", "application/json")

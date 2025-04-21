@@ -5,13 +5,18 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 mod tencent_cloud;
+mod voiceapi;
 pub use tencent_cloud::TencentCloudAsrClient;
 pub use tencent_cloud::TencentCloudAsrClientBuilder;
+pub use voiceapi::VoiceApiAsrClient;
+pub use voiceapi::VoiceApiAsrClientBuilder;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum TranscriptionType {
     #[serde(rename = "tencent")]
     TencentCloud,
+    #[serde(rename = "voiceapi")]
+    VoiceApi,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -26,7 +31,8 @@ pub struct TranscriptionOption {
     pub secret_key: Option<String>,
     pub model_type: Option<String>,
     pub buffer_size: Option<usize>,
-    pub sample_rate: Option<u32>,
+    pub samplerate: Option<u32>,
+    pub endpoint: Option<String>,
 }
 
 // Default config for backward compatibility
@@ -41,7 +47,8 @@ impl Default for TranscriptionOption {
             secret_key: None,
             model_type: None,
             buffer_size: None,
-            sample_rate: None,
+            samplerate: None,
+            endpoint: None,
         }
     }
 }
@@ -60,6 +67,12 @@ impl TranscriptionOption {
                     self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
                 }
             }
+            Some(TranscriptionType::VoiceApi) => {
+                // Set the host from environment variable if not already set
+                if self.endpoint.is_none() {
+                    self.endpoint = std::env::var("VOICEAPI_ENDPOINT").ok();
+                }
+            }
             _ => {}
         }
         self
@@ -72,6 +85,39 @@ pub type TranscriptionReceiver = mpsc::UnboundedReceiver<AudioFrame>;
 #[async_trait]
 pub trait TranscriptionClient: Send + Sync {
     fn send_audio(&self, samples: &[Sample]) -> Result<()>;
+}
+
+/// Create a transcription client based on the provider type
+pub async fn create_transcription_client(
+    option: TranscriptionOption,
+    track_id: String,
+    event_sender: crate::event::EventSender,
+) -> Result<Box<dyn TranscriptionClient>> {
+    use tokio_util::sync::CancellationToken;
+
+    let provider = option
+        .provider
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No provider specified"))?;
+
+    match provider {
+        TranscriptionType::TencentCloud => {
+            let client = TencentCloudAsrClientBuilder::new(option, event_sender.clone())
+                .with_track_id(track_id)
+                .with_cancellation_token(CancellationToken::new())
+                .build()
+                .await?;
+            Ok(Box::new(client))
+        }
+        TranscriptionType::VoiceApi => {
+            let client = VoiceApiAsrClientBuilder::new(option, event_sender.clone())
+                .with_track_id(track_id)
+                .with_cancellation_token(CancellationToken::new())
+                .build()
+                .await?;
+            Ok(Box::new(client))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -15,8 +15,11 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::{SynthesisOption, TencentCloudTtsClient},
-    transcription::{TencentCloudAsrClientBuilder, TranscriptionType},
+    synthesis::{
+        create_synthesis_client, SynthesisOption, SynthesisType, TencentCloudTtsClient,
+        VoiceApiTtsClient,
+    },
+    transcription::{TencentCloudAsrClientBuilder, TranscriptionType, VoiceApiAsrClientBuilder},
     TrackId,
 };
 use anyhow::Result;
@@ -130,6 +133,18 @@ impl ActiveCall {
                     let asr_processor = AsrProcessor::new(asr_client);
                     processors.push(Box::new(asr_processor) as Box<dyn Processor>);
                     debug!("TencentCloud Asr processor added");
+                }
+                Some(TranscriptionType::VoiceApi) => {
+                    let asr_option = asr_option.clone().check_default();
+                    let event_sender = media_stream.get_event_sender();
+                    let asr_client = VoiceApiAsrClientBuilder::new(asr_option, event_sender)
+                        .with_track_id(track_id.clone())
+                        .with_cancellation_token(cancel_token.child_token())
+                        .build()
+                        .await?;
+                    let asr_processor = AsrProcessor::new(asr_client);
+                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
+                    debug!("VoiceApi Asr processor added");
                 }
                 None => {}
             },
@@ -307,17 +322,33 @@ impl ActiveCall {
             }
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let tts_client = TencentCloudTtsClient::new(tts_option.clone());
-        let tts_track = TtsTrack::new(
-            self.track_config.server_side_track_id.clone(),
-            rx,
-            tts_client,
-        )
-        .with_cancel_token(self.cancel_token.child_token());
-
         tx.send(play_command)?;
         tts_command_tx.replace(tx);
-        self.media_stream.update_track(Box::new(tts_track)).await;
+
+        match tts_option.provider {
+            Some(SynthesisType::VoiceApi) => {
+                let tts_client = VoiceApiTtsClient::new(tts_option.clone());
+                let tts_track = TtsTrack::new(
+                    self.track_config.server_side_track_id.clone(),
+                    rx,
+                    "voiceapi".to_string(),
+                    tts_client,
+                )
+                .with_cancel_token(self.cancel_token.child_token());
+                self.media_stream.update_track(Box::new(tts_track)).await;
+            }
+            _ => {
+                let tts_client = TencentCloudTtsClient::new(tts_option.clone());
+                let tts_track = TtsTrack::new(
+                    self.track_config.server_side_track_id.clone(),
+                    rx,
+                    "tencent".to_string(),
+                    tts_client,
+                )
+                .with_cancel_token(self.cancel_token.child_token());
+                self.media_stream.update_track(Box::new(tts_track)).await;
+            }
+        };
         Ok(())
     }
 

@@ -23,12 +23,12 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'tencent',
+                provider: 'voiceapi', // 'tencent' or 'voiceapi'
                 inactivityTimeout: 15000 // 15 seconds timeout for ASR inactivity
             },
             tts: {
-                provider: 'tencent',
-                speaker: '301030',
+                provider: 'voiceapi', // 'tencent' or 'voiceapi'
+                speaker: '0', // '301030'
                 greeting: "Hello, how can I help you today?"
             },
             llm: {

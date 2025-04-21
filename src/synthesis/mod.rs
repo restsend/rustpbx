@@ -4,12 +4,16 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 mod tencent_cloud;
+mod voiceapi;
 pub use tencent_cloud::TencentCloudTtsClient;
+pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,
+    #[serde(rename = "voiceapi")]
+    VoiceApi,
 }
 #[cfg(test)]
 mod tests;
@@ -30,6 +34,7 @@ pub struct SynthesisOption {
     /// emotion: neutral、sad、happy、angry、fear、news、story、radio、poetry、
     /// call、sajiao、disgusted、amaze、peaceful、exciting、aojiao、jieshuo
     pub emotion: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 #[async_trait]
@@ -55,6 +60,7 @@ impl Default for SynthesisOption {
             codec: Some("pcm".to_string()),
             subtitle: None,
             emotion: None,
+            endpoint: None,
         }
     }
 }
@@ -73,8 +79,58 @@ impl SynthesisOption {
                     self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
                 }
             }
+            Some(SynthesisType::VoiceApi) => {
+                // Set the endpoint from environment variable if not already set
+                if self.app_id.is_none() {
+                    self.app_id = std::env::var("VOICEAPI_ENDPOINT")
+                        .ok()
+                        .or_else(|| Some("http://localhost:8000".to_string()));
+                }
+                // Set speaker ID from environment variable if not already set
+                if self.speaker.is_none() {
+                    self.speaker = std::env::var("VOICEAPI_SPEAKER_ID")
+                        .ok()
+                        .or_else(|| Some("0".to_string()));
+                }
+                // Set sample rate from environment variable if not already set
+                if self.samplerate == 16000 {
+                    if let Ok(sample_rate_str) = std::env::var("VOICEAPI_SAMPLE_RATE") {
+                        if let Ok(sample_rate) = sample_rate_str.parse::<i32>() {
+                            self.samplerate = sample_rate;
+                        }
+                    }
+                }
+                // Set preferred transport method (websocket is the default for VoiceAPI)
+                if self.codec.is_none() || self.codec.as_deref() == Some("pcm") {
+                    if let Ok(transport) = std::env::var("VOICEAPI_TRANSPORT") {
+                        self.codec = Some(transport);
+                    } else {
+                        // Default to WebSocket for VoiceAPI
+                        self.codec = Some("websocket".to_string());
+                    }
+                }
+            }
             _ => {}
         }
         self
+    }
+}
+
+/// Create a synthesis client based on the provider type
+pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+    let provider = option
+        .provider
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No provider specified"))?;
+
+    match provider {
+        SynthesisType::TencentCloud => {
+            let client = TencentCloudTtsClient::new(option);
+            Ok(Box::new(client))
+        }
+        SynthesisType::VoiceApi => {
+            let client = VoiceApiTtsClient::new(option);
+            Ok(Box::new(client))
+        }
     }
 }
