@@ -16,7 +16,7 @@ use sdp_rs::lines::media::MediaType;
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -97,6 +97,7 @@ struct RtpTrackState {
     timestamp: Arc<AtomicU32>,
     packet_count: Arc<AtomicU32>,
     octet_count: Arc<AtomicU32>,
+    last_timestamp_update: Arc<AtomicU64>,
 }
 
 impl RtpTrackState {
@@ -105,6 +106,7 @@ impl RtpTrackState {
             timestamp: Arc::new(AtomicU32::new(0)),
             packet_count: Arc::new(AtomicU32::new(0)),
             octet_count: Arc::new(AtomicU32::new(0)),
+            last_timestamp_update: Arc::new(AtomicU64::new(crate::get_timestamp())),
         }
     }
 }
@@ -273,7 +275,7 @@ impl RtpTrackBuilder {
             track_id: self.track_id,
             config: self.config,
             cancel_token: self.cancel_token.unwrap(),
-            ssrc: 0,
+            ssrc: rand::random::<u32>(),
             remote_addr: Mutex::new(None),
             remote_rtcp_addr: Mutex::new(None),
             processor_chain,
@@ -401,6 +403,17 @@ a=sendrecv\r\n",
         // We send one packet every 20ms (default packet time)
         let num_packets = (duration as f64 / self.config.ptime.as_millis() as f64).ceil() as u32;
 
+        // Calculate samples per packet for timestamp increments
+        let samples_per_packet =
+            (self.config.sample_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
+
+        // Get the current timestamp before we start sending DTMF
+        let current_ts = self.state.timestamp.load(Ordering::Relaxed);
+        let now = crate::get_timestamp();
+        self.state
+            .last_timestamp_update
+            .store(now, Ordering::Relaxed);
+
         // Generate RFC 4733 DTMF events
         for i in 0..num_packets {
             let is_end = i == num_packets - 1;
@@ -422,8 +435,9 @@ a=sendrecv\r\n",
             // Get next sequence number
             let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
 
-            // Use the current timestamp
-            let ts = self.state.timestamp.load(Ordering::Relaxed);
+            // Use the same timestamp for all DTMF packets of the same event
+            // This is per RFC 4733 requirements
+            let ts = current_ts;
 
             // Create RTP packet with DTMF payload
             let result = RtpPacketBuilder::new()
@@ -456,6 +470,11 @@ a=sendrecv\r\n",
                 return Err(anyhow::anyhow!("Failed to build DTMF RTP packet"));
             }
         }
+
+        // After sending DTMF, update the timestamp to account for the DTMF duration
+        self.state
+            .timestamp
+            .fetch_add(samples_per_packet * num_packets, Ordering::Relaxed);
 
         Ok(())
     }
@@ -643,11 +662,27 @@ impl Track for RtpTrack {
         };
 
         let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
-        let samples_per_packet = payload.len() as u32;
+        let samples_per_packet =
+            (self.config.codec.clock_rate() as f64 * self.config.ptime.as_secs_f64()) as u32;
+        let now = crate::get_timestamp();
+        let last_update = self.state.last_timestamp_update.load(Ordering::Relaxed);
+        let elapsed_ms = now.saturating_sub(last_update);
+
+        let timestamp_increment = if elapsed_ms > self.config.ptime.as_millis() as u64 {
+            let silence_periods = elapsed_ms as f64 / self.config.ptime.as_millis() as f64;
+            (silence_periods * samples_per_packet as f64) as u32
+        } else {
+            samples_per_packet
+        };
+
         let ts = self
             .state
             .timestamp
-            .fetch_add(samples_per_packet, Ordering::Relaxed);
+            .fetch_add(timestamp_increment, Ordering::Relaxed);
+
+        self.state
+            .last_timestamp_update
+            .store(now, Ordering::Relaxed);
 
         // Create RTP packet using rtp-rs
         let result = RtpPacketBuilder::new()
