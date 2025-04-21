@@ -81,8 +81,8 @@ impl SynthesisOption {
             }
             Some(SynthesisType::VoiceApi) => {
                 // Set the endpoint from environment variable if not already set
-                if self.app_id.is_none() {
-                    self.app_id = std::env::var("VOICEAPI_ENDPOINT")
+                if self.endpoint.is_none() {
+                    self.endpoint = std::env::var("VOICEAPI_ENDPOINT")
                         .ok()
                         .or_else(|| Some("http://localhost:8000".to_string()));
                 }
@@ -91,23 +91,6 @@ impl SynthesisOption {
                     self.speaker = std::env::var("VOICEAPI_SPEAKER_ID")
                         .ok()
                         .or_else(|| Some("0".to_string()));
-                }
-                // Set sample rate from environment variable if not already set
-                if self.samplerate == 16000 {
-                    if let Ok(sample_rate_str) = std::env::var("VOICEAPI_SAMPLE_RATE") {
-                        if let Ok(sample_rate) = sample_rate_str.parse::<i32>() {
-                            self.samplerate = sample_rate;
-                        }
-                    }
-                }
-                // Set preferred transport method (websocket is the default for VoiceAPI)
-                if self.codec.is_none() || self.codec.as_deref() == Some("pcm") {
-                    if let Ok(transport) = std::env::var("VOICEAPI_TRANSPORT") {
-                        self.codec = Some(transport);
-                    } else {
-                        // Default to WebSocket for VoiceAPI
-                        self.codec = Some("websocket".to_string());
-                    }
                 }
             }
             _ => {}
