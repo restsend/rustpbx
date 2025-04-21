@@ -11,7 +11,7 @@ function mainApp() {
                 enabled: false,
             },
             vad: {
-                type: 'webrtc',
+                type: 'silero',
                 enabled: false,
                 voiceThreshold: 0.6,
                 ratio: 0.5,
@@ -24,7 +24,7 @@ function mainApp() {
             },
             asr: {
                 provider: 'tencent', // 'tencent' or 'voiceapi'
-                inactivityTimeout: 15000 // 15 seconds timeout for ASR inactivity
+                inactivityTimeout: 35000 // 35 seconds timeout for ASR inactivity
             },
             tts: {
                 provider: 'tencent', // 'tencent' or 'voiceapi'
