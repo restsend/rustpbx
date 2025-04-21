@@ -43,11 +43,17 @@ pub struct TtsTrack<T: SynthesisClient> {
     cancel_token: CancellationToken,
     use_cache: bool,
     command_rx: Mutex<Option<TtsCommandReceiver>>,
+    provider: String,
     client: Mutex<Option<T>>,
 }
 
 impl<T: SynthesisClient> TtsTrack<T> {
-    pub fn new(track_id: TrackId, command_rx: TtsCommandReceiver, client: T) -> Self {
+    pub fn new(
+        track_id: TrackId,
+        command_rx: TtsCommandReceiver,
+        provider: String,
+        client: T,
+    ) -> Self {
         let config = TrackConfig::default();
         Self {
             track_id,
@@ -56,6 +62,7 @@ impl<T: SynthesisClient> TtsTrack<T> {
             cancel_token: CancellationToken::new(),
             command_rx: Mutex::new(Some(command_rx)),
             use_cache: true,
+            provider,
             client: Mutex::new(Some(client)),
         }
     }
@@ -125,6 +132,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         let event_sender_clone = event_sender.clone();
         let synthesize_done = Arc::new(AtomicBool::new(false));
         let synthesize_done_clone = synthesize_done.clone();
+        let provider = self.provider.clone();
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -135,7 +143,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
                 }
-                let cache_key = format!("tts:{:?}{}", speaker, text);
+                let cache_key = format!("tts:{}{:?}{}", provider, speaker, text);
                 let cache_key = cache::generate_cache_key(
                     &cache_key,
                     sample_rate,
