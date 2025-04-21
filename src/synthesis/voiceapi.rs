@@ -39,27 +39,16 @@ impl VoiceApiTtsClient {
     pub fn new(option: SynthesisOption) -> Self {
         Self { option }
     }
-
-    fn get_endpoint(&self) -> String {
-        // Get endpoint from options or use default
-        match &self.option.provider {
-            Some(SynthesisType::VoiceApi) => {
-                // Use endpoint from option if available
-                if let Some(endpoint) = &self.option.endpoint {
-                    return endpoint.clone();
-                }
-            }
-            _ => {}
-        }
-        "ws://localhost:8080".to_string()
-    }
-
     // WebSocket-based TTS synthesis
     async fn ws_synthesize<'a>(
         &'a self,
         text: &'a str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
-        let endpoint = self.get_endpoint();
+        let endpoint = self
+            .option
+            .endpoint
+            .clone()
+            .unwrap_or("ws://localhost:8080".to_string());
 
         // Convert http endpoint to websocket if needed
         let ws_endpoint = if endpoint.starts_with("http") {
