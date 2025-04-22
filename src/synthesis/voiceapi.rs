@@ -58,8 +58,8 @@ impl VoiceApiTtsClient {
         } else {
             endpoint
         };
-
-        let ws_url = format!("{}/tts", ws_endpoint);
+        let chunk_size = 4 * 640;
+        let ws_url = format!("{}/tts?chunk_size={}&split=false", ws_endpoint, chunk_size);
 
         debug!("voiceapi_tts: Connecting to WebSocket URL: {}", ws_url);
 
