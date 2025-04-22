@@ -219,28 +219,20 @@ impl ActiveCall {
         let mut event_receiver = self.media_stream.subscribe();
         let auto_hangup = self.auto_hangup.clone();
         let event_hook_loop = async move {
-            loop {
-                match event_receiver.recv().await {
-                    Ok(event) => match event {
-                        SessionEvent::TrackEnd { track_id, .. } => {
-                            if let Some(auto_hangup) = auto_hangup.lock().await.take() {
-                                if auto_hangup {
-                                    info!(
-                                        "Auto hangup when track end track_id:{} session_id:{}",
-                                        track_id, self.session_id
-                                    );
-                                    self.do_hangup(Some("autohangup".to_string()), Some(track_id))
-                                        .await
-                                        .ok();
-                                }
-                            }
+            while let Ok(event) = event_receiver.recv().await {
+                match event {
+                    SessionEvent::TrackEnd { track_id, .. } => {
+                        if let Some(true) = auto_hangup.lock().await.take() {
+                            info!(
+                                "call: auto hangup when track end track_id:{} session_id:{}",
+                                track_id, self.session_id
+                            );
+                            self.do_hangup(Some("autohangup".to_string()), Some(track_id))
+                                .await
+                                .ok();
                         }
-                        _ => {}
-                    },
-                    Err(e) => {
-                        warn!("Failed to receive event: {}", e);
-                        break;
                     }
+                    _ => {}
                 }
             }
         };

@@ -90,6 +90,7 @@ async fn forward_request(state: &AppState, req: Request<Body>) -> Result<Respons
     let status = response.status();
     let headers = response.headers().clone();
     let mut resp_builder = Response::builder().status(status);
+    resp_builder = resp_builder.header("X-Accel-Buffering", "no");
 
     for (name, value) in headers.iter() {
         resp_builder = resp_builder.header(name, value);
