@@ -73,10 +73,7 @@ async fn test_tts_track_basic() -> Result<()> {
     let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
-    let cancel_token = CancellationToken::new();
-    tts_track
-        .start(cancel_token.clone(), event_tx, packet_tx)
-        .await?;
+    tts_track.start(event_tx, packet_tx).await?;
 
     // Send a TTS command
     command_tx.send(TtsCommand {
@@ -131,10 +128,7 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
     let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
-    let cancel_token = CancellationToken::new();
-    tts_track
-        .start(cancel_token.clone(), event_tx, packet_tx)
-        .await?;
+    tts_track.start(event_tx, packet_tx).await?;
 
     // Send multiple TTS commands
     for i in 1..=3 {
@@ -202,11 +196,7 @@ async fn test_tts_track_configuration() -> Result<()> {
     let (event_tx, _event_rx) = broadcast::channel(16);
     let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
 
-    // Start the track
-    let cancel_token = CancellationToken::new();
-    tts_track
-        .start(cancel_token.clone(), event_tx, packet_tx)
-        .await?;
+    tts_track.start(event_tx, packet_tx).await?;
 
     // Send a TTS command
     command_tx.send(TtsCommand {

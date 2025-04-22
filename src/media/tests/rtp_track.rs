@@ -137,9 +137,7 @@ async fn test_rtp_track_start_stop() -> Result<()> {
     let (sender, _receiver) = mpsc::unbounded_channel();
 
     // Start the track with event sender and packet sender
-    track
-        .start(cancel_token.clone(), create_event_sender(), sender)
-        .await?;
+    track.start(create_event_sender(), sender).await?;
 
     // Very short wait to ensure tasks start
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -397,13 +395,7 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
     });
 
     // Start the track
-    track
-        .start(
-            CancellationToken::new(),
-            create_event_sender(),
-            packet_sender,
-        )
-        .await?;
+    track.start(create_event_sender(), packet_sender).await?;
 
     // Create and send test packets
     for i in 0..5 {

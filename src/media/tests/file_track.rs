@@ -95,11 +95,7 @@ async fn test_file_track_wav() -> Result<()> {
 
     println!("Starting FileTrack");
 
-    // Start the track
-    let token = CancellationToken::new();
-    file_track
-        .start(token.clone(), event_sender, packet_sender)
-        .await?;
+    file_track.start(event_sender, packet_sender).await?;
 
     // Wait for some packets
     let mut received_packets = 0;

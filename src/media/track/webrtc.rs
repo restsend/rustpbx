@@ -315,7 +315,6 @@ impl Track for WebrtcTrack {
 
     async fn start(
         &self,
-        token: CancellationToken,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
@@ -327,7 +326,7 @@ impl Track for WebrtcTrack {
             timestamp: crate::get_timestamp(),
         });
 
-        let token_clone = token.clone();
+        let token_clone = self.cancel_token.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
 
