@@ -102,13 +102,11 @@ impl VoiceApiTtsClient {
                 // Receive message from WebSocket
                 match read.next().await {
                     Some(Ok(Message::Binary(data))) => {
-                        debug!("voiceapi_tts: Received binary data of size {}", data.len());
                         let audio_data = data.to_vec();
                         Some((Ok(audio_data), (read, write, false)))
                     }
                     Some(Ok(Message::Text(text_data))) => {
                         // Text data is metadata
-                        debug!("voiceapi_tts: Received text data: {}", text_data);
                         match serde_json::from_str::<TtsResult>(&text_data) {
                             Ok(metadata) => {
                                 debug!("voiceapi_tts: Received metadata: progress={}, elapsed={}, duration={}, size={}", 

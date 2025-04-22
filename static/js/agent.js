@@ -23,7 +23,7 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'tencent', // 'tencent' or 'voiceapi'
+                provider: 'voiceapi', // 'tencent' or 'voiceapi'
                 inactivityTimeout: 35000 // 35 seconds timeout for ASR inactivity
             },
             tts: {
