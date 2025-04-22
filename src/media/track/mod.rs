@@ -83,7 +83,6 @@ pub trait Track: Send + Sync {
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String>;
     async fn start(
         &self,
-        token: CancellationToken,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()>;

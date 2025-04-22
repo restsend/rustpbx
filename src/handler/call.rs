@@ -58,6 +58,7 @@ pub struct ActiveCall {
     pub created_at: DateTime<Utc>,
     pub media_stream: MediaStream,
     pub track_config: TrackConfig,
+    pub last_tts_play_id: Mutex<Option<String>>,
     pub tts_command_tx: Mutex<Option<TtsCommandSender>>,
     pub tts_option: Option<SynthesisOption>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
@@ -204,6 +205,7 @@ impl ActiveCall {
             created_at: Utc::now(),
             media_stream,
             track_config: TrackConfig::default(),
+            last_tts_play_id: Mutex::new(None),
             tts_command_tx: Mutex::new(None),
             tts_option,
             auto_hangup: Arc::new(Mutex::new(None)),
@@ -302,7 +304,7 @@ impl ActiveCall {
         let mut play_command = TtsCommand {
             text,
             speaker,
-            play_id,
+            play_id: play_id.clone(),
         };
         info!(
             "active_call: new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
@@ -311,16 +313,20 @@ impl ActiveCall {
         if let Some(auto_hangup) = auto_hangup {
             *self.auto_hangup.lock().await = Some(auto_hangup);
         }
+        let mut last_tts_play_id = self.last_tts_play_id.lock().await;
         let mut tts_command_tx = self.tts_command_tx.lock().await;
         if let Some(tx) = tts_command_tx.as_ref() {
-            match tx.send(play_command) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    tts_command_tx.take();
-                    play_command = e.0;
+            if *last_tts_play_id == play_id {
+                match tx.send(play_command) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        tts_command_tx.take();
+                        play_command = e.0;
+                    }
                 }
             }
         }
+        *last_tts_play_id = play_id;
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(play_command)?;
         tts_command_tx.replace(tx);
@@ -353,6 +359,7 @@ impl ActiveCall {
     }
 
     async fn do_play(&self, url: String, auto_hangup: Option<bool>) -> Result<()> {
+        self.last_tts_play_id.lock().await.take();
         self.tts_command_tx.lock().await.take();
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_path(url)

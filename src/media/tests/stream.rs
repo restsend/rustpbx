@@ -52,7 +52,6 @@ impl Track for TestTrack {
     }
     async fn start(
         &self,
-        _token: CancellationToken,
         _event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {

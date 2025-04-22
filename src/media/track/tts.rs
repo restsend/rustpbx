@@ -112,7 +112,6 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
     }
     async fn start(
         &self,
-        token: CancellationToken,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
@@ -326,6 +325,8 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
             );
         };
         let track_id = self.track_id.clone();
+        let token = self.cancel_token.clone();
+
         tokio::spawn(async move {
             select! {
                 _ = command_loop => {

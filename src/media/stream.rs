@@ -138,15 +138,13 @@ impl MediaStream {
 
     pub async fn update_track(&self, mut track: Box<dyn Track>) {
         self.remove_track(track.id()).await;
-        let token = self.cancel_token.child_token();
         if self.recorder.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
                 self.recorder_sender.clone(),
             )));
         }
-
         match track
-            .start(token, self.event_sender.clone(), self.packet_sender.clone())
+            .start(self.event_sender.clone(), self.packet_sender.clone())
             .await
         {
             Ok(_) => {

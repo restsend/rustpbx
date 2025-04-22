@@ -389,7 +389,8 @@ function mainApp() {
 
             // Buffer for collecting text until punctuation
             let ttsBuffer = '';
-
+            let firstSegmentUsage = undefined;
+            let startTime = new Date();
             // Function to check for punctuation and send TTS if needed
             const processTtsSegment = (content) => {
                 ttsBuffer += content;
@@ -405,7 +406,11 @@ function mainApp() {
                     const segment = ttsBuffer.substring(lastIndex, match.index + 1);
                     if (segment.trim().length > 0) {
                         // Send this segment to TTS with the same playId
-                        this.sendTtsRequest(segment, undefined, playId);
+                        if (firstSegmentUsage === undefined) {
+                            firstSegmentUsage = `TTFS: ${(new Date() - startTime)} ms`
+                        }
+                        this.sendTtsRequest(segment, undefined, playId, firstSegmentUsage);
+                        firstSegmentUsage = ''
                     }
                     lastIndex = match.index + 1;
                 }
@@ -534,16 +539,19 @@ function mainApp() {
 
                     // If there was already some response, send that for TTS
                     if (fullLlmResponse) {
-                        this.sendTtsRequest(fullLlmResponse, autoHangup, playId);
+                        this.sendTtsRequest(fullLlmResponse, autoHangup, playId, '');
                     }
                 });
         },
 
         // Send TTS request to the WebSocket
-        sendTtsRequest(text, autoHangup, playId) {
+        sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined) {
             if (!text || text.trim() === '') {
                 this.addLogEntry('warning', 'Cannot send empty text to TTS');
                 return;
+            }
+            if (firstSegmentUsage === undefined) {
+                firstSegmentUsage = ''
             }
 
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -555,7 +563,7 @@ function mainApp() {
                 };
 
                 this.ws.send(JSON.stringify(ttsCommand));
-                this.addLogEntry('TTS', `${text.substring(0, 50)}${text.length > 50 ? '...' : ''}${playId ? ` (playId: ${playId})` : ''}`);
+                this.addLogEntry('TTS', `${text.substring(0, 50)}${text.length > 50 ? '...' : ''}${playId ? ` (playId: ${playId} ${firstSegmentUsage})` : ''}`);
                 this.lastTtsMessage = text;
             } else {
                 this.addLogEntry('error', 'WebSocket not connected, cannot send TTS request');

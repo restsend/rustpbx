@@ -91,7 +91,6 @@ impl Track for FileTrack {
     }
     async fn start(
         &self,
-        token: CancellationToken,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
@@ -104,6 +103,7 @@ impl Track for FileTrack {
         let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
         let use_cache = self.use_cache;
         let processor_chain = self.processor_chain.clone();
+        let token = self.cancel_token.clone();
         tokio::spawn(async move {
             let stream_result = if path.starts_with("http://") || path.starts_with("https://") {
                 stream_from_url(
@@ -112,7 +112,7 @@ impl Track for FileTrack {
                     &id,
                     sample_rate,
                     max_pcm_chunk_size,
-                    token.clone(),
+                    token,
                     packet_sender,
                     use_cache,
                 )
@@ -124,7 +124,7 @@ impl Track for FileTrack {
                     &id,
                     sample_rate,
                     max_pcm_chunk_size,
-                    token.clone(),
+                    token,
                     packet_sender,
                 )
                 .await
@@ -452,7 +452,7 @@ mod tests {
         let file_path = "fixtures/sample.wav".to_string();
         // Create a FileTrack instance
         let track_id = "test_track".to_string();
-        let file_track = FileTrack::new(track_id.clone())
+        let mut file_track = FileTrack::new(track_id.clone())
             .with_path(file_path.clone())
             .with_sample_rate(16000)
             .with_cache_enabled(true);
@@ -464,7 +464,7 @@ mod tests {
         // Start the track
         let token = CancellationToken::new();
         let token_clone = token.clone();
-        file_track.start(token_clone, event_tx, packet_tx).await?;
+        file_track.start(event_tx, packet_tx).await?;
 
         // Receive some packets to verify it's working
         let mut received_packet = false;

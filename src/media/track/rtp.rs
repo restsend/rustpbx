@@ -601,7 +601,6 @@ impl Track for RtpTrack {
 
     async fn start(
         &self,
-        token: CancellationToken,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
@@ -612,7 +611,7 @@ impl Track for RtpTrack {
         let state = self.state.clone();
         let rtp_socket = self.rtp_socket.clone();
         let processor_chain = self.processor_chain.clone();
-
+        let token = self.cancel_token.clone();
         tokio::spawn(async move {
             event_sender
                 .send(SessionEvent::TrackStart {
