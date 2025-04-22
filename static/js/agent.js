@@ -23,7 +23,7 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'voiceapi', // 'tencent' or 'voiceapi'
+                provider: 'tencent', // 'tencent' or 'voiceapi'
                 inactivityTimeout: 35000 // 35 seconds timeout for ASR inactivity
             },
             tts: {
@@ -35,7 +35,7 @@ function mainApp() {
                 useProxy: true,
                 baseurl: '',
                 apiKey: '',
-                model: 'qwen-14b',
+                model: 'qwen-turbo',
                 prompt: 'You are a helpful assistant.'
             },
             // Add UI state for tabbed interface
@@ -383,6 +383,39 @@ function mainApp() {
             // Store the full LLM response
             let fullLlmResponse = '';
             let autoHangup = undefined;
+
+            // Generate a unique playId for this LLM request
+            const playId = `llm-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+            // Buffer for collecting text until punctuation
+            let ttsBuffer = '';
+
+            // Function to check for punctuation and send TTS if needed
+            const processTtsSegment = (content) => {
+                ttsBuffer += content;
+
+                // Check if the buffer contains any punctuation
+                // Matching for periods, question marks, exclamation marks, colons, semicolons
+                const punctuationRegex = /([,，。.!?！？;；、\n])\s/g;
+                let match;
+                let lastIndex = 0;
+
+                while ((match = punctuationRegex.exec(ttsBuffer)) !== null) {
+                    // Extract the segment up to and including the punctuation
+                    const segment = ttsBuffer.substring(lastIndex, match.index + 1);
+                    if (segment.trim().length > 0) {
+                        // Send this segment to TTS with the same playId
+                        this.sendTtsRequest(segment, undefined, playId);
+                    }
+                    lastIndex = match.index + 1;
+                }
+
+                // Keep the remainder in the buffer
+                if (lastIndex > 0) {
+                    ttsBuffer = ttsBuffer.substring(lastIndex);
+                }
+            };
+
             // Prepare the request payload
             const payload = {
                 model: this.config.llm.useProxy ? 'qwen-14b' : this.config.llm.model,
@@ -434,9 +467,11 @@ function mainApp() {
                     const processStream = ({ done, value }) => {
                         if (done) {
                             let duration = new Date() - start;
-                            // When stream is complete, send the full response for TTS
+                            // When stream is complete, send any remaining text in the buffer
+                            if (ttsBuffer.trim().length > 0) {
+                                this.sendTtsRequest(ttsBuffer, autoHangup, playId);
+                            }
                             this.logEvent('LLM', `${duration} ms`, { llmResponse: fullLlmResponse });
-                            this.sendTtsRequest(fullLlmResponse);
                             return;
                         }
 
@@ -458,15 +493,14 @@ function mainApp() {
                                 try {
                                     // Parse the JSON data
                                     const jsonData = JSON.parse(data);
-                                    //let autoHangup = undefined
+
                                     // Check for tool calls (especially hangup)
                                     if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.tool_calls) {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
                                                 this.addLogEntry('LLM', 'LLM requested to hang up the call');
-                                                autoHangup = true
-                                                //this.endCall();
+                                                autoHangup = true;
                                             }
                                         });
                                     }
@@ -475,6 +509,9 @@ function mainApp() {
                                     if (jsonData.choices && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
                                         const content = jsonData.choices[0].delta.content;
                                         fullLlmResponse += content;
+
+                                        // Process the content for TTS streaming
+                                        processTtsSegment(content);
 
                                         // Update the UI with the latest response
                                         this.lastLlmResponse = fullLlmResponse;
@@ -497,13 +534,13 @@ function mainApp() {
 
                     // If there was already some response, send that for TTS
                     if (fullLlmResponse) {
-                        this.sendTtsRequest(fullLlmResponse, autoHangup);
+                        this.sendTtsRequest(fullLlmResponse, autoHangup, playId);
                     }
                 });
         },
 
         // Send TTS request to the WebSocket
-        sendTtsRequest(text, autoHangup) {
+        sendTtsRequest(text, autoHangup, playId) {
             if (!text || text.trim() === '') {
                 this.addLogEntry('warning', 'Cannot send empty text to TTS');
                 return;
@@ -513,11 +550,12 @@ function mainApp() {
                 const ttsCommand = {
                     command: 'tts',
                     text: text,
-                    autoHangup
+                    autoHangup,
+                    playId
                 };
 
                 this.ws.send(JSON.stringify(ttsCommand));
-                this.addLogEntry('TTS', `${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+                this.addLogEntry('TTS', `${text.substring(0, 50)}${text.length > 50 ? '...' : ''}${playId ? ` (playId: ${playId})` : ''}`);
                 this.lastTtsMessage = text;
             } else {
                 this.addLogEntry('error', 'WebSocket not connected, cannot send TTS request');
