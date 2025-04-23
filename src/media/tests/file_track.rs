@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 use crate::event::SessionEvent;
 use crate::media::processor::Processor;

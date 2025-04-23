@@ -201,7 +201,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
                     break;
                 }
                 _ => {
-                    error!("Received unexpected event: {:?}", event);
+                    info!("Received unexpected event: {:?}", event);
                     continue;
                 }
             }

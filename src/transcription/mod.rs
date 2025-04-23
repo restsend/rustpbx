@@ -54,7 +54,7 @@ impl Default for TranscriptionOption {
 }
 
 impl TranscriptionOption {
-    pub fn check_default(mut self) -> Self {
+    pub fn check_default(&mut self) -> &Self {
         match self.provider {
             Some(TranscriptionType::TencentCloud) => {
                 if self.app_id.is_none() {

@@ -60,6 +60,17 @@ impl Default for StreamOption {
         }
     }
 }
+impl StreamOption {
+    pub fn check_default(&mut self) -> &StreamOption {
+        if let Some(tts) = &mut self.tts {
+            tts.check_default();
+        }
+        if let Some(asr) = &mut self.asr {
+            asr.check_default();
+        }
+        self
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

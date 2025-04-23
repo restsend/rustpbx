@@ -1,4 +1,4 @@
-use super::{SynthesisClient, SynthesisOption};
+use super::{SynthesisClient, SynthesisOption, SynthesisType};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -267,6 +267,9 @@ impl TencentCloudTtsClient {
 
 #[async_trait]
 impl SynthesisClient for TencentCloudTtsClient {
+    fn provider(&self) -> SynthesisType {
+        SynthesisType::TencentCloud
+    }
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
