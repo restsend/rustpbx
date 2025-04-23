@@ -6,7 +6,9 @@ use crate::{
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
-    synthesis::SynthesisClient,
+    synthesis::{
+        SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
+    },
     AudioFrame, Samples,
 };
 use anyhow::{anyhow, Result};
@@ -27,6 +29,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+pub struct TtsHandle {
+    pub play_id: Option<String>,
+    pub command_tx: TtsCommandSender,
+}
 #[derive(Clone)]
 pub struct TtsCommand {
     pub text: String,
@@ -36,23 +42,60 @@ pub struct TtsCommand {
 pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
 type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
 
-pub struct TtsTrack<T: SynthesisClient> {
+pub struct TtsTrack {
     track_id: TrackId,
     processor_chain: ProcessorChain,
     config: TrackConfig,
     cancel_token: CancellationToken,
     use_cache: bool,
     command_rx: Mutex<Option<TtsCommandReceiver>>,
-    provider: String,
-    client: Mutex<Option<T>>,
+    client: Mutex<Option<Box<dyn SynthesisClient>>>,
 }
 
-impl<T: SynthesisClient> TtsTrack<T> {
+impl TtsHandle {
+    pub fn new(command_tx: TtsCommandSender, play_id: Option<String>) -> Self {
+        Self {
+            play_id,
+            command_tx,
+        }
+    }
+    pub fn try_send(&self, cmd: TtsCommand) -> Result<(), mpsc::error::SendError<TtsCommand>> {
+        if self.play_id == cmd.play_id {
+            self.command_tx.send(cmd)
+        } else {
+            Err(mpsc::error::SendError(cmd))
+        }
+    }
+
+    pub fn create_tts_track(
+        &self,
+        token: CancellationToken,
+        option: SynthesisOption,
+        track_id: TrackId,
+        rx: TtsCommandReceiver,
+    ) -> Result<Box<dyn Track>> {
+        match option.provider {
+            Some(SynthesisType::VoiceApi) => {
+                let client = VoiceApiTtsClient::new(option);
+                let tts_track =
+                    TtsTrack::new(track_id, rx, Box::new(client)).with_cancel_token(token);
+                Ok(Box::new(tts_track))
+            }
+            _ => {
+                let client = TencentCloudTtsClient::new(option);
+                let tts_track =
+                    TtsTrack::new(track_id, rx, Box::new(client)).with_cancel_token(token);
+                Ok(Box::new(tts_track))
+            }
+        }
+    }
+}
+
+impl TtsTrack {
     pub fn new(
         track_id: TrackId,
         command_rx: TtsCommandReceiver,
-        provider: String,
-        client: T,
+        client: Box<dyn SynthesisClient>,
     ) -> Self {
         let config = TrackConfig::default();
         Self {
@@ -62,7 +105,6 @@ impl<T: SynthesisClient> TtsTrack<T> {
             cancel_token: CancellationToken::new(),
             command_rx: Mutex::new(Some(command_rx)),
             use_cache: true,
-            provider,
             client: Mutex::new(Some(client)),
         }
     }
@@ -95,7 +137,7 @@ impl<T: SynthesisClient> TtsTrack<T> {
 }
 
 #[async_trait]
-impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
+impl Track for TtsTrack {
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -107,9 +149,11 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
     fn append_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain.append_processor(processor);
     }
+
     async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
         Ok("".to_string())
     }
+
     async fn start(
         &self,
         event_sender: EventSender,
@@ -131,7 +175,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
         let event_sender_clone = event_sender.clone();
         let synthesize_done = Arc::new(AtomicBool::new(false));
         let synthesize_done_clone = synthesize_done.clone();
-        let provider = self.provider.clone();
+
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -142,7 +186,7 @@ impl<T: SynthesisClient + 'static> Track for TtsTrack<T> {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
                 }
-                let cache_key = format!("tts:{}{:?}{}", provider, speaker, text);
+                let cache_key = format!("tts:{:?}{:?}{}", client.provider(), speaker, text);
                 let cache_key = cache::generate_cache_key(
                     &cache_key,
                     sample_rate,

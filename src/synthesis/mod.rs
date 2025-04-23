@@ -14,6 +14,8 @@ pub enum SynthesisType {
     TencentCloud,
     #[serde(rename = "voiceapi")]
     VoiceApi,
+    #[serde(rename = "other")]
+    Other(String),
 }
 #[cfg(test)]
 mod tests;
@@ -39,6 +41,7 @@ pub struct SynthesisOption {
 
 #[async_trait]
 pub trait SynthesisClient: Send + Sync {
+    fn provider(&self) -> SynthesisType;
     /// Synthesize text to audio and return a stream of audio chunks
     async fn synthesize<'a>(
         &'a self,
@@ -66,7 +69,7 @@ impl Default for SynthesisOption {
 }
 
 impl SynthesisOption {
-    pub fn check_default(mut self) -> Self {
+    pub fn check_default(&mut self) -> &Self {
         match self.provider {
             Some(SynthesisType::TencentCloud) => {
                 if self.app_id.is_none() {
@@ -114,6 +117,9 @@ pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn Synthe
         SynthesisType::VoiceApi => {
             let client = VoiceApiTtsClient::new(option);
             Ok(Box::new(client))
+        }
+        SynthesisType::Other(provider) => {
+            return Err(anyhow::anyhow!("Unsupported provider: {}", provider));
         }
     }
 }

@@ -1,4 +1,4 @@
-use super::{SynthesisClient, SynthesisOption};
+use super::{SynthesisClient, SynthesisOption, SynthesisType};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -149,6 +149,9 @@ impl VoiceApiTtsClient {
 
 #[async_trait]
 impl SynthesisClient for VoiceApiTtsClient {
+    fn provider(&self) -> SynthesisType {
+        SynthesisType::VoiceApi
+    }
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
