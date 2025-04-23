@@ -1,4 +1,12 @@
+use crate::event::EventSender;
+use crate::handler::{call, CallOption};
+use crate::media::{
+    processor::Processor,
+    track::{tts::TtsHandle, Track},
+};
+use crate::synthesis::SynthesisOption;
 use crate::useragent::UserAgent;
+use crate::TrackId;
 use crate::{config::Config, handler::call::ActiveCallRef};
 use anyhow::Result;
 use axum::{
@@ -7,7 +15,9 @@ use axum::{
     Router,
 };
 use futures::lock::Mutex;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -18,6 +28,29 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
+// Define hook types
+pub type PrepareTrackHook = Box<
+    dyn Fn(
+            &dyn Track,
+            CancellationToken,
+            EventSender,
+            CallOption,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Processor>>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub type CreateTtsTrackHook = Box<
+    dyn Fn(
+            CancellationToken,
+            TrackId,
+            Option<String>,
+            SynthesisOption,
+        ) -> Pin<Box<dyn Future<Output = Result<(TtsHandle, Box<dyn Track>)>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
@@ -25,6 +58,8 @@ pub struct AppStateInner {
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub recorder_root: String,
     pub llm_proxy: Option<String>,
+    pub prepare_track_hook: PrepareTrackHook,
+    pub create_tts_track_hook: CreateTtsTrackHook,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -36,20 +71,11 @@ pub struct App {
 pub struct AppBuilder {
     pub config: Option<Config>,
     pub useragent: Option<Arc<UserAgent>>,
+    pub prepare_track_hook: Option<PrepareTrackHook>,
+    pub create_tts_track_hook: Option<CreateTtsTrackHook>,
 }
 
 impl AppStateInner {
-    pub fn new(useragent: Arc<UserAgent>) -> Self {
-        Self {
-            config: Arc::new(Config::default()),
-            useragent,
-            token: CancellationToken::new(),
-            active_calls: Arc::new(Mutex::new(HashMap::new())),
-            recorder_root: std::env::var("RECORDER_ROOT")
-                .unwrap_or_else(|_| "/tmp/recorder".to_string()),
-            llm_proxy: std::env::var("LLM_PROXY").ok(),
-        }
-    }
     pub fn get_recorder_file(&self, session_id: &String) -> String {
         let root = Path::new(&self.recorder_root);
         if !root.exists() {
@@ -72,11 +98,14 @@ impl AppStateInner {
             .to_string()
     }
 }
+
 impl AppBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
             useragent: None,
+            prepare_track_hook: None,
+            create_tts_track_hook: None,
         }
     }
 
@@ -87,6 +116,16 @@ impl AppBuilder {
 
     pub fn useragent(mut self, useragent: Arc<UserAgent>) -> Self {
         self.useragent = Some(useragent);
+        self
+    }
+
+    pub fn prepare_track_hook(mut self, hook: PrepareTrackHook) -> Self {
+        self.prepare_track_hook = Some(hook);
+        self
+    }
+
+    pub fn create_tts_track_hook(mut self, hook: CreateTtsTrackHook) -> Self {
+        self.create_tts_track_hook = Some(hook);
         self
     }
 
@@ -117,6 +156,12 @@ impl AppBuilder {
                 active_calls: Arc::new(Mutex::new(HashMap::new())),
                 recorder_root,
                 llm_proxy,
+                prepare_track_hook: self
+                    .prepare_track_hook
+                    .unwrap_or_else(|| Box::new(call::ActiveCall::prepare_track_hook)),
+                create_tts_track_hook: self
+                    .create_tts_track_hook
+                    .unwrap_or_else(|| Box::new(call::ActiveCall::create_tts_track)),
             }),
         })
     }

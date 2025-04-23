@@ -17,7 +17,7 @@ pub mod webrtc;
 pub use handler::router;
 use sip::SipOption;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CallOption {
     pub denoise: Option<bool>,
@@ -60,6 +60,7 @@ impl Default for CallOption {
         }
     }
 }
+
 impl CallOption {
     pub fn check_default(&mut self) -> &CallOption {
         if let Some(tts) = &mut self.tts {
