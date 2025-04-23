@@ -42,7 +42,11 @@ async fn main() -> Result<()> {
         let file = File::create(log_file).expect("Failed to create log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         std::mem::forget(guard);
-        log_fmt.with_writer(non_blocking).try_init().ok();
+        log_fmt
+            .with_ansi(false)
+            .with_writer(non_blocking)
+            .try_init()
+            .ok();
     } else {
         log_fmt.try_init().ok();
     }
