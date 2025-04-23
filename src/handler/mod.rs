@@ -19,7 +19,7 @@ use sip::SipOption;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamOption {
+pub struct CallOption {
     pub denoise: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer: Option<String>,
@@ -43,7 +43,7 @@ pub struct StreamOption {
     pub sip: Option<SipOption>,
 }
 
-impl Default for StreamOption {
+impl Default for CallOption {
     fn default() -> Self {
         Self {
             denoise: None,
@@ -60,8 +60,8 @@ impl Default for StreamOption {
         }
     }
 }
-impl StreamOption {
-    pub fn check_default(&mut self) -> &StreamOption {
+impl CallOption {
+    pub fn check_default(&mut self) -> &CallOption {
         if let Some(tts) = &mut self.tts {
             tts.check_default();
         }
@@ -92,13 +92,14 @@ pub struct ReferOption {
 #[serde(rename_all = "camelCase")]
 pub enum Command {
     Invite {
-        options: StreamOption,
+        option: CallOption,
     },
     Accept {
-        options: StreamOption,
+        option: CallOption,
     },
     Reject {
         reason: String,
+        code: Option<u32>,
     },
     Candidate {
         candidates: Vec<String>,

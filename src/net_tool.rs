@@ -79,11 +79,7 @@ pub async fn external_by_stun(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let external: &SocketAddr = xor_addr.socket_address();
-    info!(
-        "useragent: external address: {} -> {}",
-        external,
-        conn.get_addr()
-    );
+    info!("external address: {} -> {}", external, conn.get_addr());
     conn.external = Some(SipAddr {
         r#type: Some(rsip::transport::Transport::Udp),
         addr: external.to_owned().into(),

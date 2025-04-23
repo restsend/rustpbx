@@ -124,7 +124,7 @@ impl UserAgent {
         state_sender: DialogStateSender,
     ) -> Result<()> {
         while let Some(mut tx) = incoming.recv().await {
-            info!("useragent: received transaction: {:?}", tx.key);
+            info!("received transaction: {:?}", tx.key);
             match tx.original.to_header()?.tag()?.as_ref() {
                 Some(_) => match dialog_layer.match_dialog(&tx.original) {
                     Some(mut d) => {
@@ -132,21 +132,21 @@ impl UserAgent {
                             match d.handle(tx).await {
                                 Ok(_) => (),
                                 Err(e) => {
-                                    info!("useragent: error handling transaction: {:?}", e);
+                                    info!("error handling transaction: {:?}", e);
                                 }
                             }
                         });
                         continue;
                     }
                     None => {
-                        info!("useragent: dialog not found: {}", tx.original);
+                        info!("dialog not found: {}", tx.original);
                         match tx
                             .reply(rsip::StatusCode::CallTransactionDoesNotExist)
                             .await
                         {
                             Ok(_) => (),
                             Err(e) => {
-                                info!("useragent: error replying to request: {:?}", e);
+                                info!("error replying to request: {:?}", e);
                             }
                         }
                         continue;
@@ -166,14 +166,14 @@ impl UserAgent {
                         Ok(d) => d,
                         Err(e) => {
                             // 481 Dialog/Transaction Does Not Exist
-                            info!("useragent: failed to obtain dialog: {:?}", e);
+                            info!("failed to obtain dialog: {:?}", e);
                             match tx
                                 .reply(rsip::StatusCode::CallTransactionDoesNotExist)
                                 .await
                             {
                                 Ok(_) => (),
                                 Err(e) => {
-                                    info!("useragent: error replying to request: {:?}", e);
+                                    info!("error replying to request: {:?}", e);
                                 }
                             }
                             continue;
@@ -182,11 +182,11 @@ impl UserAgent {
                     tokio::spawn(async move { dialog.handle(tx).await });
                 }
                 _ => {
-                    info!("useragent: received request: {:?}", tx.original.method);
+                    info!("received request: {:?}", tx.original.method);
                     match tx.reply(rsip::StatusCode::OK).await {
                         Ok(_) => (),
                         Err(e) => {
-                            info!("useragent: error replying to request: {:?}", e);
+                            info!("error replying to request: {:?}", e);
                         }
                     }
                 }
@@ -204,11 +204,11 @@ impl UserAgent {
         while let Some(state) = state_receiver.recv().await {
             match state {
                 DialogState::Calling(id) => {
-                    info!("useragent: calling dialog {}", id);
+                    info!("calling dialog {}", id);
                     let dialog = match dialog_layer.get_dialog(&id) {
                         Some(d) => d,
                         None => {
-                            info!("useragent: dialog not found {}", id);
+                            info!("dialog not found {}", id);
                             continue;
                         }
                     };
@@ -216,23 +216,23 @@ impl UserAgent {
                         Dialog::ServerInvite(d) => match self.handle_server_invite(d).await {
                             Ok(_) => (),
                             Err(e) => {
-                                info!("useragent: error handling server invite: {:?}", e);
+                                info!("error handling server invite: {:?}", e);
                             }
                         },
                         Dialog::ClientInvite(_) => {
-                            info!("useragent: client invite dialog {}", id);
+                            info!("client invite dialog {}", id);
                         }
                     }
                 }
                 DialogState::Early(id, resp) => {
-                    info!("useragent: early dialog {} {}", id, resp);
+                    info!("early dialog {} {}", id, resp);
                 }
                 DialogState::Terminated(id, status_code) => {
-                    info!("useragent: dialog terminated {} {:?}", id, status_code);
+                    info!("dialog terminated {} {:?}", id, status_code);
                     dialog_layer.remove_dialog(&id);
                 }
                 _ => {
-                    info!("useragent: received dialog state: {}", state);
+                    info!("received dialog state: {}", state);
                 }
             }
         }
@@ -248,30 +248,30 @@ impl UserAgent {
 
         tokio::select! {
             _ = token.cancelled() => {
-                info!("useragent: cancelled");
+                info!("cancelled");
             }
             result = endpoint_inner.serve() => {
                 if let Err(e) = result {
-                    info!("useragent: endpoint serve error: {:?}", e);
+                    info!("endpoint serve error: {:?}", e);
                 }
             }
             result = self.process_incoming_request(dialog_layer.clone(), incoming_txs, state_sender) => {
                 if let Err(e) = result {
-                    info!("useragent: process incoming request error: {:?}", e);
+                    info!("process incoming request error: {:?}", e);
                 }
             },
             result = self.process_dialog(dialog_layer.clone(), state_receiver) => {
                 if let Err(e) = result {
-                    info!("useragent: process dialog error: {:?}", e);
+                    info!("process dialog error: {:?}", e);
                 }
             },
         }
-        info!("useragent: stopping");
+        info!("stopping");
         Ok(())
     }
 
     pub fn stop(&self) {
-        info!("useragent: stopping");
+        info!("stopping");
         self.token.cancel();
     }
 }

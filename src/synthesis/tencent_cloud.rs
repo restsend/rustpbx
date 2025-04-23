@@ -178,7 +178,7 @@ impl TencentCloudTtsClient {
         text: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         let url = self.generate_websocket_url(text)?;
-        debug!("tencent_tts: Connecting to WebSocket URL: {}", url);
+        debug!("connecting to WebSocket URL: {}", url);
 
         // Create a request with custom headers
         let request = url.into_client_request()?;
@@ -232,7 +232,7 @@ impl TencentCloudTtsClient {
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to parse WebSocket response: {}", e);
+                                warn!("failed to parse WebSocket response: {}", e);
                                 Some((Ok(Vec::new()), (ws_stream, false)))
                             }
                         }

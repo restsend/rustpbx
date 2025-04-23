@@ -24,6 +24,8 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<u32>,
     },
     Ringing {
         #[serde(rename = "trackId")]
@@ -121,10 +123,6 @@ pub enum SessionEvent {
         end_time: Option<u32>,
         text: String,
     },
-    /// timestamp, text
-    LLMFinal { timestamp: u64, text: String },
-    /// track_id, timestamp,  word
-    LLMDelta { timestamp: u64, word: String },
     /// timestamp, metrics
     Metrics {
         timestamp: u64,
@@ -139,6 +137,8 @@ pub enum SessionEvent {
         timestamp: u64,
         sender: String,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<u32>,
     },
 }
 

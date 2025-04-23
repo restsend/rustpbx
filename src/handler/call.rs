@@ -1,4 +1,4 @@
-use super::{processor::AsrProcessor, Command, ReferOption, StreamOption};
+use super::{processor::AsrProcessor, CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
     event::{EventReceiver, EventSender, SessionEvent},
@@ -15,7 +15,6 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    transcription::{TencentCloudAsrClientBuilder, TranscriptionType, VoiceApiAsrClientBuilder},
     TrackId,
 };
 use anyhow::Result;
@@ -57,7 +56,7 @@ pub struct ActiveCall {
     pub tts_handle: Mutex<Option<TtsHandle>>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
     pub event_sender: EventSender,
-    pub option: StreamOption,
+    pub option: CallOption,
     pub dialog_id: Mutex<Option<DialogId>>,
 }
 
@@ -69,7 +68,7 @@ impl ActiveCall {
         event_sender: EventSender,
         track_id: TrackId,
         session_id: &String,
-        option: &StreamOption,
+        option: &CallOption,
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
@@ -77,7 +76,7 @@ impl ActiveCall {
 
         if let Some(_) = option.recorder {
             let recorder_file = state.get_recorder_file(session_id);
-            info!("recorder: created recording file: {}", recorder_file);
+            info!("created recording file: {}", recorder_file);
             media_stream_builder = media_stream_builder.recorder(recorder_file);
         }
 
@@ -116,37 +115,20 @@ impl ActiveCall {
             }
             None => {}
         }
+
         match option.asr {
-            Some(ref asr_option) => match asr_option.provider {
-                Some(TranscriptionType::TencentCloud) => {
-                    let event_sender = media_stream.get_event_sender();
-                    let asr_client =
-                        TencentCloudAsrClientBuilder::new(asr_option.clone(), event_sender)
-                            .with_track_id(track_id.clone())
-                            .with_cancellation_token(cancel_token.child_token())
-                            .build()
-                            .await?;
-                    let asr_processor = AsrProcessor::new(asr_client);
-                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
-                    info!("TencentCloud Asr processor added");
-                }
-                Some(TranscriptionType::VoiceApi) => {
-                    let event_sender = media_stream.get_event_sender();
-                    let asr_client =
-                        VoiceApiAsrClientBuilder::new(asr_option.clone(), event_sender)
-                            .with_track_id(track_id.clone())
-                            .with_cancellation_token(cancel_token.child_token())
-                            .build()
-                            .await?;
-                    let asr_processor = AsrProcessor::new(asr_client);
-                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
-                    info!("VoiceApi Asr processor added");
-                }
-                None => {}
-            },
+            Some(ref asr_option) => {
+                let asr_processor = AsrProcessor::create(
+                    track_id.clone(),
+                    cancel_token.child_token(),
+                    asr_option.clone(),
+                    media_stream.get_event_sender(),
+                )
+                .await?;
+                processors.push(Box::new(asr_processor) as Box<dyn Processor>);
+            }
             None => {}
         }
-
         for processor in processors {
             caller_track.append_processor(processor);
         }
@@ -163,7 +145,7 @@ impl ActiveCall {
                 info!("track setup complete answer: {}", answer);
                 event_sender
                     .send(SessionEvent::Answer {
-                        track_id: track_id.clone(),
+                        track_id,
                         timestamp: crate::get_timestamp(),
                         sdp,
                     })
@@ -184,7 +166,7 @@ impl ActiveCall {
         event_sender: EventSender,
         session_id: String,
         media_stream: MediaStream,
-        option: StreamOption,
+        option: CallOption,
         dialog_id: Option<DialogId>,
     ) -> Result<Self> {
         let active_call = ActiveCall {
@@ -212,7 +194,7 @@ impl ActiveCall {
                     SessionEvent::TrackEnd { track_id, .. } => {
                         if let Some(true) = auto_hangup.lock().await.take() {
                             info!(
-                                "call: auto hangup when track end track_id:{} session_id:{}",
+                                "auto hangup when track end track_id:{} session_id:{}",
                                 track_id, self.session_id
                             );
                             self.do_hangup(Some("autohangup".to_string()), Some(track_id))
@@ -299,7 +281,7 @@ impl ActiveCall {
             match tts_handle.try_send(play_command) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    error!("call: error sending tts command: {}", e);
+                    error!("error sending tts command: {}", e);
                     play_command = e.0;
                 }
             }
@@ -316,7 +298,7 @@ impl ActiveCall {
         ) {
             Ok(tts_track) => tts_track,
             Err(e) => {
-                error!("call: error creating tts track: {}", e);
+                error!("error creating tts track: {}", e);
                 return Err(e);
             }
         };
@@ -380,10 +362,10 @@ async fn sip_event_loop(
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
             DialogState::Trying(dialog_id) => {
-                info!("sip_call: dialog trying: {}", dialog_id);
+                info!("dialog trying: {}", dialog_id);
             }
             DialogState::Early(dialog_id, _) => {
-                info!("sip_call: dialog early: {}", dialog_id);
+                info!("dialog early: {}", dialog_id);
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -391,7 +373,7 @@ async fn sip_event_loop(
                 })?;
             }
             DialogState::Calling(dialog_id) => {
-                info!("sip_call: dialog calling: {}", dialog_id);
+                info!("dialog calling: {}", dialog_id);
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -399,10 +381,10 @@ async fn sip_event_loop(
                 })?;
             }
             DialogState::Confirmed(dialog_id) => {
-                info!("sip_call: dialog confirmed: {}", dialog_id);
+                info!("dialog confirmed: {}", dialog_id);
             }
             DialogState::Terminated(dialog_id, _) => {
-                info!("sip_call: dialog terminated: {}", dialog_id);
+                info!("dialog terminated: {}", dialog_id);
                 break;
             }
             _ => (),
@@ -419,12 +401,12 @@ async fn send_to_ws_loop(
         let data = match serde_json::to_string(&event) {
             Ok(data) => data,
             Err(e) => {
-                error!("call: error serializing event: {} {:?}", e, event);
+                error!("error serializing event: {} {:?}", e, event);
                 continue;
             }
         };
         if let Err(e) = ws_sender.send(data.into()).await {
-            error!("call: error sending event to WebSocket: {}", e);
+            error!("error sending event to WebSocket: {}", e);
         }
     }
     Ok(())
@@ -454,9 +436,9 @@ pub async fn handle_call(
             Some(Ok(Message::Text(text))) => {
                 let command = serde_json::from_str::<Command>(&text)?;
                 match command {
-                    Command::Invite { options } => options,
+                    Command::Invite { option: options } => options,
                     _ => {
-                        info!("call: the first message must be an invite {:?}", command);
+                        info!("the first message must be an invite {:?}", command);
                         return Err(anyhow::anyhow!("the first message must be an invite"));
                     }
                 }
@@ -466,7 +448,7 @@ pub async fn handle_call(
             }
         };
         option.check_default(); // check default
-        info!("call: prepare call option: {:?}", option);
+        info!("prepare call option: {:?}", option);
         let track_config = TrackConfig::default();
         let mut dialog_id = None;
         let caller_track: Box<dyn Track> = match call_type {
@@ -516,20 +498,20 @@ pub async fn handle_call(
 
     let (active_call, mut ws_receiver) = select! {
         _ = cancel_token_ref.cancelled() => {
-            info!("call: prepare call cancelled");
+            info!("prepare call cancelled");
             return Err(anyhow::anyhow!("Cancelled"));
         },
         r = prepare_call => {
             match r {
                 Ok((active_call, ws_receiver)) => (active_call, ws_receiver),
                 Err(e) => {
-                    error!("call: prepare call failed: {}", e);
+                    error!("prepare call failed: {}", e);
                     return Err(e);
                 }
             }
         }
         _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("call: prepare call send to ws");
+            info!("prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
         _ = async {
@@ -540,7 +522,7 @@ pub async fn handle_call(
                 Ok(())
             }
         } => {
-            info!("call: sip event loop");
+            info!("sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     };
@@ -553,7 +535,7 @@ pub async fn handle_call(
     };
 
     info!(
-        "call: new call: {} -> {:?}, {} active calls",
+        "new call: {} -> {:?}, {} active calls",
         active_call.session_id, active_call.call_type, active_calls_len
     );
 
@@ -563,7 +545,7 @@ pub async fn handle_call(
                 Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
                     Ok(command) => Some(command),
                     Err(e) => {
-                        error!("call: error deserializing command: {} {}", e, text);
+                        error!("error deserializing command: {} {}", e, text);
                         None
                     }
                 },
@@ -574,7 +556,7 @@ pub async fn handle_call(
                 Some(command) => match active_call.dispatch(command).await {
                     Ok(_) => (),
                     Err(e) => {
-                        error!("call: Error dispatching command: {}", e);
+                        error!("Error dispatching command: {}", e);
                     }
                 },
                 None => {}
@@ -583,16 +565,16 @@ pub async fn handle_call(
     };
     select! {
         _ = cancel_token_ref.cancelled() => {
-            info!("call: cancelled");
+            info!("cancelled");
         },
         _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("call: send_to_ws websocket disconnected");
+            info!("send_to_ws websocket disconnected");
         },
         _ = recv_from_ws => {
-            info!("call: recv_from_ws websocket disconnected");
+            info!("recv_from_ws websocket disconnected");
         },
         r = active_call_clone.serve() => {
-            info!("call: call loop disconnected {:?}", r);
+            info!("call loop disconnected {:?}", r);
         },
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
@@ -602,7 +584,7 @@ pub async fn handle_call(
                 Ok(())
             }
         } => {
-            info!("call: sip event loop");
+            info!("sip event loop");
             return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     }
@@ -614,14 +596,14 @@ pub async fn handle_call(
                 Dialog::ServerInvite(dialog) => dialog.bye().await,
             },
             None => {
-                error!("call: dialog not found");
+                error!("dialog not found");
                 return Err(anyhow::anyhow!("dialog not found"));
             }
         };
         match r {
             Ok(_) => (),
             Err(e) => {
-                error!("call: error closing dialog: {}", e);
+                error!("error closing dialog: {}", e);
             }
         }
     }

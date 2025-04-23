@@ -166,14 +166,14 @@ impl WebrtcTrack {
         let peer_connection_clone = peer_connection.clone();
         peer_connection.on_ice_candidate(Box::new(
             move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-                info!("webrtctrack: ICE candidate received: {:?}", candidate);
+                info!("ICE candidate received: {:?}", candidate);
                 Box::pin(async move {})
             },
         ));
         let cancel_token_clone = cancel_token.clone();
         peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                info!("webrtctrack: Peer connection state changed: {}", s);
+                info!("peer connection state changed: {}", s);
                 let cancel_token = cancel_token.clone();
                 let peer_connection_clone = peer_connection_clone.clone();
                 Box::pin(async move {
@@ -205,7 +205,7 @@ impl WebrtcTrack {
                     _ => 8000,  // PCMU, PCMA, TELEPHONE_EVENT
                 };
                 info!(
-                    "webrtctrack: on_track received: {} track_samplerate: {}",
+                    "on_track received: {} track_samplerate: {}",
                     track.codec().capability.mime_type,
                     track_samplerate,
                 );
@@ -214,7 +214,7 @@ impl WebrtcTrack {
                     loop {
                         select! {
                             _ = cancel_token_clone.cancelled() => {
-                                info!("webrtctrack: track cancelled");
+                                info!("track cancelled");
                                 break;
                             }
                             Ok((packet, _)) = track.read_rtp() => {
@@ -232,13 +232,13 @@ impl WebrtcTrack {
                                     ..Default::default()
                                 };
                                 if let Err(e) = processor_chain.process_frame(&frame) {
-                                    error!("webrtctrack: Failed to process frame: {}", e);
+                                    error!("Failed to process frame: {}", e);
                                     break;
                                 }
                                 match sender.send(frame) {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        error!("webrtctrack: Failed to send packet: {}", e);
+                                        error!("Failed to send packet: {}", e);
                                         break;
                                         }
                                     }
@@ -253,7 +253,7 @@ impl WebrtcTrack {
         let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
             Some(codec) => codec,
             None => {
-                return Err(anyhow::anyhow!("webrtctrack: No codec found"));
+                return Err(anyhow::anyhow!("No codec found"));
             }
         };
 
@@ -265,7 +265,7 @@ impl WebrtcTrack {
         self.config.codec = codec;
 
         info!(
-            "webrtctrack: set remote description codec:{}\noffer:\n{}",
+            "set remote description codec:{}\noffer:\n{}",
             codec.mime_type(),
             remote_desc.sdp
         );
@@ -277,19 +277,17 @@ impl WebrtcTrack {
         peer_connection.set_local_description(answer).await?;
         select! {
             _ = gather_complete.recv() => {
-                info!("webrtctrack: ICE candidate received");
+                info!("ICE candidate received");
             }
             _ = sleep(timeout.unwrap_or(HANDSHAKE_TIMEOUT)) => {
-                warn!("webrtctrack: wait candidate timeout");
+                warn!("wait candidate timeout");
             }
         }
 
         let answer = peer_connection
             .local_description()
             .await
-            .ok_or(anyhow::anyhow!(
-                "webrtctrack: Failed to get local description"
-            ))?;
+            .ok_or(anyhow::anyhow!("Failed to get local description"))?;
         Ok(answer)
     }
 }
@@ -373,8 +371,8 @@ impl Track for WebrtcTrack {
         match local_track.write_sample(&sample).await {
             Ok(_) => {}
             Err(e) => {
-                error!("webrtctrack: Failed to send sample: {}", e);
-                return Err(anyhow::anyhow!("webrtctrack: Failed to send sample: {}", e));
+                error!("failed to send sample: {}", e);
+                return Err(anyhow::anyhow!("Failed to send sample: {}", e));
             }
         }
         Ok(())

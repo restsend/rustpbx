@@ -17,6 +17,17 @@ pub enum SynthesisType {
     #[serde(rename = "other")]
     Other(String),
 }
+
+impl std::fmt::Display for SynthesisType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SynthesisType::TencentCloud => write!(f, "tencent"),
+            SynthesisType::VoiceApi => write!(f, "voiceapi"),
+            SynthesisType::Other(provider) => write!(f, "{}", provider),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
 #[derive(Debug, Clone, Deserialize, Serialize)]

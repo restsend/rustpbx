@@ -172,7 +172,7 @@ async fn stream_from_url(
 
     // Check if file is in cache and use_cache is enabled
     if use_cache && cache::is_cached(&cache_key).await? {
-        debug!("filetrack: Using cached audio for URL: {}", url);
+        debug!("using cached audio for URL: {}", url);
         let cached_data = cache::retrieve_from_cache(&cache_key).await?;
         return stream_from_memory(
             processor_chain,
@@ -187,13 +187,13 @@ async fn stream_from_url(
     }
 
     // Download the file
-    debug!("filetrack: Downloading audio from URL: {}", url);
+    debug!("downloading audio from URL: {}", url);
     let client = Client::new();
     let response = client.get(url).send().await?;
 
     if !response.status().is_success() {
         return Err(anyhow!(
-            "filetrack: Failed to download file, status code: {}",
+            "failed to download file, status code: {}",
             response.status()
         ));
     }
@@ -204,9 +204,9 @@ async fn stream_from_url(
     // Store in cache if enabled
     if use_cache {
         if let Err(e) = cache::store_in_cache(&cache_key, &data).await {
-            warn!("filetrack: Failed to store audio in cache: {}", e);
+            warn!("failed to store audio in cache: {}", e);
         } else {
-            debug!("filetrack: Stored audio in cache with key: {}", cache_key);
+            debug!("stored audio in cache with key: {}", cache_key);
         }
     }
 
@@ -382,7 +382,7 @@ async fn process_wav_reader<R: std::io::Read + Send>(
     let packet_duration_ms = packet_duration as u64;
 
     info!(
-        "Streaming WAV with {} samples, packet_duration: {} target_sample_rate: {} spec.sample_rate: {} max_pcm_chunk_size: {}",
+        "streaming WAV with {} samples, packet_duration: {} target_sample_rate: {} spec.sample_rate: {} max_pcm_chunk_size: {}",
         all_samples.len(),
         packet_duration_ms,
         target_sample_rate,
@@ -405,28 +405,25 @@ async fn process_wav_reader<R: std::io::Read + Send>(
             match processor_chain.process_frame(&packet) {
                 Ok(_) => {}
                 Err(e) => {
-                    warn!("filetrack: Failed to process audio packet: {}", e);
+                    warn!("failed to process audio packet: {}", e);
                 }
             }
             if let Err(e) = packet_sender.send(packet) {
-                warn!("filetrack: Failed to send audio packet: {}", e);
+                warn!("failed to send audio packet: {}", e);
                 break;
             }
             ticker.tick().await;
         }
-        info!(
-            "filetrack: stream loop finished in {:?}",
-            start_time.elapsed()
-        );
+        info!("stream loop finished in {:?}", start_time.elapsed());
     };
 
     select! {
         _ = token.cancelled() => {
-            info!("filetrack: filetrack: stream cancelled");
+            info!("stream cancelled");
             return Ok(());
         }
         _ = stream_loop => {
-            info!("filetrack: stream loop finished");
+            info!("stream loop finished");
         }
     }
     Ok(())

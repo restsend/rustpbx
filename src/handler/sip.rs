@@ -1,5 +1,5 @@
 use super::call::CallParams;
-use super::StreamOption;
+use super::CallOption;
 use crate::app::AppState;
 use crate::handler::call::{handle_call, ActiveCallType};
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
@@ -34,20 +34,17 @@ pub async fn sip_handler(
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
     ws.on_upgrade(|socket| async move {
-        info!("sip_call: {session_id}");
+        info!("{session_id}");
         let start_time = Instant::now();
         match handle_call(ActiveCallType::Sip, session_id.clone(), socket, state).await {
             Ok(_) => (),
             Err(e) => {
-                error!("sip_call: error handling SIP connection: {}", e);
+                error!("error handling SIP connection: {}", e);
             }
         }
         let mut active_calls = state_clone.active_calls.lock().await;
         active_calls.remove(&session_id);
-        info!(
-            "sip_call: hangup, duration {}s",
-            start_time.elapsed().as_secs_f32()
-        );
+        info!("hangup, duration {}s", start_time.elapsed().as_secs_f32());
     })
 }
 
@@ -56,7 +53,7 @@ pub(super) async fn new_rtp_track_with_sip(
     token: CancellationToken,
     track_id: TrackId,
     track_config: TrackConfig,
-    option: &StreamOption,
+    option: &CallOption,
     dlg_state_sender: DialogStateSender,
 ) -> Result<(DialogId, RtpTrack)> {
     let ua = state.useragent.clone();
@@ -97,7 +94,7 @@ pub(super) async fn new_rtp_track_with_sip(
         }),
     };
     info!(
-        "sip_call: invite {} -> {} offer: {:?}",
+        "invite {} -> {} offer: {:?}",
         invite_option.caller, invite_option.callee, offer
     );
     match ua.invite(invite_option, dlg_state_sender).await {
