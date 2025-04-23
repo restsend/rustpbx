@@ -11,7 +11,6 @@ use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
 };
-use tokio_util::sync::CancellationToken;
 
 // A mock synthesis client that returns a predefined audio sample
 struct MockSynthesisClient;

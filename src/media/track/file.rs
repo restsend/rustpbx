@@ -452,7 +452,7 @@ mod tests {
         let file_path = "fixtures/sample.wav".to_string();
         // Create a FileTrack instance
         let track_id = "test_track".to_string();
-        let mut file_track = FileTrack::new(track_id.clone())
+        let file_track = FileTrack::new(track_id.clone())
             .with_path(file_path.clone())
             .with_sample_rate(16000)
             .with_cache_enabled(true);
@@ -461,9 +461,6 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel(100);
         let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
 
-        // Start the track
-        let token = CancellationToken::new();
-        let token_clone = token.clone();
         file_track.start(event_tx, packet_tx).await?;
 
         // Receive some packets to verify it's working

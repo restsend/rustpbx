@@ -469,7 +469,7 @@ function mainApp() {
                     const decoder = new TextDecoder();
 
                     // Function to process each chunk
-                    const processStream = ({ done, value }) => {
+                    const processStream = ({ done, value }) => {　
                         if (done) {
                             let duration = new Date() - start;
                             // When stream is complete, send any remaining text in the buffer

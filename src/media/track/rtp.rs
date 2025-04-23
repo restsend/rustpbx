@@ -2,6 +2,7 @@ use super::track_codec::TrackCodec;
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
+        negotiate::select_peer_media,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackPacketSender},
     },
@@ -10,10 +11,11 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
+use rsip::HostWithPort;
 use rsipstack::transport::{udp::UdpConnection, SipAddr};
 use rtp_rs::{RtpPacketBuilder, RtpReader, Seq};
-use sdp_rs::lines::media::MediaType;
 use std::{
+    io::Cursor,
     net::SocketAddr,
     sync::{
         atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering},
@@ -24,6 +26,7 @@ use std::{
 use tokio::{select, time::interval_at, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use webrtc::sdp::SessionDescription;
 
 const RTP_MTU: usize = 1500; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
@@ -269,12 +272,14 @@ impl RtpTrackBuilder {
             rtp_socket = Some(rtp_conn);
             rtcp_socket = Some(rtcp_conn);
         }
-
+        let cancel_token = self
+            .cancel_token
+            .unwrap_or_else(|| CancellationToken::new());
         let processor_chain = ProcessorChain::new(self.config.sample_rate);
         let track = RtpTrack {
             track_id: self.track_id,
             config: self.config,
-            cancel_token: self.cancel_token.unwrap(),
+            cancel_token,
             ssrc: rand::random::<u32>(),
             remote_addr: Mutex::new(None),
             remote_rtcp_addr: Mutex::new(None),
@@ -294,54 +299,52 @@ impl RtpTrackBuilder {
 
 impl RtpTrack {
     pub fn set_remote_description(&self, answer: &str) -> Result<()> {
+        let mut reader = Cursor::new(answer);
+        let sdp = SessionDescription::unmarshal(&mut reader)?;
+        let peer_media = match select_peer_media(&sdp, "audio") {
+            Some(peer_media) => peer_media,
+            None => return Err(anyhow::anyhow!("rtptrack: no audio media in answer SDP")),
+        };
+
+        if peer_media.codecs.is_empty() {
+            return Err(anyhow::anyhow!("rtptrack: no audio codecs in answer SDP"));
+        }
+
         self.remote_description
             .lock()
             .unwrap()
             .replace(answer.to_string());
 
-        let answer = match sdp_rs::SessionDescription::try_from(answer) {
-            Ok(s) => s,
-            Err(e) => {
-                info!("rtptrack: failed to parse answer SDP: {:?} {}", e, answer);
-                return Err(anyhow::anyhow!("Failed to parse SDP"));
-            }
-        };
-
-        let peer_addr = match answer.connection {
-            Some(c) => c.connection_address.base,
-            None => {
-                info!("rtptrack: no connection address in offer SDP");
-                return Err(anyhow::anyhow!("no connection address in offer SDP"));
-            }
-        };
-        let mut peer_port = 0;
-        let mut payload_type = 0;
-        for media in answer.media_descriptions.iter() {
-            if matches!(media.media.media, MediaType::Audio) {
-                peer_port = media.media.port;
-                payload_type = media
-                    .media
-                    .fmt
-                    .split_ascii_whitespace()
-                    .next()
-                    .unwrap_or("0")
-                    .parse::<u8>()?;
-                break;
-            }
-        }
-
-        let peer_addr = format!("{}:{}", peer_addr, peer_port);
-        self.payload_type.store(payload_type, Ordering::Relaxed);
-        info!(
-            "rtptrack: set remote description peer_addr: {} payload_type: {}",
-            peer_addr, payload_type
-        );
-
         let remote_addr = SipAddr {
-            addr: peer_addr.try_into().expect("peer_addr"),
+            addr: HostWithPort {
+                host: peer_media.rtp_addr.parse()?,
+                port: Some(peer_media.rtp_port.into()),
+            },
             r#type: Some(rsip::transport::Transport::Udp),
         };
+        let remote_rtcp_addr = SipAddr {
+            addr: HostWithPort {
+                host: peer_media.rtcp_addr.parse()?,
+                port: Some(peer_media.rtcp_port.into()),
+            },
+            r#type: Some(rsip::transport::Transport::Udp),
+        };
+
+        info!(
+            "rtptrack: set remote description peer_addr: {} payload_type: {}",
+            remote_addr,
+            peer_media.codecs[0].payload_type()
+        );
+
+        self.payload_type
+            .store(peer_media.codecs[0].payload_type(), Ordering::Relaxed);
+
         self.remote_addr.lock().unwrap().replace(remote_addr);
+        self.remote_rtcp_addr
+            .lock()
+            .unwrap()
+            .replace(remote_rtcp_addr);
+
         Ok(())
     }
 
@@ -359,11 +362,12 @@ a=rtpmap:9 G722/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:101 telephone-event/8000\r\n\
-a=ssrc:{ssrc}\r\n\
+a=ssrc:{}\r\n\
 a=sendrecv\r\n",
             socketaddr.ip(),
             socketaddr.ip(),
             socketaddr.port(),
+            ssrc,
         );
         Ok(sdp)
     }
@@ -446,28 +450,33 @@ a=sendrecv\r\n",
                 .sequence(Seq::from(seq))
                 .timestamp(ts)
                 .payload(&payload)
+                .marked(i == 0) // Set marker bit for the first packet
                 .build();
 
-            if let Ok(rtp_data) = result {
-                match socket.send_raw(&rtp_data, &remote_addr).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("rtptrack: Failed to send DTMF RTP packet: {}", e);
+            match result {
+                Ok(ref rtp_data) => {
+                    match socket.send_raw(rtp_data, &remote_addr).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("rtptrack: Failed to send DTMF RTP packet: {}", e);
+                        }
+                    }
+
+                    // Update counters for RTCP
+                    self.state.packet_count.fetch_add(1, Ordering::Relaxed);
+                    self.state
+                        .octet_count
+                        .fetch_add(payload.len() as u32, Ordering::Relaxed);
+
+                    // Sleep for packet time if not the last packet
+                    if !is_end {
+                        tokio::time::sleep(self.config.ptime).await;
                     }
                 }
-
-                // Update counters for RTCP
-                self.state.packet_count.fetch_add(1, Ordering::Relaxed);
-                self.state
-                    .octet_count
-                    .fetch_add(payload.len() as u32, Ordering::Relaxed);
-
-                // Sleep for packet time if not the last packet
-                if !is_end {
-                    tokio::time::sleep(self.config.ptime).await;
+                Err(e) => {
+                    error!("rtptrack: Failed to create DTMF RTP packet: {:?}", e);
+                    continue;
                 }
-            } else {
-                return Err(anyhow::anyhow!("Failed to build DTMF RTP packet"));
             }
         }
 
@@ -500,6 +509,7 @@ a=sendrecv\r\n",
             if n <= 0 {
                 continue;
             }
+
             let reader = match RtpReader::new(&buf[0..n]) {
                 Ok(reader) => reader,
                 Err(e) => {
@@ -572,6 +582,13 @@ a=sendrecv\r\n",
             }
             interval.tick().await;
         }
+    }
+
+    // Add a method for webrtc compatibility
+    // This allows users to pass SDP strings generated by the webrtc crate
+    pub fn set_remote_description_with_webrtc(&self, webrtc_sdp: &str) -> Result<()> {
+        // For webrtc compatibility, we directly use the string representation
+        self.set_remote_description(webrtc_sdp)
     }
 }
 
@@ -683,7 +700,7 @@ impl Track for RtpTrack {
             .last_timestamp_update
             .store(now, Ordering::Relaxed);
 
-        // Create RTP packet using rtp-rs
+        // Create RTP packet
         let result = RtpPacketBuilder::new()
             .payload_type(self.payload_type.load(Ordering::Relaxed))
             .ssrc(self.ssrc)
@@ -692,22 +709,58 @@ impl Track for RtpTrack {
             .payload(&payload)
             .build();
 
-        if let Ok(rtp_data) = result {
-            match socket.send_raw(&rtp_data, &remote_addr).await {
-                Ok(_) => {
-                    // Update packet and octet counts for RTCP
-                    self.state.packet_count.fetch_add(1, Ordering::Relaxed);
-                    self.state
-                        .octet_count
-                        .fetch_add(payload.len() as u32, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    warn!("rtptrack: Failed to send RTP packet: {}", e);
+        match result {
+            Ok(ref rtp_data) => {
+                match socket.send_raw(rtp_data, &remote_addr).await {
+                    Ok(_) => {
+                        // Update packet and octet counts for RTCP
+                        self.state.packet_count.fetch_add(1, Ordering::Relaxed);
+                        self.state
+                            .octet_count
+                            .fetch_add(payload.len() as u32, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        warn!("rtptrack: Failed to send RTP packet: {}", e);
+                    }
                 }
             }
-        } else {
-            return Err(anyhow::anyhow!("Failed to build RTP packet"));
+            Err(e) => {
+                error!("rtptrack: Failed to build RTP packet: {:?}", e);
+                return Err(anyhow::anyhow!("Failed to build RTP packet"));
+            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_parse_pjsip_sdp() {
+        let sdk = r#"v=0
+o=- 3954304612 3954304613 IN IP4 192.168.1.202
+s=pjmedia
+b=AS:117
+t=0 0
+a=X-nat:3
+m=audio 4002 RTP/AVP 9 101
+c=IN IP4 192.168.1.202
+b=TIAS:96000
+a=rtcp:4003 IN IP4 192.168.1.202
+a=sendrecv
+a=rtpmap:9 G722/8000
+a=ssrc:1089147397 cname:61753255553b9c6f
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16"#;
+        let rtp_track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .build()
+            .await
+            .expect("Failed to build rtp track");
+        rtp_track
+            .set_remote_description(sdk)
+            .expect("Failed to set remote description");
+        assert_eq!(rtp_track.payload_type.load(Ordering::Relaxed), 9);
     }
 }

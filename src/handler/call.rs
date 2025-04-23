@@ -15,10 +15,7 @@ use crate::{
         },
         vad::VadProcessor,
     },
-    synthesis::{
-        create_synthesis_client, SynthesisOption, SynthesisType, TencentCloudTtsClient,
-        VoiceApiTtsClient,
-    },
+    synthesis::{SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient},
     transcription::{TencentCloudAsrClientBuilder, TranscriptionType, VoiceApiAsrClientBuilder},
     TrackId,
 };

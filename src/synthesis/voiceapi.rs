@@ -1,4 +1,4 @@
-use super::{SynthesisClient, SynthesisOption, SynthesisType};
+use super::{SynthesisClient, SynthesisOption};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
