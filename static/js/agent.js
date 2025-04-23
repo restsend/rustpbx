@@ -469,7 +469,7 @@ function mainApp() {
                     const decoder = new TextDecoder();
 
                     // Function to process each chunk
-                    const processStream = ({ done, value }) => {　
+                    const processStream = ({ done, value }) => {
                         if (done) {
                             let duration = new Date() - start;
                             // When stream is complete, send any remaining text in the buffer
@@ -708,7 +708,7 @@ function mainApp() {
 
                 const invite = {
                     command: 'invite',
-                    options: {
+                    option: {
                         asr: {
                             provider: this.config.asr.provider
                         },
@@ -725,15 +725,15 @@ function mainApp() {
                 // Add different parameters based on call type
                 if (this.config.callType === 'webrtc') {
                     // For WebRTC calls, add the offer SDP
-                    invite.options.offer = this.peerConnection.localDescription.sdp;
+                    invite.option.offer = this.peerConnection.localDescription.sdp;
                 } else if (this.config.callType === 'sip') {
                     // For SIP calls, add the caller and callee information
                     invite.callType = 'sip';
-                    invite.options.caller = this.config.sip.caller;
-                    invite.options.callee = this.config.sip.callee;
+                    invite.option.caller = this.config.sip.caller;
+                    invite.option.callee = this.config.sip.callee;
 
                     // Validate SIP parameters
-                    if (!invite.options.caller || !invite.options.callee) {
+                    if (!invite.option.caller || !invite.option.callee) {
                         this.addLogEntry('error', 'SIP call requires both caller and callee to be specified');
                         return;
                     }
