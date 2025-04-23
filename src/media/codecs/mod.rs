@@ -5,8 +5,7 @@ pub mod pcmu;
 pub mod resample;
 #[cfg(test)]
 mod tests;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CodecType {
     PCMU,
     PCMA,
@@ -78,6 +77,32 @@ impl CodecType {
             CodecType::PCMU => 8000,
             CodecType::PCMA => 8000,
             CodecType::G722 => 16000,
+        }
+    }
+}
+
+// impl FromStr for CodecType {
+//     type Err = anyhow::Error;
+
+//     fn from_str(s: &str) -> Result<Self, Self::Err> {
+//         match s {
+//             "0" => Ok(CodecType::PCMU),
+//             "8" => Ok(CodecType::PCMA),
+//             "9" => Ok(CodecType::G722),
+//             _ => Err(anyhow::anyhow!("Invalid codec type: {}", s)),
+//         }
+//     }
+// }
+
+impl TryFrom<&String> for CodecType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "0" => Ok(CodecType::PCMU),
+            "8" => Ok(CodecType::PCMA),
+            "9" => Ok(CodecType::G722),
+            _ => Err(anyhow::anyhow!("Invalid codec type: {}", value)),
         }
     }
 }

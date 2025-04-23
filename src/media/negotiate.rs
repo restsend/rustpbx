@@ -1,5 +1,13 @@
-use super::codecs;
+use super::codecs::{self, CodecType};
 use webrtc::sdp::SessionDescription;
+
+pub struct PeerMedia {
+    pub rtp_addr: String,
+    pub rtp_port: u16,
+    pub rtcp_addr: String,
+    pub rtcp_port: u16,
+    pub codecs: Vec<CodecType>,
+}
 
 pub fn strip_ipv6_candidates(sdp: &str) -> String {
     sdp.lines()
@@ -10,20 +18,104 @@ pub fn strip_ipv6_candidates(sdp: &str) -> String {
 }
 
 pub fn prefer_audio_codec(sdp: &SessionDescription) -> Option<codecs::CodecType> {
-    let mut formats = Vec::new();
+    match select_peer_media(sdp, "audio") {
+        Some(mut peer_media) => {
+            peer_media.codecs.sort_by(|a, b| a.cmp(b).reverse());
+            peer_media.codecs.first().cloned()
+        }
+        None => None,
+    }
+}
+
+pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<PeerMedia> {
+    let mut peer_media = PeerMedia {
+        rtp_addr: String::new(),
+        rtcp_addr: String::new(),
+        rtp_port: 0,
+        rtcp_port: 0,
+        codecs: Vec::new(),
+    };
+
     for media in sdp.media_descriptions.iter() {
-        if media.media_name.media == "audio" {
-            formats.extend(media.media_name.formats.iter());
+        if media.media_name.media == media_type {
+            media.media_name.formats.iter().for_each(|format| {
+                match CodecType::try_from(format) {
+                    Ok(codec) => peer_media.codecs.push(codec),
+                    Err(_) => return,
+                };
+            });
+            peer_media.rtp_port = media.media_name.port.value as u16;
+            peer_media.rtcp_port = peer_media.rtp_port + 1;
+
+            match media.connection_information {
+                Some(ref connection_information) => {
+                    connection_information.address.as_ref().map(|address| {
+                        peer_media.rtp_addr = address.address.clone();
+                        peer_media.rtcp_addr = address.address.clone();
+                    });
+                }
+                None => {
+                    continue;
+                }
+            }
+            for attribute in media.attributes.iter() {
+                if attribute.key == "rtcp" {
+                    attribute.value.as_ref().map(|v| {
+                        // Parse the RTCP port from the attribute value
+                        // Format is typically "port [IN IP4 address]"
+                        let parts: Vec<&str> = v.split_whitespace().collect();
+                        if !parts.is_empty() {
+                            if let Ok(port) = parts[0].parse::<u16>() {
+                                peer_media.rtcp_port = port;
+                            }
+                            if parts.len() >= 4 {
+                                peer_media.rtcp_addr = parts[3].to_string();
+                            }
+                        }
+                    });
+                }
+            }
         }
     }
-    formats.sort_by(|a, b| a.cmp(b).reverse());
-    for format in formats.iter() {
-        match format.as_str() {
-            "9" => return Some(codecs::CodecType::G722),
-            "0" => return Some(codecs::CodecType::PCMU),
-            "8" => return Some(codecs::CodecType::PCMA),
-            _ => {}
-        }
+    Some(peer_media)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::media::{
+        codecs::CodecType,
+        negotiate::{prefer_audio_codec, select_peer_media},
+    };
+    use std::io::Cursor;
+    use webrtc::sdp::SessionDescription;
+
+    #[test]
+    fn test_parse_pjsip_sdp() {
+        let offer = r#"v=0
+o=- 3954304612 3954304613 IN IP4 192.168.1.202
+s=pjmedia
+b=AS:117
+t=0 0
+a=X-nat:3
+m=audio 4002 RTP/AVP 0 9 101
+c=IN IP4 192.168.1.202
+b=TIAS:96000
+a=rtcp:5003 IN IP4 192.168.1.203
+a=sendrecv
+a=rtpmap:9 G722/8000
+a=ssrc:1089147397 cname:61753255553b9c6f
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16"#;
+        let mut reader = Cursor::new(offer.as_bytes());
+        let offer_sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
+        let peer_media = select_peer_media(&offer_sdp, "audio").unwrap();
+        assert_eq!(peer_media.rtp_port, 4002);
+        assert_eq!(peer_media.rtcp_port, 5003);
+        assert_eq!(peer_media.rtcp_addr, "192.168.1.203");
+        assert_eq!(peer_media.rtp_addr, "192.168.1.202");
+        assert_eq!(peer_media.codecs, vec![CodecType::PCMU, CodecType::G722]);
+
+        let codec = prefer_audio_codec(&offer_sdp);
+        assert_eq!(codec, Some(CodecType::G722));
     }
-    return None;
 }

@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 pub struct TestTrack {
     id: TrackId,

@@ -6,7 +6,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 pub type TrackPacketSender = mpsc::UnboundedSender<AudioFrame>;
 pub type TrackPacketReceiver = mpsc::UnboundedReceiver<AudioFrame>;
