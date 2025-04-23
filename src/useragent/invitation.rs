@@ -30,8 +30,8 @@ impl UserAgent {
         let dialog = match self.dialogs.lock().await.remove(&dialog_id) {
             Some(dialog) => dialog,
             None => {
-                info!("useragent: dialog not found");
-                return Err(anyhow!("useragent: dialog not found"));
+                info!("dialog not found");
+                return Err(anyhow!("dialog not found"));
             }
         };
         match dialog {
@@ -39,13 +39,13 @@ impl UserAgent {
                 dialog
                     .bye()
                     .await
-                    .map_err(|e| anyhow!("useragent: failed to bye: {}", e))?;
+                    .map_err(|e| anyhow!("failed to bye: {}", e))?;
             }
             Dialog::ServerInvite(dialog) => {
                 dialog
                     .bye()
                     .await
-                    .map_err(|e| anyhow!("useragent: failed to bye: {}", e))?;
+                    .map_err(|e| anyhow!("failed to bye: {}", e))?;
             }
         }
         Ok(())
@@ -60,27 +60,27 @@ impl UserAgent {
             .dialog_layer
             .do_invite(invite_option, state_sender)
             .await
-            .map_err(|e| anyhow!("useragent: invite failed: {}", e))?;
+            .map_err(|e| anyhow!("invite failed: {}", e))?;
 
         let offer = match resp {
             Some(resp) => {
-                info!("useragent: invite response: {}", resp);
+                info!("invite response: {}", resp);
                 match resp.status_code.kind() {
                     rsip::StatusCodeKind::Successful => {
                         let offer = resp.body.clone();
                         Some(offer)
                     }
-                    _ => return Err(anyhow!("useragent: failed to invite: {}", resp.status_code)),
+                    _ => return Err(anyhow!("failed to invite: {}", resp.status_code)),
                 }
             }
-            None => return Err(anyhow!("useragent: no response received")),
+            None => return Err(anyhow!("no response received")),
         };
 
         let dialog_id = dialog.id();
         match self.handle_client_invite(dialog).await {
             Ok(_) => Ok((dialog_id, offer)),
             Err(e) => {
-                info!("useragent: error handling client invite: {:?}", e);
+                info!("error handling client invite: {:?}", e);
                 Err(e)
             }
         }

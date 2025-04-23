@@ -53,16 +53,16 @@ impl UserAgent {
         tokio::spawn(async move {
             select! {
                 _ = handle.register_loop() => {
-                    info!("useragent: registration loop for {} ended", user);
+                    info!("registration loop for {} ended", user);
                 }
                 _ = token.cancelled() => {
-                    info!("useragent: registration loop for {} cancelled", user);
+                    info!("registration loop for {} cancelled", user);
                 }
             }
             match handle.unregister().await {
                 Ok(_) => {}
                 Err(e) => {
-                    warn!("useragent: failed to unregister user: {}", e);
+                    warn!("failed to unregister user: {}", e);
                 }
             }
         });
@@ -71,7 +71,7 @@ impl UserAgent {
 
     pub async fn unregister(&self, user: String) -> Result<()> {
         if let Some(r) = self.registration_handles.lock().await.remove(&user) {
-            info!("useragent: unregistering user: {}", user);
+            info!("unregistering user: {}", user);
             r.inner.cancel_token.cancel();
         }
         Ok(())
@@ -97,7 +97,7 @@ impl RegistrationHandle {
                 .register(&self.inner.options.sip_server)
                 .await
                 .map_err(|e| anyhow::anyhow!("Registration failed: {}", e))?;
-            info!("useragent: registration response: {}", resp);
+            info!("registration response: {}", resp);
 
             match resp.status_code().kind() {
                 StatusCodeKind::Successful => {
@@ -115,7 +115,7 @@ impl RegistrationHandle {
 
     async fn unregister(&self) -> Result<()> {
         info!(
-            "useragent: unregistering user: {} not implemented",
+            "unregistering user: {} not implemented",
             self.inner.user
         );
         Ok(())

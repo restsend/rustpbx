@@ -186,7 +186,7 @@ impl Track for TtsTrack {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
                 }
-                let cache_key = format!("tts:{:?}{:?}{}", client.provider(), speaker, text);
+                let cache_key = format!("tts:{}{:?}{}", client.provider(), speaker, text);
                 let cache_key = cache::generate_cache_key(
                     &cache_key,
                     sample_rate,
@@ -198,13 +198,13 @@ impl Track for TtsTrack {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
-                                info!("tts: Using cached audio for {}", cache_key);
+                                info!(" using cached audio for {}", cache_key);
                                 buffer_clone.lock().await.extend(bytes_to_samples(&audio));
                                 synthesize_done.store(true, Ordering::Relaxed);
                                 continue;
                             }
                             Err(e) => {
-                                warn!("tts: Error retrieving cached audio: {}", e);
+                                warn!(" error retrieving cached audio: {}", e);
                             }
                         },
                         _ => {}
@@ -261,13 +261,14 @@ impl Track for TtsTrack {
                                         .extend(bytes_to_samples(&processed_chunk));
                                 }
                                 Err(e) => {
-                                    warn!("Error in audio stream chunk: {:?}", e);
+                                    warn!(" Error in audio stream chunk: {:?}", e);
                                     event_sender
                                         .send(SessionEvent::Error {
                                             timestamp: crate::get_timestamp(),
                                             track_id: track_id.clone(),
-                                            sender: "tts.tencent".to_string(),
+                                            sender: format!("tts.{}", client.provider()),
                                             error: e.to_string(),
+                                            code: None,
                                         })
                                         .ok();
                                 }
@@ -278,7 +279,7 @@ impl Track for TtsTrack {
                         event_sender
                             .send(SessionEvent::Metrics {
                                 timestamp: crate::get_timestamp(),
-                                key: "completed.tts.tencent".to_string(),
+                                key: format!("completed.tts.{}", client.provider()),
                                 data: serde_json::json!({
                                         "speaker": speaker,
                                         "playId": play_id,
@@ -289,10 +290,11 @@ impl Track for TtsTrack {
                             .ok();
 
                         info!(
-                            "tts: synthesize audio {} bytes -> {}ms {}",
+                            "synthesize audio {} bytes -> {}ms {} with {}",
                             total_audio_len,
                             start_time.elapsed().as_millis(),
-                            text
+                            text,
+                            client.provider()
                         );
 
                         // Cache the complete audio if caching is enabled
@@ -306,13 +308,14 @@ impl Track for TtsTrack {
                         }
                     }
                     Err(e) => {
-                        warn!("Error synthesizing text: {}", e);
+                        warn!("error synthesizing text: {}", e);
                         event_sender
                             .send(SessionEvent::Error {
                                 timestamp: crate::get_timestamp(),
                                 track_id: track_id.clone(),
-                                sender: "tts.tencent".to_string(),
+                                sender: format!("tts.{}", client.provider()),
                                 error: e.to_string(),
+                                code: None,
                             })
                             .ok();
                         continue;
@@ -326,7 +329,7 @@ impl Track for TtsTrack {
         let packet_duration = 1000.0 / sample_rate as f64 * max_pcm_chunk_size as f64;
         let packet_duration_ms = packet_duration as u32;
         info!(
-            "tts_track: track started {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
+            "track started  {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
             track_id, sample_rate, max_pcm_chunk_size, packet_duration_ms
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
@@ -356,17 +359,14 @@ impl Track for TtsTrack {
                     };
                     // Process the frame with processor chain
                     if let Err(e) = processor_chain.process_frame(&packet) {
-                        warn!("tts_track: Error processing frame: {}", e);
+                        warn!("error processing frame: {}", e);
                     }
                     // Send the packet
                     packet_sender.send(packet).ok();
                 }
                 ptimer.tick().await;
             }
-            info!(
-                "tts_track: emit done {}ms",
-                start_time.elapsed().as_millis()
-            );
+            info!("emit done {} ms", start_time.elapsed().as_millis());
         };
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
@@ -374,10 +374,10 @@ impl Track for TtsTrack {
         tokio::spawn(async move {
             select! {
                 _ = command_loop => {
-                    info!("tts_track: command loop done");
+                    info!("command loop done");
                 }
                 _ = emit_loop => {
-                    info!("tts_track: emit loop done");
+                    info!("emit loop done");
                 }
                 _ = token.cancelled() => {
                 }

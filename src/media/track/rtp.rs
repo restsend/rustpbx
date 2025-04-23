@@ -217,17 +217,17 @@ impl RtpTrackBuilder {
                 };
                 break;
             } else {
-                info!("useragent: failed to bind RTP socket on port: {}", port);
+                info!("failed to bind RTP socket on port: {}", port);
             }
         }
 
         let mut rtp_conn = match rtp_conn {
             Some(c) => c,
-            None => return Err(anyhow::anyhow!("rtptrack: failed to bind RTP socket")),
+            None => return Err(anyhow::anyhow!("failed to bind RTP socket")),
         };
         let mut rtcp_conn = match rtcp_conn {
             Some(c) => c,
-            None => return Err(anyhow::anyhow!("rtptrack: failed to bind RTCP socket")),
+            None => return Err(anyhow::anyhow!("failed to bind RTCP socket")),
         };
 
         if self.external_addr.is_none() && self.stun_server.is_some() {
@@ -241,7 +241,7 @@ impl RtpTrackBuilder {
                 {
                     Ok(_) => {}
                     Err(e) => info!(
-                        "rtptrack: failed to get media external rtp addr, stunserver {} : {:?}",
+                        "failed to get media external rtp addr, stunserver {} : {:?}",
                         server, e
                     ),
                 }
@@ -254,7 +254,7 @@ impl RtpTrackBuilder {
                 {
                     Ok(_) => {}
                     Err(e) => info!(
-                        "rtptrack: failed to get media external rtcp addr, stunserver {} : {:?}",
+                        "failed to get media external rtcp addr, stunserver {} : {:?}",
                         server, e
                     ),
                 }
@@ -303,11 +303,11 @@ impl RtpTrack {
         let sdp = SessionDescription::unmarshal(&mut reader)?;
         let peer_media = match select_peer_media(&sdp, "audio") {
             Some(peer_media) => peer_media,
-            None => return Err(anyhow::anyhow!("rtptrack: no audio media in answer SDP")),
+            None => return Err(anyhow::anyhow!("no audio media in answer SDP")),
         };
 
         if peer_media.codecs.is_empty() {
-            return Err(anyhow::anyhow!("rtptrack: no audio codecs in answer SDP"));
+            return Err(anyhow::anyhow!("no audio codecs in answer SDP"));
         }
 
         self.remote_description
@@ -331,7 +331,7 @@ impl RtpTrack {
         };
 
         info!(
-            "rtptrack: set remote description peer_addr: {} payload_type: {}",
+            "set remote description peer_addr: {} payload_type: {}",
             remote_addr,
             peer_media.codecs[0].payload_type()
         );
@@ -377,7 +377,7 @@ a=sendrecv\r\n",
         let socket = &self.rtp_socket;
         let remote_addr = match self.remote_addr.lock().unwrap().as_ref() {
             Some(addr) => addr.clone(),
-            None => return Err(anyhow::anyhow!("rtptrack: Remote address not set")),
+            None => return Err(anyhow::anyhow!("Remote address not set")),
         };
         // Map DTMF digit to event code
         let event_code = match digit {
@@ -458,7 +458,7 @@ a=sendrecv\r\n",
                     match socket.send_raw(rtp_data, &remote_addr).await {
                         Ok(_) => {}
                         Err(e) => {
-                            error!("rtptrack: Failed to send DTMF RTP packet: {}", e);
+                            error!("Failed to send DTMF RTP packet: {}", e);
                         }
                     }
 
@@ -474,7 +474,7 @@ a=sendrecv\r\n",
                     }
                 }
                 Err(e) => {
-                    error!("rtptrack: Failed to create DTMF RTP packet: {:?}", e);
+                    error!("Failed to create DTMF RTP packet: {:?}", e);
                     continue;
                 }
             }
@@ -499,11 +499,8 @@ a=sendrecv\r\n",
             let (n, _) = match rtp_socket.recv_raw(&mut buf).await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("rtptrack: Error receiving RTP packet: {}", e);
-                    return Err(anyhow::anyhow!(
-                        "rtptrack: Error receiving RTP packet: {}",
-                        e
-                    ));
+                    warn!("Error receiving RTP packet: {}", e);
+                    return Err(anyhow::anyhow!("Error receiving RTP packet: {}", e));
                 }
             };
             if n <= 0 {
@@ -513,7 +510,7 @@ a=sendrecv\r\n",
             let reader = match RtpReader::new(&buf[0..n]) {
                 Ok(reader) => reader,
                 Err(e) => {
-                    debug!("rtptrack: Error creating RTP reader: {:?}", e);
+                    debug!("Error creating RTP reader: {:?}", e);
                     continue;
                 }
             };
@@ -535,13 +532,13 @@ a=sendrecv\r\n",
             };
 
             if let Err(e) = processor_chain.process_frame(&frame) {
-                error!("webrtctrack: Failed to process frame: {}", e);
+                error!("Failed to process frame: {}", e);
                 break;
             }
             match packet_sender.send(frame) {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("rtptrack: Error sending audio frame: {}", e);
+                    error!("Error sending audio frame: {}", e);
                     break;
                 }
             }
@@ -573,9 +570,9 @@ a=sendrecv\r\n",
             match remote_rtcp_addr {
                 Some(ref addr) => {
                     if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
-                        error!("rtptrack: Failed to send RTCP report: {}", e);
+                        error!("Failed to send RTCP report: {}", e);
                     } else {
-                        debug!("rtptrack: Sent RTCP Sender Report");
+                        debug!("Sent RTCP Sender Report");
                     }
                 }
                 None => {}
@@ -640,10 +637,10 @@ impl Track for RtpTrack {
             select! {
                 _ = token.cancelled() => {},
                 r = Self::send_rtcp_reports(state, rtcp_socket, ssrc, rtcp_addr) => {
-                    info!("rtptrack: RTCP sender process completed {:?}", r);
+                    info!("RTCP sender process completed {:?}", r);
                 }
                 r = Self::recv_rtp_packets(rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
-                    info!("rtptrack: RTP processor completed {:?}", r);
+                    info!("RTP processor completed {:?}", r);
                 }
             };
 
@@ -674,7 +671,7 @@ impl Track for RtpTrack {
         }
         let remote_addr = match self.remote_addr.lock().unwrap().as_ref() {
             Some(addr) => addr.clone(),
-            None => return Err(anyhow::anyhow!("rtptrack: Remote address not set")),
+            None => return Err(anyhow::anyhow!("Remote address not set")),
         };
 
         let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
@@ -720,12 +717,12 @@ impl Track for RtpTrack {
                             .fetch_add(payload.len() as u32, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        warn!("rtptrack: Failed to send RTP packet: {}", e);
+                        warn!("Failed to send RTP packet: {}", e);
                     }
                 }
             }
             Err(e) => {
-                error!("rtptrack: Failed to build RTP packet: {:?}", e);
+                error!("Failed to build RTP packet: {:?}", e);
                 return Err(anyhow::anyhow!("Failed to build RTP packet"));
             }
         }

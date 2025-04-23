@@ -98,7 +98,6 @@ pub async fn webrtc_handler(
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
     ws.on_upgrade(|socket| async move {
-        info!("webrtc call: {session_id}");
         let start_time = Instant::now();
         match handle_call(ActiveCallType::Webrtc, session_id.clone(), socket, state).await {
             Ok(_) => (),
@@ -109,14 +108,11 @@ pub async fn webrtc_handler(
         let mut active_calls = state_clone.active_calls.lock().await;
         match active_calls.remove(&session_id) {
             Some(call) => {
-                info!(
-                    "webrtc call: hangup, duration {}s",
-                    start_time.elapsed().as_secs_f32()
-                );
+                info!("hangup, duration {}s", start_time.elapsed().as_secs_f32());
                 call.cancel_token.cancel();
             }
             None => {
-                error!("webrtc call: call not found");
+                error!("all not found");
             }
         }
     })

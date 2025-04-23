@@ -84,10 +84,7 @@ impl VoiceApiAsrClientBuilder {
         let event_sender = self.event_sender;
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        info!(
-            "voiceapi_asr: start track_id: {}  sample_rate: {}",
-            track_id, sample_rate
-        );
+        info!("start track_id: {}  sample_rate: {}", track_id, sample_rate);
 
         tokio::spawn(async move {
             match VoiceApiAsrClient::handle_websocket_message(
@@ -134,7 +131,7 @@ impl VoiceApiAsrClient {
 
         // Create the websocket URL with the sample rate parameter
         let ws_url = format!("{}/asr?samplerate={}", endpoint, sample_rate);
-        debug!("voiceapi_asr: Connecting to WebSocket URL: {}", ws_url);
+        debug!("Connecting to WebSocket URL: {}", ws_url);
         let ws_url = ws_url.parse::<Uri>()?;
         let request = Request::builder()
             .uri(&ws_url)
@@ -172,7 +169,7 @@ impl VoiceApiAsrClient {
             while let Some(audio) = audio_rx.recv().await {
                 // Convert samples to websocket binary message
                 if let Err(e) = ws_sender.send(Message::Binary(audio.into())).await {
-                    warn!("voiceapi_asr: Error sending audio: {}", e);
+                    warn!("Error sending audio: {}", e);
                     break;
                 }
             }
@@ -183,7 +180,7 @@ impl VoiceApiAsrClient {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        debug!("voiceapi_asr: Received text message: {}", text);
+                        debug!("received text message: {}", text);
                         match serde_json::from_str::<VoiceApiAsrResult>(&text) {
                             Ok(result) => {
                                 let evt = if result.finished {
@@ -206,25 +203,25 @@ impl VoiceApiAsrClient {
                                     }
                                 };
                                 if let Err(e) = event_sender.send(evt) {
-                                    warn!("voiceapi_asr: Failed to send event: {}", e);
+                                    warn!("Failed to send event: {}", e);
                                     break;
                                 }
                             }
                             Err(e) => {
-                                warn!("voiceapi_asr: Failed to parse ASR result: {}", e);
+                                warn!("Failed to parse ASR result: {}", e);
                                 break;
                             }
                         }
                     }
                     Ok(Message::Close(_)) => {
-                        debug!("voiceapi_asr: WebSocket closed by server");
+                        debug!("WebSocket closed by server");
                         break;
                     }
                     Ok(Message::Frame(_)) => {
                         // Ignore frame messages
                     }
                     Err(e) => {
-                        warn!("voiceapi_asr: Error receiving message: {}", e);
+                        warn!("Error receiving message: {}", e);
                         break;
                     }
                     _ => {}
@@ -236,24 +233,21 @@ impl VoiceApiAsrClient {
         // Run the tasks concurrently until one completes or the cancellation token is triggered
         tokio::select! {
             _ = cancellation_token.cancelled() => {
-                debug!("voiceapi_asr: Cancelled by token");
+                debug!("Cancelled by token");
             }
             res = send_task => {
                 if let Err(e) = res {
-                    warn!("voiceapi_asr: Send task error: {}", e);
+                    warn!("Send task error: {}", e);
                 }
             }
             res = recv_task => {
                 if let Err(e) = res {
-                    warn!("voiceapi_asr: Receive task error: {}", e);
+                    warn!("Receive task error: {}", e);
                 }
             }
         }
 
-        info!(
-            "voiceapi_asr: WebSocket handler completed for track: {}",
-            track_id
-        );
+        info!("WebSocket handler completed for track: {}", track_id);
         Ok(())
     }
 }
@@ -269,7 +263,7 @@ impl TranscriptionClient for VoiceApiAsrClient {
 
         // Send PCM data to the audio channel
         if let Err(e) = self.audio_tx.send(buffer) {
-            warn!("voiceapi_asr: Failed to send audio: {}", e);
+            warn!("Failed to send audio: {}", e);
             return Err(anyhow!("Failed to send audio: {}", e));
         }
 

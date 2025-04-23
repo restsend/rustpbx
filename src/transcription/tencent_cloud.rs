@@ -108,7 +108,7 @@ impl TencentCloudAsrClientBuilder {
         let event_sender = self.event_sender;
         let track_id = voice_id.clone();
         info!(
-            "tencent_asr: start track_id: {} voice_id: {} config: {:?}",
+            "start track_id: {} voice_id: {} config: {:?}",
             track_id, voice_id, client.option
         );
         tokio::spawn(async move {
@@ -227,7 +227,7 @@ impl TencentCloudAsrClient {
             "wss://{}{}?{}&signature={}",
             host, url_path, query_string, signature
         );
-        info!("tencent_asr: Connecting to WebSocket URL: {}", ws_url);
+        info!("Connecting to WebSocket URL: {}", ws_url);
         let request = Request::builder()
             .uri(ws_url.parse::<Uri>()?)
             .header("Host", host)
