@@ -26,7 +26,7 @@ impl UserAgent {
         Ok(())
     }
 
-    pub(super) async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
+    pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
         let dialog = match self.dialogs.lock().await.remove(&dialog_id) {
             Some(dialog) => dialog,
             None => {

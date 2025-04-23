@@ -15,6 +15,7 @@ use crate::{
         },
         vad::VadProcessor,
     },
+    synthesis::SynthesisOption,
     TrackId,
 };
 use anyhow::Result;
@@ -26,6 +27,7 @@ use rsipstack::dialog::{
     DialogId,
 };
 use serde::{Deserialize, Serialize};
+use std::{future::Future, pin::Pin};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     select,
@@ -58,29 +60,115 @@ pub struct ActiveCall {
     pub event_sender: EventSender,
     pub option: CallOption,
     pub dialog_id: Mutex<Option<DialogId>>,
+    pub state: AppState,
 }
 
 impl ActiveCall {
+    // Default implementation for prepare_stream_hook
+    pub fn prepare_track_hook(
+        track: &dyn Track,
+        cancel_token: CancellationToken,
+        event_sender: EventSender,
+        option: CallOption,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Processor>>>> + Send>> {
+        let track_id = track.id().clone();
+        Box::pin(async move {
+            let mut processors = vec![];
+            match option.denoise {
+                Some(true) => {
+                    let noise_reducer = NoiseReducer::new(16000)?;
+                    processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
+                }
+                _ => {}
+            }
+            match option.vad {
+                Some(ref vad_option) => {
+                    let vad_option = vad_option.to_owned();
+                    info!("Vad processor added {:?}", vad_option);
+                    let vad_processor =
+                        VadProcessor::new(vad_option.r#type, event_sender.clone(), vad_option)?;
+                    processors.push(Box::new(vad_processor) as Box<dyn Processor>);
+                }
+                None => {}
+            }
+
+            match option.asr {
+                Some(ref asr_option) => {
+                    let asr_processor = AsrProcessor::create(
+                        track_id,
+                        cancel_token,
+                        asr_option.clone(),
+                        event_sender.clone(),
+                    )
+                    .await?;
+                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
+                }
+                None => {}
+            }
+
+            Ok(processors)
+        })
+    }
+
+    pub fn create_tts_track(
+        cancel_token: CancellationToken,
+        track_id: TrackId,
+        play_id: Option<String>,
+        tts_option: SynthesisOption,
+    ) -> Pin<Box<dyn Future<Output = Result<(TtsHandle, Box<dyn Track>)>> + Send>> {
+        Box::pin(async move {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let new_handle = TtsHandle::new(tx, play_id);
+            let track = new_handle.create_tts_track(cancel_token, track_id, tts_option, rx)?;
+            Ok((new_handle, track))
+        })
+    }
+
     pub async fn create_stream(
         mut caller_track: Box<dyn Track>,
         state: AppState,
         cancel_token: CancellationToken,
         event_sender: EventSender,
         track_id: TrackId,
-        session_id: &String,
         option: &CallOption,
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
-            .with_id(session_id.clone())
+            .with_id(track_id.clone())
             .cancel_token(cancel_token.clone());
 
         if let Some(_) = option.recorder {
-            let recorder_file = state.get_recorder_file(session_id);
+            let recorder_file = state.get_recorder_file(&track_id);
             info!("created recording file: {}", recorder_file);
             media_stream_builder = media_stream_builder.recorder(recorder_file);
         }
 
         let media_stream = media_stream_builder.build();
+        // Use the prepare_stream_hook to set up processors
+        let processors = match (state.prepare_track_hook)(
+            caller_track.as_ref(),
+            cancel_token,
+            event_sender.clone(),
+            option.clone(),
+        )
+        .await
+        {
+            Ok(processors) => processors,
+            Err(e) => {
+                warn!("Failed to prepare stream processors: {}", e);
+                vec![]
+            }
+        };
+
+        // Add all processors from the hook
+        for processor in processors {
+            caller_track.append_processor(processor);
+        }
+
+        let timeout = option
+            .handshake_timeout
+            .as_ref()
+            .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
+            .flatten();
 
         let offer = match option.enable_ipv6 {
             Some(false) | None => strip_ipv6_candidates(
@@ -94,50 +182,6 @@ impl ActiveCall {
                 .clone()
                 .ok_or(anyhow::anyhow!("SDP is required"))?,
         };
-        let mut processors = vec![];
-        match option.denoise {
-            Some(true) => {
-                let noise_reducer = NoiseReducer::new(16000)?;
-                processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
-            }
-            _ => {}
-        }
-        match option.vad {
-            Some(ref vad_option) => {
-                let vad_option = vad_option.to_owned();
-                info!("Vad processor added {:?}", vad_option);
-                let vad_processor = VadProcessor::new(
-                    vad_option.r#type,
-                    media_stream.get_event_sender(),
-                    vad_option,
-                )?;
-                processors.push(Box::new(vad_processor) as Box<dyn Processor>);
-            }
-            None => {}
-        }
-
-        match option.asr {
-            Some(ref asr_option) => {
-                let asr_processor = AsrProcessor::create(
-                    track_id.clone(),
-                    cancel_token.child_token(),
-                    asr_option.clone(),
-                    media_stream.get_event_sender(),
-                )
-                .await?;
-                processors.push(Box::new(asr_processor) as Box<dyn Processor>);
-            }
-            None => {}
-        }
-        for processor in processors {
-            caller_track.append_processor(processor);
-        }
-
-        let timeout = option
-            .handshake_timeout
-            .as_ref()
-            .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
-            .flatten();
 
         match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
@@ -168,6 +212,7 @@ impl ActiveCall {
         media_stream: MediaStream,
         option: CallOption,
         dialog_id: Option<DialogId>,
+        state: AppState,
     ) -> Result<Self> {
         let active_call = ActiveCall {
             cancel_token,
@@ -181,6 +226,7 @@ impl ActiveCall {
             option,
             tts_handle: Mutex::new(None),
             dialog_id: Mutex::new(dialog_id),
+            state,
         };
         Ok(active_call)
     }
@@ -287,21 +333,14 @@ impl ActiveCall {
             }
         }
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let new_handle = TtsHandle::new(tx, play_id);
-
-        let tts_track = match new_handle.create_tts_track(
+        let (new_handle, tts_track) = (self.state.create_tts_track_hook)(
             self.cancel_token.child_token(),
-            tts_option.clone(),
             self.track_config.server_side_track_id.clone(),
-            rx,
-        ) {
-            Ok(tts_track) => tts_track,
-            Err(e) => {
-                error!("error creating tts track: {}", e);
-                return Err(e);
-            }
-        };
+            play_id,
+            tts_option.clone(),
+        )
+        .await?;
+
         new_handle.try_send(play_command)?;
         *self.tts_handle.lock().await = Some(new_handle);
         self.media_stream.update_track(tts_track).await;
@@ -334,10 +373,19 @@ impl ActiveCall {
         Ok(())
     }
     async fn do_hangup(&self, reason: Option<String>, initiator: Option<String>) -> Result<()> {
+        info!("Call {} do_hangup", self.session_id);
+
         self.tts_handle.lock().await.take();
         self.cancel_token.cancel();
-        info!("Call {} do_hangup", self.session_id);
         self.media_stream.stop(reason, initiator);
+
+        if let Some(dialog_id) = self.dialog_id.lock().await.take() {
+            self.state
+                .useragent
+                .hangup(dialog_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to hangup: {}", e))?;
+        }
         Ok(())
     }
 
@@ -448,7 +496,7 @@ pub async fn handle_call(
             }
         };
         option.check_default(); // check default
-        info!("prepare call option: {:?}", option);
+        info!("prepare call {} option: {:?}", session_id, option);
         let track_config = TrackConfig::default();
         let mut dialog_id = None;
         let caller_track: Box<dyn Track> = match call_type {
@@ -474,11 +522,10 @@ pub async fn handle_call(
 
         let media_stream = ActiveCall::create_stream(
             caller_track,
-            state_clone,
+            state_clone.clone(),
             cancel_token.child_token(),
             event_sender_ref.clone(),
             track_id,
-            &session_id,
             &option,
         )
         .await?;
@@ -491,6 +538,7 @@ pub async fn handle_call(
             media_stream,
             option,
             dialog_id,
+            state_clone,
         )
         .await?;
         Ok((Arc::new(active_call), ws_receiver))

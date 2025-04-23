@@ -40,7 +40,7 @@ pub struct TtsCommand {
     pub play_id: Option<String>,
 }
 pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
-type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
+pub type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
 
 pub struct TtsTrack {
     track_id: TrackId,
@@ -59,6 +59,16 @@ impl TtsHandle {
             command_tx,
         }
     }
+
+    pub fn new_empty() -> Self {
+        // Create an unbounded channel and discard the receiver
+        let (tx, _) = mpsc::unbounded_channel();
+        Self {
+            play_id: None,
+            command_tx: tx,
+        }
+    }
+
     pub fn try_send(&self, cmd: TtsCommand) -> Result<(), mpsc::error::SendError<TtsCommand>> {
         if self.play_id == cmd.play_id {
             self.command_tx.send(cmd)
@@ -70,8 +80,8 @@ impl TtsHandle {
     pub fn create_tts_track(
         &self,
         token: CancellationToken,
-        option: SynthesisOption,
         track_id: TrackId,
+        option: SynthesisOption,
         rx: TtsCommandReceiver,
     ) -> Result<Box<dyn Track>> {
         match option.provider {
