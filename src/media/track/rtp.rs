@@ -309,6 +309,10 @@ impl RtpTrack {
             return Err(anyhow::anyhow!("no audio codecs in answer SDP"));
         }
 
+        if peer_media.rtp_addr.is_empty() {
+            return Err(anyhow::anyhow!("no rtp addr in answer SDP"));
+        }
+
         self.remote_description
             .lock()
             .unwrap()
