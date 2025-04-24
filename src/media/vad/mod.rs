@@ -33,8 +33,6 @@ impl Default for VADOption {
         Self {
             #[cfg(feature = "vad_webrtc")]
             r#type: VadType::WebRTC,
-            #[cfg(not(feature = "vad_webrtc"))]
-            r#type: VadType::Silero,
             #[cfg(not(any(feature = "vad_webrtc", feature = "vad_silero")))]
             r#type: VadType::Other("nop".to_string()),
             samplerate: 16000,
