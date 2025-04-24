@@ -495,6 +495,7 @@ a=sendrecv\r\n",
     }
 
     async fn recv_rtp_packets(
+        token: CancellationToken,
         rtp_socket: UdpConnection,
         track_id: TrackId,
         processor_chain: ProcessorChain,
@@ -502,6 +503,9 @@ a=sendrecv\r\n",
     ) -> Result<()> {
         let mut buf = vec![0u8; RTP_MTU];
         loop {
+            if token.is_cancelled() {
+                return Ok(());
+            }
             let (n, _) = match rtp_socket.recv_raw(&mut buf).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -554,6 +558,7 @@ a=sendrecv\r\n",
 
     // Send RTCP sender reports periodically
     async fn send_rtcp_reports(
+        token: CancellationToken,
         state: Arc<RtpTrackState>,
         rtcp_socket: UdpConnection,
         ssrc: u32,
@@ -565,6 +570,9 @@ a=sendrecv\r\n",
         );
 
         loop {
+            if token.is_cancelled() {
+                return Ok(());
+            }
             // Generate RTCP Sender Report
             let packet_count = state.packet_count.load(Ordering::Relaxed);
             let octet_count = state.octet_count.load(Ordering::Relaxed);
@@ -645,10 +653,10 @@ impl Track for RtpTrack {
 
             select! {
                 _ = token.cancelled() => {},
-                r = Self::send_rtcp_reports(state, rtcp_socket, ssrc, rtcp_addr) => {
+                r = Self::send_rtcp_reports(token.clone(), state, rtcp_socket, ssrc, rtcp_addr) => {
                     info!("RTCP sender process completed {:?}", r);
                 }
-                r = Self::recv_rtp_packets(rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
+                r = Self::recv_rtp_packets(token.clone(), rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
                     info!("RTP processor completed {:?}", r);
                 }
             };
