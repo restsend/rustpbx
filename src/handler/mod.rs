@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     media::{recorder::RecorderOption, vad::VADOption},
     synthesis::SynthesisOption,
@@ -41,6 +43,8 @@ pub struct CallOption {
     pub enable_ipv6: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sip: Option<SipOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<HashMap<String, String>>,
 }
 
 impl Default for CallOption {
@@ -57,6 +61,7 @@ impl Default for CallOption {
             handshake_timeout: None,
             enable_ipv6: None,
             sip: None,
+            extra: None,
         }
     }
 }

@@ -85,8 +85,7 @@ impl ActiveCall {
                 Some(ref vad_option) => {
                     let vad_option = vad_option.to_owned();
                     info!("Vad processor added {:?}", vad_option);
-                    let vad_processor =
-                        VadProcessor::new(vad_option.r#type, event_sender.clone(), vad_option)?;
+                    let vad_processor = VadProcessor::new(event_sender.clone(), vad_option)?;
                     processors.push(Box::new(vad_processor) as Box<dyn Processor>);
                 }
                 None => {}

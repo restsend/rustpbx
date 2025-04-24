@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
 
+#[cfg(feature = "vad_silero")]
 mod silero;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "vad_webrtc")]
 mod webrtc;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -29,7 +31,12 @@ pub struct VADOption {
 impl Default for VADOption {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vad_webrtc")]
             r#type: VadType::WebRTC,
+            #[cfg(not(feature = "vad_webrtc"))]
+            r#type: VadType::Silero,
+            #[cfg(not(any(feature = "vad_webrtc", feature = "vad_silero")))]
+            r#type: VadType::Other("nop".to_string()),
             samplerate: 16000,
             speech_padding: 160,
             silence_padding: 200,
@@ -40,12 +47,16 @@ impl Default for VADOption {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VadType {
     #[serde(rename = "webrtc")]
+    #[cfg(feature = "vad_webrtc")]
     WebRTC,
     #[serde(rename = "silero")]
+    #[cfg(feature = "vad_silero")]
     Silero,
+    #[serde(rename = "other")]
+    Other(String),
 }
 enum VadState {
     Speaking,
@@ -129,16 +140,6 @@ impl VadProcessorInner {
 
         let speaking_threshold = (speaking_check_count as f32 * self.option.ratio) as usize;
         let silence_threshold = (silence_check_count as f32 * self.option.ratio) as usize;
-        // trace!(
-        //     "timestamp: {}, speaking: {}/{} silence: {}/{}  time: {} is_speaking: {}",
-        //     self.window_bufs.first().unwrap().timestamp,
-        //     speaking_count,
-        //     speaking_threshold,
-        //     silence_count,
-        //     silence_threshold,
-        //     self.window_bufs.last().unwrap().timestamp,
-        //     self.window_bufs.last().unwrap().is_speaking,
-        // );
         if speaking_count >= speaking_threshold {
             match self.state {
                 VadState::Silence => {
@@ -199,10 +200,13 @@ impl VadProcessorInner {
 }
 
 impl VadProcessor {
-    pub fn new(vad_type: VadType, event_sender: EventSender, option: VADOption) -> Result<Self> {
-        let vad: Box<dyn VadEngine> = match vad_type {
+    pub fn new(event_sender: EventSender, option: VADOption) -> Result<Self> {
+        let vad: Box<dyn VadEngine> = match option.r#type {
+            #[cfg(feature = "vad_webrtc")]
             VadType::WebRTC => Box::new(webrtc::WebRtcVad::new(option.samplerate)?),
+            #[cfg(feature = "vad_silero")]
             VadType::Silero => Box::new(silero::SileroVad::new(option.samplerate)?),
+            _ => Box::new(NopVad::new()?),
         };
         let inner = VadProcessorInner {
             vad,
@@ -220,5 +224,19 @@ impl VadProcessor {
 impl Processor for VadProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         self.inner.borrow_mut().process_frame(frame)
+    }
+}
+
+struct NopVad {}
+
+impl NopVad {
+    pub fn new() -> Result<Self> {
+        Ok(Self {})
+    }
+}
+
+impl VadEngine for NopVad {
+    fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
+        Some((false, frame.timestamp))
     }
 }

@@ -13,6 +13,7 @@ use rsipstack::dialog::dialog::DialogStateSender;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -24,6 +25,7 @@ pub struct SipOption {
     pub username: String,
     pub password: String,
     pub domain: String,
+    pub headers: Option<HashMap<String, String>>,
 }
 
 pub async fn sip_handler(

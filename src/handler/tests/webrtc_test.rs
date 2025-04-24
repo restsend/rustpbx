@@ -1,4 +1,4 @@
-use crate::app::{AppBuilder, AppState};
+use crate::app::{AppState, AppStateBuilder};
 use crate::event::SessionEvent;
 use crate::media::codecs::g722::G722Encoder;
 use crate::media::codecs::resample::resample_mono;
@@ -61,7 +61,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             axum::routing::get(crate::handler::webrtc::webrtc_handler),
         )
         .fallback(handle_error)
-        .with_state(AppBuilder::new().build().await?.state);
+        .with_state(AppStateBuilder::new().build().await?);
 
     // Start the server
     let listener = TcpListener::bind("127.0.0.1:0").await?;
