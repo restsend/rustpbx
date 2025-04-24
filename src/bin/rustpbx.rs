@@ -36,6 +36,8 @@ async fn main() -> Result<()> {
         if let Ok(lv) = level.as_str().parse::<LevelFilter>() {
             log_fmt = log_fmt.with_max_level(lv);
         }
+    } else {
+        log_fmt = log_fmt.with_max_level(LevelFilter::DEBUG);
     }
     log_fmt = log_fmt.with_file(true).with_line_number(true);
     if let Some(ref log_file) = config.log_file {

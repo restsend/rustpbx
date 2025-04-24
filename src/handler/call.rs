@@ -532,7 +532,7 @@ pub async fn handle_call(
 
         let active_call = ActiveCall::new(
             call_type,
-            cancel_token.child_token(),
+            cancel_token,
             event_sender_ref,
             session_id,
             media_stream,
@@ -633,10 +633,9 @@ pub async fn handle_call(
             }
         } => {
             info!("sip event loop");
-            return Err(anyhow::anyhow!("Sip event loop failed"));
         }
     }
-
+    cancel_token_ref.cancel();
     if let Some(dialog_id) = active_call_clone.dialog_id.lock().await.take() {
         let r = match state.useragent.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => match dialog {
