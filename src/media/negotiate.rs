@@ -36,6 +36,15 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
         codecs: Vec::new(),
     };
 
+    match sdp.connection_information {
+        Some(ref connection_information) => {
+            connection_information.address.as_ref().map(|address| {
+                peer_media.rtp_addr = address.address.clone();
+                peer_media.rtcp_addr = address.address.clone();
+            });
+        }
+        None => {}
+    }
     for media in sdp.media_descriptions.iter() {
         if media.media_name.media == media_type {
             media.media_name.formats.iter().for_each(|format| {
@@ -117,5 +126,30 @@ a=fmtp:101 0-16"#;
 
         let codec = prefer_audio_codec(&offer_sdp);
         assert_eq!(codec, Some(CodecType::G722));
+    }
+
+    #[test]
+    fn test_parse_freeswitch_sdp() {
+        let offer = r#"v=0
+o=FreeSWITCH 1745447592 1745447593 IN IP4 11.22.33.123
+s=FreeSWITCH
+c=IN IP4 11.22.33.123
+t=0 0
+m=audio 26328 RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20"#;
+        let mut reader = Cursor::new(offer.as_bytes());
+        let offer_sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
+        let peer_media = select_peer_media(&offer_sdp, "audio").unwrap();
+        assert_eq!(peer_media.rtp_port, 26328);
+        assert_eq!(peer_media.rtcp_port, 26329);
+        assert_eq!(peer_media.rtcp_addr, "11.22.33.123");
+        assert_eq!(peer_media.rtp_addr, "11.22.33.123");
+        assert_eq!(peer_media.codecs, vec![CodecType::PCMU]);
+
+        let codec = prefer_audio_codec(&offer_sdp);
+        assert_eq!(codec, Some(CodecType::PCMU));
     }
 }
