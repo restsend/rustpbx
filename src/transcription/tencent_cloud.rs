@@ -194,14 +194,26 @@ impl TencentCloudAsrClient {
             ("engine_model_type", engine_model_type),
             ("voice_id", voice_id),
             ("voice_format", "1"), // PCM format
+        ];
+
+        let extra_options = vec![
             ("needvad", "1"),
-            ("filter_dirty", "0"),
+            ("vad_silence_time", "700"),
             ("filter_modal", "0"),
             ("filter_punc", "0"),
             ("convert_num_mode", "1"),
             ("word_info", "1"),
             ("max_speak_time", "60000"),
         ];
+
+        for mut option in extra_options {
+            if let Some(extra) = self.option.extra.as_ref() {
+                if let Some(value) = extra.get(option.0) {
+                    option.1 = value;
+                }
+            }
+            query_params.push(option);
+        }
 
         // Sort query parameters by key
         query_params.sort_by(|a, b| a.0.cmp(b.0));
