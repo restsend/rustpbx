@@ -10,10 +10,10 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use rsip::HostWithPort;
 use rsipstack::transport::{udp::UdpConnection, SipAddr};
-use rtp_rs::{RtpPacketBuilder, RtpReader, Seq};
+//use rtp_rs::{RtpPacketBuilder, RtpReader, Seq};
 use std::{
     io::Cursor,
     net::SocketAddr,
@@ -26,8 +26,7 @@ use std::{
 use tokio::{select, time::interval_at, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use webrtc::sdp::SessionDescription;
-
+use webrtc::{sdp::SessionDescription, util::Marshal, util::Unmarshal};
 const RTP_MTU: usize = 1500; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
 const DTMF_EVENT_DURATION_MS: u64 = 160; // Default DTMF event duration (in ms)
@@ -443,17 +442,20 @@ a=sendrecv\r\n",
             // This is per RFC 4733 requirements
             let ts = current_ts;
 
-            // Create RTP packet with DTMF payload
-            let result = RtpPacketBuilder::new()
-                .payload_type(self.dtmf_payload_type)
-                .ssrc(self.ssrc)
-                .sequence(Seq::from(seq))
-                .timestamp(ts)
-                .payload(&payload)
-                .marked(i == 0) // Set marker bit for the first packet
-                .build();
+            let payload_len = payload.len();
+            let packet = webrtc::rtp::packet::Packet {
+                header: webrtc::rtp::header::Header {
+                    payload_type: self.dtmf_payload_type,
+                    ssrc: self.ssrc,
+                    sequence_number: seq.into(),
+                    timestamp: ts,
+                    ..Default::default()
+                },
+                payload: Bytes::from(payload),
+                ..Default::default()
+            };
 
-            match result {
+            match packet.marshal() {
                 Ok(ref rtp_data) => {
                     match socket.send_raw(rtp_data, &remote_addr).await {
                         Ok(_) => {}
@@ -466,7 +468,7 @@ a=sendrecv\r\n",
                     self.state.packet_count.fetch_add(1, Ordering::Relaxed);
                     self.state
                         .octet_count
-                        .fetch_add(payload.len() as u32, Ordering::Relaxed);
+                        .fetch_add(payload_len as u32, Ordering::Relaxed);
 
                     // Sleep for packet time if not the last packet
                     if !is_end {
@@ -507,15 +509,15 @@ a=sendrecv\r\n",
                 continue;
             }
 
-            let reader = match RtpReader::new(&buf[0..n]) {
-                Ok(reader) => reader,
+            let packet = match webrtc::rtp::packet::Packet::unmarshal(&mut &buf[0..n]) {
+                Ok(packet) => packet,
                 Err(e) => {
                     debug!("Error creating RTP reader: {:?}", e);
                     continue;
                 }
             };
-            let payload_type = reader.payload_type();
-            let payload = reader.payload().to_vec();
+            let payload_type = packet.header.payload_type;
+            let payload = packet.payload.to_vec();
             let sample_rate = match payload_type {
                 9 => 16000, // G.722
                 _ => 8000,
@@ -525,7 +527,7 @@ a=sendrecv\r\n",
                 samples: Samples::RTP {
                     payload_type,
                     payload,
-                    sequence_number: reader.sequence_number().into(),
+                    sequence_number: packet.header.sequence_number.into(),
                 },
                 timestamp: crate::get_timestamp(),
                 sample_rate,
@@ -700,16 +702,20 @@ impl Track for RtpTrack {
             .last_timestamp_update
             .store(now, Ordering::Relaxed);
 
+        let payload_len = payload.len();
         // Create RTP packet
-        let result = RtpPacketBuilder::new()
-            .payload_type(self.payload_type.load(Ordering::Relaxed))
-            .ssrc(self.ssrc)
-            .sequence(Seq::from(seq))
-            .timestamp(ts)
-            .payload(&payload)
-            .build();
-
-        match result {
+        let packet = webrtc::rtp::packet::Packet {
+            header: webrtc::rtp::header::Header {
+                payload_type: self.payload_type.load(Ordering::Relaxed),
+                ssrc: self.ssrc,
+                sequence_number: seq.into(),
+                timestamp: ts,
+                ..Default::default()
+            },
+            payload: Bytes::from(payload),
+            ..Default::default()
+        };
+        match packet.marshal() {
             Ok(ref rtp_data) => {
                 match socket.send_raw(rtp_data, &remote_addr).await {
                     Ok(_) => {
@@ -717,7 +723,7 @@ impl Track for RtpTrack {
                         self.state.packet_count.fetch_add(1, Ordering::Relaxed);
                         self.state
                             .octet_count
-                            .fetch_add(payload.len() as u32, Ordering::Relaxed);
+                            .fetch_add(payload_len as u32, Ordering::Relaxed);
                     }
                     Err(e) => {
                         warn!("Failed to send RTP packet: {}", e);
