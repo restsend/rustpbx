@@ -275,7 +275,7 @@ impl RtpTrackBuilder {
         let cancel_token = self
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
-        let processor_chain = ProcessorChain::new(self.config.sample_rate);
+        let processor_chain = ProcessorChain::new(self.config.samplerate);
         let track = RtpTrack {
             track_id: self.track_id,
             config: self.config,
@@ -409,7 +409,7 @@ a=sendrecv\r\n",
 
         // Calculate samples per packet for timestamp increments
         let samples_per_packet =
-            (self.config.sample_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
+            (self.config.samplerate as f64 * self.config.ptime.as_secs_f64()) as u32;
 
         // Get the current timestamp before we start sending DTMF
         let current_ts = self.state.timestamp.load(Ordering::Relaxed);
@@ -593,6 +593,9 @@ a=sendrecv\r\n",
 impl Track for RtpTrack {
     fn id(&self) -> &TrackId {
         &self.track_id
+    }
+    fn config(&self) -> &TrackConfig {
+        &self.config
     }
 
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {

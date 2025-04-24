@@ -33,7 +33,7 @@ impl FileTrack {
         let config = TrackConfig::default();
         Self {
             track_id: id,
-            processor_chain: ProcessorChain::new(config.sample_rate),
+            processor_chain: ProcessorChain::new(config.samplerate),
             config,
             cancel_token: CancellationToken::new(),
             path: None,
@@ -77,7 +77,9 @@ impl Track for FileTrack {
     fn id(&self) -> &TrackId {
         &self.track_id
     }
-
+    fn config(&self) -> &TrackConfig {
+        &self.config
+    }
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain.insert_processor(processor);
     }
@@ -99,7 +101,7 @@ impl Track for FileTrack {
         }
         let path = self.path.clone().unwrap();
         let id = self.track_id.clone();
-        let sample_rate = self.config.sample_rate;
+        let sample_rate = self.config.samplerate;
         let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
         let use_cache = self.use_cache;
         let processor_chain = self.processor_chain.clone();

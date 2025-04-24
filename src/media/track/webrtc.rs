@@ -137,7 +137,7 @@ impl WebrtcTrack {
     }
 
     pub fn new(id: TrackId, track_config: TrackConfig) -> Self {
-        let processor_chain = ProcessorChain::new(track_config.sample_rate);
+        let processor_chain = ProcessorChain::new(track_config.samplerate);
         Self {
             track_id: id,
             config: track_config,
@@ -296,6 +296,9 @@ impl WebrtcTrack {
 impl Track for WebrtcTrack {
     fn id(&self) -> &TrackId {
         &self.track_id
+    }
+    fn config(&self) -> &TrackConfig {
+        &self.config
     }
 
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {

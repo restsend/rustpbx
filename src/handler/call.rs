@@ -72,11 +72,12 @@ impl ActiveCall {
         option: CallOption,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Processor>>>> + Send>> {
         let track_id = track.id().clone();
+        let samplerate = track.config().samplerate as usize;
         Box::pin(async move {
             let mut processors = vec![];
             match option.denoise {
                 Some(true) => {
-                    let noise_reducer = NoiseReducer::new(16000)?;
+                    let noise_reducer = NoiseReducer::new(samplerate)?;
                     processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
                 }
                 _ => {}

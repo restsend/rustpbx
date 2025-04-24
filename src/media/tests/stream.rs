@@ -1,4 +1,5 @@
 use crate::media::processor::ProcessorChain;
+use crate::media::track::TrackConfig;
 use crate::{
     event::EventSender,
     media::{
@@ -17,6 +18,7 @@ use tokio::time::Duration;
 
 pub struct TestTrack {
     id: TrackId,
+    config: TrackConfig,
     sender: Option<TrackPacketSender>,
     processor_chain: ProcessorChain,
     received_packets: Arc<Mutex<Vec<AudioFrame>>>,
@@ -26,6 +28,7 @@ impl TestTrack {
     pub fn new(id: TrackId) -> Self {
         Self {
             id,
+            config: TrackConfig::default(),
             sender: None,
             processor_chain: ProcessorChain::new(16000),
             received_packets: Arc::new(Mutex::new(Vec::new())),
@@ -37,6 +40,9 @@ impl TestTrack {
 impl Track for TestTrack {
     fn id(&self) -> &TrackId {
         &self.id
+    }
+    fn config(&self) -> &TrackConfig {
+        &self.config
     }
 
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {

@@ -110,7 +110,7 @@ impl TtsTrack {
         let config = TrackConfig::default();
         Self {
             track_id,
-            processor_chain: ProcessorChain::new(config.sample_rate),
+            processor_chain: ProcessorChain::new(config.samplerate),
             config,
             cancel_token: CancellationToken::new(),
             command_rx: Mutex::new(Some(command_rx)),
@@ -151,6 +151,9 @@ impl Track for TtsTrack {
     fn id(&self) -> &TrackId {
         &self.track_id
     }
+    fn config(&self) -> &TrackConfig {
+        &self.config
+    }
 
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain.insert_processor(processor);
@@ -179,7 +182,7 @@ impl Track for TtsTrack {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let client = self.client.lock().await.take().unwrap();
         let buffer_clone = buffer.clone();
-        let sample_rate = self.config.sample_rate;
+        let sample_rate = self.config.samplerate;
         let use_cache = self.use_cache;
         let track_id = self.track_id.clone();
         let event_sender_clone = event_sender.clone();
@@ -333,7 +336,7 @@ impl Track for TtsTrack {
                 }
             }
         };
-        let sample_rate = self.config.sample_rate;
+        let sample_rate = self.config.samplerate;
         let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
         let track_id = self.track_id.clone();
         let packet_duration = 1000.0 / sample_rate as f64 * max_pcm_chunk_size as f64;
