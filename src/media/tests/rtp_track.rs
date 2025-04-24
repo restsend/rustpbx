@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use webrtc::{rtp::packet::Packet, util::Unmarshal};
 
 // For consistency with rtp.rs
 const RTP_MTU: usize = 1500;
@@ -376,17 +377,19 @@ async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
             match tokio::time::timeout(Duration::from_millis(100), recv_socket.recv(&mut buf)).await
             {
                 Ok(Ok(n)) => {
-                    if n > 0 {
-                        if let Ok(reader) = rtp_rs::RtpReader::new(&buf[0..n]) {
-                            let payload_type = reader.payload_type();
-                            let payload = reader.payload().to_vec();
-                            let timestamp = reader.timestamp();
-                            let ssrc = reader.ssrc();
+                    if n == 0 {
+                        continue;
+                    }
+                    let mut b = &buf[..n];
+                    if let Ok(packet) = Packet::unmarshal(&mut b) {
+                        let payload_type = packet.header.payload_type;
+                        let payload = packet.payload.to_vec();
+                        let timestamp = packet.header.timestamp;
+                        let ssrc = packet.header.ssrc;
 
-                            // Store the packet details
-                            let mut received = received_packets_clone.lock().unwrap();
-                            received.push((payload_type, ssrc, timestamp, payload.len()));
-                        }
+                        // Store the packet details
+                        let mut received = received_packets_clone.lock().unwrap();
+                        received.push((payload_type, ssrc, timestamp, payload.len()));
                     }
                 }
                 _ => {}

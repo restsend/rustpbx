@@ -2,14 +2,16 @@ use anyhow::Result;
 use get_if_addrs::get_if_addrs;
 use rsipstack::transport::{udp::UdpConnection, SipAddr};
 use std::{
+    io::BufReader,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-use stun_rs::{
-    attributes::stun::XorMappedAddress, methods::BINDING, MessageClass, MessageDecoderBuilder,
-    MessageEncoderBuilder, StunMessageBuilder,
-};
 use tracing::info;
+use webrtc::stun::{
+    agent::TransactionId,
+    message::{Getter, Message, BINDING_REQUEST},
+    xoraddr::XorMappedAddress,
+};
 
 pub fn get_first_non_loopback_interface() -> Result<IpAddr> {
     get_if_addrs()?
@@ -27,20 +29,16 @@ pub async fn external_by_stun(
     stun_server: &str,
     expires: Duration,
 ) -> Result<SocketAddr> {
-    info!("getting external IP by STUN server: {}", stun_server);
-    let msg = StunMessageBuilder::new(BINDING, MessageClass::Request).build();
-
-    let encoder = MessageEncoderBuilder::default().build();
-    let mut buffer: [u8; 150] = [0x00; 150];
-    encoder
-        .encode(&mut buffer, &msg)
-        .map_err(|e| anyhow::anyhow!(e))?;
-
+    let mut msg = Message::new();
+    msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
     let mut addrs = tokio::net::lookup_host(stun_server).await?;
     let target = addrs
         .next()
         .ok_or_else(|| anyhow::anyhow!("STUN server address not found"))?;
 
+    info!("getting external IP by STUN server: {}", stun_server);
+
+    let buffer = msg.raw;
     match conn
         .send_raw(
             &buffer,
@@ -57,7 +55,6 @@ pub async fn external_by_stun(
             return Err(anyhow::anyhow!(e));
         }
     }
-
     let mut buf = [0u8; 2048];
     let (len, _) = match tokio::time::timeout(expires, conn.recv_raw(&mut buf)).await {
         Ok(r) => r.map_err(|e| anyhow::anyhow!(e))?,
@@ -66,23 +63,43 @@ pub async fn external_by_stun(
             return Err(anyhow::anyhow!(e));
         }
     };
+    let mut msg = Message::new();
+    let mut reader = BufReader::new(&buf[..len]);
+    msg.read_from(&mut reader)?;
 
-    let decoder = MessageDecoderBuilder::default().build();
-    let (resp, _) = decoder
-        .decode(&buf[..len])
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let mut xor_addr = XorMappedAddress::default();
+    xor_addr.get_from(&msg)?;
+    let external = SocketAddr::new(xor_addr.ip, xor_addr.port);
 
-    let xor_addr = resp
-        .get::<XorMappedAddress>()
-        .ok_or(anyhow::anyhow!("XorMappedAddress attribute not found"))?
-        .as_xor_mapped_address()
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    let external: &SocketAddr = xor_addr.socket_address();
     info!("external address: {} -> {}", external, conn.get_addr());
     conn.external = Some(SipAddr {
         r#type: Some(rsip::transport::Transport::Udp),
         addr: external.to_owned().into(),
     });
-    Ok(external.clone())
+    Ok(external)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsipstack::transport::udp::UdpConnection;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    #[tokio::test]
+    async fn test_external_by_stun() -> Result<()> {
+        tracing_subscriber::fmt::try_init().ok();
+        let mut conn = UdpConnection::create_connection("0.0.0.0:0".parse()?, None)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let external = external_by_stun(&mut conn, "restsend.com:3478", Duration::from_secs(5))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        assert_ne!(
+            external,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
+        );
+        info!("conn address: {}", conn.get_addr());
+        Ok(())
+    }
 }
