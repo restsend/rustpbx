@@ -91,38 +91,5 @@ pub trait TranscriptionClient: Send + Sync {
     fn send_audio(&self, samples: &[Sample]) -> Result<()>;
 }
 
-/// Create a transcription client based on the provider type
-pub async fn create_transcription_client(
-    option: TranscriptionOption,
-    track_id: String,
-    event_sender: crate::event::EventSender,
-) -> Result<Box<dyn TranscriptionClient>> {
-    use tokio_util::sync::CancellationToken;
-
-    let provider = option
-        .provider
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No provider specified"))?;
-
-    match provider {
-        TranscriptionType::TencentCloud => {
-            let client = TencentCloudAsrClientBuilder::new(option, event_sender.clone())
-                .with_track_id(track_id)
-                .with_cancellation_token(CancellationToken::new())
-                .build()
-                .await?;
-            Ok(Box::new(client))
-        }
-        TranscriptionType::VoiceApi => {
-            let client = VoiceApiAsrClientBuilder::new(option, event_sender.clone())
-                .with_track_id(track_id)
-                .with_cancellation_token(CancellationToken::new())
-                .build()
-                .await?;
-            Ok(Box::new(client))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests;

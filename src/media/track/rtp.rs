@@ -449,6 +449,10 @@ a=sendrecv\r\n",
             let payload_len = payload.len();
             let packet = webrtc::rtp::packet::Packet {
                 header: webrtc::rtp::header::Header {
+                    version: 2,
+                    padding: false,
+                    extension: false,
+                    marker: false,
                     payload_type: self.dtmf_payload_type,
                     ssrc: self.ssrc,
                     sequence_number: seq.into(),
@@ -586,7 +590,7 @@ a=sendrecv\r\n",
                     if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
                         error!("Failed to send RTCP report: {}", e);
                     } else {
-                        debug!("Sent RTCP Sender Report");
+                        debug!("Sent RTCP Sender Report -> {}", addr);
                     }
                 }
                 None => {}
@@ -652,7 +656,9 @@ impl Track for RtpTrack {
                 .ok();
 
             select! {
-                _ = token.cancelled() => {},
+                _ = token.cancelled() => {
+                    info!("RTC process cancelled");
+                },
                 r = Self::send_rtcp_reports(token.clone(), state, rtcp_socket, ssrc, rtcp_addr) => {
                     info!("RTCP sender process completed {:?}", r);
                 }
@@ -718,6 +724,10 @@ impl Track for RtpTrack {
         // Create RTP packet
         let packet = webrtc::rtp::packet::Packet {
             header: webrtc::rtp::header::Header {
+                version: 2,
+                padding: false,
+                extension: false,
+                marker: false,
                 payload_type: self.payload_type.load(Ordering::Relaxed),
                 ssrc: self.ssrc,
                 sequence_number: seq.into(),
