@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::AudioFrame;
 use crate::Sample;
 use anyhow::Result;
@@ -33,6 +35,7 @@ pub struct TranscriptionOption {
     pub buffer_size: Option<usize>,
     pub samplerate: Option<u32>,
     pub endpoint: Option<String>,
+    pub extra: Option<HashMap<String, String>>,
 }
 
 // Default config for backward compatibility
@@ -49,6 +52,7 @@ impl Default for TranscriptionOption {
             buffer_size: None,
             samplerate: None,
             endpoint: None,
+            extra: None,
         }
     }
 }

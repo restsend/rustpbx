@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
+use std::{collections::HashMap, pin::Pin};
 mod tencent_cloud;
 mod voiceapi;
 pub use tencent_cloud::TencentCloudTtsClient;
@@ -48,6 +48,7 @@ pub struct SynthesisOption {
     /// call、sajiao、disgusted、amaze、peaceful、exciting、aojiao、jieshuo
     pub emotion: Option<String>,
     pub endpoint: Option<String>,
+    pub extra: Option<HashMap<String, String>>,
 }
 
 #[async_trait]
@@ -75,6 +76,7 @@ impl Default for SynthesisOption {
             subtitle: None,
             emotion: None,
             endpoint: None,
+            extra: None,
         }
     }
 }

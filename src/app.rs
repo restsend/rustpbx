@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::net::TcpListener;
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -64,11 +65,7 @@ pub struct AppStateInner {
 
 pub type AppState = Arc<AppStateInner>;
 
-pub struct App {
-    pub state: AppState,
-}
-
-pub struct AppBuilder {
+pub struct AppStateBuilder {
     pub config: Option<Config>,
     pub useragent: Option<Arc<UserAgent>>,
     pub prepare_track_hook: Option<PrepareTrackHook>,
@@ -99,7 +96,7 @@ impl AppStateInner {
     }
 }
 
-impl AppBuilder {
+impl AppStateBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
@@ -129,7 +126,7 @@ impl AppBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<App> {
+    pub async fn build(self) -> Result<AppState> {
         let config = Arc::new(self.config.unwrap_or_default());
         let token = CancellationToken::new();
 
@@ -148,84 +145,79 @@ impl AppBuilder {
             std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
         let llm_proxy = std::env::var("LLM_PROXY").ok();
 
-        Ok(App {
-            state: Arc::new(AppStateInner {
-                config,
-                useragent,
-                token,
-                active_calls: Arc::new(Mutex::new(HashMap::new())),
-                recorder_root,
-                llm_proxy,
-                prepare_track_hook: self
-                    .prepare_track_hook
-                    .unwrap_or_else(|| Box::new(call::ActiveCall::prepare_track_hook)),
-                create_tts_track_hook: self
-                    .create_tts_track_hook
-                    .unwrap_or_else(|| Box::new(call::ActiveCall::create_tts_track)),
-            }),
-        })
+        Ok(Arc::new(AppStateInner {
+            config,
+            useragent,
+            token,
+            active_calls: Arc::new(Mutex::new(HashMap::new())),
+            recorder_root,
+            llm_proxy,
+            prepare_track_hook: self
+                .prepare_track_hook
+                .unwrap_or_else(|| Box::new(call::ActiveCall::prepare_track_hook)),
+            create_tts_track_hook: self
+                .create_tts_track_hook
+                .unwrap_or_else(|| Box::new(call::ActiveCall::create_tts_track)),
+        }))
     }
 }
 
-impl App {
-    pub async fn run(self) -> Result<()> {
-        // Get components ready
-        let ua = self.state.useragent.clone();
-        let token = self.state.token.child_token();
+pub async fn run(state: AppState) -> Result<()> {
+    // Get components ready
+    let ua = state.useragent.clone();
+    let token = state.token.child_token();
 
-        // Create router with empty state
-        let app = create_router(self.state.clone());
+    // Create router with empty state
+    let app = create_router(state.clone());
 
-        // Bind to address
-        let addr: SocketAddr = self.state.config.http_addr.parse()?;
-        info!("Attempting to bind to {}", addr);
+    // Bind to address
+    let addr: SocketAddr = state.config.http_addr.parse()?;
+    info!("Attempting to bind to {}", addr);
 
-        // Start HTTP server with Axum 0.8.1
-        let listener = match TcpListener::bind(addr).await {
-            Ok(l) => {
-                info!("Successfully bound to {}", addr);
-                l
-            }
-            Err(e) => {
-                tracing::error!("Failed to bind to {}: {}", addr, e);
-                return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
-            }
-        };
+    // Start HTTP server with Axum 0.8.1
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => {
+            info!("Successfully bound to {}", addr);
+            l
+        }
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
+        }
+    };
 
-        // Run HTTP server and SIP server in parallel
-        info!("Starting server on {}", addr);
+    // Run HTTP server and SIP server in parallel
+    info!("Starting server on {}", addr);
 
-        let http_task = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        );
+    let http_task = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    );
 
-        tokio::select! {
-            http_result = http_task => {
-                match http_result {
-                    Ok(_) => info!("Server shut down gracefully"),
-                    Err(e) => {
-                        tracing::error!("Server error: {}", e);
-                        return Err(anyhow::anyhow!("Server error: {}", e));
-                    }
+    select! {
+        http_result = http_task => {
+            match http_result {
+                Ok(_) => info!("Server shut down gracefully"),
+                Err(e) => {
+                    tracing::error!("Server error: {}", e);
+                    return Err(anyhow::anyhow!("Server error: {}", e));
                 }
-            }
-            ua_result = ua.serve() => {
-                if let Err(e) = ua_result {
-                    tracing::error!("User agent server error: {}", e);
-                    return Err(anyhow::anyhow!("User agent server error: {}", e));
-                }
-            }
-            _ = token.cancelled() => {
-                info!("Application shutting down due to cancellation");
             }
         }
-
-        // Clean shutdown
-        self.state.useragent.stop();
-
-        Ok(())
+        ua_result = ua.serve() => {
+            if let Err(e) = ua_result {
+                tracing::error!("User agent server error: {}", e);
+                return Err(anyhow::anyhow!("User agent server error: {}", e));
+            }
+        }
+        _ = token.cancelled() => {
+            info!("Application shutting down due to cancellation");
+        }
     }
+
+    // Clean shutdown
+    state.useragent.stop();
+    Ok(())
 }
 
 // Index page handler

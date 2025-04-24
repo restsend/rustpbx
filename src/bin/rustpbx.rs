@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
-use rustpbx::{app::AppBuilder, config::Config};
+use rustpbx::{app::AppStateBuilder, config::Config};
 use std::fs::File;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
@@ -51,12 +51,12 @@ async fn main() -> Result<()> {
         log_fmt.try_init().ok();
     }
 
-    let app_builder = AppBuilder::new().config(config);
-    let app = app_builder.build().await.expect("Failed to build app");
+    let state_builder = AppStateBuilder::new().config(config);
+    let state = state_builder.build().await.expect("Failed to build app");
 
-    info!("Starting rustpbx on {}", app.state.config.http_addr);
+    info!("Starting rustpbx on {}", state.config.http_addr);
     select! {
-        _ = app.run() => {}
+        _ = rustpbx::app::run(state) => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Received CTRL+C, shutting down");
         }

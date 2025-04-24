@@ -13,14 +13,14 @@ use tokio::{select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-pub struct RegisterOptions {
+pub struct RegisterOption {
     pub sip_server: String,
     pub credential: Option<Credential>,
 }
 pub struct RegistrationHandleInner {
     pub endpoint_inner: EndpointInnerRef,
     pub user: String,
-    pub options: RegisterOptions,
+    pub option: RegisterOption,
     pub cancel_token: CancellationToken,
     pub start_time: Mutex<Instant>,
     pub last_update: Mutex<Instant>,
@@ -32,13 +32,13 @@ pub struct RegistrationHandle {
 }
 
 impl UserAgent {
-    pub async fn register(&self, user: String, options: RegisterOptions) -> Result<()> {
+    pub async fn register(&self, user: String, options: RegisterOption) -> Result<()> {
         let token = self.token.child_token();
         let handle = RegistrationHandle {
             inner: Arc::new(RegistrationHandleInner {
                 endpoint_inner: self.endpoint.inner.clone(),
                 user: user.clone(),
-                options,
+                option: options,
                 cancel_token: token.clone(),
                 start_time: Mutex::new(Instant::now()),
                 last_update: Mutex::new(Instant::now()),
@@ -91,10 +91,10 @@ impl RegistrationHandle {
             }
             let mut registration = Registration::new(
                 self.inner.endpoint_inner.clone(),
-                self.inner.options.credential.clone(),
+                self.inner.option.credential.clone(),
             );
             let resp = registration
-                .register(&self.inner.options.sip_server)
+                .register(&self.inner.option.sip_server)
                 .await
                 .map_err(|e| anyhow::anyhow!("Registration failed: {}", e))?;
             info!("registration response: {}", resp);
@@ -114,10 +114,7 @@ impl RegistrationHandle {
     }
 
     async fn unregister(&self) -> Result<()> {
-        info!(
-            "unregistering user: {} not implemented",
-            self.inner.user
-        );
+        info!("unregistering user: {} not implemented", self.inner.user);
         Ok(())
     }
 }

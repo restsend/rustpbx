@@ -1,10 +1,5 @@
-use std::fs::File;
-use std::io::Write;
-
 use super::*;
 use crate::event::SessionEvent;
-use crate::media::codecs::samples_to_bytes;
-use crate::media::denoiser::NoiseReducer;
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -13,7 +8,13 @@ struct TestResults {
     speech_segments: Vec<(u64, u64)>, // (start_time, duration)
 }
 #[tokio::test]
+#[cfg(feature = "vad_silero")]
 async fn test_vad_with_noise_denoise() {
+    use std::fs::File;
+    use std::io::Write;
+
+    use crate::media::codecs::samples_to_bytes;
+    use crate::media::denoiser::NoiseReducer;
     let (all_samples, sample_rate) =
         crate::media::track::file::read_wav_file("fixtures/noise_gating_zh_16k.wav").unwrap();
     assert_eq!(sample_rate, 16000, "Expected 16kHz sample rate");
@@ -27,9 +28,10 @@ async fn test_vad_with_noise_denoise() {
     let (event_sender, mut event_receiver) = broadcast::channel(128);
     let track_id = "test_track".to_string();
 
-    let config = VADOption::default();
-    let vad = VadProcessor::new(VadType::Silero, event_sender.clone(), config)
-        .expect("Failed to create VAD processor");
+    let mut option = VADOption::default();
+    option.r#type = VadType::Silero;
+    let vad =
+        VadProcessor::new(event_sender.clone(), option).expect("Failed to create VAD processor");
     let mut total_duration = 0;
     let (frame_size, chunk_duration_ms) = (320, 20);
     let mut out_file = File::create("fixtures/noise_gating_zh_16k_denoised.pcm.decoded").unwrap();
@@ -90,6 +92,7 @@ async fn test_vad_with_noise_denoise() {
     );
     assert!(results.speech_segments.len() == 8);
 }
+
 #[tokio::test]
 async fn test_vad_engines_with_wav_file() {
     let (all_samples, sample_rate) =
@@ -102,10 +105,18 @@ async fn test_vad_engines_with_wav_file() {
         all_samples.len()
     );
     //
-    for vad_type in [VadType::WebRTC, VadType::Silero] {
+    for vad_type in [
+        #[cfg(feature = "vad_webrtc")]
+        VadType::WebRTC,
+        #[cfg(feature = "vad_silero")]
+        VadType::Silero,
+    ] {
         let vad_name = match vad_type {
+            #[cfg(feature = "vad_webrtc")]
             VadType::WebRTC => "WebRTC",
+            #[cfg(feature = "vad_silero")]
             VadType::Silero => "Silero",
+            VadType::Other(ref name) => name,
         };
 
         println!("\n--- Testing {} VAD Engine ---", vad_name);
@@ -113,8 +124,9 @@ async fn test_vad_engines_with_wav_file() {
         let (event_sender, mut event_receiver) = broadcast::channel(16);
         let track_id = "test_track".to_string();
 
-        let config = VADOption::default();
-        let vad = VadProcessor::new(vad_type, event_sender.clone(), config)
+        let mut option = VADOption::default();
+        option.r#type = vad_type.clone();
+        let vad = VadProcessor::new(event_sender.clone(), option)
             .expect("Failed to create VAD processor");
 
         let (frame_size, chunk_duration_ms) = (320, 20);
