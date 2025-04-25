@@ -2,12 +2,12 @@
 name = "rustpbx"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
 license = "MIT"
 repository = "https://github.com/restsend/rustpbx"
 readme = "README.md"
-keywords = ["sip", "voip", "telephony", "pbx"]
+keywords = ["sip", "voip", "telephony", "pbx", "webrtc"]
 categories = ["network-programming", "multimedia"]
 
 [features]
