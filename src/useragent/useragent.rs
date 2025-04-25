@@ -1,3 +1,5 @@
+use crate::config::SipConfig;
+
 use super::registration::RegistrationHandle;
 use anyhow::{anyhow, Result};
 use rsip::prelude::HeadersExt;
@@ -17,18 +19,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct UserAgentBuilder {
-    pub sip_addr: Option<String>,
-    pub external_ip: Option<String>,
-    pub stun_server: Option<String>,
-    pub rtp_start_port: u16,
-    pub sip_port: u16,
+    pub config: Option<SipConfig>,
     pub token: Option<CancellationToken>,
 }
 pub struct UserAgent {
+    pub config: SipConfig,
     pub token: CancellationToken,
-    pub external_ip: Option<String>,
-    pub stun_server: Option<String>,
-    pub rtp_start_port: u16,
     pub endpoint: Endpoint,
     pub registration_handles: Mutex<HashMap<String, RegistrationHandle>>,
     pub dialog_layer: Arc<DialogLayer>,
@@ -38,42 +34,17 @@ pub struct UserAgent {
 impl UserAgentBuilder {
     pub fn new() -> Self {
         Self {
-            sip_addr: None,
+            config: None,
             token: None,
-            sip_port: 5060,
-            external_ip: None,
-            stun_server: None,
-            rtp_start_port: 12000,
         }
     }
-
-    pub fn external_ip(mut self, external_ip: Option<String>) -> Self {
-        self.external_ip = external_ip;
+    pub fn with_config(mut self, config: Option<SipConfig>) -> Self {
+        self.config = config;
         self
     }
 
-    pub fn stun_server(mut self, stun_server: Option<String>) -> Self {
-        self.stun_server = stun_server;
-        self
-    }
-
-    pub fn rtp_start_port(mut self, port: u16) -> Self {
-        self.rtp_start_port = port;
-        self
-    }
-
-    pub fn sip_port(mut self, port: u16) -> Self {
-        self.sip_port = port;
-        self
-    }
-
-    pub fn token(mut self, token: Option<CancellationToken>) -> Self {
-        self.token = token;
-        self
-    }
-
-    pub fn sip_addr(mut self, sip_addr: String) -> Self {
-        self.sip_addr = Some(sip_addr);
+    pub fn with_token(mut self, token: CancellationToken) -> Self {
+        self.token = Some(token);
         self
     }
 
@@ -83,14 +54,14 @@ impl UserAgentBuilder {
             .take()
             .unwrap_or_else(|| CancellationToken::new());
 
-        let local_ip = if let Some(ip) = &self.sip_addr {
-            IpAddr::from_str(ip)?
+        let config = self.config.to_owned().unwrap_or_default();
+        let local_ip = if !config.addr.is_empty() {
+            IpAddr::from_str(config.addr.as_str())?
         } else {
             crate::net_tool::get_first_non_loopback_interface()?
         };
-
         let transport_layer = TransportLayer::new(token.clone());
-        let local_addr: SocketAddr = format!("{}:{}", local_ip, self.sip_port).parse()?;
+        let local_addr: SocketAddr = format!("{}:{}", local_ip, config.udp_port).parse()?;
 
         let udp_conn = UdpConnection::create_connection(local_addr, None)
             .await
@@ -105,9 +76,7 @@ impl UserAgentBuilder {
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
         Ok(UserAgent {
             token,
-            external_ip: self.external_ip.clone(),
-            stun_server: self.stun_server.clone(),
-            rtp_start_port: self.rtp_start_port,
+            config,
             endpoint,
             registration_handles: Mutex::new(HashMap::new()),
             dialog_layer,

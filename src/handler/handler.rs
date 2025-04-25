@@ -24,6 +24,7 @@ async fn list_calls(State(state): State<AppState>) -> Response {
                 "id": id,
                 "call_type": call.call_type,
                 "created_at": call.created_at.to_rfc3339(),
+                "option": call.option,
             })
         }).collect::<Vec<_>>(),
     });
