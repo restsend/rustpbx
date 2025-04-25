@@ -57,8 +57,6 @@ pub struct AppStateInner {
     pub useragent: Arc<UserAgent>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
-    pub recorder_root: String,
-    pub llm_proxy: Option<String>,
     pub prepare_track_hook: PrepareTrackHook,
     pub create_tts_track_hook: CreateTtsTrackHook,
 }
@@ -74,7 +72,7 @@ pub struct AppStateBuilder {
 
 impl AppStateInner {
     pub fn get_recorder_file(&self, session_id: &String) -> String {
-        let root = Path::new(&self.recorder_root);
+        let root = Path::new(&self.config.recorder_path);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
                 Ok(_) => {
@@ -129,29 +127,23 @@ impl AppStateBuilder {
     pub async fn build(self) -> Result<AppState> {
         let config = Arc::new(self.config.unwrap_or_default());
         let token = CancellationToken::new();
+        let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
 
         let useragent = if let Some(ua) = self.useragent {
             ua
         } else {
-            let external_ip = config.sip.as_ref().and_then(|s| s.external_ip.clone());
+            let config = config.sip.clone();
             let ua_builder = crate::useragent::UserAgentBuilder::new()
-                .external_ip(external_ip)
-                .rtp_start_port(12000);
-
+                .with_token(token.child_token())
+                .with_config(config);
             Arc::new(ua_builder.build().await?)
         };
-
-        let recorder_root =
-            std::env::var("RECORDER_ROOT").unwrap_or_else(|_| "/tmp/recorder".to_string());
-        let llm_proxy = std::env::var("LLM_PROXY").ok();
 
         Ok(Arc::new(AppStateInner {
             config,
             useragent,
             token,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
-            recorder_root,
-            llm_proxy,
             prepare_track_hook: self
                 .prepare_track_hook
                 .unwrap_or_else(|| Box::new(call::ActiveCall::prepare_track_hook)),
@@ -163,31 +155,18 @@ impl AppStateBuilder {
 }
 
 pub async fn run(state: AppState) -> Result<()> {
-    // Get components ready
     let ua = state.useragent.clone();
     let token = state.token.child_token();
 
-    // Create router with empty state
     let app = create_router(state.clone());
-
-    // Bind to address
     let addr: SocketAddr = state.config.http_addr.parse()?;
-    info!("Attempting to bind to {}", addr);
-
-    // Start HTTP server with Axum 0.8.1
     let listener = match TcpListener::bind(addr).await {
-        Ok(l) => {
-            info!("Successfully bound to {}", addr);
-            l
-        }
+        Ok(l) => l,
         Err(e) => {
             tracing::error!("Failed to bind to {}: {}", addr, e);
             return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
         }
     };
-
-    // Run HTTP server and SIP server in parallel
-    info!("Starting server on {}", addr);
 
     let http_task = axum::serve(
         listener,
@@ -214,8 +193,7 @@ pub async fn run(state: AppState) -> Result<()> {
             info!("Application shutting down due to cancellation");
         }
     }
-
-    // Clean shutdown
+    token.cancel();
     state.useragent.stop();
     Ok(())
 }

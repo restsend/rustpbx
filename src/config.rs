@@ -14,53 +14,42 @@ pub struct Config {
     pub http_addr: String,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub console: Option<ConsoleConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sip: Option<SipConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rtp_start_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_server: Option<String>,
+    pub recorder_path: String,
+    pub media_cache_path: String,
+    pub llmproxy: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SipConfig {
     pub addr: String,
     pub udp_port: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tcp_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ws_port: Option<u16>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Path to the private key file for TLS
-    pub ssl_private_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Path to the certificate file for TLS
-    pub ssl_certificate: Option<String>,
+    pub useragent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ProxyConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addr: String,
+    pub external_ip: Option<String>,
     pub useragent: Option<String>,
+    pub ssl_private_key: Option<String>,
+    pub ssl_certificate: Option<String>,
+    pub udp_port: Option<u16>,
+    pub tcp_port: Option<u16>,
+    pub tls_port: Option<u16>,
+    pub ws_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ConsoleConfig {
     pub prefix: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
 
@@ -77,7 +66,15 @@ impl Default for ConsoleConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            useragent: Some("rustpbx".to_string()),
+            addr: "0.0.0.0".to_string(),
+            external_ip: None,
+            useragent: None,
+            ssl_private_key: None,
+            ssl_certificate: None,
+            udp_port: None,
+            tcp_port: None,
+            tls_port: None,
+            ws_port: None,
         }
     }
 }
@@ -88,11 +85,7 @@ impl Default for SipConfig {
             addr: "0.0.0.0".to_string(),
             udp_port: 5060,
             external_ip: None,
-            tcp_port: None,
-            tls_port: None,
-            ws_port: None,
-            ssl_private_key: None,
-            ssl_certificate: None,
+            useragent: Some("rustpbx".to_string()),
         }
     }
 }
@@ -109,6 +102,15 @@ impl Default for Config {
             rtp_start_port: None,
             external_ip: None,
             stun_server: None,
+            #[cfg(target_os = "windows")]
+            recorder_path: "./recorder".to_string(),
+            #[cfg(not(target_os = "windows"))]
+            recorder_path: "/tmp/recorder".to_string(),
+            #[cfg(target_os = "windows")]
+            media_cache_path: "./mediacache".to_string(),
+            #[cfg(not(target_os = "windows"))]
+            media_cache_path: "/tmp/mediacache".to_string(),
+            llmproxy: None,
         }
     }
 }

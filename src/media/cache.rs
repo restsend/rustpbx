@@ -76,8 +76,9 @@ pub async fn is_cached(key: &str) -> Result<bool> {
 pub async fn store_in_cache(key: &str, data: &Vec<u8>) -> Result<()> {
     ensure_cache_dir().await?;
     let path = get_cache_path(key)?;
+    tokio::fs::write(&path.join(".tmp"), data).await?;
+    tokio::fs::rename(&path.join(".tmp"), &path).await?;
     info!("cache: Stored {} -> {} bytes", key, data.len());
-    tokio::fs::write(&path, data).await?;
     Ok(())
 }
 
