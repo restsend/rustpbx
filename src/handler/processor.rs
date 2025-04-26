@@ -10,7 +10,7 @@ use crate::{
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 pub struct AsrProcessor {
-    asr_client: Box<dyn TranscriptionClient>,
+    pub asr_client: Box<dyn TranscriptionClient>,
 }
 
 impl AsrProcessor {
