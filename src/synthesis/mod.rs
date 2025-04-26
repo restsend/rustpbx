@@ -8,7 +8,7 @@ mod voiceapi;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,
@@ -24,6 +24,20 @@ impl std::fmt::Display for SynthesisType {
             SynthesisType::TencentCloud => write!(f, "tencent"),
             SynthesisType::VoiceApi => write!(f, "voiceapi"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SynthesisType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "tencent" => Ok(SynthesisType::TencentCloud),
+            "voiceapi" => Ok(SynthesisType::VoiceApi),
+            _ => Ok(SynthesisType::Other(value)),
         }
     }
 }

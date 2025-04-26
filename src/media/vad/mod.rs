@@ -45,7 +45,7 @@ impl Default for VADOption {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub enum VadType {
     #[serde(rename = "webrtc")]
     #[cfg(feature = "vad_webrtc")]
@@ -56,6 +56,35 @@ pub enum VadType {
     #[serde(rename = "other")]
     Other(String),
 }
+
+impl<'de> Deserialize<'de> for VadType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            #[cfg(feature = "vad_webrtc")]
+            "webrtc" => Ok(VadType::WebRTC),
+            #[cfg(feature = "vad_silero")]
+            "silero" => Ok(VadType::Silero),
+            _ => Ok(VadType::Other(value)),
+        }
+    }
+}
+
+impl std::fmt::Display for VadType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "vad_webrtc")]
+            VadType::WebRTC => write!(f, "webrtc"),
+            #[cfg(feature = "vad_silero")]
+            VadType::Silero => write!(f, "voiceapi"),
+            VadType::Other(provider) => write!(f, "{}", provider),
+        }
+    }
+}
+
 enum VadState {
     Speaking,
     Silence,

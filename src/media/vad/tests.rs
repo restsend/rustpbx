@@ -3,10 +3,34 @@ use crate::event::SessionEvent;
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
+
+#[test]
+fn test_vadtype_deserialization() {
+    // Test deserializing a string
+    let json_str = r#""unknown_vad_type""#;
+    let vad_type: VadType = serde_json::from_str(json_str).unwrap();
+    match vad_type {
+        VadType::Other(s) => assert_eq!(s, "unknown_vad_type"),
+        _ => panic!("Expected VadType::Other"),
+    }
+
+    // Test deserializing a known type
+    #[cfg(feature = "vad_webrtc")]
+    {
+        let json_known = r#""webrtc""#;
+        let vad_type: VadType = serde_json::from_str(json_known).unwrap();
+        match vad_type {
+            VadType::WebRTC => {}
+            _ => panic!("Expected VadType::WebRTC"),
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 struct TestResults {
     speech_segments: Vec<(u64, u64)>, // (start_time, duration)
 }
+
 #[tokio::test]
 #[cfg(feature = "vad_silero")]
 async fn test_vad_with_noise_denoise() {

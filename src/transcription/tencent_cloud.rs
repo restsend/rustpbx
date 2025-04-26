@@ -55,7 +55,7 @@ pub struct TencentCloudAsrClient {
 pub struct TencentCloudAsrClientBuilder {
     option: TranscriptionOption,
     track_id: Option<String>,
-    cancellation_token: Option<CancellationToken>,
+    token: Option<CancellationToken>,
     event_sender: EventSender,
 }
 
@@ -63,13 +63,13 @@ impl TencentCloudAsrClientBuilder {
     pub fn new(option: TranscriptionOption, event_sender: EventSender) -> Self {
         Self {
             option,
-            cancellation_token: None,
+            token: None,
             track_id: None,
             event_sender,
         }
     }
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = Some(cancellation_token);
+    pub fn with_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.token = Some(cancellation_token);
         self
     }
     pub fn with_secret_id(mut self, secret_id: String) -> Self {
@@ -104,7 +104,7 @@ impl TencentCloudAsrClientBuilder {
         };
         let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let ws_stream = client.connect_websocket(voice_id.as_str()).await?;
-        let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
+        let token = self.token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
         let track_id = voice_id.clone();
         info!(
@@ -117,7 +117,7 @@ impl TencentCloudAsrClientBuilder {
                 ws_stream,
                 audio_rx,
                 event_sender,
-                cancellation_token,
+                token,
             )
             .await
             {
@@ -267,7 +267,7 @@ impl TencentCloudAsrClient {
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         event_sender: EventSender,
-        cancellation_token: CancellationToken,
+        token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let recv_loop = async move {
@@ -288,7 +288,7 @@ impl TencentCloudAsrClient {
                                         response.code
                                     ));
                                 }
-                                response.result.map(|result| {
+                                response.result.and_then(|result| {
                                     let event = if result.slice_type == 2 {
                                         SessionEvent::AsrFinal {
                                             track_id: track_id.clone(),
@@ -308,7 +308,7 @@ impl TencentCloudAsrClient {
                                             end_time: Some(result.end_time),
                                         }
                                     };
-                                    event_sender.send(event).ok();
+                                    event_sender.send(event).ok()
                                 });
                             }
                             Err(e) => {
@@ -358,7 +358,7 @@ impl TencentCloudAsrClient {
         tokio::select! {
             r = recv_loop => {r},
             r = send_loop => {r},
-            _ = cancellation_token.cancelled() => {Ok(())}
+            _ = token.cancelled() => {Ok(())}
         }
     }
 }

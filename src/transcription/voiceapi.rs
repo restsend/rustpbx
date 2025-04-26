@@ -37,7 +37,7 @@ pub struct VoiceApiAsrClient {
 pub struct VoiceApiAsrClientBuilder {
     option: TranscriptionOption,
     track_id: Option<String>,
-    cancellation_token: Option<CancellationToken>,
+    token: Option<CancellationToken>,
     event_sender: EventSender,
 }
 
@@ -45,14 +45,14 @@ impl VoiceApiAsrClientBuilder {
     pub fn new(option: TranscriptionOption, event_sender: EventSender) -> Self {
         Self {
             option,
-            cancellation_token: None,
+            token: None,
             track_id: None,
             event_sender,
         }
     }
 
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = Some(cancellation_token);
+    pub fn with_token(mut self, token: CancellationToken) -> Self {
+        self.token = Some(token);
         self
     }
 
@@ -80,7 +80,7 @@ impl VoiceApiAsrClientBuilder {
         };
         let sample_rate = self.option.samplerate.unwrap_or(16000);
         let ws_stream = client.connect_websocket(sample_rate).await?;
-        let cancellation_token = self.cancellation_token.unwrap_or(CancellationToken::new());
+        let token = self.token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -92,7 +92,7 @@ impl VoiceApiAsrClientBuilder {
                 ws_stream,
                 audio_rx,
                 event_sender,
-                cancellation_token,
+                token,
             )
             .await
             {
