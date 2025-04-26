@@ -148,4 +148,8 @@ pub enum Command {
         #[serde(rename = "trackId")]
         track_id: Option<String>,
     },
+    History {
+        speaker: String,
+        text: String,
+    },
 }

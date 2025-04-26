@@ -284,6 +284,7 @@ impl ActiveCall {
             Command::Pause {} => self.do_pause().await,
             Command::Resume {} => self.do_resume().await,
             Command::Interrupt {} => self.do_interrupt().await,
+            Command::History { speaker, text } => self.do_history(speaker, text).await,
             _ => {
                 info!("Invalid command: {:?}", command);
                 Ok(())
@@ -359,6 +360,20 @@ impl ActiveCall {
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
+
+    async fn do_history(&self, speaker: String, text: String) -> Result<()> {
+        self.media_stream
+            .get_event_sender()
+            .send(SessionEvent::AddHistory {
+                sender: Some(self.session_id.clone()),
+                timestamp: crate::get_timestamp(),
+                speaker,
+                text,
+            })
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     async fn do_interrupt(&self) -> Result<()> {
         self.tts_handle.lock().await.take();
         self.media_stream

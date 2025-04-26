@@ -140,6 +140,12 @@ pub enum SessionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<u32>,
     },
+    AddHistory {
+        sender: Option<String>,
+        timestamp: u64,
+        speaker: String,
+        text: String,
+    },
 }
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;
