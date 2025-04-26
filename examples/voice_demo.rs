@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
     let asr_client = Arc::new(
         TencentCloudAsrClientBuilder::new(transcription_config, event_sender)
-            .with_cancellation_token(cancel_token.clone())
+            .with_token(cancel_token.clone())
             .build()
             .await?,
     );

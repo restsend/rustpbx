@@ -13,12 +13,13 @@ pub use tencent_cloud::TencentCloudAsrClientBuilder;
 pub use voiceapi::VoiceApiAsrClient;
 pub use voiceapi::VoiceApiAsrClientBuilder;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum TranscriptionType {
     #[serde(rename = "tencent")]
     TencentCloud,
     #[serde(rename = "voiceapi")]
     VoiceApi,
+    Other(String),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -36,6 +37,30 @@ pub struct TranscriptionOption {
     pub samplerate: Option<u32>,
     pub endpoint: Option<String>,
     pub extra: Option<HashMap<String, String>>,
+}
+
+impl std::fmt::Display for TranscriptionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TranscriptionType::TencentCloud => write!(f, "tencent"),
+            TranscriptionType::VoiceApi => write!(f, "voiceapi"),
+            TranscriptionType::Other(provider) => write!(f, "{}", provider),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "tencent" => Ok(TranscriptionType::TencentCloud),
+            "voiceapi" => Ok(TranscriptionType::VoiceApi),
+            _ => Ok(TranscriptionType::Other(value)),
+        }
+    }
 }
 
 // Default config for backward compatibility
