@@ -61,7 +61,7 @@ impl VoiceApiTtsClient {
         let chunk_size = 4 * 640;
         let ws_url = format!("{}/tts?chunk_size={}&split=false", ws_endpoint, chunk_size);
 
-        debug!("voiceapi_tts: Connecting to WebSocket URL: {}", ws_url);
+        debug!("Connecting to WebSocket URL: {}", ws_url);
 
         let ws_url = ws_url.parse::<Uri>()?;
         // Create WebSocket request
@@ -84,7 +84,7 @@ impl VoiceApiTtsClient {
                 response.status()
             ));
         }
-        debug!("voiceapi_tts: WebSocket connection established");
+        debug!("WebSocket connection established");
         // Split WebSocket stream into sender and receiver
         let (mut ws_sender, ws_receiver) = ws_stream.split();
         // Send the TTS request
@@ -109,7 +109,7 @@ impl VoiceApiTtsClient {
                         // Text data is metadata
                         match serde_json::from_str::<TtsResult>(&text_data) {
                             Ok(metadata) => {
-                                debug!("voiceapi_tts: Received metadata: progress={}, elapsed={}, duration={}, size={}", 
+                                debug!("Received metadata: progress={}, elapsed={}, duration={}, size={}", 
                                       metadata.progress, metadata.elapsed, metadata.duration, metadata.size);
 
                                 // If progress is 1.0, this is the final message
@@ -119,7 +119,7 @@ impl VoiceApiTtsClient {
                                 Some((Ok(Vec::new()), (read, write, is_finished)))
                             }
                             Err(e) => {
-                                warn!("voiceapi_tts: Failed to parse metadata: {}", e);
+                                warn!("Failed to parse metadata: {}", e);
                                 // Continue receiving data
                                 Some((Ok(Vec::new()), (read, write, false)))
                             }
@@ -127,11 +127,11 @@ impl VoiceApiTtsClient {
                     }
                     Some(Ok(Message::Close(_))) => {
                         // Connection closed
-                        debug!("voiceapi_tts: WebSocket closed by server");
+                        debug!("WebSocket closed by server");
                         None
                     }
                     Some(Err(e)) => {
-                        warn!("voiceapi_tts: WebSocket error: {:?}", e);
+                        warn!("WebSocket error: {:?}", e);
                         // Error occurred
                         Some((Err(anyhow!("WebSocket error: {}", e)), (read, write, true)))
                     }
