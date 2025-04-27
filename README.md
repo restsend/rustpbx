@@ -4,15 +4,11 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 
 ## Overview
 
-RustPBX enables real-time control of call states, transcription, and TTS through WebSocket interfaces. It integrates seamlessly with modern communication infrastructure while maintaining compatibility with traditional telephony systems.
+## WebRTC workflow
+![Webrtc](./docs/webrtc.png)
 
-### Key Features
-
-- **WebSocket Control Interface**: Manage call states, real-time transcription, and TTS commands via WebSocket
-- **AI Service Integration**: Direct integration with mainstream ASR/TTS service providers
-- **Modern Web Connectivity**: Support for SIP.js and WebRTC over WSS, providing firewall-friendly and secure communications
-- **Traditional SBC Capabilities**: Functions as a Session Border Controller with high-performance proxy features
-- **Enterprise-Grade Features**: Includes CDR (Call Detail Records), authentication, and call forwarding functionality
+## Sip workflow
+![Sip](./docs/sip.png)
 
 ## Requirements
 

@@ -275,7 +275,19 @@ impl ActiveCall {
                 speaker,
                 play_id,
                 auto_hangup,
-            } => self.do_tts(text, speaker, play_id, auto_hangup).await,
+                streaming,
+                end_of_stream,
+            } => {
+                self.do_tts(
+                    text,
+                    speaker,
+                    play_id,
+                    auto_hangup,
+                    streaming,
+                    end_of_stream,
+                )
+                .await
+            }
             Command::Play { url, auto_hangup } => self.do_play(url, auto_hangup).await,
             Command::Hangup { reason, initiator } => self.do_hangup(reason, initiator).await,
             Command::Refer { target, options } => self.do_refer(target, options).await,
@@ -301,6 +313,8 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
         auto_hangup: Option<bool>,
+        streaming: Option<bool>,
+        end_of_stream: Option<bool>,
     ) -> Result<()> {
         let tts_option = match self.option.tts {
             Some(ref option) => option,
@@ -314,9 +328,12 @@ impl ActiveCall {
             text,
             speaker,
             play_id: play_id.clone(),
+            streaming,
+            end_of_stream,
         };
+
         info!(
-            "active_call: new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
+            "new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
             play_command.text, play_command.speaker, auto_hangup
         );
 

@@ -2,6 +2,15 @@ use crate::PcmBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GibberishAction {
+    Stop,
+    Pause,
+    Continue,
+    Ask, // Request additional information
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 #[serde(rename_all = "camelCase")]
 pub enum SessionEvent {
@@ -67,13 +76,11 @@ pub enum SessionEvent {
         #[serde(skip)]
         samples: Option<PcmBuf>,
     },
-    Noisy {
+    Gibberish {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        #[serde(rename = "startTime")]
-        start_time: u64,
-        r#type: String, // loud, music, unclear
+        action: GibberishAction,
     },
     DTMF {
         #[serde(rename = "trackId")]
@@ -123,14 +130,12 @@ pub enum SessionEvent {
         end_time: Option<u32>,
         text: String,
     },
-    /// timestamp, metrics
     Metrics {
         timestamp: u64,
         key: String,
         duration: u32,
         data: serde_json::Value,
     },
-    /// timestamp, error message
     Error {
         #[serde(rename = "trackId")]
         track_id: String,

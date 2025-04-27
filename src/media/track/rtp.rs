@@ -697,19 +697,23 @@ impl Track for RtpTrack {
             None => return Err(anyhow::anyhow!("Remote address not set")),
         };
 
-        let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
-        let samples_per_packet =
-            (self.config.codec.clock_rate() as f64 * self.config.ptime.as_secs_f64()) as u32;
+        let clock_rate = match self.payload_type.load(Ordering::Relaxed) {
+            _ => 8000,
+        };
+        let samples_per_packet = (clock_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
         let now = crate::get_timestamp();
         let last_update = self.state.last_timestamp_update.load(Ordering::Relaxed);
         let elapsed_ms = now.saturating_sub(last_update);
 
-        let timestamp_increment = if elapsed_ms > self.config.ptime.as_millis() as u64 {
-            let silence_periods = elapsed_ms as f64 / self.config.ptime.as_millis() as f64;
-            (silence_periods * samples_per_packet as f64) as u32
-        } else {
-            samples_per_packet
-        };
+        let mut silence_periods = (elapsed_ms as f64 / self.config.ptime.as_millis() as f64).ceil();
+        if silence_periods <= 2.0 {
+            silence_periods = 1.0;
+        }
+
+        let timestamp_increment = (silence_periods * samples_per_packet as f64) as u32;
+        let seq = self
+            .sequence_number
+            .fetch_add(silence_periods as u16, Ordering::Relaxed);
 
         let ts = self
             .state

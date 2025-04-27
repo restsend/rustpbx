@@ -68,7 +68,7 @@ impl TencentCloudAsrClientBuilder {
             event_sender,
         }
     }
-    pub fn with_token(mut self, cancellation_token: CancellationToken) -> Self {
+    pub fn with_cancel_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.token = Some(cancellation_token);
         self
     }
