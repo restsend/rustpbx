@@ -26,6 +26,12 @@ pub struct VADOption {
     pub ratio: f32,
     pub voice_threshold: f32,
     pub max_buffer_duration_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_id: Option<String>,
 }
 
 impl Default for VADOption {
@@ -41,6 +47,9 @@ impl Default for VADOption {
             ratio: 0.5,
             voice_threshold: 0.5,
             max_buffer_duration_secs: 50,
+            endpoint: None,
+            secret_key: None,
+            secret_id: None,
         }
     }
 }

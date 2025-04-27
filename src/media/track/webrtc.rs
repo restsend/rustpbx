@@ -47,7 +47,7 @@ pub struct WebrtcTrackConfig {
 
 pub struct WebrtcTrack {
     track_id: TrackId,
-    config: TrackConfig,
+    track_config: TrackConfig,
     processor_chain: ProcessorChain,
     packet_sender: Arc<Mutex<Option<TrackPacketSender>>>,
     cancel_token: CancellationToken,
@@ -60,7 +60,7 @@ impl WebrtcTrack {
         codec: CodecType,
         stream_id: Option<String>,
     ) -> Arc<TrackLocalStaticSample> {
-        let id = stream_id.unwrap_or("rustpbx-track".to_string());
+        let stream_id = stream_id.unwrap_or("rustpbx-track".to_string());
         Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: codec.mime_type().to_string(),
@@ -69,7 +69,7 @@ impl WebrtcTrack {
                 ..Default::default()
             },
             "audio".to_string(),
-            id,
+            stream_id,
         ))
     }
     pub fn get_media_engine() -> Result<MediaEngine> {
@@ -140,7 +140,7 @@ impl WebrtcTrack {
         let processor_chain = ProcessorChain::new(track_config.samplerate);
         Self {
             track_id: id,
-            config: track_config,
+            track_config,
             processor_chain,
             packet_sender: Arc::new(Mutex::new(None)),
             cancel_token: CancellationToken::new(),
@@ -262,7 +262,7 @@ impl WebrtcTrack {
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
         self.local_track = Some(track.clone());
-        self.config.codec = codec;
+        self.track_config.codec = codec;
 
         info!(
             "set remote description codec:{}\noffer:\n{}",
@@ -298,7 +298,7 @@ impl Track for WebrtcTrack {
         &self.track_id
     }
     fn config(&self) -> &TrackConfig {
-        &self.config
+        &self.track_config
     }
 
     fn insert_processor(&mut self, processor: Box<dyn Processor>) {
@@ -360,12 +360,12 @@ impl Track for WebrtcTrack {
             }
         };
 
-        let payload_type = self.config.codec.payload_type();
+        let payload_type = self.track_config.codec.payload_type();
         let payload = self.encoder.encode(payload_type, packet.clone());
 
         let sample = webrtc::media::Sample {
             data: payload.into(),
-            duration: Duration::from_millis(self.config.ptime.as_millis() as u64),
+            duration: Duration::from_millis(self.track_config.ptime.as_millis() as u64),
             timestamp: SystemTime::now(),
             packet_timestamp: packet.timestamp as u32,
             ..Default::default()

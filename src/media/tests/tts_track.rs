@@ -83,8 +83,7 @@ async fn test_tts_track_basic() -> Result<()> {
     // Send a TTS command
     command_tx.send(TtsCommand {
         text: "Test speech synthesis".to_string(),
-        speaker: None,
-        play_id: None,
+        ..Default::default()
     })?;
 
     // Wait for at least one audio frame
@@ -139,8 +138,8 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
     for i in 1..=3 {
         command_tx.send(TtsCommand {
             text: format!("Test speech synthesis {}", i),
-            speaker: None,
             play_id: Some(format!("test-{}", i)),
+            ..Default::default()
         })?;
     }
 
@@ -208,6 +207,7 @@ async fn test_tts_track_configuration() -> Result<()> {
         text: "Test with custom configuration".to_string(),
         speaker: Some("test-speaker".to_string()),
         play_id: Some("config-test".to_string()),
+        ..Default::default()
     })?;
 
     // Wait for an audio frame

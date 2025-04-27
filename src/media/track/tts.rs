@@ -33,11 +33,13 @@ pub struct TtsHandle {
     pub play_id: Option<String>,
     pub command_tx: TtsCommandSender,
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TtsCommand {
     pub text: String,
     pub speaker: Option<String>,
     pub play_id: Option<String>,
+    pub streaming: Option<bool>,
+    pub end_of_stream: Option<bool>,
 }
 pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
 pub type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;

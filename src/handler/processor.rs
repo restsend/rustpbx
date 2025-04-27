@@ -24,7 +24,7 @@ impl AsrProcessor {
             Some(TranscriptionType::VoiceApi) => {
                 let client = VoiceApiAsrClientBuilder::new(option, event_sender)
                     .with_track_id(track_id)
-                    .with_token(token)
+                    .with_cancel_token(token)
                     .build()
                     .await?;
                 Box::new(client) as Box<dyn TranscriptionClient>
@@ -32,7 +32,7 @@ impl AsrProcessor {
             _ => {
                 let client = TencentCloudAsrClientBuilder::new(option, event_sender)
                     .with_track_id(track_id)
-                    .with_token(token)
+                    .with_cancel_token(token)
                     .build()
                     .await?;
                 Box::new(client) as Box<dyn TranscriptionClient>

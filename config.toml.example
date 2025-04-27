@@ -1,0 +1,17 @@
+# A example config file
+# mv config.toml.example config.toml
+# cargo run . --bin rustpbx --conf config.toml
+
+http_addr = "0.0.0.0:8080"
+log_level = "debug"
+log_file = "/var/log/rustpbx.log"
+stun_server = "stun.l.google.com:19302"
+recorder_path = "/app/recorders"
+media_cache_path = "/app/mediacache"
+
+[sip]
+addr="0.0.0.0"
+udp_port=13050 # don't use 5060
+
+# Replace your EIP here for public ip
+# external_ip="1.2.3.4"

@@ -20,7 +20,7 @@ use tracing::info;
 
 pub struct UserAgentBuilder {
     pub config: Option<SipConfig>,
-    pub token: Option<CancellationToken>,
+    pub cancel_token: Option<CancellationToken>,
 }
 pub struct UserAgent {
     pub config: SipConfig,
@@ -35,7 +35,7 @@ impl UserAgentBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
-            token: None,
+            cancel_token: None,
         }
     }
     pub fn with_config(mut self, config: Option<SipConfig>) -> Self {
@@ -44,13 +44,13 @@ impl UserAgentBuilder {
     }
 
     pub fn with_token(mut self, token: CancellationToken) -> Self {
-        self.token = Some(token);
+        self.cancel_token = Some(token);
         self
     }
 
     pub async fn build(mut self) -> Result<UserAgent> {
         let token = self
-            .token
+            .cancel_token
             .take()
             .unwrap_or_else(|| CancellationToken::new());
 

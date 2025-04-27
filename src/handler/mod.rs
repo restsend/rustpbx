@@ -86,7 +86,6 @@ pub struct ReferOption {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// Music on hold
     moh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_hangup: Option<bool>,
@@ -120,6 +119,10 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "autoHangup")]
         auto_hangup: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        streaming: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        end_of_stream: Option<bool>,
     },
     Play {
         url: String,

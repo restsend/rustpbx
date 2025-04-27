@@ -12,6 +12,7 @@ use reqwest::header;
 use serde::{Deserialize, Serialize};
 use std::{env, time::Instant};
 use tracing::{error, info};
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenAIConfig {
     pub endpoint: String,
