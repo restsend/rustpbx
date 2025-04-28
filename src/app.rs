@@ -156,7 +156,7 @@ impl AppStateBuilder {
 
 pub async fn run(state: AppState) -> Result<()> {
     let ua = state.useragent.clone();
-    let token = state.token.child_token();
+    let token = state.token.clone();
 
     let app = create_router(state.clone());
     let addr: SocketAddr = state.config.http_addr.parse()?;

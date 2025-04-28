@@ -1,13 +1,13 @@
 use crate::PcmBuf;
 use serde::{Deserialize, Serialize};
-
+use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GibberishAction {
-    Stop,
-    Pause,
-    Continue,
-    Ask, // Request additional information
+    Stop,     // Stop the media stream
+    Pause,    // Pause the media stream
+    Continue, // Do nothing
+    Ask,      // Request additional information
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +150,13 @@ pub enum SessionEvent {
         timestamp: u64,
         speaker: String,
         text: String,
+    },
+    Other {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        sender: String,
+        extra: Option<HashMap<String, String>>,
     },
 }
 

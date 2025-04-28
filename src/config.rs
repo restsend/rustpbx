@@ -1,6 +1,6 @@
 use anyhow::Error;
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -23,6 +23,7 @@ pub struct Config {
     pub recorder_path: String,
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
+    pub ice_servers: Option<Vec<IceServerItem>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -49,6 +50,13 @@ pub struct ProxyConfig {
 #[derive(Debug, Deserialize)]
 pub struct ConsoleConfig {
     pub prefix: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default, Serialize)]
+pub struct IceServerItem {
+    pub urls: Vec<String>,
     pub username: Option<String>,
     pub password: Option<String>,
 }
@@ -111,6 +119,7 @@ impl Default for Config {
             #[cfg(not(target_os = "windows"))]
             media_cache_path: "/tmp/mediacache".to_string(),
             llmproxy: None,
+            ice_servers: None,
         }
     }
 }
