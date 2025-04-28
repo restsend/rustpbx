@@ -18,7 +18,7 @@ use std::{
     io::Cursor,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -26,8 +26,18 @@ use std::{
 use tokio::{select, time::interval_at, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use webrtc::{sdp::SessionDescription, util::Marshal, util::Unmarshal};
-const RTP_MTU: usize = 1500; // Standard MTU size
+use webrtc::{
+    rtp::{
+        codecs::g7xx::G7xxPayloader,
+        packet::Packet,
+        packetizer::{new_packetizer, Packetizer},
+        sequence::{new_random_sequencer, Sequencer},
+    },
+    sdp::SessionDescription,
+    util::{Marshal, Unmarshal},
+};
+const RTP_MTU: usize = 1500; // UDP MTU size
+const RTP_OUTBOUND_MTU: usize = 1200; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
 const DTMF_EVENT_DURATION_MS: u64 = 160; // Default DTMF event duration (in ms)
 const DTMF_EVENT_VOLUME: u8 = 10; // Default volume for DTMF events (0-63)
@@ -130,17 +140,18 @@ pub struct RtpTrack {
     config: TrackConfig,
     cancel_token: CancellationToken,
     ssrc: u32,
-    remote_addr: Mutex<Option<SipAddr>>,
-    remote_rtcp_addr: Mutex<Option<SipAddr>>,
+    remote_addr: Option<SipAddr>,
+    remote_rtcp_addr: Option<SipAddr>,
     processor_chain: ProcessorChain,
     rtp_socket: UdpConnection,
     rtcp_socket: UdpConnection,
-    sequence_number: AtomicU16,
     encoder: TrackCodec,
     state: Arc<RtpTrackState>,
     dtmf_payload_type: u8,
-    payload_type: AtomicU8,
-    remote_description: Mutex<Option<String>>,
+    payload_type: u8,
+    remote_description: Option<String>,
+    sequencer: Box<dyn Sequencer + Send + Sync>,
+    packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -280,24 +291,25 @@ impl RtpTrackBuilder {
             config: self.config,
             cancel_token,
             ssrc: rand::random::<u32>(),
-            remote_addr: Mutex::new(None),
-            remote_rtcp_addr: Mutex::new(None),
+            remote_addr: None,
+            remote_rtcp_addr: None,
             processor_chain,
             rtp_socket: rtp_socket.unwrap(),
             rtcp_socket: rtcp_socket.unwrap(),
-            sequence_number: AtomicU16::new(0),
             encoder: TrackCodec::new(),
             state: Arc::new(RtpTrackState::new()),
             dtmf_payload_type: 101,
-            payload_type: AtomicU8::new(9),
-            remote_description: Mutex::new(None),
+            payload_type: 0,
+            remote_description: None,
+            sequencer: Box::new(new_random_sequencer()),
+            packetizer: Mutex::new(None),
         };
         Ok(track)
     }
 }
 
 impl RtpTrack {
-    pub fn set_remote_description(&self, answer: &str) -> Result<()> {
+    pub fn set_remote_description(&mut self, answer: &str) -> Result<()> {
         let mut reader = Cursor::new(answer);
         let sdp = SessionDescription::unmarshal(&mut reader)?;
         let peer_media = match select_peer_media(&sdp, "audio") {
@@ -313,10 +325,7 @@ impl RtpTrack {
             return Err(anyhow::anyhow!("no rtp addr in answer SDP"));
         }
 
-        self.remote_description
-            .lock()
-            .unwrap()
-            .replace(answer.to_string());
+        self.remote_description.replace(answer.to_string());
 
         let remote_addr = SipAddr {
             addr: HostWithPort {
@@ -339,15 +348,22 @@ impl RtpTrack {
             peer_media.codecs[0].payload_type()
         );
 
-        self.payload_type
-            .store(peer_media.codecs[0].payload_type(), Ordering::Relaxed);
+        self.payload_type = peer_media.codecs[0].payload_type();
+        self.remote_addr.replace(remote_addr);
+        self.remote_rtcp_addr.replace(remote_rtcp_addr);
 
-        self.remote_addr.lock().unwrap().replace(remote_addr);
-        self.remote_rtcp_addr
+        let payloader = Box::<G7xxPayloader>::default();
+        self.packetizer
             .lock()
             .unwrap()
-            .replace(remote_rtcp_addr);
-
+            .replace(Box::new(new_packetizer(
+                RTP_OUTBOUND_MTU,
+                peer_media.codecs[0].payload_type(),
+                self.ssrc,
+                payloader,
+                self.sequencer.clone(),
+                peer_media.codecs[0].clock_rate(),
+            )));
         Ok(())
     }
 
@@ -378,7 +394,7 @@ a=sendrecv\r\n",
     // Send DTMF tone using RFC 4733
     pub async fn send_dtmf(&self, digit: &str, duration_ms: Option<u64>) -> Result<()> {
         let socket = &self.rtp_socket;
-        let remote_addr = match self.remote_addr.lock().unwrap().as_ref() {
+        let remote_addr = match self.remote_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => return Err(anyhow::anyhow!("Remote address not set")),
         };
@@ -414,8 +430,6 @@ a=sendrecv\r\n",
         let samples_per_packet =
             (self.config.samplerate as f64 * self.config.ptime.as_secs_f64()) as u32;
 
-        // Get the current timestamp before we start sending DTMF
-        let current_ts = self.state.timestamp.load(Ordering::Relaxed);
         let now = crate::get_timestamp();
         self.state
             .last_timestamp_update
@@ -439,53 +453,37 @@ a=sendrecv\r\n",
             payload[2] = ((event_duration >> 8) & 0xFF) as u8;
             payload[3] = (event_duration & 0xFF) as u8;
 
-            // Get next sequence number
-            let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed);
-
-            // Use the same timestamp for all DTMF packets of the same event
-            // This is per RFC 4733 requirements
-            let ts = current_ts;
-
-            let payload_len = payload.len();
-            let packet = webrtc::rtp::packet::Packet {
-                header: webrtc::rtp::header::Header {
-                    version: 2,
-                    padding: false,
-                    extension: false,
-                    marker: false,
-                    payload_type: self.dtmf_payload_type,
-                    ssrc: self.ssrc,
-                    sequence_number: seq.into(),
-                    timestamp: ts,
-                    ..Default::default()
-                },
-                payload: Bytes::from(payload),
-                ..Default::default()
+            let packets = match self.packetizer.lock().unwrap().as_mut() {
+                Some(p) => p.packetize(&Bytes::from_owner(payload), samples_per_packet)?,
+                None => return Err(anyhow::anyhow!("Packetizer not set")),
             };
+            for mut packet in packets {
+                packet.header.payload_type = self.dtmf_payload_type;
 
-            match packet.marshal() {
-                Ok(ref rtp_data) => {
-                    match socket.send_raw(rtp_data, &remote_addr).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("Failed to send DTMF RTP packet: {}", e);
+                match packet.marshal() {
+                    Ok(ref rtp_data) => {
+                        match socket.send_raw(rtp_data, &remote_addr).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("Failed to send DTMF RTP packet: {}", e);
+                            }
+                        }
+
+                        // Update counters for RTCP
+                        self.state.packet_count.fetch_add(1, Ordering::Relaxed);
+                        self.state
+                            .octet_count
+                            .fetch_add(rtp_data.len() as u32, Ordering::Relaxed);
+
+                        // Sleep for packet time if not the last packet
+                        if !is_end {
+                            tokio::time::sleep(self.config.ptime).await;
                         }
                     }
-
-                    // Update counters for RTCP
-                    self.state.packet_count.fetch_add(1, Ordering::Relaxed);
-                    self.state
-                        .octet_count
-                        .fetch_add(payload_len as u32, Ordering::Relaxed);
-
-                    // Sleep for packet time if not the last packet
-                    if !is_end {
-                        tokio::time::sleep(self.config.ptime).await;
+                    Err(e) => {
+                        error!("Failed to create DTMF RTP packet: {:?}", e);
+                        continue;
                     }
-                }
-                Err(e) => {
-                    error!("Failed to create DTMF RTP packet: {:?}", e);
-                    continue;
                 }
             }
         }
@@ -521,7 +519,7 @@ a=sendrecv\r\n",
                 continue;
             }
 
-            let packet = match webrtc::rtp::packet::Packet::unmarshal(&mut &buf[0..n]) {
+            let packet = match Packet::unmarshal(&mut &buf[0..n]) {
                 Ok(packet) => packet,
                 Err(e) => {
                     debug!("Error creating RTP reader: {:?}", e);
@@ -601,7 +599,7 @@ a=sendrecv\r\n",
 
     // Add a method for webrtc compatibility
     // This allows users to pass SDP strings generated by the webrtc crate
-    pub fn set_remote_description_with_webrtc(&self, webrtc_sdp: &str) -> Result<()> {
+    pub fn set_remote_description_with_webrtc(&mut self, webrtc_sdp: &str) -> Result<()> {
         // For webrtc compatibility, we directly use the string representation
         self.set_remote_description(webrtc_sdp)
     }
@@ -625,12 +623,7 @@ impl Track for RtpTrack {
     }
 
     async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
-        let answer = self
-            .remote_description
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or("".to_string());
+        let answer = self.remote_description.clone().unwrap_or("".to_string());
         Ok(answer)
     }
 
@@ -640,7 +633,7 @@ impl Track for RtpTrack {
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
         let track_id = self.track_id.clone();
-        let rtcp_addr = self.remote_rtcp_addr.lock().unwrap().clone();
+        let rtcp_addr = self.remote_rtcp_addr.clone();
         let rtcp_socket = self.rtcp_socket.clone();
         let ssrc = self.ssrc;
         let state = self.state.clone();
@@ -685,80 +678,68 @@ impl Track for RtpTrack {
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
         let socket = &self.rtp_socket;
-        let payload = self
-            .encoder
-            .encode(self.payload_type.load(Ordering::Relaxed), packet.clone());
+        let payload = self.encoder.encode(self.payload_type, packet.clone());
 
         if payload.is_empty() {
             return Ok(());
         }
-        let remote_addr = match self.remote_addr.lock().unwrap().as_ref() {
+        let remote_addr = match self.remote_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => return Err(anyhow::anyhow!("Remote address not set")),
         };
 
-        let clock_rate = match self.payload_type.load(Ordering::Relaxed) {
+        let clock_rate = match self.payload_type {
             _ => 8000,
         };
-        let samples_per_packet = (clock_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
+
         let now = crate::get_timestamp();
         let last_update = self.state.last_timestamp_update.load(Ordering::Relaxed);
-        let elapsed_ms = now.saturating_sub(last_update);
-
-        let mut silence_periods = (elapsed_ms as f64 / self.config.ptime.as_millis() as f64).ceil();
-        if silence_periods <= 2.0 {
-            silence_periods = 1.0;
-        }
-
-        let timestamp_increment = (silence_periods * samples_per_packet as f64) as u32;
-        let seq = self
-            .sequence_number
-            .fetch_add(silence_periods as u16, Ordering::Relaxed);
-
-        let ts = self
-            .state
-            .timestamp
-            .fetch_add(timestamp_increment, Ordering::Relaxed);
+        let skipped_packets = if last_update > 0 {
+            (now - last_update) / clock_rate as u64
+        } else {
+            0
+        };
 
         self.state
             .last_timestamp_update
             .store(now, Ordering::Relaxed);
 
-        let payload_len = payload.len();
-        // Create RTP packet
-        let packet = webrtc::rtp::packet::Packet {
-            header: webrtc::rtp::header::Header {
-                version: 2,
-                padding: false,
-                extension: false,
-                marker: false,
-                payload_type: self.payload_type.load(Ordering::Relaxed),
-                ssrc: self.ssrc,
-                sequence_number: seq.into(),
-                timestamp: ts,
-                ..Default::default()
-            },
-            payload: Bytes::from(payload),
-            ..Default::default()
+        if skipped_packets > 0 {
+            for _ in 0..skipped_packets {
+                self.sequencer.next_sequence_number();
+            }
+        }
+
+        let samples_per_packet = (clock_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
+        let packets = match self.packetizer.lock().unwrap().as_mut() {
+            Some(p) => {
+                if skipped_packets > 0 {
+                    p.skip_samples((skipped_packets * samples_per_packet as u64) as u32);
+                }
+                p.packetize(&Bytes::from_owner(payload), samples_per_packet)?
+            }
+            None => return Err(anyhow::anyhow!("Packetizer not set")),
         };
-        match packet.marshal() {
-            Ok(ref rtp_data) => {
-                match socket.send_raw(rtp_data, &remote_addr).await {
+        for packet in packets {
+            match packet.marshal() {
+                Ok(ref rtp_data) => match socket.send_raw(rtp_data, &remote_addr).await {
                     Ok(_) => {
-                        // Update packet and octet counts for RTCP
                         self.state.packet_count.fetch_add(1, Ordering::Relaxed);
                         self.state
                             .octet_count
-                            .fetch_add(payload_len as u32, Ordering::Relaxed);
+                            .fetch_add(rtp_data.len() as u32, Ordering::Relaxed);
+                        self.state
+                            .timestamp
+                            .fetch_add(samples_per_packet, Ordering::Relaxed);
                     }
                     Err(e) => {
                         warn!("Failed to send RTP packet: {}", e);
                     }
+                },
+                Err(e) => {
+                    error!("Failed to build RTP packet: {:?}", e);
+                    return Err(anyhow::anyhow!("Failed to build RTP packet"));
                 }
-            }
-            Err(e) => {
-                error!("Failed to build RTP packet: {:?}", e);
-                return Err(anyhow::anyhow!("Failed to build RTP packet"));
             }
         }
         Ok(())
@@ -786,13 +767,13 @@ a=rtpmap:9 G722/8000
 a=ssrc:1089147397 cname:61753255553b9c6f
 a=rtpmap:101 telephone-event/8000
 a=fmtp:101 0-16"#;
-        let rtp_track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+        let mut rtp_track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
             .build()
             .await
             .expect("Failed to build rtp track");
         rtp_track
             .set_remote_description(sdk)
             .expect("Failed to set remote description");
-        assert_eq!(rtp_track.payload_type.load(Ordering::Relaxed), 9);
+        assert_eq!(rtp_track.payload_type, 9);
     }
 }

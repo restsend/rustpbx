@@ -92,7 +92,7 @@ pub(super) async fn new_rtp_track_with_sip(
         rtp_track = rtp_track.with_stun_server(stun_server.clone());
     }
 
-    let rtp_track = rtp_track.build().await?;
+    let mut rtp_track = rtp_track.build().await?;
     let offer = rtp_track.local_description().ok();
     let invite_option = InviteOption {
         caller: caller.clone().try_into()?,

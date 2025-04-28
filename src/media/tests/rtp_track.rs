@@ -511,7 +511,7 @@ async fn test_rtp_track_set_remote_description() -> Result<()> {
     let track_id = "test-remote-desc".to_string();
     let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
         .with_cancel_token(cancel_token.clone());
-    let track = builder.build().await?;
+    let mut track = builder.build().await?;
 
     // Create valid SDP for testing
     let test_sdp = r#"v=0

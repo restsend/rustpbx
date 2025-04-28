@@ -23,17 +23,9 @@ pub struct IceServer {
     credential: Option<String>,
 }
 
-pub(crate) async fn get_iceservers(client_ip: ClientIp) -> Response {
+pub(crate) async fn get_iceservers(client_ip: ClientIp, State(state): State<AppState>) -> Response {
     let rs_token = env::var("RESTSEND_TOKEN").unwrap_or_default();
-    let default_stun_server =
-        env::var("STUN_SERVER").unwrap_or_else(|_| "stun:restsend.com:3478".to_string());
-
-    let default_ice_servers = vec![IceServer {
-        urls: vec![default_stun_server.clone()],
-        username: None,
-        credential: None,
-    }];
-
+    let default_ice_servers = state.config.ice_servers.as_ref();
     if rs_token.is_empty() {
         return Json(default_ice_servers).into_response();
     }
