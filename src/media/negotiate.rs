@@ -18,7 +18,9 @@ pub fn strip_ipv6_candidates(sdp: &str) -> String {
 }
 
 pub fn prefer_audio_codec(sdp: &SessionDescription) -> Option<codecs::CodecType> {
-    select_peer_media(sdp, "audio")?.codecs.first().cloned()
+    let mut codecs = select_peer_media(sdp, "audio")?.codecs;
+    codecs.sort_by(|a, b| a.cmp(b));
+    codecs.last().cloned()
 }
 
 pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<PeerMedia> {

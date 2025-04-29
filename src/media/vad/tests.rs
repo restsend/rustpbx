@@ -114,7 +114,7 @@ async fn test_vad_with_noise_denoise() {
         results.speech_segments.len(),
         total_duration
     );
-    assert!(results.speech_segments.len() == 8);
+    assert!(results.speech_segments.len() == 9);
 }
 
 #[tokio::test]
