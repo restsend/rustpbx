@@ -113,10 +113,10 @@ impl TencentCloudAsrClientBuilder {
         );
         tokio::spawn(async move {
             match TencentCloudAsrClient::handle_websocket_message(
-                track_id,
+                track_id.clone(),
                 ws_stream,
                 audio_rx,
-                event_sender,
+                event_sender.clone(),
                 token,
             )
             .await
@@ -126,6 +126,15 @@ impl TencentCloudAsrClientBuilder {
                 }
                 Err(e) => {
                     info!("Error in handle_websocket_message: {}", e);
+                    event_sender
+                        .send(SessionEvent::Error {
+                            track_id,
+                            timestamp: crate::get_timestamp(),
+                            sender: "tencent_cloud_asr".to_string(),
+                            error: e.to_string(),
+                            code: None,
+                        })
+                        .ok();
                 }
             }
         });
