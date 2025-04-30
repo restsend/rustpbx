@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use crate::{
     media::{recorder::RecorderOption, vad::VADOption},
     synthesis::SynthesisOption,
     transcription::TranscriptionOption,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub mod call;
 pub mod handler;

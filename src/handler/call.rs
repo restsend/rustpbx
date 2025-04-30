@@ -21,7 +21,10 @@ use crate::{
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
-use futures::{stream::SplitSink, SinkExt, StreamExt};
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use rsipstack::dialog::{
     dialog::{Dialog, DialogState, DialogStateReceiver},
     DialogId,
@@ -498,18 +501,59 @@ pub async fn handle_call(
     socket: axum::extract::ws::WebSocket,
     state: AppState,
 ) -> Result<()> {
-    let (mut ws_sender, mut ws_receiver) = socket.split();
     let cancel_token = CancellationToken::new();
-    let mut event_sender = crate::event::create_event_sender();
+    let (mut ws_sender, ws_receiver) = socket.split();
+    let event_sender = crate::event::create_event_sender();
     let mut event_receiver = event_sender.subscribe();
 
+    select! {
+        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
+            info!("prepare call send to ws");
+            return Err(anyhow::anyhow!("WebSocket closed"));
+        }
+        r = process_call(cancel_token.clone(), call_type, session_id.clone(),ws_receiver, event_sender, state) => {
+            match r {
+                Ok(_) => {}
+                Err(e) => {
+                    info!("call error: {}", e);
+                    let error_event = SessionEvent::Error {
+                        track_id:session_id,
+                        timestamp:crate::get_timestamp(),
+                        error:e.to_string(),
+                        sender: "handle_call".to_string(),
+                        code: None };
+                    match serde_json::to_string(&error_event) {
+                        Ok(data) => {ws_sender.send(data.into()).await.ok();},
+                        Err(_) => {
+                            error!("error serializing error event: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        _ = cancel_token.cancelled() => {
+            info!("cancelled");
+        }
+    };
+    ws_sender.flush().await.ok();
+    Ok(())
+}
+
+async fn process_call(
+    cancel_token: CancellationToken,
+    call_type: ActiveCallType,
+    session_id: String,
+    mut ws_receiver: SplitStream<WebSocket>,
+    mut event_sender: EventSender,
+    state: AppState,
+) -> Result<()> {
     let track_id = session_id.clone();
     let cancel_token_ref = cancel_token.clone();
-    let event_sender_ref = event_sender.clone();
     let state_clone = state.clone();
     let (dlg_state_sender, mut dlg_state_receiver) = mpsc::unbounded_channel();
     let track_id_clone = track_id.clone();
     let call_type_ref = call_type.clone();
+    let event_sender_ref = event_sender.clone();
 
     let prepare_call = async move {
         let mut option = match ws_receiver.next().await {
@@ -583,16 +627,12 @@ pub async fn handle_call(
         },
         r = prepare_call => {
             match r {
-                Ok((active_call, ws_receiver)) => (active_call, ws_receiver),
+                Ok(call_result) => call_result,
                 Err(e) => {
                     error!("prepare call failed: {}", e);
                     return Err(e);
                 }
             }
-        }
-        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("prepare call send to ws");
-            return Err(anyhow::anyhow!("WebSocket closed"));
         }
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
@@ -644,12 +684,6 @@ pub async fn handle_call(
         }
     };
     select! {
-        _ = cancel_token_ref.cancelled() => {
-            info!("cancelled");
-        },
-        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
-            info!("send_to_ws websocket disconnected");
-        },
         _ = recv_from_ws => {
             info!("recv_from_ws websocket disconnected");
         },

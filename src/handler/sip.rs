@@ -36,7 +36,6 @@ pub async fn sip_handler(
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
     ws.on_upgrade(|socket| async move {
-        info!("{session_id}");
         let start_time = Instant::now();
         match handle_call(ActiveCallType::Sip, session_id.clone(), socket, state).await {
             Ok(_) => (),
@@ -53,9 +52,7 @@ pub async fn sip_handler(
                 );
                 call.cancel_token.cancel();
             }
-            None => {
-                error!("all not found");
-            }
+            None => {}
         }
     })
 }
@@ -126,6 +123,6 @@ pub(super) async fn new_rtp_track_with_sip(
             }
             Ok((dialog_id, rtp_track))
         }
-        Err(e) => Err(anyhow::anyhow!("failed to invite: {}", e)),
+        Err(e) => Err(e),
     }
 }
