@@ -60,7 +60,7 @@ impl UserAgent {
             .dialog_layer
             .do_invite(invite_option, state_sender)
             .await
-            .map_err(|e| anyhow!("invite failed: {}", e))?;
+            .map_err(|e| anyhow!("{}", e))?;
 
         let offer = match resp {
             Some(resp) => {
@@ -70,7 +70,7 @@ impl UserAgent {
                         let offer = resp.body.clone();
                         Some(offer)
                     }
-                    _ => return Err(anyhow!("failed to invite: {}", resp.status_code)),
+                    _ => return Err(anyhow!("{}", resp.status_code)),
                 }
             }
             None => return Err(anyhow!("no response received")),
