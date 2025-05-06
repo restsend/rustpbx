@@ -76,8 +76,8 @@ pub async fn is_cached(key: &str) -> Result<bool> {
 pub async fn store_in_cache(key: &str, data: &Vec<u8>) -> Result<()> {
     ensure_cache_dir().await?;
     let path = get_cache_path(key)?;
-    tokio::fs::write(&path.join(".tmp"), data).await?;
-    tokio::fs::rename(&path.join(".tmp"), &path).await?;
+    tokio::fs::write(&path.with_extension(".tmp"), data).await?;
+    tokio::fs::rename(&path.with_extension(".tmp"), &path).await?;
     info!("cache: Stored {} -> {} bytes", key, data.len());
     Ok(())
 }
@@ -111,22 +111,12 @@ pub async fn delete_from_cache(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
     #[tokio::test]
     async fn test_cache_operations() -> Result<()> {
-        // Create a temporary directory for testing
-        let temp_dir = tempdir()?;
-        let temp_path = temp_dir.path().to_str().unwrap();
-
-        // Set the cache directory to the temporary directory
-        set_cache_dir(temp_path)?;
-
-        // Ensure cache directory exists
         ensure_cache_dir().await?;
 
         // Generate a cache key
-        let key = generate_cache_key("test_data", 16000, &"".to_string());
+        let key = generate_cache_key("test_data", 8000, &"".to_string());
 
         // Test storing data in cache
         let test_data = b"TEST DATA".to_vec();

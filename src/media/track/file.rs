@@ -433,21 +433,13 @@ async fn process_wav_reader<R: std::io::Read + Send>(
 
 #[cfg(test)]
 mod tests {
+    use crate::media::cache::ensure_cache_dir;
+
     use super::*;
-    use tempfile::tempdir;
     use tokio::sync::{broadcast, mpsc};
     #[tokio::test]
     async fn test_file_track_with_cache() -> Result<()> {
-        // Set up a temporary cache directory with a unique name for this test
-        let temp_dir = tempdir()?;
-        let cache_path = temp_dir.path().join("file_track_cache");
-        tokio::fs::create_dir_all(&cache_path).await?;
-        let cache_path_str = cache_path.to_str().unwrap();
-        cache::set_cache_dir(cache_path_str)?;
-
-        // Ensure cache directory exists
-        cache::ensure_cache_dir().await?;
-
+        ensure_cache_dir().await?;
         let file_path = "fixtures/sample.wav".to_string();
         // Create a FileTrack instance
         let track_id = "test_track".to_string();

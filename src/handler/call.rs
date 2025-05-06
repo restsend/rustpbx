@@ -26,7 +26,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use rsipstack::dialog::{
-    dialog::{Dialog, DialogState, DialogStateReceiver},
+    dialog::{DialogState, DialogStateReceiver},
     DialogId,
 };
 use serde::{Deserialize, Serialize};
@@ -188,8 +188,11 @@ impl ActiveCall {
 
         match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
-                let sdp = strip_ipv6_candidates(&answer);
-                info!("track setup complete answer: {}", answer);
+                let sdp = match option.enable_ipv6 {
+                    Some(false) | None => strip_ipv6_candidates(&answer),
+                    Some(true) => answer,
+                };
+                info!("track setup complete answer: {}", sdp);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id,
@@ -433,6 +436,17 @@ impl ActiveCall {
     }
 
     async fn do_unmute(&self, _track_id: Option<String>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn cleanup(&self) -> Result<()> {
+        info!("call cleanup: {}", self.session_id);
+        self.tts_handle.lock().await.take();
+        self.media_stream.stop(None, None);
+        if let Some(dialog_id) = self.dialog_id.lock().await.take() {
+            self.state.useragent.hangup(dialog_id).await.ok();
+        }
+        self.cancel_token.cancel();
         Ok(())
     }
 }
@@ -701,24 +715,6 @@ async fn process_call(
             info!("sip event loop");
         }
     }
-    cancel_token_ref.cancel();
-    if let Some(dialog_id) = active_call_clone.dialog_id.lock().await.take() {
-        let r = match state.useragent.dialog_layer.get_dialog(&dialog_id) {
-            Some(dialog) => match dialog {
-                Dialog::ClientInvite(dialog) => dialog.bye().await,
-                Dialog::ServerInvite(dialog) => dialog.bye().await,
-            },
-            None => {
-                error!("dialog not found");
-                return Err(anyhow::anyhow!("dialog not found"));
-            }
-        };
-        match r {
-            Ok(_) => (),
-            Err(e) => {
-                error!("error closing dialog: {}", e);
-            }
-        }
-    }
+    active_call_clone.cleanup().await?;
     Ok(())
 }

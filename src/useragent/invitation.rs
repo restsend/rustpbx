@@ -30,7 +30,6 @@ impl UserAgent {
         let dialog = match self.dialogs.lock().await.remove(&dialog_id) {
             Some(dialog) => dialog,
             None => {
-                info!("dialog not found");
                 return Err(anyhow!("dialog not found"));
             }
         };
