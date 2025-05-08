@@ -25,10 +25,18 @@ use tracing::{error, info, warn, Level};
 use uuid::Uuid;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
+use clap::Parser;
+
+#[derive(Parser)]
+struct Args {
+    #[clap(short, long, default_value = "assets/sample.wav")]
+    media_path: String,
+}
 // Application state
 struct AppState {
     connections: Mutex<HashMap<String, ConnectionState>>,
     root_dir: PathBuf,
+    media_path: PathBuf,
 }
 
 struct ConnectionState {
@@ -53,19 +61,7 @@ struct WebRTCOffer {
 #[derive(Debug, Serialize)]
 struct WebRTCAnswer {
     sdp: WebRTCSessionDescription,
-    #[serde(skip_serializing_if = "Vec::is_none")]
     ice_candidates: Vec<RTCIceCandidateInit>,
-}
-
-// Helper extension trait
-trait VecExt<T> {
-    fn is_none(&self) -> bool;
-}
-
-impl<T> VecExt<T> for Vec<T> {
-    fn is_none(&self) -> bool {
-        self.is_empty()
-    }
 }
 
 // Index page handler
@@ -120,11 +116,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
     );
     let track_id = format!("webrtc-{}", Uuid::new_v4());
     let mut webrtc_track = WebrtcTrack::new(track_id.clone(), TrackConfig::default());
-    let sample_path = state
-        .root_dir
-        .join("assets/sample.wav")
-        .to_string_lossy()
-        .to_string();
+    let sample_path = state.media_path.to_string_lossy().to_string();
     // Create connection state
     let connection_state = ConnectionState {
         cancel_token: cancel_token.clone(),
@@ -185,6 +177,7 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
+    let args = Args::parse();
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_file(true)
@@ -201,21 +194,24 @@ async fn main() -> Result<()> {
     .find(|p| p.join("assets").exists())
     .unwrap()
     .to_path_buf();
+
+    let media_path = root_dir.join(args.media_path);
+
+    info!("Looking for Media file at path: {:?}", media_path);
+    if !media_path.exists() {
+        error!("Media file does not exist at path: {:?}", media_path);
+        return Err(anyhow::anyhow!(
+            "Media file does not exist at path: {:?}",
+            media_path
+        ));
+    }
+
     // Create app state
     let state = Arc::new(AppState {
         connections: Mutex::new(HashMap::new()),
         root_dir,
+        media_path,
     });
-    // // Create sample WAV file if it doesn't exist
-    let wav_path = state.root_dir.join("assets/sample.wav");
-    info!("Looking for WAV file at path: {:?}", wav_path);
-    if !wav_path.exists() {
-        error!("WAV file does not exist at path: {:?}", wav_path);
-        return Err(anyhow::anyhow!(
-            "WAV file does not exist at path: {:?}",
-            wav_path
-        ));
-    }
 
     // Build router
     let app = Router::new()
