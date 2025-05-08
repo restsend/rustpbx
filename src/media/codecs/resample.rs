@@ -15,8 +15,9 @@ impl LinearResampler {
         let input_chunk_size = match input_sample_rate {
             8000 => 160,
             16000 => 320,
+            44100 => 882,
             48000 => 960,
-            _ => 160,
+            _ => (input_sample_rate as f64 / 50.0).ceil() as usize,
         };
         let output_chunk_size = (input_chunk_size as f64 * rate) as usize;
         let resampler = FftFixedOut::<f64>::new(
