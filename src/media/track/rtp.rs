@@ -641,13 +641,6 @@ impl Track for RtpTrack {
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
         tokio::spawn(async move {
-            event_sender
-                .send(SessionEvent::TrackStart {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                })
-                .ok();
-
             select! {
                 _ = token.cancelled() => {
                     info!("RTC process cancelled");

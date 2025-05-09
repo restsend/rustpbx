@@ -1,6 +1,6 @@
 use crate::event::{EventReceiver, EventSender, SessionEvent};
 use crate::media::{
-    dtmf::DTMFDetector,
+    dtmf::DtmfDetector,
     processor::Processor,
     recorder::{Recorder, RecorderOption},
     track::{Track, TrackPacketReceiver, TrackPacketSender},
@@ -25,7 +25,7 @@ pub struct MediaStream {
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
-    dtmf_detector: Mutex<DTMFDetector>,
+    dtmf_detector: DtmfDetector,
     recorder_sender: mpsc::UnboundedSender<AudioFrame>,
     recorder_receiver: Mutex<Option<mpsc::UnboundedReceiver<AudioFrame>>>,
 }
@@ -76,7 +76,7 @@ impl MediaStreamBuilder {
             event_sender: self.event_sender,
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
-            dtmf_detector: Mutex::new(DTMFDetector::new()),
+            dtmf_detector: DtmfDetector::new(),
             recorder_sender,
             recorder_receiver: Mutex::new(Some(recorder_receiver)),
         }
@@ -153,7 +153,7 @@ impl MediaStream {
                 self.tracks.lock().await.insert(track_id.clone(), track);
                 self.event_sender
                     .send(SessionEvent::TrackStart {
-                        track_id: track_id.clone(),
+                        track_id,
                         timestamp: crate::get_timestamp(),
                     })
                     .ok();
@@ -222,17 +222,12 @@ impl MediaStream {
                 payload,
                 ..
             } => {
-                // Check for DTMF events in RTP payload
-                let mut dtmf_detector = self.dtmf_detector.lock().await;
-                if let Some(digit) =
-                    dtmf_detector.detect_rtp(&packet.track_id, *payload_type, payload)
-                {
-                    // Send DTMF event
+                if let Some(digit) = self.dtmf_detector.detect_rtp(*payload_type, payload) {
                     self.event_sender
-                        .send(SessionEvent::DTMF {
+                        .send(SessionEvent::Dtmf {
                             track_id: packet.track_id.clone(),
-                            timestamp: crate::get_timestamp(),
-                            digit: digit.clone(),
+                            timestamp: packet.timestamp,
+                            digit,
                         })
                         .ok();
                 }

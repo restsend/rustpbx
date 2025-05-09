@@ -94,13 +94,6 @@ impl Track for WebsocketTrack {
         let payload_type = self.payload_type;
 
         tokio::spawn(async move {
-            event_sender
-                .send(SessionEvent::TrackStart {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                })
-                .ok();
-
             let track_id_clone = track_id.clone();
             let audio_from_ws_loop = async move {
                 let mut sequence_number = 0;

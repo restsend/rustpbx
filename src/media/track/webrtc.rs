@@ -326,10 +326,6 @@ impl Track for WebrtcTrack {
         let track_id = self.track_id.clone();
 
         tokio::spawn(async move {
-            let _ = event_sender.send(SessionEvent::TrackStart {
-                track_id: track_id.clone(),
-                timestamp: crate::get_timestamp(),
-            });
             token_clone.cancelled().await;
             let _ = event_sender_clone.send(SessionEvent::TrackEnd {
                 track_id,
