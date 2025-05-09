@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use crate::event::{EventSender, SessionEvent};
 use crate::{Sample, TrackId};
 use anyhow::{anyhow, Result};
@@ -164,10 +167,15 @@ impl VoiceApiAsrClient {
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let start_time = Arc::new(AtomicU64::new(0));
+        let start_time_ref = start_time.clone();
 
         let send_task = async move {
             while let Some(audio) = audio_rx.recv().await {
                 // Convert samples to websocket binary message
+                if start_time_ref.load(Ordering::Relaxed) == 0 {
+                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
+                }
                 if let Err(e) = ws_sender.send(Message::Binary(audio.into())).await {
                     warn!("Error sending audio: {}", e);
                     break;
@@ -206,6 +214,29 @@ impl VoiceApiAsrClient {
                                     warn!("Failed to send event: {}", e);
                                     break;
                                 }
+                                let diff_time =
+                                    crate::get_timestamp() - start_time.load(Ordering::Relaxed);
+                                let metrics_event = if result.finished {
+                                    start_time.store(0, Ordering::Relaxed);
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: format!("completed.asr.voiceapi"),
+                                        data: serde_json::json!({
+                                            "index": result.idx,
+                                        }),
+                                        duration: diff_time as u32,
+                                    }
+                                } else {
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: format!("ttfb.asr.voiceapi"),
+                                        data: serde_json::json!({
+                                            "index": result.idx,
+                                        }),
+                                        duration: diff_time as u32,
+                                    }
+                                };
+                                event_sender.send(metrics_event).ok();
                             }
                             Err(e) => {
                                 warn!("Failed to parse ASR result: {}", e);

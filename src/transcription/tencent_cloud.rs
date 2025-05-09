@@ -1,3 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionOption};
@@ -279,6 +283,8 @@ impl TencentCloudAsrClient {
         token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let start_time = Arc::new(AtomicU64::new(0));
+        let start_time_ref = start_time.clone();
         let recv_loop = async move {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
@@ -317,7 +323,31 @@ impl TencentCloudAsrClient {
                                             end_time: Some(result.end_time),
                                         }
                                     };
-                                    event_sender.send(event).ok()
+                                    event_sender.send(event).ok();
+
+                                    let diff_time =
+                                        crate::get_timestamp() - start_time.load(Ordering::Relaxed);
+                                    let metrics_event = if result.slice_type == 2 {
+                                        start_time.store(0, Ordering::Relaxed);
+                                        SessionEvent::Metrics {
+                                            timestamp: crate::get_timestamp(),
+                                            key: format!("completed.asr.tencent"),
+                                            data: serde_json::json!({
+                                                "index": result.index,
+                                            }),
+                                            duration: diff_time as u32,
+                                        }
+                                    } else {
+                                        SessionEvent::Metrics {
+                                            timestamp: crate::get_timestamp(),
+                                            key: format!("ttfb.asr.tencent"),
+                                            data: serde_json::json!({
+                                                "index": result.index,
+                                            }),
+                                            duration: diff_time as u32,
+                                        }
+                                    };
+                                    event_sender.send(metrics_event).ok()
                                 });
                             }
                             Err(e) => {
@@ -348,9 +378,14 @@ impl TencentCloudAsrClient {
                     ws_sender
                         .send(Message::Text("{\"type\": \"end\"}".into()))
                         .await?;
+                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
                     continue;
                 }
                 total_bytes_sent += samples.len();
+                if start_time_ref.load(Ordering::Relaxed) == 0 {
+                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
+                }
+
                 match ws_sender.send(Message::Binary(samples.into())).await {
                     Ok(_) => {}
                     Err(e) => {

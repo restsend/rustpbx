@@ -115,7 +115,11 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
             .build(),
     );
     let track_id = format!("webrtc-{}", Uuid::new_v4());
-    let mut webrtc_track = WebrtcTrack::new(track_id.clone(), TrackConfig::default());
+    let mut webrtc_track = WebrtcTrack::new(
+        cancel_token.child_token(),
+        track_id.clone(),
+        TrackConfig::default(),
+    );
     let sample_path = state.media_path.to_string_lossy().to_string();
     // Create connection state
     let connection_state = ConnectionState {

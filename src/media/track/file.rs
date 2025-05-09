@@ -647,7 +647,7 @@ impl Track for FileTrack {
 /// Download a file from URL, with optional caching
 async fn download_from_url(url: &str, use_cache: bool) -> Result<File> {
     // Check if file is already cached
-    let cache_key = cache::generate_cache_key(url, 0, &"".to_string());
+    let cache_key = cache::generate_cache_key(url, 0, None);
     if use_cache && cache::is_cached(&cache_key).await? {
         match cache::get_cache_path(&cache_key) {
             Ok(path) => return File::open(&path).map_err(|e| anyhow::anyhow!(e)),
@@ -832,7 +832,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // Get the cache key and verify it exists
-        let cache_key = cache::generate_cache_key(&file_path, 16000, &"".to_string());
+        let cache_key = cache::generate_cache_key(&file_path, 16000, None);
         let wav_data = tokio::fs::read(&file_path).await?;
         
         // Manually store the file in cache if it's not already there, to make the test more reliable
