@@ -26,32 +26,24 @@ const BUFFER_SIZE: usize = 16384;
 
 // AudioReader trait to unify WAV and MP3 handling
 trait AudioReader: Send {
-    // Shared method to be implemented by each implementation
     fn fill_buffer(&mut self) -> Result<usize>;
 
-    // Common implementation for both MP3 and WAV to reuse the same reading logic
-    fn read_chunk(&mut self, max_chunk_size: usize) -> Result<Option<(PcmBuf, u32)>> {
-        // If current buffer is exhausted or empty, fill it
-        if self.position() >= self.buffer_size() {
-            let samples_read = self.fill_buffer()?;
-            if samples_read == 0 {
-                return Ok(None); // End of file
+    fn read_chunk(&mut self, packet_duration_ms: u32) -> Result<Option<(PcmBuf, u32)>> {
+        let max_chunk_size = self.sample_rate() as usize * packet_duration_ms as usize / 1000;
+        let remaining = self.buffer_size() - self.position();
+        if self.position() >= self.buffer_size() || remaining < max_chunk_size {
+            if self.fill_buffer()? == 0 {
+                return Ok(None); 
             }
         }
-
-        if self.buffer_size() == 0 {
-            return Ok(None); // No data available
-        }
-
         let remaining = self.buffer_size() - self.position();
-        if remaining == 0 {
-            return Ok(None); // End of buffer
+        if self.buffer_size() == 0 || remaining == 0 {
+            return Ok(None); 
         }
 
         let chunk_size = min(max_chunk_size, remaining);
         let end_pos = self.position() + chunk_size;
 
-        // Safety check to ensure we don't exceed buffer bounds
         if end_pos > self.buffer_size() {
             warn!(
                 "Invalid buffer access attempt: position={}, end_pos={}, buffer_size={}",
@@ -62,17 +54,13 @@ trait AudioReader: Send {
             return Ok(None);
         }
 
-        // Extract the chunk
         let chunk = self.extract_chunk(self.position(), end_pos);
         self.set_position(end_pos); 
-
-        // Use the resampler if needed
         let final_chunk = if self.sample_rate() != self.target_sample_rate() && self.sample_rate() > 0 {
             self.resample_chunk(&chunk)
         } else {
             chunk
         };
-
         Ok(Some((final_chunk, self.target_sample_rate())))
     }
 
@@ -104,15 +92,6 @@ impl WavAudioReader {
         let reader = BufReader::new(file);
         let wav_reader = WavReader::new(reader)?;
         let spec = wav_reader.spec();
-        
-        let resampler = if spec.sample_rate != target_sample_rate {
-            Some(LinearResampler::new(
-                spec.sample_rate as usize,
-                target_sample_rate as usize,
-            )?)
-        } else {
-            None
-        };
 
         Ok(Self {
             reader: wav_reader,
@@ -124,7 +103,7 @@ impl WavAudioReader {
             is_stereo: spec.channels == 2,
             bits_per_sample: spec.bits_per_sample,
             sample_format: spec.sample_format,
-            resampler,
+            resampler: None,
         })
     }
 
@@ -243,7 +222,6 @@ impl AudioReader for WavAudioReader {
         if let Some(resampler) = &mut self.resampler {
             resampler.resample(chunk)
         } else {
-            // Initialize resampler if needed
             if let Ok(mut new_resampler) = LinearResampler::new(
                 self.sample_rate as usize, 
                 self.target_sample_rate as usize
@@ -260,8 +238,7 @@ impl AudioReader for WavAudioReader {
 
 struct Mp3AudioReader {
     buffer: Vec<i16>,
-    buffer_size: usize,
-    sample_rate: u32,
+        sample_rate: u32,
     position: usize,
     target_sample_rate: u32,
     reached_eof: bool,
@@ -277,7 +254,6 @@ impl Mp3AudioReader {
 
         Ok(Self {
             buffer: Vec::with_capacity(BUFFER_SIZE),
-            buffer_size: 0,
             sample_rate: 0, // Will be set when first frame is decoded
             position: 0,
             target_sample_rate,
@@ -332,21 +308,20 @@ impl Mp3AudioReader {
             let mut pcm = [0i16; rmp3::MAX_SAMPLES_PER_FRAME];
 
             let input_buffer_clone = self.input_buffer.clone();
-            let result = self.decoder.next(&input_buffer_clone, &mut pcm);
-
-            if result.is_none() {
-                if self.input_buffer.len() > 128 {
-                    self.input_buffer.drain(0..128);
-                } else {
-                    if decoded_buffer.is_empty() {
-                        self.reached_eof = true;
+            let (frame, consumed) = match self.decoder.next(&input_buffer_clone, &mut pcm) {
+                Some(result) => result,
+                None => {
+                    if self.input_buffer.len() > 128 {
+                        self.input_buffer.drain(0..128);
+                    } else {
+                        if decoded_buffer.is_empty() {
+                            self.reached_eof = true;
+                        }
+                        break;
                     }
-                    break;
+                    continue;
                 }
-                continue;
-            }
-
-            let (frame, consumed) = result.unwrap();
+            };
 
             if consumed > 0 {
                 if consumed <= self.input_buffer.len() {
@@ -359,19 +334,9 @@ impl Mp3AudioReader {
             match frame {
                 rmp3::Frame::Audio(audio) => {
                     if self.sample_rate == 0 {
-                        self.sample_rate = audio.sample_rate();
-                        
-                        // Initialize resampler when we first know the sample rate
-                        if self.sample_rate != self.target_sample_rate {
-                            self.resampler = LinearResampler::new(
-                                self.sample_rate as usize,
-                                self.target_sample_rate as usize
-                            ).ok();
-                        }
-                        
+                        self.sample_rate = audio.sample_rate();                        
                         info!("MP3 file detected with sample rate: {}", self.sample_rate);
                     }
-
                     let samples = audio.samples();
                     decoded_buffer.extend_from_slice(samples);
                     samples_read += samples.len();
@@ -380,7 +345,6 @@ impl Mp3AudioReader {
             }
         }
         self.buffer = decoded_buffer;
-        self.buffer_size = self.buffer.len();
         Ok(samples_read)
     }
 }
@@ -393,7 +357,7 @@ impl AudioReader for Mp3AudioReader {
     }
 
     fn buffer_size(&self) -> usize {
-        self.buffer_size
+        self.buffer.len()
     }
 
     fn position(&self) -> usize {
@@ -444,26 +408,20 @@ async fn process_audio_reader(
     processor_chain: ProcessorChain,
     mut audio_reader: Box<dyn AudioReader>,
     track_id: &str,
-    max_pcm_chunk_size: usize,
+    packet_duration_ms: u32,
     target_sample_rate: u32,
     token: CancellationToken,
     packet_sender: TrackPacketSender,
 ) -> Result<()> {
-    // Calculate packet duration based on sample rate and chunk size
-    let packet_duration = 1000.0 / target_sample_rate as f64 * max_pcm_chunk_size as f64;
-    let packet_duration_ms = packet_duration as u64;
-
     info!(
         "streaming audio with target_sample_rate: {}, packet_duration: {}ms",
         target_sample_rate, packet_duration_ms
     );
-
     let stream_loop = async move {
         let start_time = Instant::now();
-        let mut ticker = tokio::time::interval(Duration::from_millis(packet_duration_ms));
+        let mut ticker = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
 
-        // Process audio chunks
-        while let Some((chunk, chunk_sample_rate)) = audio_reader.read_chunk(max_pcm_chunk_size)? {
+        while let Some((chunk, chunk_sample_rate)) = audio_reader.read_chunk(packet_duration_ms)? {
             let packet = AudioFrame {
                 track_id: track_id.to_string(),
                 timestamp: crate::get_timestamp(),
@@ -586,8 +544,8 @@ impl Track for FileTrack {
         let path = self.path.clone().unwrap();
         let id = self.track_id.clone();
         let sample_rate = self.config.samplerate;
-        let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
         let use_cache = self.use_cache;
+        let packet_duration_ms = self.config.ptime.as_millis() as u32;
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
 
@@ -642,7 +600,7 @@ impl Track for FileTrack {
                 file,
                 &id,
                 sample_rate,
-                max_pcm_chunk_size,
+                packet_duration_ms,
                 token,
                 packet_sender,
             )
@@ -741,7 +699,7 @@ async fn stream_audio_file(
     file: File,
     track_id: &str,
     target_sample_rate: u32,
-    max_pcm_chunk_size: usize,
+    packet_duration_ms: u32,
     token: CancellationToken,
     packet_sender: TrackPacketSender,
 ) -> Result<()> {
@@ -761,7 +719,7 @@ async fn stream_audio_file(
         processor_chain,
         audio_reader,
         track_id,
-        max_pcm_chunk_size,
+        packet_duration_ms,
         target_sample_rate,
         token,
         packet_sender,
@@ -816,38 +774,6 @@ pub fn read_wav_file(path: &str) -> Result<(PcmBuf, u32)> {
         all_samples = mono_samples;
     }
     Ok((all_samples, spec.sample_rate))
-}
-
-/// Create MP3 reader for testing purposes
-pub async fn create_mp3_reader_for_test(
-    path: String,
-    target_sample_rate: u32,
-) -> Result<(u32, usize)> {
-    use std::fs::File;
-
-    // Open the file
-    let file = if path.starts_with("http://") || path.starts_with("https://") {
-        download_from_url(&path, true).await?
-    } else {
-        File::open(&path).map_err(|e| anyhow::anyhow!("filetrack: {}", e))?
-    };
-
-    let mut reader = Mp3AudioReader::from_file(file, target_sample_rate)?;
-
-    // Record original sample rate
-    let samples_read = reader.fill_buffer()?;
-    let original_sample_rate = reader.sample_rate;
-
-    // Output resampling information
-    info!(
-        "MP3 decoding: original_rate={}, target_rate={}, samples_read={}, buffer_size={}",
-        original_sample_rate,
-        target_sample_rate,
-        samples_read,
-        reader.buffer.len()
-    );
-
-    Ok((original_sample_rate, reader.buffer.len()))
 }
 
 #[cfg(test)]
@@ -939,40 +865,19 @@ mod tests {
         match std::fs::read(&file_path) {
             Ok(file) => {
                 let mut decoder = rmp3::Decoder::new(&file);
-                let mut found_audio = false;
-
-                // Try reading a few frames
-                for _ in 0..5 {
-                    if let Some(frame) = decoder.next() {
-                        match frame {
-                            rmp3::Frame::Audio(pcm) => {
-                                println!(
-                                    "Found audio frame with sample rate: {} and {} samples",
-                                    pcm.sample_rate(),
-                                    pcm.samples().len()
-                                );
-                                found_audio = true;
-                            }
-                            rmp3::Frame::Other(h) => {
-                                println!("Found non-audio frame: {:?}", h);
-                            }
-                        }
-
-                        if found_audio {
-                            break;
+                while let Some(frame) = decoder.next() {
+                    match frame {
+                        rmp3::Frame::Audio(_pcm) => {}
+                        rmp3::Frame::Other(h) => {
+                            println!("Found non-audio frame: {:?}", h);
                         }
                     }
-                }
-
-                if !found_audio {
-                    println!("No audio frames found in first 5 frames. File may not be valid MP3.");
                 }
             }
             Err(_) => {
                 println!("Skipping MP3 test: sample file not found at {}", file_path);
             }
         }
-
         Ok(())
     }
     
@@ -1001,7 +906,7 @@ mod tests {
                     let result1 = reader.read_chunk(1024)?;
 
                     // Manually set position to buffer_size to force buffer refill
-                    reader.position = reader.buffer_size;
+                    reader.position = reader.buffer.len();
 
                     // Read the second batch
                     let samples_read_2 = reader.fill_buffer()?;

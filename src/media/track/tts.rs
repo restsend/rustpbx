@@ -339,13 +339,12 @@ impl Track for TtsTrack {
             }
         };
         let sample_rate = self.config.samplerate;
-        let max_pcm_chunk_size = self.config.max_pcm_chunk_size;
         let track_id = self.track_id.clone();
-        let packet_duration = 1000.0 / sample_rate as f64 * max_pcm_chunk_size as f64;
-        let packet_duration_ms = packet_duration as u32;
+        let packet_duration_ms = self.config.ptime.as_millis() as u32;
+        let max_pcm_chunk_size = sample_rate as usize * packet_duration_ms as usize / 1000;
         info!(
-            "track started  {} with sample_rate: {} max_pcm_chunk_size: {} packet_duration_ms: {}",
-            track_id, sample_rate, max_pcm_chunk_size, packet_duration_ms
+            "track started  {} with sample_rate: {} packet_duration_ms: {} max_pcm_chunk_size: {}",
+            track_id, sample_rate, packet_duration_ms, max_pcm_chunk_size
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let processor_chain = self.processor_chain.clone();
