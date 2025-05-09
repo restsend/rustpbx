@@ -44,6 +44,8 @@ pub struct CallOption {
     pub sip: Option<SipOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>, // pcmu, pcma, g722, pcm, only for websocket call
 }
 
 impl Default for CallOption {
@@ -61,6 +63,7 @@ impl Default for CallOption {
             enable_ipv6: None,
             sip: None,
             extra: None,
+            codec: None,
         }
     }
 }

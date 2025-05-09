@@ -159,6 +159,12 @@ pub enum SessionEvent {
         sender: String,
         extra: Option<HashMap<String, String>>,
     },
+    Binary {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        timestamp: u64,
+        data: Vec<u8>,
+    },
 }
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;

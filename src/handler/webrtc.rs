@@ -1,10 +1,7 @@
-use super::{
-    call::{ActiveCallType, CallParams},
-    middleware::clientip::ClientIp,
-};
-use crate::{app::AppState, handler::call::handle_call};
+use super::middleware::clientip::ClientIp;
+use crate::app::AppState;
 use axum::{
-    extract::{Query, State, WebSocketUpgrade},
+    extract::State,
     response::{IntoResponse, Response},
     Json,
 };
@@ -12,7 +9,6 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use std::{env, time::Instant};
 use tracing::{error, info};
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IceServer {
@@ -80,35 +76,4 @@ pub(crate) async fn get_iceservers(client_ip: ClientIp, State(state): State<AppS
             Json(default_ice_servers).into_response()
         }
     }
-}
-
-pub async fn webrtc_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    Query(params): Query<CallParams>,
-) -> Response {
-    let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let state_clone = state.clone();
-    ws.on_upgrade(|socket| async move {
-        let start_time = Instant::now();
-        match handle_call(ActiveCallType::Webrtc, session_id.clone(), socket, state).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error handling WebRTC connection: {}", e);
-            }
-        }
-        let mut active_calls = state_clone.active_calls.lock().await;
-        match active_calls.remove(&session_id) {
-            Some(call) => {
-                info!(
-                    "sip call end, duration {}s",
-                    start_time.elapsed().as_secs_f32()
-                );
-                call.cancel_token.cancel();
-            }
-            None => {
-                error!("all not found");
-            }
-        }
-    })
 }

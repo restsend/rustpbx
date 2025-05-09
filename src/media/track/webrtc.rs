@@ -136,14 +136,14 @@ impl WebrtcTrack {
         servers
     }
 
-    pub fn new(id: TrackId, track_config: TrackConfig) -> Self {
+    pub fn new(cancel_token: CancellationToken, id: TrackId, track_config: TrackConfig) -> Self {
         let processor_chain = ProcessorChain::new(track_config.samplerate);
         Self {
             track_id: id,
             track_config,
             processor_chain,
             packet_sender: Arc::new(Mutex::new(None)),
-            cancel_token: CancellationToken::new(),
+            cancel_token,
             local_track: None,
             encoder: TrackCodec::new(),
         }
@@ -321,18 +321,15 @@ impl Track for WebrtcTrack {
     ) -> Result<()> {
         // Store the packet sender
         *self.packet_sender.lock().await = Some(packet_sender.clone());
-
-        let _ = event_sender.send(SessionEvent::TrackStart {
-            track_id: self.track_id.clone(),
-            timestamp: crate::get_timestamp(),
-        });
-
         let token_clone = self.cancel_token.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
 
-        // Start a task to watch for cancellation
         tokio::spawn(async move {
+            let _ = event_sender.send(SessionEvent::TrackStart {
+                track_id: track_id.clone(),
+                timestamp: crate::get_timestamp(),
+            });
             token_clone.cancelled().await;
             let _ = event_sender_clone.send(SessionEvent::TrackEnd {
                 track_id,
