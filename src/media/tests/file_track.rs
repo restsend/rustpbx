@@ -85,7 +85,7 @@ async fn test_file_track_wav() -> Result<()> {
     file_track = file_track.with_config(
         crate::media::track::TrackConfig::default()
             .with_sample_rate(16000)
-            .with_max_pcm_chunk_size(160), // 10ms chunks at 16kHz
+            .with_ptime(Duration::from_millis(10)), // 10ms chunks at 16kHz
     );
 
     // Create channels
