@@ -10,6 +10,10 @@
     <script src="/static/js/agent.js"></script>
     <!-- Alpine.js CDN -->
     <script defer src="./static/js/alpine.min.js"></script>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css"
+        integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
 </head>
 
 <body class="bg-gray-100 min-h-screen pb-20" x-data="mainApp()" x-init="init()">
@@ -337,6 +341,62 @@
                     class="bg-red-500 hover:bg-red-600 text-white py-2 px-6 rounded-full disabled:opacity-50 flex items-center">
                     <i class="fas fa-phone-slash mr-2"></i> Hang Up
                 </button>
+                <button @click="toggleDtmfKeypad" :disabled="!callActive"
+                    class="bg-blue-500 hover:bg-blue-600 text-white py-2 px-6 rounded-full disabled:opacity-50 flex items-center">
+                    <i class="fas fa-keyboard mr-2"></i> DTMF Keypad
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- DTMF Keypad Modal -->
+    <div x-show="showDtmfKeypad" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+        x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0"
+        x-transition:enter-end="opacity-100" x-transition:leave="transition ease-in duration-200"
+        x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0">
+
+        <div class="bg-white rounded-lg shadow-lg p-6 max-w-md w-full" @click.away="showDtmfKeypad = false">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold">DTMF Keypad</h3>
+                <button @click="showDtmfKeypad = false" class="text-gray-500 hover:text-gray-700">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 mb-4">
+                <button @click="sendDtmfTone('1')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">1</button>
+                <button @click="sendDtmfTone('2')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">2</button>
+                <button @click="sendDtmfTone('3')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">3</button>
+                <button @click="sendDtmfTone('4')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">4</button>
+                <button @click="sendDtmfTone('5')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">5</button>
+                <button @click="sendDtmfTone('6')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">6</button>
+                <button @click="sendDtmfTone('7')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">7</button>
+                <button @click="sendDtmfTone('8')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">8</button>
+                <button @click="sendDtmfTone('9')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">9</button>
+                <button @click="sendDtmfTone('*')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">*</button>
+                <button @click="sendDtmfTone('0')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">0</button>
+                <button @click="sendDtmfTone('#')"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-800 py-4 rounded font-bold text-xl">#</button>
+            </div>
+
+            <div class="text-gray-600 text-sm">
+                Last Tone Sent: <span class="font-mono bg-gray-100 px-2 py-1 rounded"
+                    x-text="lastDtmfTone || '-'"></span>
             </div>
         </div>
     </div>
