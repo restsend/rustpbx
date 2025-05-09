@@ -1,7 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
 use crate::transcription::{TranscriptionClient, TranscriptionOption};
@@ -16,6 +12,8 @@ use http::{Request, StatusCode, Uri};
 use rand::random;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};

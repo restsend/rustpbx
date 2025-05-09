@@ -83,7 +83,7 @@ pub enum SessionEvent {
         timestamp: u64,
         action: GibberishAction,
     },
-    DTMF {
+    Dtmf {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,

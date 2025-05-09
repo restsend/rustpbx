@@ -1,26 +1,4 @@
-use crate::PcmBuf;
-use std::collections::HashMap;
-use std::f32::consts::PI;
-
-// DTMF frequencies according to ITU-T Q.23
-const DTMF_FREQUENCIES: [(f32, f32); 16] = [
-    (697.0, 1209.0), // 1
-    (697.0, 1336.0), // 2
-    (697.0, 1477.0), // 3
-    (770.0, 1209.0), // 4
-    (770.0, 1336.0), // 5
-    (770.0, 1477.0), // 6
-    (852.0, 1209.0), // 7
-    (852.0, 1336.0), // 8
-    (852.0, 1477.0), // 9
-    (941.0, 1336.0), // 0
-    (941.0, 1209.0), // *
-    (941.0, 1477.0), // #
-    (697.0, 1633.0), // A
-    (770.0, 1633.0), // B
-    (852.0, 1633.0), // C
-    (941.0, 1633.0), // D
-];
+use std::sync::atomic::{AtomicU64, AtomicU8};
 
 // DTMF events as per RFC 4733
 const DTMF_EVENT_0: u8 = 0;
@@ -40,54 +18,104 @@ const DTMF_EVENT_B: u8 = 13;
 const DTMF_EVENT_C: u8 = 14;
 const DTMF_EVENT_D: u8 = 15;
 
-pub struct DTMFDetector {
+pub struct DtmfDetector {
     // Track the last seen event to avoid repeated events
-    last_event: HashMap<String, u8>,
+    last_event: AtomicU8,
+    last_duration: AtomicU64,
 }
 
-impl DTMFDetector {
+struct DtmfPayload {
+    event: u8,     // 8bits
+    is_end: bool,  // 1bit
+    reserved: u8,  // 1bits
+    volume: u8,    // 6bits
+    duration: u16, // 16bits
+}
+
+impl DtmfPayload {
+    fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 4 {
+            return None;
+        }
+
+        let event = payload[0];
+        if event > DTMF_EVENT_D {
+            return None;
+        }
+
+        // Second byte: End bit (E) is the most significant bit (bit 7)
+        // and Reserved bits are the remaining 7 bits
+        let is_end = (payload[1] & 0b1000_0000) != 0;
+        let reserved = payload[1] & 0b0111_1111;
+        // Third byte: Volume (0-63)
+        let volume = payload[2] & 0b0011_1111;
+        // Fourth byte: Duration as u8
+        let duration = if payload.len() >= 4 {
+            payload[3] as u16
+        } else {
+            0
+        };
+
+        Some(Self {
+            event,
+            is_end,
+            reserved,
+            volume,
+            duration,
+        })
+    }
+}
+
+impl DtmfDetector {
     pub fn new() -> Self {
         Self {
-            last_event: HashMap::new(),
+            last_event: AtomicU8::new(0),
+            last_duration: AtomicU64::new(0),
         }
     }
 
     // Detect DTMF events from RTP payload as specified in RFC 4733
-    pub fn detect_rtp(
-        &mut self,
-        track_id: &str,
-        payload_type: u8,
-        payload: &[u8],
-    ) -> Option<String> {
+    pub fn detect_rtp(&self, payload_type: u8, payload: &[u8]) -> Option<String> {
         // RFC 4733 defines DTMF events with payload types 96-127 (dynamic)
         // However, we'll be more lenient and just check if the payload has the right format
         if payload.len() < 4 {
             return None;
         }
+
+        // Generally, telephone-event payload type is in dynamic range 96-127
         if payload_type < 96 || payload_type > 127 {
             return None;
         }
-        // Extract the event code (first byte)
-        let event = payload[0];
 
-        // Check if this is a valid DTMF event (0-15)
-        if event > DTMF_EVENT_D {
+        // Parse the DTMF payload
+        let dtmf_payload = DtmfPayload::parse(payload)?;
+
+        // Only report end packets to avoid duplicates
+        if !dtmf_payload.is_end {
             return None;
         }
 
-        // Check if this is the same as the last event for this track
-        if let Some(&last) = self.last_event.get(track_id) {
-            if last == event {
-                return None; // Don't repeat the same event
-            }
+        // Get current duration
+        let current_duration = dtmf_payload.duration as u64;
+        let last_duration = self
+            .last_duration
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let last_event = self.last_event.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Check if this is a duplicate event (same event with similar duration)
+        if dtmf_payload.event == last_event
+            && (current_duration <= last_duration || current_duration - last_duration < 100)
+        {
+            return None;
         }
 
-        // Store this event as the last seen for this track
-        self.last_event.insert(track_id.to_string(), event);
-
-        // Convert the event code to a DTMF character
+        // Update last event and duration
+        self.last_event
+            .store(dtmf_payload.event, std::sync::atomic::Ordering::Relaxed);
+        self.last_duration
+            .store(current_duration, std::sync::atomic::Ordering::Relaxed);
         Some(
-            match event {
+            match dtmf_payload.event {
                 DTMF_EVENT_0 => "0",
                 DTMF_EVENT_1 => "1",
                 DTMF_EVENT_2 => "2",
@@ -104,58 +132,92 @@ impl DTMFDetector {
                 DTMF_EVENT_B => "B",
                 DTMF_EVENT_C => "C",
                 DTMF_EVENT_D => "D",
-                _ => unreachable!(), // We already checked if event <= 15
+                _ => return None, // Invalid event
             }
             .to_string(),
         )
     }
+}
 
-    // Generate DTMF tone samples for a given character
-    pub fn generate_tone(digit: &str, sample_rate: u32, duration_ms: u32) -> PcmBuf {
-        let digit_index = match digit {
-            "1" => 0,
-            "2" => 1,
-            "3" => 2,
-            "4" => 3,
-            "5" => 4,
-            "6" => 5,
-            "7" => 6,
-            "8" => 7,
-            "9" => 8,
-            "0" => 9,
-            "*" => 10,
-            "#" => 11,
-            "A" => 12,
-            "B" => 13,
-            "C" => 14,
-            "D" => 15,
-            _ => return vec![], // Not a valid DTMF digit
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let (freq1, freq2) = DTMF_FREQUENCIES[digit_index];
-        let samples = (sample_rate as f32 * duration_ms as f32 / 1000.0) as usize;
-        let mut output = Vec::with_capacity(samples);
+    #[test]
+    fn test_dtmf_payload_parse() {
+        // Valid DTMF payload for digit "1" with end bit set
+        // Event: 1, End bit: 1, Reserved: 0, Volume: 10, Duration: 160
+        let payload = [1, 0x80, 10, 160];
 
-        for i in 0..samples {
-            let t = i as f32 / sample_rate as f32;
+        let dtmf = DtmfPayload::parse(&payload).unwrap();
+        assert_eq!(dtmf.event, 1);
+        assert_eq!(dtmf.is_end, true);
+        assert_eq!(dtmf.reserved, 0);
+        assert_eq!(dtmf.volume, 10 & 0b0011_1111); // Only 6 bits of volume
+        assert_eq!(dtmf.duration, 160);
 
-            // Generate the dual tone with 3dB attenuation to avoid clipping
-            let sample = 0.35 * (2.0 * PI * freq1 * t).sin() + 0.35 * (2.0 * PI * freq2 * t).sin();
+        // Test payload with end bit not set
+        let payload = [2, 0x00, 10, 100];
 
-            // Apply envelope to avoid clicks (quick attack, longer release)
-            let envelope = if i < 100 {
-                i as f32 / 100.0
-            } else if i > samples - 100 {
-                (samples - i) as f32 / 100.0
-            } else {
-                1.0
-            };
+        let dtmf = DtmfPayload::parse(&payload).unwrap();
+        assert_eq!(dtmf.event, 2);
+        assert_eq!(dtmf.is_end, false);
 
-            // Convert to i16
-            let value = (sample * envelope * 32767.0) as i16;
-            output.push(value);
+        // Invalid event code
+        let payload = [20, 0x80, 10, 100]; // 20 > DTMF_EVENT_D
+        assert!(DtmfPayload::parse(&payload).is_none());
+
+        // Too short payload
+        let payload = [1, 0x80, 10]; // Missing duration byte
+        assert!(DtmfPayload::parse(&payload).is_none());
+    }
+
+    #[test]
+    fn test_dtmf_detection() {
+        let detector = DtmfDetector::new();
+
+        // Test basic detection
+        {
+            // Valid DTMF payload for digit "5" with end bit set
+            let payload = [DTMF_EVENT_5, 0x80, 10, 100];
+
+            // Use payload_type 101 (typical for telephone-event)
+            let digit = detector.detect_rtp(101, &payload);
+            assert_eq!(digit, Some("5".to_string()));
+
+            // Should reject payloads with invalid payload type
+            let digit = detector.detect_rtp(0, &payload);
+            assert_eq!(digit, None);
+
+            // Should reject payloads with end bit not set
+            let payload = [DTMF_EVENT_5, 0x00, 10, 100];
+            let digit = detector.detect_rtp(101, &payload);
+            assert_eq!(digit, None);
         }
 
-        output
+        // Test duplicate detection
+        {
+            let detector = DtmfDetector::new(); // Use a fresh detector
+
+            // First event
+            let payload1 = [DTMF_EVENT_5, 0x80, 10, 100]; // Duration 100
+            let digit1 = detector.detect_rtp(101, &payload1);
+            assert_eq!(digit1, Some("5".to_string()));
+
+            // Similar duration - should be rejected as duplicate
+            let payload2 = [DTMF_EVENT_5, 0x80, 10, 150]; // Duration 150 (similar)
+            let digit2 = detector.detect_rtp(101, &payload2);
+            assert_eq!(digit2, None);
+
+            // Much larger duration - should be detected as new event
+            let payload3 = [DTMF_EVENT_5, 0x80, 10, 210]; // Much larger duration
+            let digit3 = detector.detect_rtp(101, &payload3);
+            assert_eq!(digit3, Some("5".to_string()));
+
+            // Different event - should be detected
+            let payload4 = [DTMF_EVENT_6, 0x80, 10, 100]; // Event 6 ("6" key)
+            let digit4 = detector.detect_rtp(101, &payload4);
+            assert_eq!(digit4, Some("6".to_string()));
+        }
     }
 }
