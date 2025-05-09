@@ -62,7 +62,7 @@ pub mod rtp;
 pub mod track_codec;
 pub mod tts;
 pub mod webrtc;
-
+pub mod websocket;
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &TrackId;

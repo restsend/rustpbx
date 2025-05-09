@@ -11,6 +11,7 @@ use crate::{
             file::FileTrack,
             tts::{TtsCommand, TtsHandle},
             webrtc::WebrtcTrack,
+            websocket::WebsocketTrack,
             Track, TrackConfig,
         },
         vad::VadProcessor,
@@ -20,6 +21,7 @@ use crate::{
 };
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -174,16 +176,10 @@ impl ActiveCall {
             .flatten();
 
         let offer = match option.enable_ipv6 {
-            Some(false) | None => strip_ipv6_candidates(
-                option
-                    .offer
-                    .as_ref()
-                    .ok_or(anyhow::anyhow!("SDP is required"))?,
-            ),
-            _ => option
-                .offer
-                .clone()
-                .ok_or(anyhow::anyhow!("SDP is required"))?,
+            Some(false) | None => {
+                strip_ipv6_candidates(option.offer.as_ref().unwrap_or(&"".to_string()))
+            }
+            _ => option.offer.clone().unwrap_or("".to_string()),
         };
 
         match caller_track.handshake(offer, timeout).await {
@@ -495,16 +491,25 @@ async fn send_to_ws_loop(
     event_receiver: &mut EventReceiver,
 ) -> Result<()> {
     while let Ok(event) = event_receiver.recv().await {
-        let data = match serde_json::to_string(&event) {
-            Ok(data) => data,
-            Err(e) => {
-                error!("error serializing event: {} {:?}", e, event);
-                continue;
+        match event {
+            SessionEvent::Binary { data, .. } => {
+                if let Err(e) = ws_sender.send(data.into()).await {
+                    error!("error sending event to WebSocket: {}", e);
+                }
+            }
+            _ => {
+                let data = match serde_json::to_string(&event) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("error serializing event: {} {:?}", e, event);
+                        continue;
+                    }
+                };
+                if let Err(e) = ws_sender.send(data.into()).await {
+                    error!("error sending event to WebSocket: {}", e);
+                }
             }
         };
-        if let Err(e) = ws_sender.send(data.into()).await {
-            error!("error sending event to WebSocket: {}", e);
-        }
     }
     Ok(())
 }
@@ -569,6 +574,9 @@ async fn process_call(
     let call_type_ref = call_type.clone();
     let event_sender_ref = event_sender.clone();
 
+    let audio_from_ws = Arc::new(Mutex::new(None));
+    let audio_from_ws_ref = audio_from_ws.clone();
+
     let prepare_call = async move {
         let mut option = match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
@@ -586,12 +594,29 @@ async fn process_call(
             }
         };
         option.check_default(); // check default
-        info!("prepare call {} option: {:?}", session_id, option);
+        info!(
+            "prepare {:?} call {} option: {:?}",
+            call_type, session_id, option
+        );
         let track_config = TrackConfig::default();
         let mut dialog_id = None;
         let caller_track: Box<dyn Track> = match call_type {
-            ActiveCallType::Webrtc | ActiveCallType::WebSocket => {
-                let webrtc_track = WebrtcTrack::new(track_id.clone(), track_config);
+            ActiveCallType::WebSocket => {
+                let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+                audio_from_ws_ref.lock().await.replace(tx);
+                let ws_track = WebsocketTrack::new(
+                    cancel_token.child_token(),
+                    track_id.clone(),
+                    track_config,
+                    event_sender_ref.clone(),
+                    rx,
+                    option.codec.clone(),
+                );
+                Box::new(ws_track)
+            }
+            ActiveCallType::Webrtc => {
+                let webrtc_track =
+                    WebrtcTrack::new(cancel_token.child_token(), track_id.clone(), track_config);
                 Box::new(webrtc_track)
             }
             ActiveCallType::Sip => {
@@ -673,27 +698,34 @@ async fn process_call(
         active_call.session_id, active_call.call_type, active_calls_len
     );
 
+    let audio_from_ws = audio_from_ws.lock().await.take();
     let recv_from_ws = async move {
         while let Some(msg) = ws_receiver.next().await {
             let command = match msg {
                 Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
-                    Ok(command) => Some(command),
+                    Ok(command) => command,
                     Err(e) => {
                         error!("error deserializing command: {} {}", e, text);
-                        None
+                        continue;
                     }
                 },
-                _ => None,
+                Ok(Message::Binary(data)) => {
+                    if let Some(sender) = audio_from_ws.as_ref() {
+                        if let Err(e) = sender.send(data) {
+                            error!("error sending audio data: {}", e);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
             };
 
-            match command {
-                Some(command) => match active_call.dispatch(command).await {
-                    Ok(_) => (),
-                    Err(e) => {
-                        error!("Error dispatching command: {}", e);
-                    }
-                },
-                None => {}
+            match active_call.dispatch(command).await {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Error dispatching command: {}", e);
+                }
             }
         }
     };

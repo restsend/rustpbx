@@ -1,23 +1,17 @@
-use super::call::CallParams;
 use super::CallOption;
 use crate::app::AppState;
-use crate::handler::call::{handle_call, ActiveCallType};
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
 use crate::media::track::TrackConfig;
 use crate::TrackId;
 use anyhow::Result;
-use axum::extract::{Query, WebSocketUpgrade};
-use axum::{extract::State, response::Response};
 use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::DialogStateSender;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
@@ -26,35 +20,6 @@ pub struct SipOption {
     pub password: String,
     pub domain: String,
     pub headers: Option<HashMap<String, String>>,
-}
-
-pub async fn sip_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    Query(params): Query<CallParams>,
-) -> Response {
-    let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let state_clone = state.clone();
-    ws.on_upgrade(|socket| async move {
-        let start_time = Instant::now();
-        match handle_call(ActiveCallType::Sip, session_id.clone(), socket, state).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("error handling SIP connection: {}", e);
-            }
-        }
-        let mut active_calls = state_clone.active_calls.lock().await;
-        match active_calls.remove(&session_id) {
-            Some(call) => {
-                info!(
-                    "sip call end, duration {}s",
-                    start_time.elapsed().as_secs_f32()
-                );
-                call.cancel_token.cancel();
-            }
-            None => {}
-        }
-    })
 }
 
 pub(super) async fn new_rtp_track_with_sip(

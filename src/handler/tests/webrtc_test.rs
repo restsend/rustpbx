@@ -58,7 +58,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     let app = Router::new()
         .route(
             "/ws",
-            axum::routing::get(crate::handler::webrtc::webrtc_handler),
+            axum::routing::get(crate::handler::handler::webrtc_handler),
         )
         .fallback(handle_error)
         .with_state(AppStateBuilder::new().build().await?);
