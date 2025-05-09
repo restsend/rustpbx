@@ -201,11 +201,10 @@ impl Track for TtsTrack {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
                 }
-                let cache_key = format!("tts:{}{:?}{}", client.provider(), speaker, text);
                 let cache_key = cache::generate_cache_key(
-                    &cache_key,
+                    &format!("tts:{}{}", client.provider(), text),
                     sample_rate,
-                    speaker.as_ref().unwrap_or(&"".to_string()),
+                    speaker.as_ref(),
                 );
                 synthesize_done.store(false, Ordering::Relaxed);
 
@@ -245,7 +244,7 @@ impl Track for TtsTrack {
                                         event_sender
                                             .send(SessionEvent::Metrics {
                                                 timestamp: crate::get_timestamp(),
-                                                key: "ttfb.tts.tencent".to_string(),
+                                                key: format!("ttfb.tts.{}", client.provider()),
                                                 data: serde_json::json!({
                                                         "speaker": speaker,
                                                         "playId": play_id,

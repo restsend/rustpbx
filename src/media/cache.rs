@@ -52,12 +52,15 @@ pub async fn ensure_cache_dir() -> Result<()> {
 }
 
 /// Generate a cache key from text or URL
-pub fn generate_cache_key(input: &str, sample_rate: u32, speaker: &str) -> String {
+pub fn generate_cache_key(input: &str, sample_rate: u32, speaker: Option<&String>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
 
-    format!("{}_{}_{}", hex::encode(result), sample_rate, speaker)
+    match speaker {
+        Some(speaker) => format!("{}_{}_{}", hex::encode(result), sample_rate, speaker),
+        None => format!("{}_{}", hex::encode(result), sample_rate),
+    }
 }
 
 /// Get the full path for a cached file
@@ -116,7 +119,7 @@ mod tests {
         ensure_cache_dir().await?;
 
         // Generate a cache key
-        let key = generate_cache_key("test_data", 8000, &"".to_string());
+        let key = generate_cache_key("test_data", 8000, None);
 
         // Test storing data in cache
         let test_data = b"TEST DATA".to_vec();
@@ -134,16 +137,16 @@ mod tests {
         assert!(!is_cached(&key).await?);
 
         // Test clean cache
-        let key2 = generate_cache_key("test_data2", 16000, &"".to_string());
+        let key2 = generate_cache_key("test_data2", 16000, None);
         store_in_cache(&key2, &test_data).await?;
         Ok(())
     }
 
     #[test]
     fn test_generate_cache_key() {
-        let key1 = generate_cache_key("hello", 16000, &"".to_string());
-        let key2 = generate_cache_key("hello", 8000, &"".to_string());
-        let key3 = generate_cache_key("world", 16000, &"".to_string());
+        let key1 = generate_cache_key("hello", 16000, None);
+        let key2 = generate_cache_key("hello", 8000, None);
+        let key3 = generate_cache_key("world", 16000, None);
 
         // Same input with different sample rates should produce different keys
         assert_ne!(key1, key2);
