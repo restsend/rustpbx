@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicU64, AtomicU8};
-
 // DTMF events as per RFC 4733
 const DTMF_EVENT_0: u8 = 0;
 const DTMF_EVENT_1: u8 = 1;
@@ -27,8 +26,8 @@ pub struct DtmfDetector {
 struct DtmfPayload {
     event: u8,     // 8bits
     is_end: bool,  // 1bit
-    reserved: u8,  // 1bits
-    volume: u8,    // 6bits
+    _reserved: u8, // 1bits
+    _volume: u8,   // 6bits
     duration: u16, // 16bits
 }
 
@@ -43,24 +42,30 @@ impl DtmfPayload {
             return None;
         }
 
+        //     0                   1                   2                   3
+        //     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        //    |     event     |E|R| volume    |          duration             |
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+        //                  Figure 1: Payload Format for Named Events
+
         // Second byte: End bit (E) is the most significant bit (bit 7)
-        // and Reserved bits are the remaining 7 bits
         let is_end = (payload[1] & 0b1000_0000) != 0;
-        let reserved = payload[1] & 0b0111_1111;
-        // Third byte: Volume (0-63)
-        let volume = payload[2] & 0b0011_1111;
-        // Fourth byte: Duration as u8
-        let duration = if payload.len() >= 4 {
-            payload[3] as u16
-        } else {
-            0
-        };
+        // Reserved bit (R) is the second most significant bit (bit 6)
+        let reserved = payload[1] & 0b0100_0000;
+        // Volume is the 6 least significant bits (0-5)
+        let volume = payload[1] & 0b0011_1111;
+
+        // Duration is a 16-bit value spanning bytes 2 and 3
+        let duration_high = payload[2] as u16;
+        let duration_low = payload[3] as u16;
+        let duration = (duration_high << 8) | duration_low;
 
         Some(Self {
             event,
             is_end,
-            reserved,
-            volume,
+            _reserved: reserved,
+            _volume: volume,
             duration,
         })
     }
@@ -94,9 +99,8 @@ impl DtmfDetector {
         if !dtmf_payload.is_end {
             return None;
         }
-
         // Get current duration
-        let current_duration = dtmf_payload.duration as u64;
+        let current_duration = crate::get_timestamp();
         let last_duration = self
             .last_duration
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -112,8 +116,10 @@ impl DtmfDetector {
         // Update last event and duration
         self.last_event
             .store(dtmf_payload.event, std::sync::atomic::Ordering::Relaxed);
-        self.last_duration
-            .store(current_duration, std::sync::atomic::Ordering::Relaxed);
+        self.last_duration.store(
+            current_duration + dtmf_payload.duration as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Some(
             match dtmf_payload.event {
                 DTMF_EVENT_0 => "0",
@@ -147,21 +153,22 @@ mod tests {
     fn test_dtmf_payload_parse() {
         // Valid DTMF payload for digit "1" with end bit set
         // Event: 1, End bit: 1, Reserved: 0, Volume: 10, Duration: 160
-        let payload = [1, 0x80, 10, 160];
+        let payload = [1, 0x8A, 0, 160]; // 0x8A = 10001010 (end=1, reserved=0, volume=10)
 
         let dtmf = DtmfPayload::parse(&payload).unwrap();
         assert_eq!(dtmf.event, 1);
         assert_eq!(dtmf.is_end, true);
-        assert_eq!(dtmf.reserved, 0);
-        assert_eq!(dtmf.volume, 10 & 0b0011_1111); // Only 6 bits of volume
+        assert_eq!(dtmf._reserved, 0);
+        assert_eq!(dtmf._volume, 10); // 10 = 001010 binary
         assert_eq!(dtmf.duration, 160);
 
         // Test payload with end bit not set
-        let payload = [2, 0x00, 10, 100];
+        let payload = [2, 0x00, 0, 160]; // 0x00 = 00000000 (end=0, reserved=0, volume=0)
 
         let dtmf = DtmfPayload::parse(&payload).unwrap();
         assert_eq!(dtmf.event, 2);
         assert_eq!(dtmf.is_end, false);
+        assert_eq!(dtmf._volume, 0);
 
         // Invalid event code
         let payload = [20, 0x80, 10, 100]; // 20 > DTMF_EVENT_D
@@ -170,6 +177,20 @@ mod tests {
         // Too short payload
         let payload = [1, 0x80, 10]; // Missing duration byte
         assert!(DtmfPayload::parse(&payload).is_none());
+
+        // Test the specific case [2, 138, 3, 32]
+        let payload = [2, 138, 3, 32];
+        // 138 decimal = 10001010 binary
+        // End bit (bit 7) = 1
+        // Reserved bit (bit 6) = 0
+        // Volume (bits 0-5) = 001010 = 10
+
+        let dtmf = DtmfPayload::parse(&payload).unwrap();
+        assert_eq!(dtmf.event, 2); // DTMF digit "2"
+        assert_eq!(dtmf.is_end, true); // End bit is set
+        assert_eq!(dtmf._reserved, 0); // Reserved bit is 0
+        assert_eq!(dtmf._volume, 10); // Volume is 10
+        assert_eq!(dtmf.duration, 800); // Duration is 3 * 256 + 32 = 800
     }
 
     #[test]
@@ -200,22 +221,22 @@ mod tests {
             let detector = DtmfDetector::new(); // Use a fresh detector
 
             // First event
-            let payload1 = [DTMF_EVENT_5, 0x80, 10, 100]; // Duration 100
+            let payload1 = [DTMF_EVENT_5, 0x80, 0, 100]; // Duration 100
             let digit1 = detector.detect_rtp(101, &payload1);
             assert_eq!(digit1, Some("5".to_string()));
 
             // Similar duration - should be rejected as duplicate
-            let payload2 = [DTMF_EVENT_5, 0x80, 10, 150]; // Duration 150 (similar)
+            let payload2 = [DTMF_EVENT_5, 0x80, 0, 100]; // Duration 150 (similar)
             let digit2 = detector.detect_rtp(101, &payload2);
             assert_eq!(digit2, None);
-
+            std::thread::sleep(std::time::Duration::from_millis(200));
             // Much larger duration - should be detected as new event
-            let payload3 = [DTMF_EVENT_5, 0x80, 10, 210]; // Much larger duration
+            let payload3 = [DTMF_EVENT_5, 0x80, 0, 100]; // Much larger duration
             let digit3 = detector.detect_rtp(101, &payload3);
             assert_eq!(digit3, Some("5".to_string()));
 
             // Different event - should be detected
-            let payload4 = [DTMF_EVENT_6, 0x80, 10, 100]; // Event 6 ("6" key)
+            let payload4 = [DTMF_EVENT_6, 0x80, 1, 8]; // Event 6 ("6" key)
             let digit4 = detector.detect_rtp(101, &payload4);
             assert_eq!(digit4, Some("6".to_string()));
         }

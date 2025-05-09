@@ -53,6 +53,11 @@ function mainApp() {
         rtcStatus: 'disconnected',
         callActive: false,
 
+        // DTMF related properties
+        showDtmfKeypad: false,
+        lastDtmfTone: null,
+        dtmfSender: null,
+
         // ASR inactivity tracking
         asrLastActivityTime: null,
         asrInactivityTimer: null,
@@ -87,6 +92,7 @@ function mainApp() {
                 'ASR': 'bg-blue-100 text-blue-800',
                 'LLM': 'bg-purple-100 text-purple-800',
                 'TTS': 'bg-green-100 text-green-800',
+                'DTMF': 'bg-orange-100 text-orange-800',
                 'ERROR': 'bg-red-100 text-red-800',
                 'WARNING': 'bg-yellow-100 text-yellow-800',
                 'METRICS': 'bg-indigo-100 text-indigo-800'
@@ -576,6 +582,43 @@ function mainApp() {
             this.connectWebSocket();
         },
 
+        // Toggle DTMF keypad visibility
+        toggleDtmfKeypad() {
+            this.showDtmfKeypad = !this.showDtmfKeypad;
+        },
+
+        // Send DTMF tone
+        sendDtmfTone(tone) {
+            if (!this.peerConnection || !this.callActive) {
+                this.addLogEntry('error', 'Cannot send DTMF tone: No active call');
+                return;
+            }
+
+            if (!this.dtmfSender) {
+                // Create DTMF sender if it doesn't exist
+                const senders = this.peerConnection.getSenders();
+                const audioSender = senders.find(sender => sender.track && sender.track.kind === 'audio');
+
+                if (audioSender) {
+                    this.dtmfSender = audioSender.dtmf;
+                    if (!this.dtmfSender) {
+                        this.addLogEntry('error', 'DTMF sending not supported by the browser');
+                        return;
+                    }
+                } else {
+                    this.addLogEntry('error', 'No audio sender available for DTMF');
+                    return;
+                }
+            }
+
+            // Send the DTMF tone
+            this.dtmfSender.insertDTMF(tone);
+            this.lastDtmfTone = tone;
+
+            // Log to debug console with special DTMF type
+            this.logEvent('DTMF', `Sent DTMF tone: ${tone}`);
+        },
+
         async prepareCall() {
             if (this.config.callType === 'webrtc') {
                 // For WebRTC calls, set up peer connection
@@ -605,6 +648,8 @@ function mainApp() {
             if (this.peerConnection) {
                 this.peerConnection.close();
                 this.peerConnection = null;
+                this.dtmfSender = null; // Reset DTMF sender
+                this.showDtmfKeypad = false; // Hide keypad if open
             }
 
             this.rtcStatus = 'disconnected';
@@ -639,7 +684,13 @@ function mainApp() {
             this.peerConnection = new RTCPeerConnection(configuration);
             mediaStream.getTracks().forEach(track => {
                 this.addLogEntry('info', 'Added local audio stream');
-                this.peerConnection.addTrack(track, mediaStream);
+                const sender = this.peerConnection.addTrack(track, mediaStream);
+
+                // Set up DTMF sender for audio track
+                if (track.kind === 'audio' && sender.dtmf) {
+                    this.dtmfSender = sender.dtmf;
+                    this.addLogEntry('info', 'DTMF sender initialized');
+                }
             });
 
             // Handle connection state changes
@@ -668,6 +719,14 @@ function mainApp() {
                         this.addLogEntry('error', `Error playing remote audio: ${error.message}`);
                     });
                 this.addLogEntry('info', 'Received remote audio stream');
+
+                // Set up DTMF sender for the audio track
+                const senders = this.peerConnection.getSenders();
+                const audioSender = senders.find(sender => sender.track && sender.track.kind === 'audio');
+                if (audioSender && audioSender.dtmf) {
+                    this.dtmfSender = audioSender.dtmf;
+                    this.addLogEntry('info', 'DTMF sender initialized');
+                }
             };
             // Handle ICE candidate events
             this.peerConnection.onicecandidate = (event) => {
