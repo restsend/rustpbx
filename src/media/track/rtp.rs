@@ -75,6 +75,8 @@ pub struct RtpTrackBuilder {
     rtp_socket: Option<UdpConnection>,
     rtcp_socket: Option<UdpConnection>,
     rtp_start_port: u16,
+    rtp_end_port: u16,
+    rtp_alloc_count: u32,
 }
 
 pub struct RtpTrack {
@@ -107,6 +109,8 @@ impl RtpTrackBuilder {
             rtp_socket: None,
             rtcp_socket: None,
             rtp_start_port: 12000,
+            rtp_end_port: u16::MAX - 1,
+            rtp_alloc_count: 500,
         }
     }
 
@@ -114,7 +118,14 @@ impl RtpTrackBuilder {
         self.rtp_start_port = rtp_start_port;
         self
     }
-
+    pub fn with_rtp_end_port(mut self, rtp_end_port: u16) -> Self {
+        self.rtp_end_port = rtp_end_port;
+        self
+    }
+    pub fn with_rtp_alloc_count(mut self, rtp_alloc_count: u32) -> Self {
+        self.rtp_alloc_count = rtp_alloc_count;
+        self
+    }
     pub fn with_local_addr(mut self, local_addr: SocketAddr) -> Self {
         self.local_addr = Some(local_addr);
         self
@@ -149,8 +160,11 @@ impl RtpTrackBuilder {
         let mut rtp_conn = None;
         let mut rtcp_conn = None;
 
-        for p in 0..100 {
-            let port = self.rtp_start_port + p * 2;
+        for _ in 0..self.rtp_alloc_count {
+            let port = rand::random_range::<u16, _>(self.rtp_start_port..=self.rtp_end_port);
+            if port % 2 != 0 {
+                continue;
+            }
             if let Ok(c) =
                 UdpConnection::create_connection(format!("{:?}:{}", addr, port).parse()?, None)
                     .await
@@ -168,8 +182,6 @@ impl RtpTrackBuilder {
                     }
                 };
                 break;
-            } else {
-                info!("failed to bind RTP socket on port: {}", port);
             }
         }
 
@@ -228,11 +240,17 @@ impl RtpTrackBuilder {
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
         let processor_chain = ProcessorChain::new(self.config.samplerate);
+        let ssrc = loop {
+            let i = rand::random::<u32>();
+            if i % 2 == 0 {
+                break i;
+            }
+        };
         let track = RtpTrack {
             track_id: self.track_id,
             config: self.config,
             cancel_token,
-            ssrc: rand::random::<u32>(),
+            ssrc,
             remote_addr: None,
             remote_rtcp_addr: None,
             processor_chain,
