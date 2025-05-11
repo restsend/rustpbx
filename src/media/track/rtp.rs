@@ -10,10 +10,9 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use rsip::HostWithPort;
 use rsipstack::transport::{udp::UdpConnection, SipAddr};
-//use rtp_rs::{RtpPacketBuilder, RtpReader, Seq};
 use std::{
     io::Cursor,
     net::SocketAddr,
@@ -27,6 +26,12 @@ use tokio::{select, time::interval_at, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use webrtc::{
+    rtcp::{
+        sender_report::SenderReport,
+        source_description::{
+            SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
+        },
+    },
     rtp::{
         codecs::g7xx::G7xxPayloader,
         packet::Packet,
@@ -41,69 +46,6 @@ const RTP_OUTBOUND_MTU: usize = 1200; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
 const DTMF_EVENT_DURATION_MS: u64 = 160; // Default DTMF event duration (in ms)
 const DTMF_EVENT_VOLUME: u8 = 10; // Default volume for DTMF events (0-63)
-
-// RTCP Sender Report packet structure
-// https://datatracker.ietf.org/doc/html/rfc3550#section-6.4.1
-struct RtcpSenderReport {
-    ssrc: u32,
-    ntp_sec: u32,
-    ntp_frac: u32,
-    rtp_timestamp: u32,
-    packet_count: u32,
-    octet_count: u32,
-}
-
-impl RtcpSenderReport {
-    fn new(ssrc: u32, rtp_timestamp: u32, packet_count: u32, octet_count: u32) -> Self {
-        // Get current time
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-
-        // Convert to NTP format
-        let ntp_sec = now.as_secs() as u32 + 2208988800u32; // Seconds since 1900-01-01
-        let ntp_frac = ((now.subsec_nanos() as u64 * 0x100000000u64) / 1_000_000_000u64) as u32;
-
-        Self {
-            ssrc,
-            ntp_sec,
-            ntp_frac,
-            rtp_timestamp,
-            packet_count,
-            octet_count,
-        }
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        // Create a buffer with enough capacity for the RTCP SR packet
-        let mut buf = BytesMut::with_capacity(28);
-
-        // RTCP header (4 bytes)
-        // First byte: V=2, P=0, RC=0
-        buf.put_u8(0x80); // Version=2, Padding=0, Count=0
-        buf.put_u8(200); // PT=200 (SR)
-        buf.put_u16(6); // Length (6 32-bit words minus 1) = 6 words - 1 = 5, in network byte order
-
-        // SSRC of sender (4 bytes)
-        buf.put_u32(self.ssrc);
-
-        // NTP timestamp (8 bytes)
-        buf.put_u32(self.ntp_sec);
-        buf.put_u32(self.ntp_frac);
-
-        // RTP timestamp (4 bytes)
-        buf.put_u32(self.rtp_timestamp);
-
-        // Sender's packet count (4 bytes)
-        buf.put_u32(self.packet_count);
-
-        // Sender's octet count (4 bytes)
-        buf.put_u32(self.octet_count);
-
-        // Convert to Vec<u8> and return
-        buf.to_vec()
-    }
-}
 
 struct RtpTrackState {
     timestamp: Arc<AtomicU32>,
@@ -343,8 +285,9 @@ impl RtpTrack {
         };
 
         info!(
-            "set remote description peer_addr: {} payload_type: {}",
+            "set remote description peer_addr: {} rtcp_addr: {} payload_type: {}",
             remote_addr,
+            remote_rtcp_addr,
             peer_media.codecs[0].payload_type()
         );
 
@@ -580,9 +523,28 @@ a=sendrecv\r\n",
             let octet_count = state.octet_count.load(Ordering::Relaxed);
             let rtp_timestamp = state.timestamp.load(Ordering::Relaxed);
 
-            let sr = RtcpSenderReport::new(ssrc, rtp_timestamp, packet_count, octet_count);
-            let rtcp_data = sr.to_bytes();
+            let pkts = vec![
+                Box::new(SenderReport {
+                    ssrc,
+                    ntp_time: Instant::now().elapsed().as_secs() as u64,
+                    rtp_time: rtp_timestamp,
+                    packet_count,
+                    octet_count,
+                    profile_extensions: Bytes::new(),
+                    reports: vec![],
+                }) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>,
+                Box::new(SourceDescription {
+                    chunks: vec![SourceDescriptionChunk {
+                        source: ssrc,
+                        items: vec![SourceDescriptionItem {
+                            sdes_type: SdesType::SdesName,
+                            text: "rustpbx".into(),
+                        }],
+                    }],
+                }) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>,
+            ];
 
+            let rtcp_data = webrtc::rtcp::packet::marshal(&pkts)?;
             match remote_rtcp_addr {
                 Some(ref addr) => {
                     if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
@@ -713,7 +675,8 @@ impl Track for RtpTrack {
             }
             None => return Err(anyhow::anyhow!("Packetizer not set")),
         };
-        for packet in packets {
+        for mut packet in packets {
+            packet.header.marker = false;
             match packet.marshal() {
                 Ok(ref rtp_data) => match socket.send_raw(rtp_data, &remote_addr).await {
                     Ok(_) => {
