@@ -5,7 +5,9 @@ function mainApp() {
             callType: 'webrtc', // Default to WebRTC, can be 'webrtc' or 'sip'
             sip: {
                 caller: '',
-                callee: ''
+                callee: '',
+                username: '',
+                password: ''
             },
             denoise: {
                 enabled: false,
@@ -790,6 +792,14 @@ function mainApp() {
                     invite.callType = 'sip';
                     invite.option.caller = this.config.sip.caller;
                     invite.option.callee = this.config.sip.callee;
+
+                    // Add SIP credentials if provided
+                    if (this.config.sip.username || this.config.sip.password) {
+                        invite.option.sip = {
+                            username: this.config.sip.username,
+                            password: this.config.sip.password
+                        };
+                    }
 
                     // Validate SIP parameters
                     if (!invite.option.caller || !invite.option.callee) {
