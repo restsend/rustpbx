@@ -529,6 +529,7 @@ impl RtpTrack {
             };
             for mut packet in packets {
                 packet.header.payload_type = self.dtmf_payload_type;
+                packet.header.marker = false;
 
                 match packet.marshal() {
                     Ok(ref rtp_data) => {
