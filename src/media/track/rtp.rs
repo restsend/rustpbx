@@ -81,7 +81,7 @@ pub struct RtpTrackBuilder {
     track_id: TrackId,
     config: TrackConfig,
     local_addr: Option<IpAddr>,
-    external_addr: Option<SocketAddr>,
+    external_addr: Option<IpAddr>,
     stun_server: Option<String>,
     rtp_socket: Option<UdpConnection>,
     rtcp_socket: Option<UdpConnection>,
@@ -157,7 +157,7 @@ impl RtpTrackBuilder {
         self
     }
 
-    pub fn with_external_addr(mut self, external_addr: SocketAddr) -> Self {
+    pub fn with_external_addr(mut self, external_addr: IpAddr) -> Self {
         self.external_addr = Some(external_addr);
         self
     }
@@ -269,6 +269,33 @@ impl RtpTrackBuilder {
                     ),
                 }
             }
+        } else if let Some(addr) = self.external_addr {
+            rtp_conn.external = Some(
+                SocketAddr::new(
+                    addr,
+                    *rtp_conn
+                        .get_addr()
+                        .addr
+                        .port
+                        .clone()
+                        .unwrap_or_default()
+                        .value(),
+                )
+                .into(),
+            );
+            rtcp_conn.external = Some(
+                SocketAddr::new(
+                    addr,
+                    *rtcp_conn
+                        .get_addr()
+                        .addr
+                        .port
+                        .clone()
+                        .unwrap_or_default()
+                        .value(),
+                )
+                .into(),
+            );
         }
         Ok((rtp_conn, rtcp_conn))
     }
