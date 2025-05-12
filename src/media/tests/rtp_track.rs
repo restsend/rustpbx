@@ -345,9 +345,7 @@ async fn create_connected_sockets(
 async fn test_rtp_track_e2e_with_jitter_buffer() -> Result<()> {
     // Create a pair of connected UDP sockets for testing
     let (send_socket, recv_socket) = create_connected_sockets().await?;
-    let send_addr = send_socket.local_addr()?;
-    let _recv_addr = recv_socket.local_addr()?;
-
+    let send_addr = send_socket.local_addr()?.ip();
     // Create a cancel token that we'll use to stop everything
     let cancel_token = CancellationToken::new();
 

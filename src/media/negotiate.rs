@@ -6,6 +6,7 @@ pub struct PeerMedia {
     pub rtp_port: u16,
     pub rtcp_addr: String,
     pub rtcp_port: u16,
+    pub rtcp_mux: bool,
     pub codecs: Vec<CodecType>,
 }
 
@@ -29,6 +30,7 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
         rtcp_addr: String::new(),
         rtp_port: 0,
         rtcp_port: 0,
+        rtcp_mux: false,
         codecs: Vec::new(),
     };
 
@@ -78,6 +80,11 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
                             }
                         }
                     });
+                }
+                if attribute.key == "rtcp-mux" {
+                    peer_media.rtcp_mux = true;
+                    peer_media.rtcp_addr = peer_media.rtp_addr.clone();
+                    peer_media.rtcp_port = peer_media.rtp_port;
                 }
             }
         }

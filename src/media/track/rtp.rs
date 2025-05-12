@@ -2,6 +2,7 @@ use super::track_codec::TrackCodec;
 use crate::{
     event::{EventSender, SessionEvent},
     media::{
+        codecs::CodecType,
         negotiate::select_peer_media,
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackPacketSender},
@@ -15,9 +16,9 @@ use rsip::HostWithPort;
 use rsipstack::transport::{udp::UdpConnection, SipAddr};
 use std::{
     io::Cursor,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -38,7 +39,17 @@ use webrtc::{
         packetizer::{new_packetizer, Packetizer},
         sequence::{new_random_sequencer, Sequencer},
     },
-    sdp::SessionDescription,
+    sdp::{
+        description::{
+            common::{Address, Attribute, ConnectionInformation},
+            media::{MediaName, RangedPort},
+            session::{
+                Origin, TimeDescription, Timing, ATTR_KEY_RTCPMUX, ATTR_KEY_SEND_ONLY,
+                ATTR_KEY_SEND_RECV, ATTR_KEY_SSRC,
+            },
+        },
+        MediaDescription, SessionDescription,
+    },
     util::{Marshal, Unmarshal},
 };
 const RTP_MTU: usize = 1500; // UDP MTU size
@@ -69,14 +80,17 @@ pub struct RtpTrackBuilder {
     cancel_token: Option<CancellationToken>,
     track_id: TrackId,
     config: TrackConfig,
-    local_addr: Option<SocketAddr>,
+    local_addr: Option<IpAddr>,
     external_addr: Option<SocketAddr>,
     stun_server: Option<String>,
     rtp_socket: Option<UdpConnection>,
     rtcp_socket: Option<UdpConnection>,
+    rtcp_mux: bool,
     rtp_start_port: u16,
     rtp_end_port: u16,
     rtp_alloc_count: u32,
+    enabled_codecs: Vec<CodecType>,
+    session_name: String,
 }
 
 pub struct RtpTrack {
@@ -84,6 +98,7 @@ pub struct RtpTrack {
     config: TrackConfig,
     cancel_token: CancellationToken,
     ssrc: u32,
+    rtcp_mux: bool,
     remote_addr: Option<SipAddr>,
     remote_rtcp_addr: Option<SipAddr>,
     processor_chain: ProcessorChain,
@@ -96,6 +111,9 @@ pub struct RtpTrack {
     remote_description: Option<String>,
     sequencer: Box<dyn Sequencer + Send + Sync>,
     packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
+    enabled_codecs: Vec<CodecType>,
+    sendrecv: AtomicBool,
+    session_name: String,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -108,9 +126,17 @@ impl RtpTrackBuilder {
             cancel_token: None,
             rtp_socket: None,
             rtcp_socket: None,
+            rtcp_mux: true,
             rtp_start_port: 12000,
             rtp_end_port: u16::MAX - 1,
             rtp_alloc_count: 500,
+            enabled_codecs: vec![
+                CodecType::G722,
+                CodecType::PCMU,
+                CodecType::PCMA,
+                CodecType::TelephoneEvent,
+            ],
+            session_name: "rustpbx".to_string(),
         }
     }
 
@@ -126,7 +152,7 @@ impl RtpTrackBuilder {
         self.rtp_alloc_count = rtp_alloc_count;
         self
     }
-    pub fn with_local_addr(mut self, local_addr: SocketAddr) -> Self {
+    pub fn with_local_addr(mut self, local_addr: IpAddr) -> Self {
         self.local_addr = Some(local_addr);
         self
     }
@@ -154,9 +180,24 @@ impl RtpTrackBuilder {
         self.rtcp_socket = Some(rtcp_socket);
         self
     }
+    pub fn with_rtcp_mux(mut self, rtcp_mux: bool) -> Self {
+        self.rtcp_mux = rtcp_mux;
+        self
+    }
 
+    pub fn with_enabled_codecs(mut self, enabled_codecs: Vec<CodecType>) -> Self {
+        self.enabled_codecs = enabled_codecs;
+        self
+    }
+    pub fn with_session_name(mut self, session_name: String) -> Self {
+        self.session_name = session_name;
+        self
+    }
     pub async fn build_rtp_rtcp_conn(&self) -> Result<(UdpConnection, UdpConnection)> {
-        let addr = crate::net_tool::get_first_non_loopback_interface()?;
+        let addr = match self.local_addr {
+            Some(addr) => addr,
+            None => crate::net_tool::get_first_non_loopback_interface()?,
+        };
         let mut rtp_conn = None;
         let mut rtcp_conn = None;
 
@@ -169,18 +210,23 @@ impl RtpTrackBuilder {
                 UdpConnection::create_connection(format!("{:?}:{}", addr, port).parse()?, None)
                     .await
             {
+                if !self.rtcp_mux {
+                    // if rtcp mux is not enabled, we need to create a separate RTCP socket
+                    rtcp_conn = match UdpConnection::create_connection(
+                        format!("{:?}:{}", addr, port + 1).parse()?,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(c) => Some(c),
+                        Err(_) => {
+                            continue;
+                        }
+                    };
+                } else {
+                    rtcp_conn = Some(c.clone());
+                }
                 rtp_conn = Some(c);
-                rtcp_conn = match UdpConnection::create_connection(
-                    format!("{:?}:{}", addr, port + 1).parse()?,
-                    None,
-                )
-                .await
-                {
-                    Ok(c) => Some(c),
-                    Err(_) => {
-                        continue;
-                    }
-                };
                 break;
             }
         }
@@ -251,6 +297,7 @@ impl RtpTrackBuilder {
             config: self.config,
             cancel_token,
             ssrc,
+            rtcp_mux: self.rtcp_mux,
             remote_addr: None,
             remote_rtcp_addr: None,
             processor_chain,
@@ -263,6 +310,9 @@ impl RtpTrackBuilder {
             remote_description: None,
             sequencer: Box::new(new_random_sequencer()),
             packetizer: Mutex::new(None),
+            enabled_codecs: self.enabled_codecs,
+            sendrecv: AtomicBool::new(true),
+            session_name: self.session_name,
         };
         Ok(track)
     }
@@ -312,6 +362,7 @@ impl RtpTrack {
         self.payload_type = peer_media.codecs[0].payload_type();
         self.remote_addr.replace(remote_addr);
         self.remote_rtcp_addr.replace(remote_rtcp_addr);
+        self.rtcp_mux = peer_media.rtcp_mux;
 
         let payloader = Box::<G7xxPayloader>::default();
         self.packetizer
@@ -330,26 +381,84 @@ impl RtpTrack {
 
     pub fn local_description(&self) -> Result<String> {
         let socketaddr: SocketAddr = self.rtp_socket.get_addr().addr.to_owned().try_into()?;
-        let ssrc = self.ssrc;
-        let sdp = format!(
-            "v=0\r\n\
-o=- 0 0 IN IP4 {}\r\n\
-s=rustpbx\r\n\
-c=IN IP4 {}\r\n\
-t=0 0\r\n\
-m=audio {} RTP/AVP 9 8 0 101\r\n\
-a=rtpmap:9 G722/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n\
-a=ssrc:{}\r\n\
-a=sendrecv\r\n",
-            socketaddr.ip(),
-            socketaddr.ip(),
-            socketaddr.port(),
-            ssrc,
-        );
-        Ok(sdp)
+        let mut sdp = SessionDescription::default();
+
+        // Set session-level attributes
+        sdp.version = 0;
+        sdp.origin = Origin {
+            username: "-".to_string(),
+            session_id: 0,
+            session_version: 0,
+            network_type: "IN".to_string(),
+            address_type: "IP4".to_string(),
+            unicast_address: socketaddr.ip().to_string(),
+        };
+        sdp.session_name = self.session_name.clone();
+        sdp.connection_information = Some(ConnectionInformation {
+            address_type: "IP4".to_string(),
+            network_type: "IN".to_string(),
+            address: Some(Address {
+                address: socketaddr.ip().to_string(),
+                ttl: None,
+                range: None,
+            }),
+        });
+        sdp.time_descriptions.push(TimeDescription {
+            timing: Timing {
+                start_time: 0,
+                stop_time: 0,
+            },
+            repeat_times: vec![],
+        });
+
+        // Add media section
+        let mut media = MediaDescription::default();
+        media.media_name = MediaName {
+            media: "audio".to_string(),
+            port: RangedPort {
+                value: socketaddr.port() as isize,
+                range: None,
+            },
+            protos: vec!["RTP".to_string(), "AVP".to_string()],
+            formats: vec![],
+        };
+
+        for codec in self.enabled_codecs.iter() {
+            media
+                .media_name
+                .formats
+                .push(codec.payload_type().to_string());
+            media.attributes.push(Attribute {
+                key: "rtpmap".to_string(),
+                value: Some(format!("{} {}", codec.payload_type(), codec.rtpmap())),
+            });
+        }
+
+        // Add media-level attributes
+        if self.rtcp_mux {
+            media.attributes.push(Attribute {
+                key: ATTR_KEY_RTCPMUX.to_string(),
+                value: None,
+            });
+        }
+        media.attributes.push(Attribute {
+            key: ATTR_KEY_SSRC.to_string(),
+            value: Some(self.ssrc.to_string()),
+        });
+
+        if self.sendrecv.load(Ordering::Relaxed) {
+            media.attributes.push(Attribute {
+                key: ATTR_KEY_SEND_RECV.to_string(),
+                value: None,
+            });
+        } else {
+            media.attributes.push(Attribute {
+                key: ATTR_KEY_SEND_ONLY.to_string(),
+                value: None,
+            });
+        }
+        sdp.media_descriptions.push(media);
+        Ok(sdp.marshal())
     }
 
     // Send DTMF tone using RFC 4733
@@ -525,13 +634,13 @@ a=sendrecv\r\n",
         state: Arc<RtpTrackState>,
         rtcp_socket: UdpConnection,
         ssrc: u32,
+        session_name: String,
         remote_rtcp_addr: Option<SipAddr>,
     ) -> Result<()> {
         let mut interval = interval_at(
             Instant::now() + Duration::from_millis(RTCP_SR_INTERVAL_MS),
             Duration::from_millis(RTCP_SR_INTERVAL_MS),
         );
-
         loop {
             if token.is_cancelled() {
                 return Ok(());
@@ -556,7 +665,7 @@ a=sendrecv\r\n",
                         source: ssrc,
                         items: vec![SourceDescriptionItem {
                             sdes_type: SdesType::SdesName,
-                            text: "rustpbx".into(),
+                            text: session_name.clone().into(),
                         }],
                     }],
                 }) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>,
@@ -620,12 +729,14 @@ impl Track for RtpTrack {
         let rtp_socket = self.rtp_socket.clone();
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
+        let session_name = self.session_name.clone();
+
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
                     info!("RTC process cancelled");
                 },
-                r = Self::send_rtcp_reports(token.clone(), state, rtcp_socket, ssrc, rtcp_addr) => {
+                r = Self::send_rtcp_reports(token.clone(), state, rtcp_socket, ssrc, session_name, rtcp_addr) => {
                     info!("RTCP sender process completed {:?}", r);
                 }
                 r = Self::recv_rtp_packets(token.clone(), rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
