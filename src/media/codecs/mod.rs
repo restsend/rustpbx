@@ -3,6 +3,7 @@ pub mod g722;
 pub mod pcma;
 pub mod pcmu;
 pub mod resample;
+pub mod telephone_event;
 #[cfg(test)]
 mod tests;
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -10,6 +11,7 @@ pub enum CodecType {
     PCMU,
     PCMA,
     G722,
+    TelephoneEvent,
 }
 
 pub trait Decoder: Send + Sync {
@@ -39,6 +41,7 @@ pub fn create_decoder(codec: CodecType) -> Box<dyn Decoder> {
         CodecType::PCMU => Box::new(pcmu::PcmuDecoder::new()),
         CodecType::PCMA => Box::new(pcma::PcmaDecoder::new()),
         CodecType::G722 => Box::new(g722::G722Decoder::new()),
+        CodecType::TelephoneEvent => Box::new(telephone_event::TelephoneEventDecoder::new()),
     }
 }
 
@@ -47,6 +50,7 @@ pub fn create_encoder(codec: CodecType) -> Box<dyn Encoder> {
         CodecType::PCMU => Box::new(pcmu::PcmuEncoder::new()),
         CodecType::PCMA => Box::new(pcma::PcmaEncoder::new()),
         CodecType::G722 => Box::new(g722::G722Encoder::new()),
+        CodecType::TelephoneEvent => Box::new(telephone_event::TelephoneEventEncoder::new()),
     }
 }
 
@@ -56,13 +60,24 @@ impl CodecType {
             CodecType::PCMU => "audio/PCMU",
             CodecType::PCMA => "audio/PCMA",
             CodecType::G722 => "audio/G722",
+            CodecType::TelephoneEvent => "audio/telephone-event",
         }
     }
+    pub fn rtpmap(&self) -> &str {
+        match self {
+            CodecType::PCMU => "PCMU/8000",
+            CodecType::PCMA => "PCMA/8000",
+            CodecType::G722 => "G722/16000",
+            CodecType::TelephoneEvent => "telephone-event/8000",
+        }
+    }
+
     pub fn clock_rate(&self) -> u32 {
         match self {
             CodecType::PCMU => 8000,
             CodecType::PCMA => 8000,
             CodecType::G722 => 8000,
+            CodecType::TelephoneEvent => 8000,
         }
     }
     pub fn payload_type(&self) -> u8 {
@@ -70,6 +85,7 @@ impl CodecType {
             CodecType::PCMU => 0,
             CodecType::PCMA => 8,
             CodecType::G722 => 9,
+            CodecType::TelephoneEvent => 101,
         }
     }
     pub fn samplerate(&self) -> u32 {
@@ -77,22 +93,10 @@ impl CodecType {
             CodecType::PCMU => 8000,
             CodecType::PCMA => 8000,
             CodecType::G722 => 16000,
+            CodecType::TelephoneEvent => 8000,
         }
     }
 }
-
-// impl FromStr for CodecType {
-//     type Err = anyhow::Error;
-
-//     fn from_str(s: &str) -> Result<Self, Self::Err> {
-//         match s {
-//             "0" => Ok(CodecType::PCMU),
-//             "8" => Ok(CodecType::PCMA),
-//             "9" => Ok(CodecType::G722),
-//             _ => Err(anyhow::anyhow!("Invalid codec type: {}", s)),
-//         }
-//     }
-// }
 
 impl TryFrom<&String> for CodecType {
     type Error = anyhow::Error;
@@ -102,6 +106,7 @@ impl TryFrom<&String> for CodecType {
             "0" => Ok(CodecType::PCMU),
             "8" => Ok(CodecType::PCMA),
             "9" => Ok(CodecType::G722),
+            "101" => Ok(CodecType::TelephoneEvent),
             _ => Err(anyhow::anyhow!("Invalid codec type: {}", value)),
         }
     }
