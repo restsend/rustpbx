@@ -22,7 +22,7 @@ pub struct SipOption {
     pub headers: Option<HashMap<String, String>>,
 }
 
-pub(super) async fn new_rtp_track_with_sip(
+pub async fn new_rtp_track_with_sip(
     state: AppState,
     token: CancellationToken,
     track_id: TrackId,
@@ -40,22 +40,42 @@ pub(super) async fn new_rtp_track_with_sip(
         None => return Err(anyhow::anyhow!("callee is required")),
     };
     let mut rtp_track =
-        RtpTrackBuilder::new(track_id.clone(), track_config).with_cancel_token(token.child_token());
+        RtpTrackBuilder::new(track_id.clone(), track_config).with_cancel_token(token);
 
-    if let Some(rtp_start_port) = state.config.rtp_start_port {
-        rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
-    }
+    if let Some(ref sip) = state.config.sip {
+        if let Some(rtp_start_port) = sip.rtp_start_port {
+            rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
+        }
+        if let Some(rtp_end_port) = sip.rtp_end_port {
+            rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
+        }
 
-    if let Some(ref external_ip) = state.config.external_ip {
-        rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
-    }
+        if let Some(ref external_ip) = sip.external_ip {
+            rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
+        }
 
-    if let Some(ref stun_server) = state.config.stun_server {
-        rtp_track = rtp_track.with_stun_server(stun_server.clone());
+        if let Some(ref stun_server) = sip.stun_server {
+            rtp_track = rtp_track.with_stun_server(stun_server.clone());
+        }
+
+        if let Some(ref useragent) = sip.useragent {
+            rtp_track = rtp_track.with_session_name(useragent.clone());
+        }
     }
 
     let mut rtp_track = rtp_track.build().await?;
     let offer = rtp_track.local_description().ok();
+
+    let headers = if let Some(ref headers) = option.sip.as_ref().unwrap().headers {
+        Some(
+            headers
+                .iter()
+                .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
+                .collect(),
+        )
+    } else {
+        None
+    };
     let invite_option = InviteOption {
         caller: caller.clone().try_into()?,
         callee: callee.try_into()?,
@@ -66,9 +86,10 @@ pub(super) async fn new_rtp_track_with_sip(
             username: opt.username.clone(),
             password: opt.password.clone(),
         }),
+        headers,
     };
     info!(
-        "invite {} -> {} offer: {:?}",
+        "invite {} -> {} offer: \n{:?}",
         invite_option.caller, invite_option.callee, offer
     );
     match ua.invite(invite_option, dlg_state_sender).await {

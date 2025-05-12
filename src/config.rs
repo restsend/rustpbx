@@ -2,10 +2,12 @@ use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+const USER_AGENT: &str = "rustpbx";
+
 #[derive(Parser, Debug)]
 #[command(version)]
 pub(crate) struct Cli {
-    #[clap(long)]
+    #[clap(long, default_value = "rustpbx.toml")]
     pub conf: Option<String>,
 }
 
@@ -17,9 +19,6 @@ pub struct Config {
     pub console: Option<ConsoleConfig>,
     pub sip: Option<SipConfig>,
     pub proxy: Option<ProxyConfig>,
-    pub rtp_start_port: Option<u16>,
-    pub external_ip: Option<String>,
-    pub stun_server: Option<String>,
     pub recorder_path: String,
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
@@ -31,6 +30,9 @@ pub struct SipConfig {
     pub addr: String,
     pub udp_port: u16,
     pub external_ip: Option<String>,
+    pub stun_server: Option<String>,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
     pub useragent: Option<String>,
 }
 
@@ -93,7 +95,10 @@ impl Default for SipConfig {
             addr: "0.0.0.0".to_string(),
             udp_port: 5060,
             external_ip: None,
-            useragent: Some("rustpbx".to_string()),
+            rtp_start_port: Some(12000),
+            rtp_end_port: Some(42000),
+            stun_server: None,
+            useragent: Some(USER_AGENT.to_string()),
         }
     }
 }
@@ -107,9 +112,6 @@ impl Default for Config {
             console: Some(ConsoleConfig::default()),
             sip: Some(SipConfig::default()),
             proxy: Some(ProxyConfig::default()),
-            rtp_start_port: None,
-            external_ip: None,
-            stun_server: None,
             #[cfg(target_os = "windows")]
             recorder_path: "./recorder".to_string(),
             #[cfg(not(target_os = "windows"))]
@@ -126,7 +128,9 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &str) -> Result<Self, Error> {
-        let config = toml::from_str(&std::fs::read_to_string(path)?)?;
+        let config = toml::from_str(
+            &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
+        )?;
         Ok(config)
     }
 }
