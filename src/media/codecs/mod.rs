@@ -96,6 +96,12 @@ impl CodecType {
             CodecType::TelephoneEvent => 8000,
         }
     }
+    pub fn is_audio(&self) -> bool {
+        match self {
+            CodecType::PCMU | CodecType::PCMA | CodecType::G722 => true,
+            _ => false,
+        }
+    }
 }
 
 impl TryFrom<&String> for CodecType {

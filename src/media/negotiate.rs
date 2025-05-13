@@ -21,7 +21,11 @@ pub fn strip_ipv6_candidates(sdp: &str) -> String {
 pub fn prefer_audio_codec(sdp: &SessionDescription) -> Option<codecs::CodecType> {
     let mut codecs = select_peer_media(sdp, "audio")?.codecs;
     codecs.sort_by(|a, b| a.cmp(b));
-    codecs.last().cloned()
+    codecs
+        .iter()
+        .filter(|codec| codec.is_audio())
+        .last()
+        .cloned()
 }
 
 pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<PeerMedia> {
@@ -125,7 +129,10 @@ a=fmtp:101 0-16"#;
         assert_eq!(peer_media.rtcp_port, 5003);
         assert_eq!(peer_media.rtcp_addr, "192.168.1.203");
         assert_eq!(peer_media.rtp_addr, "192.168.1.202");
-        assert_eq!(peer_media.codecs, vec![CodecType::PCMU, CodecType::G722]);
+        assert_eq!(
+            peer_media.codecs,
+            vec![CodecType::PCMU, CodecType::G722, CodecType::TelephoneEvent]
+        );
 
         let codec = prefer_audio_codec(&offer_sdp);
         assert_eq!(codec, Some(CodecType::G722));
@@ -150,7 +157,10 @@ a=ptime:20"#;
         assert_eq!(peer_media.rtcp_port, 26329);
         assert_eq!(peer_media.rtcp_addr, "11.22.33.123");
         assert_eq!(peer_media.rtp_addr, "11.22.33.123");
-        assert_eq!(peer_media.codecs, vec![CodecType::PCMU]);
+        assert_eq!(
+            peer_media.codecs,
+            vec![CodecType::PCMU, CodecType::TelephoneEvent]
+        );
 
         let codec = prefer_audio_codec(&offer_sdp);
         assert_eq!(codec, Some(CodecType::PCMU));
