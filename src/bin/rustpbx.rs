@@ -5,6 +5,7 @@ use rustpbx::{app::AppStateBuilder, config::Config};
 use std::fs::File;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,26 +32,41 @@ async fn main() -> Result<()> {
         .map(|conf| Config::load(&conf).expect("Failed to load config"))
         .unwrap_or_default();
 
-    let mut log_fmt = tracing_subscriber::fmt();
-    if let Some(ref level) = config.log_level {
-        if let Ok(lv) = level.as_str().parse::<LevelFilter>() {
-            log_fmt = log_fmt.with_max_level(lv);
-        }
-    } else {
-        log_fmt = log_fmt.with_max_level(LevelFilter::DEBUG);
+    let mut env_filter = EnvFilter::from_default_env();
+    if let Some(Ok(level)) = config
+        .log_level
+        .as_ref()
+        .map(|level| level.parse::<LevelFilter>())
+    {
+        env_filter = env_filter.add_directive(level.into());
     }
-    log_fmt = log_fmt.with_file(true).with_line_number(true);
+
     if let Some(ref log_file) = config.log_file {
         let file = File::create(log_file).expect("Failed to create log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         std::mem::forget(guard);
-        log_fmt
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(true)
             .with_ansi(false)
-            .with_writer(non_blocking)
-            .try_init()
-            .ok();
+            .with_writer(non_blocking);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .init();
     } else {
-        log_fmt.try_init().ok();
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(true);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
     }
 
     let state_builder = AppStateBuilder::new().config(config);

@@ -13,7 +13,7 @@ pub use tencent_cloud::TencentCloudAsrClientBuilder;
 pub use voiceapi::VoiceApiAsrClient;
 pub use voiceapi::VoiceApiAsrClientBuilder;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Hash, Eq, PartialEq)]
 pub enum TranscriptionType {
     #[serde(rename = "tencent")]
     TencentCloud,

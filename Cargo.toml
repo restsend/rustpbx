@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
@@ -35,7 +35,7 @@ tokio-tungstenite = { version = "0.26.2", features = [
 ] }
 tokio-util = "0.7.15"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2"
 url = "2.5.4"
 uuid = { version = "1.16.0", features = ["v4"] }

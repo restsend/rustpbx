@@ -1,11 +1,10 @@
-use super::{processor::AsrProcessor, CallOption, Command, ReferOption};
+use super::{CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
-        denoiser::NoiseReducer,
+        engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
-        processor::Processor,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
             file::FileTrack,
@@ -14,9 +13,7 @@ use crate::{
             websocket::WebsocketTrack,
             Track, TrackConfig,
         },
-        vad::VadProcessor,
     },
-    synthesis::SynthesisOption,
     TrackId,
 };
 use anyhow::Result;
@@ -32,7 +29,6 @@ use rsipstack::dialog::{
     DialogId,
 };
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     select,
@@ -69,66 +65,6 @@ pub struct ActiveCall {
 }
 
 impl ActiveCall {
-    // Default implementation for prepare_stream_hook
-    pub fn prepare_track_hook(
-        track: &dyn Track,
-        cancel_token: CancellationToken,
-        event_sender: EventSender,
-        option: CallOption,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Processor>>>> + Send>> {
-        let track_id = track.id().clone();
-        let samplerate = track.config().samplerate as usize;
-        Box::pin(async move {
-            let mut processors = vec![];
-            match option.denoise {
-                Some(true) => {
-                    let noise_reducer = NoiseReducer::new(samplerate)?;
-                    processors.push(Box::new(noise_reducer) as Box<dyn Processor>);
-                }
-                _ => {}
-            }
-            match option.vad {
-                Some(ref vad_option) => {
-                    let vad_option = vad_option.to_owned();
-                    info!("Vad processor added {:?}", vad_option);
-                    let vad_processor = VadProcessor::new(event_sender.clone(), vad_option)?;
-                    processors.push(Box::new(vad_processor) as Box<dyn Processor>);
-                }
-                None => {}
-            }
-
-            match option.asr {
-                Some(ref asr_option) => {
-                    let asr_processor = AsrProcessor::create(
-                        track_id,
-                        cancel_token,
-                        asr_option.clone(),
-                        event_sender.clone(),
-                    )
-                    .await?;
-                    processors.push(Box::new(asr_processor) as Box<dyn Processor>);
-                }
-                None => {}
-            }
-
-            Ok(processors)
-        })
-    }
-
-    pub fn create_tts_track(
-        cancel_token: CancellationToken,
-        track_id: TrackId,
-        play_id: Option<String>,
-        tts_option: SynthesisOption,
-    ) -> Pin<Box<dyn Future<Output = Result<(TtsHandle, Box<dyn Track>)>> + Send>> {
-        Box::pin(async move {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let new_handle = TtsHandle::new(tx, play_id);
-            let track = new_handle.create_tts_track(cancel_token, track_id, tts_option, rx)?;
-            Ok((new_handle, track))
-        })
-    }
-
     pub async fn create_stream(
         mut caller_track: Box<dyn Track>,
         state: AppState,
@@ -149,11 +85,12 @@ impl ActiveCall {
 
         let media_stream = media_stream_builder.build();
         // Use the prepare_stream_hook to set up processors
-        let processors = match (state.prepare_track_hook)(
+        let processors = match StreamEngine::create_processors(
+            state.stream_engine.clone(),
             caller_track.as_ref(),
             cancel_token,
             event_sender.clone(),
-            option.clone(),
+            &option,
         )
         .await
         {
@@ -353,11 +290,12 @@ impl ActiveCall {
             }
         }
 
-        let (new_handle, tts_track) = (self.state.create_tts_track_hook)(
+        let (new_handle, tts_track) = StreamEngine::create_tts_track(
+            self.state.stream_engine.clone(),
             self.cancel_token.child_token(),
             self.track_config.server_side_track_id.clone(),
             play_id,
-            tts_option.clone(),
+            &tts_option,
         )
         .await?;
 
