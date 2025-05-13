@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"

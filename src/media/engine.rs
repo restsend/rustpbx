@@ -6,7 +6,7 @@ use super::{
         tts::{TtsHandle, TtsTrack},
         Track,
     },
-    vad::{VADOption, VadEngine, VadProcessor, VadType},
+    vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
     event::EventSender,
@@ -26,7 +26,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-pub type FnCreateVadEngine = fn(option: &VADOption) -> Result<Box<dyn VadEngine>>;
+pub type FnCreateVadProcessor = fn(
+    token: CancellationToken,
+    event_sender: EventSender,
+    option: VADOption,
+) -> Result<Box<dyn Processor>>;
+
 pub type FnCreateAsrClient = Box<
     dyn Fn(
             TrackId,
@@ -53,7 +58,7 @@ pub type CreateProcessorsHook = Box<
 >;
 
 pub struct StreamEngine {
-    vad_creators: HashMap<VadType, FnCreateVadEngine>,
+    vad_creators: HashMap<VadType, FnCreateVadProcessor>,
     asr_creators: HashMap<TranscriptionType, FnCreateAsrClient>,
     tts_creators: HashMap<SynthesisType, FnCreateTtsClient>,
     pub create_processors_hook: Arc<CreateProcessorsHook>,
@@ -91,7 +96,7 @@ impl StreamEngine {
         }
     }
 
-    pub fn register_vad(&mut self, vad_type: VadType, creator: FnCreateVadEngine) -> &mut Self {
+    pub fn register_vad(&mut self, vad_type: VadType, creator: FnCreateVadProcessor) -> &mut Self {
         self.vad_creators.insert(vad_type, creator);
         self
     }
@@ -114,35 +119,39 @@ impl StreamEngine {
         self
     }
 
-    pub fn create_vad(&self, event_sender: EventSender, option: VADOption) -> Result<VadProcessor> {
+    pub fn create_vad_processor(
+        &self,
+        token: CancellationToken,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Box<dyn Processor>> {
         let creator = self.vad_creators.get(&option.r#type);
         if let Some(creator) = creator {
-            let engine = creator(&option)?;
-            VadProcessor::new(engine, event_sender, option)
+            creator(token, event_sender, option)
         } else {
             Err(anyhow::anyhow!("VAD type not found: {}", option.r#type))
         }
     }
 
-    pub async fn create_asr_client(
+    pub async fn create_asr_processor(
         &self,
         track_id: TrackId,
         cancel_token: CancellationToken,
         option: TranscriptionOption,
         event_sender: EventSender,
-    ) -> Result<Box<dyn TranscriptionClient>> {
-        match option.provider {
+    ) -> Result<Box<dyn Processor>> {
+        let asr_client = match option.provider {
             Some(ref provider) => {
                 let creator = self.asr_creators.get(&provider);
                 if let Some(creator) = creator {
-                    let client = creator(track_id, cancel_token, option, event_sender).await?;
-                    Ok(client)
+                    creator(track_id, cancel_token, option, event_sender).await?
                 } else {
-                    Err(anyhow::anyhow!("ASR type not found: {}", provider))
+                    return Err(anyhow::anyhow!("ASR type not found: {}", provider));
                 }
             }
-            None => Err(anyhow::anyhow!("ASR type not found: {:?}", option.provider)),
-        }
+            None => return Err(anyhow::anyhow!("ASR type not found: {:?}", option.provider)),
+        };
+        Ok(Box::new(AsrProcessor { asr_client }))
     }
 
     pub async fn create_tts_client(
@@ -215,26 +224,29 @@ impl StreamEngine {
                 _ => {}
             }
             match option.vad {
-                Some(ref vad_option) => {
-                    info!("Vad processor added {:?}", vad_option);
-                    let vad_option = vad_option.to_owned();
-                    let vad_processor = engine.create_vad(event_sender.clone(), vad_option)?;
-                    processors.push(Box::new(vad_processor) as Box<dyn Processor>);
+                Some(ref option) => {
+                    let vad_processor: Box<dyn Processor + 'static> = engine.create_vad_processor(
+                        cancel_token.child_token(),
+                        event_sender.clone(),
+                        option.to_owned(),
+                    )?;
+                    info!("Vad processor added {:?}", option);
+                    processors.push(vad_processor);
                 }
                 None => {}
             }
             match option.asr {
-                Some(ref asr_option) => {
-                    info!("Asr processor added {:?}", asr_option);
-                    let asr_client = engine
-                        .create_asr_client(
+                Some(ref option) => {
+                    let asr_processor = engine
+                        .create_asr_processor(
                             track_id,
-                            cancel_token,
-                            asr_option.clone(),
+                            cancel_token.child_token(),
+                            option.to_owned(),
                             event_sender.clone(),
                         )
                         .await?;
-                    processors.push(Box::new(AsrProcessor { asr_client }) as Box<dyn Processor>);
+                    info!("Asr processor added {:?}", option);
+                    processors.push(asr_processor);
                 }
                 None => {}
             }

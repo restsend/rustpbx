@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
-
+use tokio_util::sync::CancellationToken;
 #[cfg(feature = "vad_silero")]
 mod silero;
 #[cfg(test)]
@@ -237,20 +237,28 @@ impl VadProcessorInner {
 
 impl VadProcessor {
     #[cfg(feature = "vad_webrtc")]
-    pub fn create_webrtc(option: &VADOption) -> Result<Box<dyn VadEngine>> {
+    pub fn create_webrtc(
+        _token: CancellationToken,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Box<dyn Processor>> {
         let vad: Box<dyn VadEngine> = match option.r#type {
             VadType::WebRTC => Box::new(webrtc::WebRtcVad::new(option.samplerate)?),
             _ => Box::new(NopVad::new()?),
         };
-        Ok(vad)
+        Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
     }
     #[cfg(feature = "vad_silero")]
-    pub fn create_silero(option: &VADOption) -> Result<Box<dyn VadEngine>> {
+    pub fn create_silero(
+        _token: CancellationToken,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Box<dyn Processor>> {
         let vad: Box<dyn VadEngine> = match option.r#type {
             VadType::Silero => Box::new(silero::SileroVad::new(option.samplerate)?),
             _ => Box::new(NopVad::new()?),
         };
-        Ok(vad)
+        Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
     }
 
     pub fn new(

@@ -54,8 +54,8 @@ async fn test_vad_with_noise_denoise() {
 
     let mut option = VADOption::default();
     option.r#type = VadType::Silero;
-    let engine = VadProcessor::create_silero(&option).expect("Failed to create VAD processor");
-    let vad = VadProcessor::new(engine, event_sender.clone(), option)
+    let token = CancellationToken::new();
+    let vad = VadProcessor::create_silero(token, event_sender.clone(), option)
         .expect("Failed to create VAD processor");
     let mut total_duration = 0;
     let (frame_size, chunk_duration_ms) = (320, 20);
@@ -151,21 +151,18 @@ async fn test_vad_engines_with_wav_file() {
 
         let mut option = VADOption::default();
         option.r#type = vad_type.clone();
-        let engine = match vad_type {
+        let token = CancellationToken::new();
+        let vad = match vad_type {
             #[cfg(feature = "vad_silero")]
-            VadType::Silero => {
-                VadProcessor::create_silero(&option).expect("Failed to create VAD processor")
-            }
+            VadType::Silero => VadProcessor::create_silero(token, event_sender.clone(), option)
+                .expect("Failed to create VAD processor"),
             #[cfg(feature = "vad_webrtc")]
-            VadType::WebRTC => {
-                VadProcessor::create_webrtc(&option).expect("Failed to create VAD processor")
-            }
+            VadType::WebRTC => VadProcessor::create_webrtc(token, event_sender.clone(), option)
+                .expect("Failed to create VAD processor"),
             VadType::Other(ref name) => {
                 panic!("Unsupported VAD type: {}", name);
             }
         };
-        let vad = VadProcessor::new(engine, event_sender.clone(), option)
-            .expect("Failed to create VAD processor");
 
         let (frame_size, chunk_duration_ms) = (320, 20);
         let mut total_duration = 0;
