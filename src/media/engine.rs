@@ -40,7 +40,7 @@ pub type FnCreateAsrClient = Box<
 pub type FnCreateTtsClient = fn(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>>;
 
 // Define hook types
-pub type CreateProcesorsHook = Box<
+pub type CreateProcessorsHook = Box<
     dyn Fn(
             Arc<StreamEngine>,
             &dyn Track,
@@ -56,7 +56,7 @@ pub struct StreamEngine {
     vad_creators: HashMap<VadType, FnCreateVadEngine>,
     asr_creators: HashMap<TranscriptionType, FnCreateAsrClient>,
     tts_creators: HashMap<SynthesisType, FnCreateTtsClient>,
-    pub create_procesors_hook: Arc<CreateProcesorsHook>,
+    pub create_processors_hook: Arc<CreateProcessorsHook>,
 }
 
 impl Default for StreamEngine {
@@ -87,7 +87,7 @@ impl StreamEngine {
             vad_creators: HashMap::new(),
             asr_creators: HashMap::new(),
             tts_creators: HashMap::new(),
-            create_procesors_hook: Arc::new(Box::new(Self::default_create_procesors_hook)),
+            create_processors_hook: Arc::new(Box::new(Self::default_create_procesors_hook)),
         }
     }
 
@@ -172,7 +172,7 @@ impl StreamEngine {
         event_sender: EventSender,
         option: &CallOption,
     ) -> Result<Vec<Box<dyn Processor>>> {
-        (engine.clone().create_procesors_hook)(
+        (engine.clone().create_processors_hook)(
             engine,
             track,
             cancel_token,
