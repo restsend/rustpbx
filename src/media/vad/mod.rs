@@ -54,7 +54,7 @@ impl Default for VADOption {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Eq, Hash, PartialEq)]
 pub enum VadType {
     #[serde(rename = "webrtc")]
     #[cfg(feature = "vad_webrtc")]
@@ -236,16 +236,30 @@ impl VadProcessorInner {
 }
 
 impl VadProcessor {
-    pub fn new(event_sender: EventSender, option: VADOption) -> Result<Self> {
+    #[cfg(feature = "vad_webrtc")]
+    pub fn create_webrtc(option: &VADOption) -> Result<Box<dyn VadEngine>> {
         let vad: Box<dyn VadEngine> = match option.r#type {
-            #[cfg(feature = "vad_webrtc")]
             VadType::WebRTC => Box::new(webrtc::WebRtcVad::new(option.samplerate)?),
-            #[cfg(feature = "vad_silero")]
+            _ => Box::new(NopVad::new()?),
+        };
+        Ok(vad)
+    }
+    #[cfg(feature = "vad_silero")]
+    pub fn create_silero(option: &VADOption) -> Result<Box<dyn VadEngine>> {
+        let vad: Box<dyn VadEngine> = match option.r#type {
             VadType::Silero => Box::new(silero::SileroVad::new(option.samplerate)?),
             _ => Box::new(NopVad::new()?),
         };
+        Ok(vad)
+    }
+
+    pub fn new(
+        engine: Box<dyn VadEngine>,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Self> {
         let inner = VadProcessorInner {
-            vad,
+            vad: engine,
             event_sender,
             option,
             state: VadState::Silence,

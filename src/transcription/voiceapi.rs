@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -45,6 +47,23 @@ pub struct VoiceApiAsrClientBuilder {
 }
 
 impl VoiceApiAsrClientBuilder {
+    pub fn create(
+        track_id: TrackId,
+        token: CancellationToken,
+        option: TranscriptionOption,
+        event_sender: EventSender,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>> {
+        Box::pin(async move {
+            let builder = Self::new(option, event_sender);
+            builder
+                .with_cancel_token(token)
+                .with_track_id(track_id)
+                .build()
+                .await
+                .map(|client| Box::new(client) as Box<dyn TranscriptionClient>)
+        })
+    }
+
     pub fn new(option: TranscriptionOption, event_sender: EventSender) -> Self {
         Self {
             option,

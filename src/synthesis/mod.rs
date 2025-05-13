@@ -8,7 +8,7 @@ mod voiceapi;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Hash, Eq, PartialEq)]
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,

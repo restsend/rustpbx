@@ -36,6 +36,10 @@ struct TtsResult {
 }
 
 impl VoiceApiTtsClient {
+    pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+        let client = Self::new(option.clone());
+        Ok(Box::new(client))
+    }
     pub fn new(option: SynthesisOption) -> Self {
         Self { option }
     }

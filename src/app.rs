@@ -1,13 +1,6 @@
-use crate::event::EventSender;
-use crate::handler::{call, CallOption};
-use crate::media::{
-    processor::Processor,
-    track::{tts::TtsHandle, Track},
+use crate::{
+    config::Config, handler::call::ActiveCallRef, media::engine::StreamEngine, useragent::UserAgent,
 };
-use crate::synthesis::SynthesisOption;
-use crate::useragent::UserAgent;
-use crate::TrackId;
-use crate::{config::Config, handler::call::ActiveCallRef};
 use anyhow::Result;
 use axum::{
     response::{Html, IntoResponse},
@@ -15,9 +8,7 @@ use axum::{
     Router,
 };
 use futures::lock::Mutex;
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -29,36 +20,12 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
-// Define hook types
-pub type PrepareTrackHook = Box<
-    dyn Fn(
-            &dyn Track,
-            CancellationToken,
-            EventSender,
-            CallOption,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Box<dyn Processor>>>> + Send>>
-        + Send
-        + Sync,
->;
-
-pub type CreateTtsTrackHook = Box<
-    dyn Fn(
-            CancellationToken,
-            TrackId,
-            Option<String>,
-            SynthesisOption,
-        ) -> Pin<Box<dyn Future<Output = Result<(TtsHandle, Box<dyn Track>)>> + Send>>
-        + Send
-        + Sync,
->;
-
 pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
-    pub prepare_track_hook: PrepareTrackHook,
-    pub create_tts_track_hook: CreateTtsTrackHook,
+    pub stream_engine: Arc<StreamEngine>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -66,8 +33,7 @@ pub type AppState = Arc<AppStateInner>;
 pub struct AppStateBuilder {
     pub config: Option<Config>,
     pub useragent: Option<Arc<UserAgent>>,
-    pub prepare_track_hook: Option<PrepareTrackHook>,
-    pub create_tts_track_hook: Option<CreateTtsTrackHook>,
+    pub stream_engine: Option<Arc<StreamEngine>>,
 }
 
 impl AppStateInner {
@@ -99,8 +65,7 @@ impl AppStateBuilder {
         Self {
             config: None,
             useragent: None,
-            prepare_track_hook: None,
-            create_tts_track_hook: None,
+            stream_engine: None,
         }
     }
 
@@ -111,16 +76,6 @@ impl AppStateBuilder {
 
     pub fn useragent(mut self, useragent: Arc<UserAgent>) -> Self {
         self.useragent = Some(useragent);
-        self
-    }
-
-    pub fn prepare_track_hook(mut self, hook: PrepareTrackHook) -> Self {
-        self.prepare_track_hook = Some(hook);
-        self
-    }
-
-    pub fn create_tts_track_hook(mut self, hook: CreateTtsTrackHook) -> Self {
-        self.create_tts_track_hook = Some(hook);
         self
     }
 
@@ -138,18 +93,13 @@ impl AppStateBuilder {
                 .with_config(config);
             Arc::new(ua_builder.build().await?)
         };
-
+        let stream_engine = self.stream_engine.unwrap_or_default();
         Ok(Arc::new(AppStateInner {
             config,
             useragent,
             token,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
-            prepare_track_hook: self
-                .prepare_track_hook
-                .unwrap_or_else(|| Box::new(call::ActiveCall::prepare_track_hook)),
-            create_tts_track_hook: self
-                .create_tts_track_hook
-                .unwrap_or_else(|| Box::new(call::ActiveCall::create_tts_track)),
+            stream_engine,
         }))
     }
 }
