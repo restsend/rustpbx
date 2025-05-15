@@ -373,7 +373,7 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn cleanup(&self) -> Result<()> {
+    pub async fn cleanup(&self) -> Result<()> {
         info!("call cleanup: {}", self.session_id);
         self.tts_handle.lock().await.take();
         self.media_stream.stop(None, None);
