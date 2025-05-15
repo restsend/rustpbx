@@ -47,6 +47,7 @@ impl UserAgent {
                     .map_err(|e| anyhow!("failed to bye: {}", e))?;
             }
         }
+        self.dialog_layer.remove_dialog(&dialog_id);
         Ok(())
     }
 
