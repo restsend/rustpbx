@@ -57,10 +57,6 @@ pub async fn new_rtp_track_with_sip(
         if let Some(ref stun_server) = sip.stun_server {
             rtp_track = rtp_track.with_stun_server(stun_server.clone());
         }
-
-        if let Some(ref useragent) = sip.useragent {
-            rtp_track = rtp_track.with_session_name(useragent.clone());
-        }
     }
 
     let mut rtp_track = rtp_track.build().await?;

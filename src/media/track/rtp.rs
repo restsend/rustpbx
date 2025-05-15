@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use webrtc::{
     rtcp::{
+        goodbye::Goodbye,
         sender_report::SenderReport,
         source_description::{
             SdesType, SourceDescription, SourceDescriptionChunk, SourceDescriptionItem,
@@ -90,7 +91,7 @@ pub struct RtpTrackBuilder {
     rtp_end_port: u16,
     rtp_alloc_count: u32,
     enabled_codecs: Vec<CodecType>,
-    session_name: String,
+    ssrc_cname: String,
 }
 
 pub struct RtpTrack {
@@ -98,6 +99,7 @@ pub struct RtpTrack {
     config: TrackConfig,
     cancel_token: CancellationToken,
     ssrc: u32,
+    ssrc_cname: String,
     rtcp_mux: bool,
     remote_addr: Option<SipAddr>,
     remote_rtcp_addr: Option<SipAddr>,
@@ -113,7 +115,6 @@ pub struct RtpTrack {
     packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
     enabled_codecs: Vec<CodecType>,
     sendrecv: AtomicBool,
-    session_name: String,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -136,7 +137,7 @@ impl RtpTrackBuilder {
                 CodecType::PCMA,
                 CodecType::TelephoneEvent,
             ],
-            session_name: "rustpbx".to_string(),
+            ssrc_cname: format!("rustpbx-{}", rand::random::<u32>()),
         }
     }
 
@@ -190,7 +191,7 @@ impl RtpTrackBuilder {
         self
     }
     pub fn with_session_name(mut self, session_name: String) -> Self {
-        self.session_name = session_name;
+        self.ssrc_cname = session_name;
         self
     }
     pub async fn build_rtp_rtcp_conn(&self) -> Result<(UdpConnection, UdpConnection)> {
@@ -339,7 +340,7 @@ impl RtpTrackBuilder {
             packetizer: Mutex::new(None),
             enabled_codecs: self.enabled_codecs,
             sendrecv: AtomicBool::new(true),
-            session_name: self.session_name,
+            ssrc_cname: self.ssrc_cname,
         };
         Ok(track)
     }
@@ -420,7 +421,7 @@ impl RtpTrack {
             address_type: "IP4".to_string(),
             unicast_address: socketaddr.ip().to_string(),
         };
-        sdp.session_name = self.session_name.clone();
+        sdp.session_name = "-".to_string();
         sdp.connection_information = Some(ConnectionInformation {
             address_type: "IP4".to_string(),
             network_type: "IN".to_string(),
@@ -470,9 +471,12 @@ impl RtpTrack {
         }
         media.attributes.push(Attribute {
             key: ATTR_KEY_SSRC.to_string(),
-            value: Some(self.ssrc.to_string()),
+            value: Some(if self.ssrc_cname.is_empty() {
+                self.ssrc.to_string()
+            } else {
+                format!("{} cname:{}", self.ssrc, self.ssrc_cname)
+            }),
         });
-
         if self.sendrecv.load(Ordering::Relaxed) {
             media.attributes.push(Attribute {
                 key: ATTR_KEY_SEND_RECV.to_string(),
@@ -660,10 +664,10 @@ impl RtpTrack {
     async fn send_rtcp_reports(
         token: CancellationToken,
         state: Arc<RtpTrackState>,
-        rtcp_socket: UdpConnection,
+        rtcp_socket: &UdpConnection,
         ssrc: u32,
-        session_name: String,
-        remote_rtcp_addr: Option<SipAddr>,
+        ssrc_cname: String,
+        remote_rtcp_addr: Option<&SipAddr>,
     ) -> Result<()> {
         let mut interval = interval_at(
             Instant::now() + Duration::from_millis(RTCP_SR_INTERVAL_MS),
@@ -678,26 +682,28 @@ impl RtpTrack {
             let octet_count = state.octet_count.load(Ordering::Relaxed);
             let rtp_timestamp = state.timestamp.load(Ordering::Relaxed);
 
-            let pkts = vec![
-                Box::new(SenderReport {
-                    ssrc,
-                    ntp_time: Instant::now().elapsed().as_secs() as u64,
-                    rtp_time: rtp_timestamp,
-                    packet_count,
-                    octet_count,
-                    profile_extensions: Bytes::new(),
-                    reports: vec![],
-                }) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>,
-                Box::new(SourceDescription {
+            let mut pkts = vec![Box::new(SenderReport {
+                ssrc,
+                ntp_time: Instant::now().elapsed().as_secs() as u64,
+                rtp_time: rtp_timestamp,
+                packet_count,
+                octet_count,
+                profile_extensions: Bytes::new(),
+                reports: vec![],
+            })
+                as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>];
+            if !ssrc_cname.is_empty() {
+                pkts.push(Box::new(SourceDescription {
                     chunks: vec![SourceDescriptionChunk {
                         source: ssrc,
                         items: vec![SourceDescriptionItem {
-                            sdes_type: SdesType::SdesName,
-                            text: session_name.clone().into(),
+                            sdes_type: SdesType::SdesCname,
+                            text: ssrc_cname.clone().into(),
                         }],
                     }],
-                }) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>,
-            ];
+                })
+                    as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>);
+            }
 
             let rtcp_data = webrtc::rtcp::packet::marshal(&pkts)?;
             match remote_rtcp_addr {
@@ -757,20 +763,37 @@ impl Track for RtpTrack {
         let rtp_socket = self.rtp_socket.clone();
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
-        let session_name = self.session_name.clone();
+        let ssrc_cname = self.ssrc_cname.clone();
 
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
                     info!("RTC process cancelled");
                 },
-                r = Self::send_rtcp_reports(token.clone(), state, rtcp_socket, ssrc, session_name, rtcp_addr) => {
+                r = Self::send_rtcp_reports(token.clone(), state, &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
                     info!("RTCP sender process completed {:?}", r);
                 }
                 r = Self::recv_rtp_packets(token.clone(), rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
                     info!("RTP processor completed {:?}", r);
                 }
             };
+
+            // send rtcp bye packet
+            match rtcp_addr {
+                Some(ref addr) => {
+                    let pkts = vec![Box::new(Goodbye {
+                        sources: vec![ssrc],
+                        reason: "end of call".into(),
+                    })
+                        as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>];
+                    if let Ok(data) = webrtc::rtcp::packet::marshal(&pkts) {
+                        if let Err(e) = rtcp_socket.send_raw(&data, addr).await {
+                            error!("Failed to send RTCP goodbye packet: {}", e);
+                        }
+                    }
+                }
+                None => {}
+            }
 
             event_sender
                 .send(SessionEvent::TrackEnd {
