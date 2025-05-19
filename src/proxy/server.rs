@@ -139,15 +139,13 @@ impl SipServerBuilder {
             .parse::<IpAddr>()
             .map_err(|e| anyhow!("proxy: failed to parse local ip address: {}", e))?;
 
-        let external_ip = inner
-            .config
-            .external_ip
-            .as_ref()
-            .map(|s| s.parse::<SocketAddr>())
-            .ok_or(anyhow::anyhow!(
-                "proxy: failed to parse external ip address"
-            ))?
-            .ok();
+        let external_ip = match inner.config.external_ip {
+            Some(ref s) => s
+                .parse::<SocketAddr>()
+                .map_err(|e| anyhow!("proxy: failed to parse external ip address: {}", e))
+                .ok(),
+            None => None,
+        };
 
         if inner.config.udp_port.is_none()
             && inner.config.tcp_port.is_none()
