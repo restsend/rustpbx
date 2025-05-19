@@ -92,7 +92,7 @@ impl Default for ProxyConfig {
             useragent: None,
             ssl_private_key: None,
             ssl_certificate: None,
-            udp_port: None,
+            udp_port: Some(5060),
             tcp_port: None,
             tls_port: None,
             ws_port: None,
@@ -108,7 +108,7 @@ impl Default for UseragentConfig {
     fn default() -> Self {
         Self {
             addr: "0.0.0.0".to_string(),
-            udp_port: 5060,
+            udp_port: 25060,
             external_ip: None,
             rtp_start_port: Some(12000),
             rtp_end_port: Some(42000),
