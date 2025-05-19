@@ -431,7 +431,7 @@ function mainApp() {
 
             // Prepare the request payload
             const payload = {
-                model: this.config.llm.useProxy ? 'qwen-14b' : this.config.llm.model,
+                model: this.config.llm.useProxy ? 'qwen3-14b' : this.config.llm.model,
                 messages: [
                     { role: 'system', content: this.config.llm.prompt },
                     { role: 'user', content: text }
