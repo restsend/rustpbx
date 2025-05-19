@@ -215,6 +215,19 @@ impl Track for TtsTrack {
                                 info!(" using cached audio for {}", cache_key);
                                 buffer_clone.lock().await.extend(bytes_to_samples(&audio));
                                 synthesize_done.store(true, Ordering::Relaxed);
+                                event_sender
+                                    .send(SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: format!("completed.tts.{}", client.provider()),
+                                        data: serde_json::json!({
+                                                "speaker": speaker,
+                                                "playId": play_id,
+                                                "length": audio.len(),
+                                                "cached": true,
+                                        }),
+                                        duration: 0,
+                                    })
+                                    .ok();
                                 continue;
                             }
                             Err(e) => {

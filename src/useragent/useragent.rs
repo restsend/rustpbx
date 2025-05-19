@@ -1,4 +1,4 @@
-use crate::config::SipConfig;
+use crate::config::UseragentConfig;
 
 use super::registration::RegistrationHandle;
 use anyhow::{anyhow, Result};
@@ -19,11 +19,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct UserAgentBuilder {
-    pub config: Option<SipConfig>,
+    pub config: Option<UseragentConfig>,
     pub cancel_token: Option<CancellationToken>,
 }
 pub struct UserAgent {
-    pub config: SipConfig,
+    pub config: UseragentConfig,
     pub token: CancellationToken,
     pub endpoint: Endpoint,
     pub registration_handles: Mutex<HashMap<String, RegistrationHandle>>,
@@ -38,7 +38,7 @@ impl UserAgentBuilder {
             cancel_token: None,
         }
     }
-    pub fn with_config(mut self, config: Option<SipConfig>) -> Self {
+    pub fn with_config(mut self, config: Option<UseragentConfig>) -> Self {
         self.config = config;
         self
     }
