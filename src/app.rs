@@ -127,7 +127,14 @@ impl AppStateBuilder {
                 .add_module(Box::new(CdrModule::new(proxy_config.clone())))
                 .add_module(Box::new(CallModule::new(proxy_config.clone())));
 
-            Arc::new(proxy_builder.build().await?)
+            let proxy = match proxy_builder.build().await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to build proxy: {}", e);
+                    return Err(anyhow::anyhow!("Failed to build proxy: {}", e));
+                }
+            };
+            Arc::new(proxy)
         };
         Ok(Arc::new(AppStateInner {
             config,
