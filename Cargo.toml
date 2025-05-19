@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
@@ -39,7 +39,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2"
 url = "2.5.4"
 uuid = { version = "1.16.0", features = ["v4"] }
-webrtc = "0.12.0"
+webrtc = "0.13.0"
 webrtc-vad = { version = "0.4.0", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 toml = "0.8"
@@ -47,7 +47,8 @@ rand = "0.9.0"
 hound = "3.5.1"
 voice_activity_detector = { version = "0.2.0", optional = true }
 chrono = "0.4.40"
-rsipstack = "0.2.0"
+#rsipstack = "0.2.0"
+rsipstack = { path = "../rsipstack" }
 rsip = "0.4.0"
 reqwest = { version = "0.12.15", features = ["json", "rustls-tls"] }
 base64 = "0.22.1"
@@ -68,6 +69,8 @@ get_if_addrs = "0.5.3"
 symphonia = { version = "0.5.4", features = ["mp3"] }
 tempfile = "3.8"
 rmp3 = "0.3"
+ipnetwork = "0.20.0"
+ipset_lookup = "0.4.8"
 
 
 [dev-dependencies]

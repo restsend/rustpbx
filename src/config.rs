@@ -17,7 +17,7 @@ pub struct Config {
     pub log_level: Option<String>,
     pub log_file: Option<String>,
     pub console: Option<ConsoleConfig>,
-    pub sip: Option<SipConfig>,
+    pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
     pub recorder_path: String,
     pub media_cache_path: String,
@@ -26,7 +26,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct SipConfig {
+pub struct UseragentConfig {
     pub addr: String,
     pub udp_port: u16,
     pub external_ip: Option<String>,
@@ -36,8 +36,9 @@ pub struct SipConfig {
     pub useragent: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ProxyConfig {
+    pub load_modules: Option<Vec<String>>,
     pub addr: String,
     pub external_ip: Option<String>,
     pub useragent: Option<String>,
@@ -47,6 +48,10 @@ pub struct ProxyConfig {
     pub tcp_port: Option<u16>,
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
+    pub allows: Option<Vec<String>>,
+    pub denies: Option<Vec<String>>,
+    pub max_concurrency: Option<usize>,
+    pub registrar_expires: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +82,12 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             addr: "0.0.0.0".to_string(),
+            load_modules: Some(vec![
+                "ban".to_string(),
+                "registrar".to_string(),
+                "cdr".to_string(),
+                "call".to_string(),
+            ]),
             external_ip: None,
             useragent: None,
             ssl_private_key: None,
@@ -85,11 +96,15 @@ impl Default for ProxyConfig {
             tcp_port: None,
             tls_port: None,
             ws_port: None,
+            allows: None,
+            denies: None,
+            max_concurrency: None,
+            registrar_expires: Some(60),
         }
     }
 }
 
-impl Default for SipConfig {
+impl Default for UseragentConfig {
     fn default() -> Self {
         Self {
             addr: "0.0.0.0".to_string(),
@@ -110,7 +125,7 @@ impl Default for Config {
             log_level: None,
             log_file: None,
             console: Some(ConsoleConfig::default()),
-            sip: Some(SipConfig::default()),
+            ua: Some(UseragentConfig::default()),
             proxy: Some(ProxyConfig::default()),
             #[cfg(target_os = "windows")]
             recorder_path: "./recorder".to_string(),

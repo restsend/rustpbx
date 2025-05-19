@@ -1,5 +1,15 @@
 use crate::{
-    config::Config, handler::call::ActiveCallRef, media::engine::StreamEngine, useragent::UserAgent,
+    config::Config,
+    handler::call::ActiveCallRef,
+    media::engine::StreamEngine,
+    proxy::{
+        ban::BanModule,
+        call::CallModule,
+        cdr::CdrModule,
+        registrar::RegistrarModule,
+        server::{SipServer, SipServerBuilder},
+    },
+    useragent::UserAgent,
 };
 use anyhow::Result;
 use axum::{
@@ -23,6 +33,7 @@ use tracing::{info, warn};
 pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
+    pub proxy: Arc<SipServer>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
@@ -34,6 +45,7 @@ pub struct AppStateBuilder {
     pub config: Option<Config>,
     pub useragent: Option<Arc<UserAgent>>,
     pub stream_engine: Option<Arc<StreamEngine>>,
+    pub proxy: Option<Arc<SipServer>>,
 }
 
 impl AppStateInner {
@@ -66,6 +78,7 @@ impl AppStateBuilder {
             config: None,
             useragent: None,
             stream_engine: None,
+            proxy: None,
         }
     }
 
@@ -74,11 +87,18 @@ impl AppStateBuilder {
         self
     }
 
-    pub fn useragent(mut self, useragent: Arc<UserAgent>) -> Self {
+    pub fn with_useragent(mut self, useragent: Arc<UserAgent>) -> Self {
         self.useragent = Some(useragent);
         self
     }
-
+    pub fn with_proxy(mut self, proxy: Arc<SipServer>) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+    pub fn with_stream_engine(mut self, stream_engine: Arc<StreamEngine>) -> Self {
+        self.stream_engine = Some(stream_engine);
+        self
+    }
     pub async fn build(self) -> Result<AppState> {
         let config = Arc::new(self.config.unwrap_or_default());
         let token = CancellationToken::new();
@@ -87,25 +107,42 @@ impl AppStateBuilder {
         let useragent = if let Some(ua) = self.useragent {
             ua
         } else {
-            let config = config.sip.clone();
+            let config = config.ua.clone();
             let ua_builder = crate::useragent::UserAgentBuilder::new()
                 .with_token(token.child_token())
                 .with_config(config);
             Arc::new(ua_builder.build().await?)
         };
         let stream_engine = self.stream_engine.unwrap_or_default();
+        let proxy = if let Some(proxy) = self.proxy {
+            proxy
+        } else {
+            let proxy_config = Arc::new(config.proxy.clone().unwrap_or_default());
+            let mut proxy_builder =
+                SipServerBuilder::new(proxy_config.clone()).with_cancel_token(token.child_token());
+
+            proxy_builder = proxy_builder
+                .add_module(Box::new(BanModule::new(proxy_config.clone())))
+                .add_module(Box::new(RegistrarModule::new(proxy_config.clone())))
+                .add_module(Box::new(CdrModule::new(proxy_config.clone())))
+                .add_module(Box::new(CallModule::new(proxy_config.clone())));
+
+            Arc::new(proxy_builder.build().await?)
+        };
         Ok(Arc::new(AppStateInner {
             config,
             useragent,
             token,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             stream_engine,
+            proxy,
         }))
     }
 }
 
 pub async fn run(state: AppState) -> Result<()> {
     let ua = state.useragent.clone();
+    let proxy = state.proxy.clone();
     let token = state.token.clone();
 
     let app = create_router(state.clone());
@@ -137,6 +174,12 @@ pub async fn run(state: AppState) -> Result<()> {
             if let Err(e) = ua_result {
                 tracing::error!("User agent server error: {}", e);
                 return Err(anyhow::anyhow!("User agent server error: {}", e));
+            }
+        }
+        proxy_result = proxy.serve() => {
+            if let Err(e) = proxy_result {
+                tracing::error!("Proxy server error: {}", e);
+                return Err(anyhow::anyhow!("Proxy server error: {}", e));
             }
         }
         _ = token.cancelled() => {

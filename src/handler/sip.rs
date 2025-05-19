@@ -42,7 +42,7 @@ pub async fn new_rtp_track_with_sip(
     let mut rtp_track =
         RtpTrackBuilder::new(track_id.clone(), track_config).with_cancel_token(token);
 
-    if let Some(ref sip) = state.config.sip {
+    if let Some(ref sip) = state.config.ua {
         if let Some(rtp_start_port) = sip.rtp_start_port {
             rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
         }
