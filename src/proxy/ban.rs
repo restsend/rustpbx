@@ -4,11 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use std::{
-    net::{AddrParseError, IpAddr},
-    str::FromStr,
-    sync::Arc,
-};
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -78,6 +74,10 @@ pub struct BanModule {
 }
 
 impl BanModule {
+    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = BanModule::new(config);
+        Ok(Box::new(module))
+    }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         let mut allows = Vec::new();
         let mut denies = Vec::new();
@@ -205,7 +205,7 @@ impl ProxyModule for BanModule {
         "ban"
     }
 
-    async fn on_start(&mut self, _inner: SipServerRef) -> Result<()> {
+    async fn on_start(&mut self) -> Result<()> {
         Ok(())
     }
 

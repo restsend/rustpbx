@@ -3,15 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum GibberishAction {
-    Stop,     // Stop the media stream
-    Pause,    // Pause the media stream
-    Continue, // Do nothing
-    Ask,      // Request additional information
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 #[serde(rename_all = "camelCase")]
 pub enum SessionEvent {
@@ -77,11 +68,12 @@ pub enum SessionEvent {
         #[serde(skip)]
         samples: Option<PcmBuf>,
     },
-    Gibberish {
+    ///End of Utterance
+    Eou {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        action: GibberishAction,
+        completed: bool,
     },
     Dtmf {
         #[serde(rename = "trackId")]

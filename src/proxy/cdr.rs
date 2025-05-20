@@ -125,6 +125,10 @@ pub struct CdrModule {
 }
 
 impl CdrModule {
+    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = CdrModule::new(config);
+        Ok(Box::new(module))
+    }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         let path = PathBuf::from("cdr");
         if !path.exists() {
@@ -150,8 +154,7 @@ impl ProxyModule for CdrModule {
         vec![]
     }
 
-    async fn on_start(&mut self, _inner: SipServerRef) -> Result<()> {
-        info!("CDR module started");
+    async fn on_start(&mut self) -> Result<()> {
         Ok(())
     }
 

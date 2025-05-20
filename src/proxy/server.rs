@@ -1,7 +1,7 @@
 use super::{
     locator::{Locator, MemoryLocator},
     user::{MemoryUserBackend, UserBackend},
-    ProxyAction, ProxyModule,
+    FnCreateProxyModule, ProxyAction, ProxyModule,
 };
 use crate::config::ProxyConfig;
 use anyhow::{anyhow, Result};
@@ -11,7 +11,7 @@ use rsipstack::{
     EndpointBuilder,
 };
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -28,7 +28,6 @@ pub struct SipServerInner {
     pub config: Arc<ProxyConfig>,
     pub user_backend: Arc<Box<dyn UserBackend>>,
     pub locator: Arc<Box<dyn Locator>>,
-    pub allow_methods: HashSet<String>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -44,7 +43,7 @@ pub struct SipServerBuilder {
     cancel_token: Option<CancellationToken>,
     user_backend: Box<dyn UserBackend>,
     locator: Box<dyn Locator>,
-    modules: Vec<Box<dyn ProxyModule>>,
+    module_fns: HashMap<String, FnCreateProxyModule>,
 }
 
 impl SipServerBuilder {
@@ -54,7 +53,7 @@ impl SipServerBuilder {
             cancel_token: None,
             user_backend: Box::new(MemoryUserBackend::new()),
             locator: Box::new(MemoryLocator::new()),
-            modules: vec![],
+            module_fns: HashMap::new(),
         }
     }
 
@@ -73,76 +72,70 @@ impl SipServerBuilder {
         self
     }
 
-    pub fn add_module(mut self, module: Box<dyn ProxyModule>) -> Self {
-        self.modules.push(module);
+    pub fn register_module(mut self, name: &str, module_fn: FnCreateProxyModule) -> Self {
+        self.module_fns.insert(name.to_lowercase(), module_fn);
         self
     }
     pub async fn build(self) -> Result<SipServer> {
-        let mut allow_methods = HashSet::new();
-        for module in self.modules.iter() {
-            for method in module.allow_methods() {
-                allow_methods.insert(method.to_string());
-            }
-        }
-
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
             cancel_token: self.cancel_token.unwrap_or_default(),
             user_backend: Arc::new(self.user_backend),
             locator: Arc::new(self.locator),
-            allow_methods,
         });
 
-        let load_modules = self.config.load_modules.as_ref();
-        let mut modules = if let Some(load_modules) = load_modules {
-            let mut modules = self
-                .modules
-                .into_iter()
-                .filter(|m| load_modules.contains(&m.name().to_string()))
-                .map(|m| m)
-                .collect::<Vec<_>>();
-            // sort modules by enable_modules order
-            modules.sort_by(|a, b| {
-                let a_index = load_modules.iter().position(|m| m == a.name());
-                let b_index = load_modules.iter().position(|m| m == b.name());
-                a_index.cmp(&b_index)
-            });
-            modules
-        } else {
-            self.modules
-        };
+        let mut allow_methods = Vec::new();
+        let mut modules = Vec::new();
+        if let Some(load_modules) = self.config.load_modules.as_ref() {
+            let start_time = Instant::now();
+            for name in load_modules.iter() {
+                if let Some(module_fn) = self.module_fns.get(name) {
+                    let module_start_time = Instant::now();
+                    let mut module = match module_fn(inner.clone(), self.config.clone()) {
+                        Ok(module) => module,
+                        Err(e) => {
+                            error!("failed to create module {}: {}", name, e);
+                            continue;
+                        }
+                    };
+                    match module.on_start().await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("failed to start module {}: {}", name, e);
+                            continue;
+                        }
+                    }
+                    allow_methods.extend(module.allow_methods());
+                    modules.push(module);
 
-        let start_time = Instant::now();
-        for module in modules.iter_mut() {
-            match module.on_start(inner.clone()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("proxy: failed to start module {}: {}", module.name(), e);
-                    return Err(anyhow::anyhow!(
-                        "proxy: failed to start module {}: {}",
-                        module.name(),
-                        e
-                    ));
+                    info!(
+                        "module {} loaded in {:?}",
+                        name,
+                        module_start_time.elapsed()
+                    );
+                } else {
+                    error!("module {} not found", name);
                 }
             }
+            allow_methods.dedup();
+            info!(
+                "modules loaded in {:?} modules: {:?}",
+                start_time.elapsed(),
+                modules.iter().map(|m| m.name()).collect::<Vec<_>>()
+            );
         }
-        info!(
-            "proxy: started with modules: {:?}, elapsed: {:?}",
-            modules.iter().map(|m| m.name()).collect::<Vec<_>>(),
-            start_time.elapsed()
-        );
 
         let transport_layer = TransportLayer::new(inner.cancel_token.clone());
         let local_addr = inner
             .config
             .addr
             .parse::<IpAddr>()
-            .map_err(|e| anyhow!("proxy: failed to parse local ip address: {}", e))?;
+            .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
         let external_ip = match inner.config.external_ip {
             Some(ref s) => s
                 .parse::<SocketAddr>()
-                .map_err(|e| anyhow!("proxy: failed to parse external ip address: {}", e))
+                .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
                 .ok(),
             None => None,
         };
@@ -153,7 +146,7 @@ impl SipServerBuilder {
             && inner.config.ws_port.is_none()
         {
             return Err(anyhow::anyhow!(
-                "proxy: No port specified, please specify at least one port: udp, tcp, tls, ws"
+                "No port specified, please specify at least one port: udp, tcp, tls, ws"
             ));
         }
 
@@ -167,11 +160,12 @@ impl SipServerBuilder {
 
         let mut endpoint_builder = EndpointBuilder::new();
         if let Some(ref user_agent) = inner.config.useragent {
-            endpoint_builder.user_agent(user_agent.as_str());
+            endpoint_builder.with_user_agent(user_agent.as_str());
         }
         let endpoint_builder = endpoint_builder
-            .cancel_token(inner.cancel_token.clone())
-            .transport_layer(transport_layer);
+            .with_cancel_token(inner.cancel_token.clone())
+            .with_allows(allow_methods)
+            .with_transport_layer(transport_layer);
 
         let endpoint = endpoint_builder.build();
 
@@ -203,11 +197,11 @@ impl SipServer {
             match module.on_stop().await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("proxy: failed to stop module {}: {}", module.name(), e);
+                    error!("failed to stop module {}: {}", module.name(), e);
                 }
             }
         }
-        info!("proxy: stopped");
+        info!("stopped");
         Ok(())
     }
     pub fn stop(&self) {
@@ -219,15 +213,8 @@ impl SipServer {
         while let Some(mut tx) = incoming.recv().await {
             let key = tx.key.to_string();
             info!(key, "Received transaction");
-            let method = tx.original.method().to_string();
-            if !self.inner.allow_methods.contains(&method) {
-                info!(key, "Method not allowed: {}", method);
-                tx.reply(rsip::StatusCode::MethodNotAllowed).await.ok();
-                continue;
-            }
-
             let modules = self.modules.clone();
-            //TODO: max concurrency with tokio::spawn
+
             let token = self.inner.cancel_token.child_token();
             let runnings_tx = runnings_tx.clone();
 
@@ -279,7 +266,7 @@ impl SipServer {
                     ProxyAction::Abort => break,
                 },
                 Err(e) => {
-                    error!(key, "proxy: failed to handle transaction: {}", e);
+                    error!(key, "failed to handle transaction: {}", e);
                     if tx.last_response.is_none() {
                         tx.reply(rsip::StatusCode::ServerInternalError).await.ok();
                     }
@@ -292,7 +279,7 @@ impl SipServer {
             match module.on_transaction_end(tx).await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!(key, "proxy: failed to handle transaction: {}", e);
+                    error!(key, "failed to handle transaction: {}", e);
                 }
             }
         }

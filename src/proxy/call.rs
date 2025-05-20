@@ -16,6 +16,10 @@ pub struct CallModule {
 }
 
 impl CallModule {
+    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = CallModule::new(config);
+        Ok(Box::new(module))
+    }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         let inner = Arc::new(CallModuleInner { config });
         Self { inner }
@@ -37,7 +41,7 @@ impl ProxyModule for CallModule {
             rsip::Method::Refer,
         ]
     }
-    async fn on_start(&mut self, _inner: SipServerRef) -> Result<()> {
+    async fn on_start(&mut self) -> Result<()> {
         Ok(())
     }
     async fn on_stop(&self) -> Result<()> {
