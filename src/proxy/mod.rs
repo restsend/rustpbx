@@ -1,17 +1,16 @@
-use std::sync::Arc;
-
+use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transaction::transaction::Transaction;
 use server::SipServerRef;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-use crate::config::ProxyConfig;
 pub mod auth;
 pub mod ban;
 pub mod call;
 pub mod cdr;
 pub mod locator;
+pub mod locator_db;
 pub mod mediaproxy;
 pub mod presence;
 pub mod registrar;
@@ -19,6 +18,8 @@ pub mod server;
 #[cfg(test)]
 pub mod tests;
 pub mod user;
+pub mod user_db;
+pub mod user_plain;
 pub enum ProxyAction {
     Continue,
     Abort,

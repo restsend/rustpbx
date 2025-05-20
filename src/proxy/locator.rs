@@ -52,12 +52,14 @@ impl Locator for MemoryLocator {
         locations.insert(identifier, location);
         Ok(())
     }
+
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
         let mut locations = self.locations.lock().await;
         locations.remove(&identifier);
         Ok(())
     }
+
     async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>> {
         let identifier = self.get_identifier(username, realm);
         let locations = self.locations.lock().await;

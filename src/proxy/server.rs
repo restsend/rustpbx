@@ -1,6 +1,6 @@
 use super::{
     locator::{Locator, MemoryLocator},
-    user::{MemoryUserBackend, UserBackend},
+    user::{create_user_backend, UserBackend},
     FnCreateProxyModule, ProxyAction, ProxyModule,
 };
 use crate::config::ProxyConfig;
@@ -41,7 +41,7 @@ pub struct SipServer {
 pub struct SipServerBuilder {
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
-    user_backend: Box<dyn UserBackend>,
+    user_backend: Option<Box<dyn UserBackend>>,
     locator: Box<dyn Locator>,
     module_fns: HashMap<String, FnCreateProxyModule>,
 }
@@ -51,14 +51,14 @@ impl SipServerBuilder {
         Self {
             config,
             cancel_token: None,
-            user_backend: Box::new(MemoryUserBackend::new()),
+            user_backend: None,
             locator: Box::new(MemoryLocator::new()),
             module_fns: HashMap::new(),
         }
     }
 
     pub fn with_user_backend(mut self, user_backend: Box<dyn UserBackend>) -> Self {
-        self.user_backend = user_backend;
+        self.user_backend = Some(user_backend);
         self
     }
 
@@ -76,17 +76,28 @@ impl SipServerBuilder {
         self.module_fns.insert(name.to_lowercase(), module_fn);
         self
     }
+
     pub async fn build(self) -> Result<SipServer> {
+        let user_backend = match create_user_backend(&self.config.user_backend).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                error!(
+                    "failed to create user backend: {} {:?}",
+                    e, self.config.user_backend
+                );
+                return Err(e);
+            }
+        };
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
             cancel_token: self.cancel_token.unwrap_or_default(),
-            user_backend: Arc::new(self.user_backend),
+            user_backend: Arc::new(user_backend),
             locator: Arc::new(self.locator),
         });
 
         let mut allow_methods = Vec::new();
         let mut modules = Vec::new();
-        if let Some(load_modules) = self.config.load_modules.as_ref() {
+        if let Some(load_modules) = self.config.modules.as_ref() {
             let start_time = Instant::now();
             for name in load_modules.iter() {
                 if let Some(module_fn) = self.module_fns.get(name) {
