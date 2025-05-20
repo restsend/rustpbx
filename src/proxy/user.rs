@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
+use crate::config::UserBackendConfig;
+
+use super::{user_db::DbBackend, user_plain::PlainTextBackend};
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SipUser {
     pub id: u64,
@@ -47,18 +51,11 @@ pub trait UserBackend: Send + Sync {
             user.to_string()
         }
     }
-    async fn create_user(&self, user: SipUser) -> Result<()>;
+    async fn authenticate(&self, username: &str, password: &str) -> Result<bool>;
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser>;
-    async fn update_user(&self, username: &str, realm: Option<&str>, user: SipUser) -> Result<()>;
-    async fn delete_user(&self, username: &str, realm: Option<&str>) -> Result<()>;
-    async fn update_user_password(
-        &self,
-        username: &str,
-        realm: Option<&str>,
-        password: &str,
-    ) -> Result<()>;
-    async fn enable_user(&self, username: &str, realm: Option<&str>) -> Result<()>;
-    async fn disable_user(&self, username: &str, realm: Option<&str>) -> Result<()>;
+    async fn create_user(&self, _user: SipUser) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct MemoryUserBackend {
@@ -71,38 +68,30 @@ impl MemoryUserBackend {
             users: Mutex::new(HashMap::new()),
         }
     }
-}
-#[async_trait]
-impl UserBackend for MemoryUserBackend {
-    async fn create_user(&self, user: SipUser) -> Result<()> {
+    pub async fn create_user(&self, user: SipUser) -> Result<()> {
         let identifier = self.get_identifier(user.username.as_str(), user.realm.as_deref());
         self.users.lock().await.insert(identifier, user);
         Ok(())
     }
 
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
-        let identifier = self.get_identifier(username, realm);
-        self.users
-            .lock()
-            .await
-            .get(&identifier)
-            .cloned()
-            .ok_or(anyhow::anyhow!("User not found"))
-    }
-
-    async fn update_user(&self, username: &str, realm: Option<&str>, user: SipUser) -> Result<()> {
+    pub async fn update_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+        user: SipUser,
+    ) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
         self.users.lock().await.insert(identifier, user);
         Ok(())
     }
 
-    async fn delete_user(&self, user: &str, realm: Option<&str>) -> Result<()> {
+    pub async fn delete_user(&self, user: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(user, realm);
         self.users.lock().await.remove(&identifier);
         Ok(())
     }
 
-    async fn update_user_password(
+    pub async fn update_user_password(
         &self,
         username: &str,
         realm: Option<&str>,
@@ -115,7 +104,7 @@ impl UserBackend for MemoryUserBackend {
         Ok(())
     }
 
-    async fn enable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
+    pub async fn enable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
         let mut users = self.users.lock().await;
         let user = users.get_mut(&identifier).unwrap();
@@ -123,11 +112,65 @@ impl UserBackend for MemoryUserBackend {
         Ok(())
     }
 
-    async fn disable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
+    pub async fn disable_user(&self, username: &str, realm: Option<&str>) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
         let mut users = self.users.lock().await;
         let user = users.get_mut(&identifier).unwrap();
         user.enabled = false;
         Ok(())
+    }
+}
+#[async_trait]
+impl UserBackend for MemoryUserBackend {
+    async fn authenticate(&self, username: &str, password: &str) -> Result<bool> {
+        let identifier = self.get_identifier(username, None);
+        if let Some(user) = self.users.lock().await.get(&identifier) {
+            match user.password {
+                Some(ref stored_password) => return Ok(stored_password == password),
+                None => return Err(anyhow::anyhow!("Password not set for user")),
+            }
+        }
+        return Err(anyhow::anyhow!("User not found"));
+    }
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+        let identifier = self.get_identifier(username, realm);
+        self.users
+            .lock()
+            .await
+            .get(&identifier)
+            .cloned()
+            .ok_or(anyhow::anyhow!("User not found"))
+    }
+}
+
+pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn UserBackend>> {
+    match config {
+        UserBackendConfig::Memory => Ok(Box::new(MemoryUserBackend::new())),
+        UserBackendConfig::Plain { path } => {
+            let backend = PlainTextBackend::new(path);
+            backend.load().await?;
+            Ok(Box::new(backend))
+        }
+        UserBackendConfig::Database {
+            url,
+            table_name,
+            username_column,
+            password_column,
+            enabled_column,
+            password_hash,
+            password_salt,
+        } => {
+            let backend = DbBackend::new(
+                url.clone(),
+                table_name.clone(),
+                username_column.clone(),
+                password_column.clone(),
+                enabled_column.clone(),
+                password_hash.clone(),
+                password_salt.clone(),
+            )
+            .await?;
+            Ok(Box::new(backend))
+        }
     }
 }

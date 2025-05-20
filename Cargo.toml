@@ -66,11 +66,18 @@ http = "1.3.1"
 urlencoding = "2.1.3"
 byteorder = "1.5.0"
 get_if_addrs = "0.5.3"
-symphonia = { version = "0.5.4", features = ["mp3"] }
 tempfile = "3.8"
 rmp3 = "0.3"
-ipnetwork = "0.20.0"
+ipnetwork = "0.21.1"
 ipset_lookup = "0.4.8"
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "sqlite",
+    "mysql",
+    "any",
+] }
+sha1 = "0.10.6"
 
 
 [dev-dependencies]

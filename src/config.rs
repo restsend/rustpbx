@@ -36,9 +36,28 @@ pub struct UseragentConfig {
     pub useragent: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum UserBackendConfig {
+    Memory,
+    Plain {
+        path: String,
+    },
+    Database {
+        url: String,
+        table_name: Option<String>,
+        username_column: Option<String>,
+        password_column: Option<String>,
+        enabled_column: Option<String>,
+        password_hash: Option<String>,
+        password_salt: Option<String>,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProxyConfig {
-    pub load_modules: Option<Vec<String>>,
+    pub modules: Option<Vec<String>>,
     pub addr: String,
     pub external_ip: Option<String>,
     pub useragent: Option<String>,
@@ -52,6 +71,7 @@ pub struct ProxyConfig {
     pub denies: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
+    pub user_backend: UserBackendConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +102,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             addr: "0.0.0.0".to_string(),
-            load_modules: Some(vec![
+            modules: Some(vec![
                 "ban".to_string(),
                 "auth".to_string(),
                 "registrar".to_string(),
@@ -101,7 +121,14 @@ impl Default for ProxyConfig {
             denies: None,
             max_concurrency: None,
             registrar_expires: Some(60),
+            user_backend: UserBackendConfig::default(),
         }
+    }
+}
+
+impl Default for UserBackendConfig {
+    fn default() -> Self {
+        Self::Memory
     }
 }
 
