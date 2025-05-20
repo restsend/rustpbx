@@ -84,6 +84,7 @@ impl Default for ProxyConfig {
             addr: "0.0.0.0".to_string(),
             load_modules: Some(vec![
                 "ban".to_string(),
+                "auth".to_string(),
                 "registrar".to_string(),
                 "cdr".to_string(),
                 "call".to_string(),

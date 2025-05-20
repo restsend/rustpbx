@@ -8,6 +8,10 @@ use std::sync::Arc;
 pub struct PresenceModule {}
 
 impl PresenceModule {
+    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = PresenceModule::new(config);
+        Ok(Box::new(module))
+    }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         Self {}
     }
@@ -24,7 +28,7 @@ impl ProxyModule for PresenceModule {
             rsip::Method::Notify,
         ]
     }
-    async fn on_start(&mut self, _inner: SipServerRef) -> Result<()> {
+    async fn on_start(&mut self) -> Result<()> {
         Ok(())
     }
     async fn on_stop(&self) -> Result<()> {

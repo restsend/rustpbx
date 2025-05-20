@@ -45,6 +45,10 @@ pub struct MediaProxyModule {
 }
 
 impl MediaProxyModule {
+    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = MediaProxyModule::new(config);
+        Ok(Box::new(module))
+    }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         Self {
             config,
@@ -59,7 +63,7 @@ impl ProxyModule for MediaProxyModule {
         "mediaproxy"
     }
 
-    async fn on_start(&mut self, _inner: SipServerRef) -> Result<()> {
+    async fn on_start(&mut self) -> Result<()> {
         info!("MediaProxyModule started");
         Ok(())
     }

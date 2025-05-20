@@ -70,8 +70,8 @@ impl UserAgentBuilder {
         transport_layer.add_transport(udp_conn.into());
 
         let endpoint = EndpointBuilder::new()
-            .cancel_token(token.child_token())
-            .transport_layer(transport_layer)
+            .with_cancel_token(token.child_token())
+            .with_transport_layer(transport_layer)
             .build();
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
         Ok(UserAgent {

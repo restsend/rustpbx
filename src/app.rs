@@ -3,6 +3,7 @@ use crate::{
     handler::call::ActiveCallRef,
     media::engine::StreamEngine,
     proxy::{
+        auth::AuthModule,
         ban::BanModule,
         call::CallModule,
         cdr::CdrModule,
@@ -122,10 +123,11 @@ impl AppStateBuilder {
                 SipServerBuilder::new(proxy_config.clone()).with_cancel_token(token.child_token());
 
             proxy_builder = proxy_builder
-                .add_module(Box::new(BanModule::new(proxy_config.clone())))
-                .add_module(Box::new(RegistrarModule::new(proxy_config.clone())))
-                .add_module(Box::new(CdrModule::new(proxy_config.clone())))
-                .add_module(Box::new(CallModule::new(proxy_config.clone())));
+                .register_module("ban", BanModule::create)
+                .register_module("auth", AuthModule::create)
+                .register_module("registrar", RegistrarModule::create)
+                .register_module("cdr", CdrModule::create)
+                .register_module("call", CallModule::create);
 
             let proxy = match proxy_builder.build().await {
                 Ok(p) => p,

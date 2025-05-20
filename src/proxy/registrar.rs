@@ -2,10 +2,7 @@ use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
 use crate::{config::ProxyConfig, proxy::locator::Location};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::{
-    prelude::{HeadersExt, ToTypedHeader, UntypedHeader},
-    typed::Allow,
-};
+use rsip::prelude::{HeadersExt, ToTypedHeader, UntypedHeader};
 use rsipstack::{
     rsip_ext::extract_uri_from_contact, transaction::transaction::Transaction, transport::SipAddr,
 };
@@ -15,15 +12,16 @@ use tracing::info;
 
 #[derive(Clone)]
 pub struct RegistrarModule {
-    server: Option<SipServerRef>,
+    server: SipServerRef,
     config: Arc<ProxyConfig>,
 }
 impl RegistrarModule {
-    pub fn new(config: Arc<ProxyConfig>) -> Self {
-        Self {
-            server: None,
-            config,
-        }
+    pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = RegistrarModule::new(server, config);
+        Ok(Box::new(module))
+    }
+    pub fn new(server: SipServerRef, config: Arc<ProxyConfig>) -> Self {
+        Self { server, config }
     }
 }
 
@@ -35,8 +33,7 @@ impl ProxyModule for RegistrarModule {
     fn allow_methods(&self) -> Vec<rsip::Method> {
         vec![rsip::Method::Register]
     }
-    async fn on_start(&mut self, inner: SipServerRef) -> Result<()> {
-        self.server = Some(inner);
+    async fn on_start(&mut self) -> Result<()> {
         Ok(())
     }
     async fn on_stop(&self) -> Result<()> {
@@ -105,11 +102,6 @@ impl ProxyModule for RegistrarModule {
             params: vec![],
         };
 
-        let locator = match self.server {
-            Some(ref server) => &server.locator,
-            None => return Ok(ProxyAction::Continue),
-        };
-
         let expires = match tx.original.expires_header() {
             Some(expires) => match expires.value().parse::<u32>() {
                 Ok(v) => {
@@ -121,7 +113,8 @@ impl ProxyModule for RegistrarModule {
                             ?destination,
                             "unregistered user"
                         );
-                        locator
+                        self.server
+                            .locator
                             .unregister(user.username.as_str(), user.realm.as_deref())
                             .await
                             .ok();
@@ -149,26 +142,28 @@ impl ProxyModule for RegistrarModule {
             last_modified: Instant::now(),
         };
 
-        locator
+        self.server
+            .locator
             .register(user.username.as_str(), user.realm.as_deref(), location)
             .await
             .ok();
-        let allow_headers = self
-            .server
-            .as_ref()
-            .map(|s| {
-                s.allow_methods
+
+        let mut headers = vec![
+            contact.into(),
+            rsip::Header::Expires(expires.unwrap_or(60).into()),
+        ];
+
+        if !tx.endpoint_inner.allows.is_empty() {
+            headers.push(rsip::Header::Allow(
+                tx.endpoint_inner
+                    .allows
                     .iter()
                     .map(|m| m.to_string())
                     .collect::<Vec<String>>()
-            })
-            .unwrap_or_default()
-            .join(",");
-        let headers = vec![
-            contact.into(),
-            rsip::Header::Allow(allow_headers.into()),
-            rsip::Header::Expires(expires.unwrap_or(60).into()),
-        ];
+                    .join(",")
+                    .into(),
+            ));
+        }
         tx.reply_with(rsip::StatusCode::OK, headers, None)
             .await
             .ok();
