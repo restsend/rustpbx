@@ -1,7 +1,7 @@
 use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-
+use std::collections::HashMap;
 const USER_AGENT: &str = "rustpbx";
 
 #[derive(Parser, Debug)]
@@ -41,17 +41,52 @@ pub struct UseragentConfig {
 #[serde(rename_all = "snake_case")]
 pub enum UserBackendConfig {
     Memory,
+    Http {
+        url: String,
+        method: Option<String>,
+        username_field: Option<String>,
+        password_field: Option<String>,
+        realm_field: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    },
     Plain {
         path: String,
     },
     Database {
         url: String,
         table_name: Option<String>,
+        id_column: Option<String>,
         username_column: Option<String>,
         password_column: Option<String>,
         enabled_column: Option<String>,
+        realm_column: Option<String>,
         password_hash: Option<String>,
         password_salt: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum LocatorConfig {
+    Memory,
+    Http {
+        url: String,
+        method: Option<String>,
+        username_field: Option<String>,
+        expires_field: Option<String>,
+        realm_field: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    },
+    Database {
+        url: String,
+        table_name: Option<String>,
+        id_column: Option<String>,
+        username_column: Option<String>,
+        expires_column: Option<String>,
+        realm_column: Option<String>,
+        destination_column: Option<String>,
+        transport_column: Option<String>,
     },
 }
 
@@ -72,6 +107,7 @@ pub struct ProxyConfig {
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     pub user_backend: UserBackendConfig,
+    pub locator: LocatorConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,11 +158,18 @@ impl Default for ProxyConfig {
             max_concurrency: None,
             registrar_expires: Some(60),
             user_backend: UserBackendConfig::default(),
+            locator: LocatorConfig::default(),
         }
     }
 }
 
 impl Default for UserBackendConfig {
+    fn default() -> Self {
+        Self::Memory
+    }
+}
+
+impl Default for LocatorConfig {
     fn default() -> Self {
         Self::Memory
     }

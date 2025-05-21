@@ -1,5 +1,5 @@
 use super::{
-    locator::{Locator, MemoryLocator},
+    locator::{create_locator, Locator},
     user::{create_user_backend, UserBackend},
     FnCreateProxyModule, ProxyAction, ProxyModule,
 };
@@ -42,8 +42,8 @@ pub struct SipServerBuilder {
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
     user_backend: Option<Box<dyn UserBackend>>,
-    locator: Box<dyn Locator>,
     module_fns: HashMap<String, FnCreateProxyModule>,
+    locator: Option<Box<dyn Locator>>,
 }
 
 impl SipServerBuilder {
@@ -52,8 +52,8 @@ impl SipServerBuilder {
             config,
             cancel_token: None,
             user_backend: None,
-            locator: Box::new(MemoryLocator::new()),
             module_fns: HashMap::new(),
+            locator: None,
         }
     }
 
@@ -61,12 +61,10 @@ impl SipServerBuilder {
         self.user_backend = Some(user_backend);
         self
     }
-
-    pub fn with_locator(mut self, registrator: Box<dyn Locator>) -> Self {
-        self.locator = registrator;
+    pub fn with_locator(mut self, locator: Box<dyn Locator>) -> Self {
+        self.locator = Some(locator);
         self
     }
-
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
@@ -76,23 +74,38 @@ impl SipServerBuilder {
         self.module_fns.insert(name.to_lowercase(), module_fn);
         self
     }
-
     pub async fn build(self) -> Result<SipServer> {
-        let user_backend = match create_user_backend(&self.config.user_backend).await {
-            Ok(backend) => backend,
-            Err(e) => {
-                error!(
-                    "failed to create user backend: {} {:?}",
-                    e, self.config.user_backend
-                );
-                return Err(e);
+        let user_backend = if let Some(backend) = self.user_backend {
+            backend
+        } else {
+            match create_user_backend(&self.config.user_backend).await {
+                Ok(backend) => backend,
+                Err(e) => {
+                    error!(
+                        "failed to create user backend: {} {:?}",
+                        e, self.config.user_backend
+                    );
+                    return Err(e);
+                }
             }
         };
+        let locator = if let Some(locator) = self.locator {
+            locator
+        } else {
+            match create_locator(&self.config.locator).await {
+                Ok(locator) => locator,
+                Err(e) => {
+                    error!("failed to create locator: {} {:?}", e, self.config.locator);
+                    return Err(e);
+                }
+            }
+        };
+
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
             cancel_token: self.cancel_token.unwrap_or_default(),
             user_backend: Arc::new(user_backend),
-            locator: Arc::new(self.locator),
+            locator: Arc::new(locator),
         });
 
         let mut allow_methods = Vec::new();

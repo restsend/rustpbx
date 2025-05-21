@@ -25,7 +25,7 @@ async fn test_auth_module_invite_success() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner, config);
+    let module = AuthModule::new(server_inner);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -54,7 +54,7 @@ async fn test_auth_module_register_success() {
     );
 
     // Create the auth module
-    let module = AuthModule::new(server_inner, config);
+    let module = AuthModule::new(server_inner);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -78,7 +78,7 @@ async fn test_auth_module_disabled_user() {
     let request = create_auth_request(rsip::Method::Invite, "bob", "example.com", Some("password"));
 
     // Create the auth module
-    let module = AuthModule::new(server_inner, config);
+    let module = AuthModule::new(server_inner);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -102,7 +102,7 @@ async fn test_auth_module_unknown_user() {
     let request = create_auth_request(rsip::Method::Invite, "unknown", "example.com", None);
 
     // Create the auth module
-    let module = AuthModule::new(server_inner, config);
+    let module = AuthModule::new(server_inner);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -126,7 +126,7 @@ async fn test_auth_module_bypass_other_methods() {
     let request = create_auth_request(rsip::Method::Options, "unknown", "example.com", None);
 
     // Create the auth module
-    let module = AuthModule::new(server_inner, config);
+    let module = AuthModule::new(server_inner);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -209,7 +209,7 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
 #[tokio::test]
 async fn test_auth_no_credentials() {
     let (server, config) = create_test_server().await;
-    let auth_module = AuthModule::new(server, config);
+    let auth_module = AuthModule::new(server);
 
     // Create an INVITE request with no auth headers
     let request = create_sip_request(rsip::Method::Invite, "alice", "example.com");
@@ -233,7 +233,7 @@ async fn test_auth_no_credentials() {
 #[tokio::test]
 async fn test_auth_bypass_for_non_invite_register() {
     let (server, config) = create_test_server().await;
-    let auth_module = AuthModule::new(server, config);
+    let auth_module = AuthModule::new(server);
 
     // Create a BYE request
     let request = create_sip_request(rsip::Method::Bye, "alice", "example.com");
@@ -262,7 +262,7 @@ async fn test_auth_bypass_for_non_invite_register() {
 #[tokio::test]
 async fn test_auth_disabled_user() {
     let (server, config) = create_test_server().await;
-    let auth_module = AuthModule::new(server, config);
+    let auth_module = AuthModule::new(server);
 
     // Create an INVITE request for disabled user
     let request = create_sip_request(rsip::Method::Invite, "bob", "example.com");

@@ -1,7 +1,9 @@
+use super::locator_db::DbLocator;
+use crate::config::{LocatorConfig, ProxyConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,11 @@ impl MemoryLocator {
             locations: Mutex::new(HashMap::new()),
         }
     }
+    pub fn create(
+        _config: Arc<ProxyConfig>,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>> {
+        Box::pin(async move { Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>) })
+    }
 }
 
 #[async_trait]
@@ -67,6 +74,37 @@ impl Locator for MemoryLocator {
             Ok(vec![location.clone()])
         } else {
             Err(anyhow::anyhow!("User not found"))
+        }
+    }
+}
+
+pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> {
+    match config {
+        LocatorConfig::Memory | LocatorConfig::Http { .. } => {
+            Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>)
+        }
+        LocatorConfig::Database {
+            url,
+            table_name,
+            id_column,
+            username_column,
+            expires_column,
+            realm_column,
+            destination_column,
+            transport_column,
+        } => {
+            let db_locator = DbLocator::new(
+                url.clone(),
+                table_name.clone(),
+                id_column.clone(),
+                username_column.clone(),
+                expires_column.clone(),
+                realm_column.clone(),
+                destination_column.clone(),
+                transport_column.clone(),
+            )
+            .await?;
+            Ok(Box::new(db_locator) as Box<dyn Locator>)
         }
     }
 }

@@ -734,6 +734,7 @@ impl ProxyModule for CallModule {
             rsip::Method::Cancel,
             rsip::Method::Options,
             rsip::Method::Info,
+            rsip::Method::Update,
             rsip::Method::Refer,
         ]
     }

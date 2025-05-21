@@ -18,17 +18,16 @@ use tracing::{debug, info};
 #[derive(Clone)]
 pub struct AuthModule {
     server: SipServerRef,
-    config: Arc<ProxyConfig>,
 }
 
 impl AuthModule {
-    pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = AuthModule::new(server, config);
+    pub fn create(server: SipServerRef, _config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = AuthModule::new(server);
         Ok(Box::new(module))
     }
 
-    pub fn new(server: SipServerRef, config: Arc<ProxyConfig>) -> Self {
-        Self { server, config }
+    pub fn new(server: SipServerRef) -> Self {
+        Self { server }
     }
 
     pub async fn authenticate_request(&self, tx: &mut Transaction) -> Result<bool> {
