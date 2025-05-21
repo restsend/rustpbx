@@ -55,7 +55,12 @@ impl PlainTextBackend {
 
 #[async_trait]
 impl UserBackend for PlainTextBackend {
-    async fn authenticate(&self, username: &str, password: &str) -> Result<bool> {
+    async fn authenticate(
+        &self,
+        username: &str,
+        password: &str,
+        _realm: Option<&str>,
+    ) -> Result<bool> {
         if let Some(user) = self.users.lock().unwrap().get(username) {
             Ok(user.password == Some(password.to_string()))
         } else {

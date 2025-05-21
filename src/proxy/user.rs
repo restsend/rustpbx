@@ -1,13 +1,11 @@
+use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTextBackend};
+use crate::config::{ProxyConfig, UserBackendConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
-
-use crate::config::UserBackendConfig;
-
-use super::{user_db::DbBackend, user_plain::PlainTextBackend};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SipUser {
@@ -51,7 +49,12 @@ pub trait UserBackend: Send + Sync {
             user.to_string()
         }
     }
-    async fn authenticate(&self, username: &str, password: &str) -> Result<bool>;
+    async fn authenticate(
+        &self,
+        username: &str,
+        password: &str,
+        realm: Option<&str>,
+    ) -> Result<bool>;
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
@@ -63,6 +66,12 @@ pub struct MemoryUserBackend {
 }
 
 impl MemoryUserBackend {
+    pub fn create(
+        _config: Arc<ProxyConfig>,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn UserBackend>>> + Send>> {
+        Box::pin(async move { Ok(Box::new(MemoryUserBackend::new()) as Box<dyn UserBackend>) })
+    }
+
     pub fn new() -> Self {
         Self {
             users: Mutex::new(HashMap::new()),
@@ -122,7 +131,12 @@ impl MemoryUserBackend {
 }
 #[async_trait]
 impl UserBackend for MemoryUserBackend {
-    async fn authenticate(&self, username: &str, password: &str) -> Result<bool> {
+    async fn authenticate(
+        &self,
+        username: &str,
+        password: &str,
+        _realm: Option<&str>,
+    ) -> Result<bool> {
         let identifier = self.get_identifier(username, None);
         if let Some(user) = self.users.lock().await.get(&identifier) {
             match user.password {
@@ -145,6 +159,25 @@ impl UserBackend for MemoryUserBackend {
 
 pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn UserBackend>> {
     match config {
+        UserBackendConfig::Http {
+            url,
+            method,
+            username_field,
+            password_field,
+            realm_field,
+            headers,
+        } => {
+            let backend = HttpUserBackend::new(
+                url,
+                method,
+                username_field,
+                password_field,
+                realm_field,
+                headers,
+            );
+            Ok(Box::new(backend))
+        }
+
         UserBackendConfig::Memory => Ok(Box::new(MemoryUserBackend::new())),
         UserBackendConfig::Plain { path } => {
             let backend = PlainTextBackend::new(path);
@@ -159,13 +192,17 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             enabled_column,
             password_hash,
             password_salt,
+            id_column,
+            realm_column,
         } => {
             let backend = DbBackend::new(
                 url.clone(),
                 table_name.clone(),
+                id_column.clone(),
                 username_column.clone(),
                 password_column.clone(),
                 enabled_column.clone(),
+                realm_column.clone(),
                 password_hash.clone(),
                 password_salt.clone(),
             )

@@ -19,7 +19,9 @@ pub mod server;
 pub mod tests;
 pub mod user;
 pub mod user_db;
+pub mod user_http;
 pub mod user_plain;
+
 pub enum ProxyAction {
     Continue,
     Abort,

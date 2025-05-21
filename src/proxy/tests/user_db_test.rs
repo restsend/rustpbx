@@ -16,7 +16,8 @@ async fn setup_test_db() -> AnyPool {
             id INTEGER PRIMARY KEY,
             username TEXT NOT NULL,
             password TEXT NOT NULL,
-            enabled INTEGER DEFAULT 1
+            enabled INTEGER DEFAULT 1,
+            realm TEXT NOT NULL,
         )",
     )
     .execute(&db)
@@ -151,16 +152,27 @@ async fn test_db_backend() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .await
     .unwrap();
 
     // Test authentication
-    assert!(backend.authenticate("testuser", "testpass").await.unwrap());
-    assert!(backend.authenticate("admin", "adminpass").await.unwrap());
-    assert!(!backend.authenticate("testuser", "wrongpass").await.unwrap());
+    assert!(backend
+        .authenticate("testuser", "testpass", None)
+        .await
+        .unwrap());
+    assert!(backend
+        .authenticate("admin", "adminpass", None)
+        .await
+        .unwrap());
     assert!(!backend
-        .authenticate("nonexistent", "password")
+        .authenticate("testuser", "wrongpass", None)
+        .await
+        .unwrap());
+    assert!(!backend
+        .authenticate("nonexistent", "password", None)
         .await
         .unwrap());
 
@@ -200,9 +212,11 @@ async fn test_db_backend() {
     let custom_backend = DbBackend::new(
         "sqlite::memory:".to_string(),
         Some("custom_users".to_string()),
+        Some("id".to_string()),
         Some("user_name".to_string()),
         Some("pass_word".to_string()),
         Some("is_enabled".to_string()),
+        None,
         None,
         None,
     )
@@ -210,11 +224,11 @@ async fn test_db_backend() {
     .unwrap();
 
     assert!(custom_backend
-        .authenticate("customuser", "custompass")
+        .authenticate("customuser", "custompass", None)
         .await
         .unwrap());
     assert!(!custom_backend
-        .authenticate("customuser", "wrongpass")
+        .authenticate("customuser", "wrongpass", None)
         .await
         .unwrap());
 
@@ -259,6 +273,8 @@ async fn test_db_backend() {
             None,
             None,
             None,
+            None,
+            None,
             Some(hash_type.replace("_salt", "").to_string()),
             Some(salt.to_string()),
         )
@@ -267,11 +283,11 @@ async fn test_db_backend() {
 
         // Test authentication with hash
         assert!(hash_backend
-            .authenticate("hashuser", "hashpass")
+            .authenticate("hashuser", "hashpass", None)
             .await
             .unwrap());
         assert!(!hash_backend
-            .authenticate("hashuser", "wrongpass")
+            .authenticate("hashuser", "wrongpass", None)
             .await
             .unwrap());
     }
