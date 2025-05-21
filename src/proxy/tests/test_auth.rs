@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test]
 async fn test_auth_module_invite_success() {
     // Create test server with user backend
-    let (server_inner, config) = create_test_server().await;
+    let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for valid user with proper authentication
     let request = create_auth_request(
@@ -43,7 +43,7 @@ async fn test_auth_module_invite_success() {
 #[tokio::test]
 async fn test_auth_module_register_success() {
     // Create test server with user backend
-    let (server_inner, config) = create_test_server().await;
+    let (server_inner, _) = create_test_server().await;
 
     // Create REGISTER request for valid user with proper authentication
     let request = create_auth_request(
@@ -72,7 +72,7 @@ async fn test_auth_module_register_success() {
 #[tokio::test]
 async fn test_auth_module_disabled_user() {
     // Create test server with user backend
-    let (server_inner, config) = create_test_server().await;
+    let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for disabled user
     let request = create_auth_request(rsip::Method::Invite, "bob", "example.com", Some("password"));
@@ -96,7 +96,7 @@ async fn test_auth_module_disabled_user() {
 #[tokio::test]
 async fn test_auth_module_unknown_user() {
     // Create test server with user backend
-    let (server_inner, config) = create_test_server().await;
+    let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for unknown user
     let request = create_auth_request(rsip::Method::Invite, "unknown", "example.com", None);
@@ -120,7 +120,7 @@ async fn test_auth_module_unknown_user() {
 #[tokio::test]
 async fn test_auth_module_bypass_other_methods() {
     // Create test server with user backend
-    let (server_inner, config) = create_test_server().await;
+    let (server_inner, _) = create_test_server().await;
 
     // Create OPTIONS request for unknown user (should bypass auth)
     let request = create_auth_request(rsip::Method::Options, "unknown", "example.com", None);
@@ -208,7 +208,7 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
 
 #[tokio::test]
 async fn test_auth_no_credentials() {
-    let (server, config) = create_test_server().await;
+    let (server, _) = create_test_server().await;
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request with no auth headers
@@ -232,7 +232,7 @@ async fn test_auth_no_credentials() {
 
 #[tokio::test]
 async fn test_auth_bypass_for_non_invite_register() {
-    let (server, config) = create_test_server().await;
+    let (server, _) = create_test_server().await;
     let auth_module = AuthModule::new(server);
 
     // Create a BYE request
@@ -261,7 +261,7 @@ async fn test_auth_bypass_for_non_invite_register() {
 
 #[tokio::test]
 async fn test_auth_disabled_user() {
-    let (server, config) = create_test_server().await;
+    let (server, _) = create_test_server().await;
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request for disabled user

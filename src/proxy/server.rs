@@ -232,6 +232,18 @@ impl SipServer {
         self.inner.cancel_token.cancel();
     }
 
+    pub fn get_inner(&self) -> SipServerRef {
+        self.inner.clone()
+    }
+
+    pub fn get_modules(&self) -> impl Iterator<Item = &Box<dyn ProxyModule>> {
+        self.modules.iter()
+    }
+
+    pub fn get_cancel_token(&self) -> CancellationToken {
+        self.inner.cancel_token.clone()
+    }
+
     async fn handle_incoming(&self, mut incoming: TransactionReceiver) -> Result<()> {
         let runnings_tx = Arc::new(AtomicUsize::new(0));
         while let Some(mut tx) = incoming.recv().await {

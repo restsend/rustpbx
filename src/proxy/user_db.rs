@@ -116,9 +116,13 @@ impl UserBackend for DbBackend {
         let hashed_password = self.hash_password(password);
 
         // Use raw SQL query to be flexible with table and column names
+        let realm_column = match self.realm_column {
+            Some(ref realm_col) => format!("AND {} = $3", realm_col),
+            None => "".to_string(),
+        };
         let query = format!(
-            "SELECT COUNT(*) FROM {} WHERE {} = $1 AND {} = $2",
-            self.table_name, self.username_column, self.password_column
+            "SELECT COUNT(*) FROM {} WHERE {} = $1 AND {} = $2 {}",
+            self.table_name, self.username_column, self.password_column, realm_column
         );
 
         let count: i64 = sqlx::query_scalar::<_, i64>(&query)

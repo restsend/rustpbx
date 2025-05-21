@@ -740,12 +740,10 @@ impl ProxyModule for CallModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
-        info!("Call module started");
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
-        info!("Call module stopped");
         Ok(())
     }
 
