@@ -334,4 +334,3 @@ fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsip::R
 
     request
 }
- 

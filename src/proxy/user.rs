@@ -2,21 +2,50 @@ use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTex
 use crate::config::{ProxyConfig, UserBackendConfig};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::prelude::HeadersExt;
+use rsip::{headers::auth::Algorithm, prelude::HeadersExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::info;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SipUser {
     pub id: u64,
+    pub enabled: bool,
     pub username: String,
     pub password: Option<String>,
-    pub enabled: bool,
     pub realm: Option<String>,
 }
 
-impl SipUser {}
+impl SipUser {
+    pub fn auth_digest(&self, algorithm: Algorithm) -> String {
+        use md5::{Digest, Md5};
+        use sha2::{Sha256, Sha512};
+        let value = format!(
+            "{}:{}:{}",
+            self.username,
+            self.realm.as_ref().unwrap_or(&"".to_string()),
+            self.password.as_ref().unwrap_or(&"".to_string()),
+        );
+        match algorithm {
+            Algorithm::Md5 | Algorithm::Md5Sess => {
+                let mut hasher = Md5::new();
+                hasher.update(value);
+                format!("{:x}", hasher.finalize())
+            }
+            Algorithm::Sha256 | Algorithm::Sha256Sess => {
+                let mut hasher = Sha256::new();
+                hasher.update(value);
+                format!("{:x}", hasher.finalize())
+            }
+            Algorithm::Sha512 | Algorithm::Sha512Sess => {
+                let mut hasher = Sha512::new();
+                hasher.update(value);
+                format!("{:x}", hasher.finalize())
+            }
+        }
+    }
+}
 
 impl TryFrom<&rsip::Request> for SipUser {
     type Error = rsipstack::Error;
@@ -49,12 +78,6 @@ pub trait UserBackend: Send + Sync {
             user.to_string()
         }
     }
-    async fn authenticate(
-        &self,
-        username: &str,
-        password: &str,
-        realm: Option<&str>,
-    ) -> Result<bool>;
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
@@ -73,6 +96,7 @@ impl MemoryUserBackend {
     }
 
     pub fn new() -> Self {
+        info!("Creating MemoryUserBackend");
         Self {
             users: Mutex::new(HashMap::new()),
         }
@@ -131,29 +155,15 @@ impl MemoryUserBackend {
 }
 #[async_trait]
 impl UserBackend for MemoryUserBackend {
-    async fn authenticate(
-        &self,
-        username: &str,
-        password: &str,
-        _realm: Option<&str>,
-    ) -> Result<bool> {
-        let identifier = self.get_identifier(username, None);
-        if let Some(user) = self.users.lock().await.get(&identifier) {
-            match user.password {
-                Some(ref stored_password) => return Ok(stored_password == password),
-                None => return Err(anyhow::anyhow!("Password not set for user")),
-            }
-        }
-        return Err(anyhow::anyhow!("User not found"));
-    }
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+        let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
-        self.users
-            .lock()
-            .await
-            .get(&identifier)
-            .cloned()
-            .ok_or(anyhow::anyhow!("User not found"))
+        let mut user = match users.get(&identifier) {
+            Some(user) => user.clone(),
+            None => return Err(anyhow::anyhow!("User not found")),
+        };
+        user.realm = realm.map(|r| r.to_string());
+        Ok(user)
     }
 }
 
