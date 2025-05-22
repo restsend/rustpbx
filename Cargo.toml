@@ -78,6 +78,11 @@ sqlx = { version = "0.8.6", features = [
     "any",
 ] }
 sha1 = "0.10.6"
+sea-orm = { version = "1.1.11", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+] }
+sea-orm-migration = "1.1.11"
 
 
 [dev-dependencies]

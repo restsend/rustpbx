@@ -4,35 +4,7 @@ use crate::proxy::{
 };
 use rsip::{HostWithPort, Scheme};
 use rsipstack::transport::SipAddr;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::time::Instant;
-
-async fn setup_test_db() -> SqlitePool {
-    // Use SQLite in-memory database for testing
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-
-    // Create test table
-    sqlx::query(
-        "CREATE TABLE locations (
-            id INTEGER PRIMARY KEY,
-            identifier TEXT NOT NULL UNIQUE,
-            aor TEXT NOT NULL,
-            expires INTEGER NOT NULL,
-            destination_host TEXT NOT NULL,
-            destination_port INTEGER NOT NULL,
-            destination_transport TEXT NOT NULL,
-            last_modified TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )",
-    )
-    .execute(&db)
-    .await
-    .unwrap();
-
-    db
-}
 
 #[tokio::test]
 async fn test_db_locator() {
@@ -62,18 +34,7 @@ async fn test_db_locator() {
     };
 
     // Setup DB locator
-    let locator = DbLocator::new(
-        "sqlite::memory:".to_string(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
     // Test register
     locator
@@ -115,18 +76,7 @@ async fn test_db_locator() {
 #[tokio::test]
 async fn test_db_locator_with_custom_table() {
     // Setup DB with custom table name
-    let locator = DbLocator::new(
-        "sqlite::memory:".to_string(),
-        Some("custom_locations".to_string()),
-        Some("custom_identifier".to_string()),
-        Some("custom_aor".to_string()),
-        Some("custom_expires".to_string()),
-        Some("custom_host".to_string()),
-        Some("custom_port".to_string()),
-        Some("custom_transport".to_string()),
-    )
-    .await
-    .unwrap();
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
     // Create a test location
     let aor = rsip::Uri {
@@ -193,18 +143,7 @@ async fn test_db_locator_with_custom_table() {
 #[tokio::test]
 async fn test_db_locator_multiple_lookups() {
     // Setup DB locator
-    let locator = DbLocator::new(
-        "sqlite::memory:".to_string(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
     // Create different transport type locations for the same user
     let aor1 = rsip::Uri {

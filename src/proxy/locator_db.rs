@@ -1,84 +1,123 @@
-use super::locator::{Location, Locator};
+use super::locator::{Location as LocatorLocation, Locator};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sqlx::{pool::Pool, sqlite::Sqlite, Row};
-use std::time::Instant;
+use sea_orm::{entity::prelude::*, ActiveModelTrait, Database, Set};
+pub use sea_orm_migration::prelude::*;
+use sea_orm_migration::schema::{integer, pk_auto, string, timestamp};
+use std::time::{Instant, SystemTime};
+use tracing::error;
 
-/// Database backed Locator implementation
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[sea_orm(table_name = "rustpbx_locations")]
+pub struct Model {
+    #[sea_orm(primary_key, auto_increment = true)]
+    pub id: i64,
+    pub aor: String,
+    pub expires: i64,
+    pub username: String,
+    pub realm: String,
+    pub destination: String,
+    pub transport: String,
+    pub last_modified: i64,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+impl ActiveModelBehavior for ActiveModel {}
+impl Entity {}
+
+/// Database backed Locator implementation using SeaORM
 pub struct DbLocator {
-    db: Pool<Sqlite>,
-    table_name: String,
-    id_column: String,
-    username_column: String,
-    expires_column: String,
-    realm_column: String,
-    destination_column: String,
-    transport_column: String,
+    db: DatabaseConnection,
+}
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Entity)
+                    .if_not_exists()
+                    .col(pk_auto(Column::Id))
+                    .col(string(Column::Aor).char_len(255).not_null())
+                    .col(integer(Column::Expires).not_null())
+                    .col(string(Column::Username).char_len(200).not_null())
+                    .col(string(Column::Realm).char_len(200).null())
+                    .col(string(Column::Destination).char_len(255).not_null())
+                    .col(string(Column::Transport).char_len(32).not_null())
+                    .col(integer(Column::LastModified).not_null())
+                    .col(timestamp(Column::CreatedAt).not_null())
+                    .col(timestamp(Column::UpdatedAt).not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        // Add index on username+realm
+        manager
+            .create_index(
+                Index::create()
+                    .table(Entity)
+                    .name("idx_locations_realm_username")
+                    .col(Column::Realm)
+                    .col(Column::Username)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .table(Entity)
+                    .name("idx_locations_realm_username")
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .drop_table(Table::drop().table(Entity).to_owned())
+            .await
+    }
+}
+
+pub struct Migrator;
+
+#[async_trait::async_trait]
+impl MigratorTrait for Migrator {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        vec![Box::new(Migration {})]
+    }
 }
 
 impl DbLocator {
     /// Create a new DbLocator with a database connection
-    pub async fn new(
-        url: String,
-        table_name: Option<String>,
-        id_column: Option<String>,
-        username_column: Option<String>,
-        expires_column: Option<String>,
-        realm_column: Option<String>,
-        destination_column: Option<String>,
-        transport_column: Option<String>,
-    ) -> Result<Self> {
-        let db = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect(&url)
+    pub async fn new(url: String) -> Result<Self> {
+        // Connect to the database
+        let db = Database::connect(&url)
             .await
             .map_err(|e| anyhow::anyhow!("Database connection error: {}", e))?;
-
-        let db_locator = Self {
-            db,
-            table_name: table_name.unwrap_or_else(|| "locations".to_string()),
-            id_column: id_column.unwrap_or_else(|| "identifier".to_string()),
-            username_column: username_column.unwrap_or_else(|| "aor".to_string()),
-            expires_column: expires_column.unwrap_or_else(|| "expires".to_string()),
-            realm_column: realm_column.unwrap_or_else(|| "realm".to_string()),
-            destination_column: destination_column.unwrap_or_else(|| "destination".to_string()),
-            transport_column: transport_column.unwrap_or_else(|| "transport".to_string()),
-        };
-
-        // Ensure the table exists
-        db_locator.ensure_table().await?;
-
-        Ok(db_locator)
+        let db_locator = Self { db };
+        match db_locator.migrate().await {
+            Ok(_) => Ok(db_locator),
+            Err(e) => {
+                error!("migrate locator fail {}", e);
+                Err(e)
+            }
+        }
     }
 
-    /// Ensure the locations table exists in the database
-    async fn ensure_table(&self) -> Result<()> {
-        // Check if table exists, if not create it
-        let query = format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                id INTEGER PRIMARY KEY,
-                {} TEXT NOT NULL UNIQUE,
-                {} TEXT NOT NULL,
-                {} INTEGER NOT NULL,
-                {} TEXT NOT NULL,
-                {} TEXT NOT NULL,
-                {} TEXT NOT NULL,
-                last_modified TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )",
-            self.table_name,
-            self.id_column,
-            self.username_column,
-            self.expires_column,
-            self.realm_column,
-            self.destination_column,
-            self.transport_column
-        );
-
-        sqlx::query(&query)
-            .execute(&self.db)
+    pub async fn migrate(&self) -> Result<()> {
+        Migrator::up(&self.db, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Error creating table: {}", e))?;
-
+            .map_err(|e| anyhow::anyhow!("Migration error: {}", e))?;
         Ok(())
     }
 }
@@ -89,11 +128,12 @@ impl Locator for DbLocator {
         &self,
         username: &str,
         realm: Option<&str>,
-        location: Location,
+        location: LocatorLocation,
     ) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
+        // Default implementation for standard cases:
         let aor = location.aor.to_string();
-        let expires = location.expires;
+        let expires = location.expires as i64;
+        let realm_value = realm.unwrap_or_default().to_string();
 
         // Extract SipAddr components
         let (host, transport) = match &location.destination {
@@ -102,98 +142,104 @@ impl Locator for DbLocator {
                     Some(t) => t.to_string(),
                     None => "UDP".to_string(), // Default to UDP if not specified
                 };
-                (addr, transport)
+                (addr.to_string(), transport)
             }
         };
 
-        // For SQLite, we can use INSERT OR REPLACE which is simpler than ON CONFLICT
-        let query = format!(
-            "INSERT OR REPLACE INTO {} ({}, {}, {}, {}, {}, {}, last_modified)
-             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            self.table_name,
-            self.id_column,
-            self.username_column,
-            self.expires_column,
-            self.realm_column,
-            self.destination_column,
-            self.transport_column
-        );
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
 
-        sqlx::query(&query)
-            .bind(identifier)
-            .bind(aor)
-            .bind(expires as i64)
-            .bind(realm)
-            .bind(host.to_string())
-            .bind(transport)
-            .execute(&self.db)
+        // Check if record exists
+        let existing = Entity::find()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(&realm_value))
+            .one(&self.db)
             .await
-            .map_err(|e| anyhow::anyhow!("Database error on register: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Database error on register lookup: {}", e))?;
+
+        match existing {
+            Some(model) => {
+                // Update existing record
+                let mut active_model: ActiveModel = model.into();
+                active_model.expires = Set(expires);
+                active_model.username = Set(username.to_string());
+                active_model.realm = Set(realm_value);
+                active_model.destination = Set(host);
+                active_model.aor = Set(aor);
+                active_model.transport = Set(transport);
+                active_model.last_modified = Set(now);
+                active_model.updated_at = Set(chrono::Utc::now().naive_utc());
+
+                active_model
+                    .update(&self.db)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Database error on register update: {}", e))?;
+            }
+            None => {
+                // Create new record - let the database assign the ID
+                let now_dt = chrono::Utc::now().naive_utc();
+
+                // Create a new active model with all fields except id
+                let mut active_model = ActiveModel::new();
+                active_model.aor = Set(aor);
+                active_model.expires = Set(expires);
+                active_model.username = Set(username.to_string());
+                active_model.realm = Set(realm_value);
+                active_model.destination = Set(host);
+                active_model.transport = Set(transport);
+                active_model.last_modified = Set(now);
+                active_model.created_at = Set(now_dt);
+                active_model.updated_at = Set(now_dt);
+
+                // Insert without specifying id
+                active_model
+                    .insert(&self.db)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Database error on register insert: {}", e))?;
+            }
+        }
 
         Ok(())
     }
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
+        // Standard implementation for other cases
+        let realm_value = realm.unwrap_or_default();
 
-        let query = format!(
-            "DELETE FROM {} WHERE {} = ?",
-            self.table_name, self.id_column
-        );
-
-        sqlx::query(&query)
-            .bind(identifier)
-            .execute(&self.db)
+        Entity::delete_many()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(realm_value))
+            .exec(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on unregister: {}", e))?;
 
         Ok(())
     }
 
-    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>> {
-        let identifier = self.get_identifier(username, realm);
-
-        let query = format!(
-            "SELECT {}, {},  {}, {} FROM {} WHERE {} = ?",
-            self.username_column,
-            self.expires_column,
-            self.destination_column,
-            self.transport_column,
-            self.table_name,
-            self.id_column
-        );
-
-        let rows = sqlx::query(&query)
-            .bind(identifier)
-            .fetch_all(&self.db)
+    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<LocatorLocation>> {
+        // Default implementation for standard cases
+        let realm_value = realm.unwrap_or_default();
+        let models = Entity::find()
+            .filter(Column::Username.eq(username))
+            .filter(Column::Realm.eq(realm_value))
+            .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
-        if rows.is_empty() {
+        if models.is_empty() {
             return Err(anyhow::anyhow!("User not found"));
         }
 
         let mut locations = Vec::new();
-        for row in rows {
-            let aor_str: String = row
-                .try_get(self.username_column.as_str())
-                .map_err(|e| anyhow::anyhow!("Error getting aor: {}", e))?;
-            let expires: i64 = row
-                .try_get(self.expires_column.as_str())
-                .map_err(|e| anyhow::anyhow!("Error getting expires: {}", e))?;
-            let host: String = row
-                .try_get(self.destination_column.as_str())
-                .map_err(|e| anyhow::anyhow!("Error getting destination host: {}", e))?;
-            let transport_str: String = row
-                .try_get(self.transport_column.as_str())
-                .map_err(|e| anyhow::anyhow!("Error getting destination transport: {}", e))?;
-
+        for model in models {
             // Parse the aor into a Uri
-            let aor = rsip::Uri::try_from(aor_str.as_str())
+            let aor = rsip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
 
             // Parse transport from string
-            let transport = match transport_str.to_uppercase().as_str() {
+            let transport = match model.transport.to_uppercase().as_str() {
                 "UDP" => rsip::transport::Transport::Udp,
                 "TCP" => rsip::transport::Transport::Tcp,
                 "TLS" => rsip::transport::Transport::Tls,
@@ -201,15 +247,18 @@ impl Locator for DbLocator {
                 _ => rsip::transport::Transport::Udp, // Default to UDP
             };
 
+            // Parse destination host to HostWithPort
+            let addr = model.destination.try_into()?;
+
             // Create SipAddr
             let destination = SipAddr {
                 r#type: Some(transport),
-                addr: host.try_into()?,
+                addr,
             };
 
-            locations.push(Location {
+            locations.push(LocatorLocation {
                 aor,
-                expires: expires as u32,
+                expires: model.expires as u32,
                 destination,
                 last_modified: Instant::now(), // We can't store Instant in DB, so create a new one
             });

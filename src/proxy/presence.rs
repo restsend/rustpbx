@@ -12,7 +12,7 @@ impl PresenceModule {
         let module = PresenceModule::new(config);
         Ok(Box::new(module))
     }
-    pub fn new(config: Arc<ProxyConfig>) -> Self {
+    pub fn new(_config: Arc<ProxyConfig>) -> Self {
         Self {}
     }
 }
