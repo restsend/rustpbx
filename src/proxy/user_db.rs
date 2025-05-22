@@ -1,8 +1,6 @@
 use super::user::{SipUser, UserBackend};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use md5;
-use sha1::Digest as Sha1Digest;
 use sqlx::{AnyPool, Row};
 
 pub struct DbBackend {
@@ -13,8 +11,6 @@ pub struct DbBackend {
     password_column: String,
     enabled_column: Option<String>,
     realm_column: Option<String>,
-    password_hash: Option<String>,
-    password_salt: Option<String>,
 }
 
 impl DbBackend {
@@ -26,8 +22,6 @@ impl DbBackend {
         password_column: Option<String>,
         enabled_column: Option<String>,
         realm_column: Option<String>,
-        password_hash: Option<String>,
-        password_salt: Option<String>,
     ) -> Result<Self> {
         let db = sqlx::any::AnyPoolOptions::new()
             .connect(&url)
@@ -42,8 +36,6 @@ impl DbBackend {
             password_column: password_column.unwrap_or_else(|| "password".to_string()),
             enabled_column,
             realm_column,
-            password_hash,
-            password_salt,
         })
     }
 }
