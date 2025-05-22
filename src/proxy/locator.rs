@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
+use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct Location {
@@ -35,6 +36,7 @@ pub struct MemoryLocator {
 
 impl MemoryLocator {
     pub fn new() -> Self {
+        info!("Creating MemoryLocator");
         Self {
             locations: Mutex::new(HashMap::new()),
         }

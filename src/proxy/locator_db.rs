@@ -6,7 +6,7 @@ use sea_orm::{entity::prelude::*, ActiveModelTrait, Database, Set};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{integer, pk_auto, string, timestamp};
 use std::time::{Instant, SystemTime};
-use tracing::error;
+use tracing::{error, info};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "rustpbx_locations")]
@@ -105,6 +105,7 @@ impl DbLocator {
             .await
             .map_err(|e| anyhow::anyhow!("Database connection error: {}", e))?;
         let db_locator = Self { db };
+        info!("Creating DbLocator");
         match db_locator.migrate().await {
             Ok(_) => Ok(db_locator),
             Err(e) => {

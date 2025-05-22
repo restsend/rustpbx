@@ -1,5 +1,6 @@
 use crate::proxy::user::UserBackend;
 use crate::proxy::user_db::DbBackend;
+use md5::Md5;
 use sha1::Digest as Sha1Digest;
 use sqlx::AnyPool;
 
@@ -60,7 +61,10 @@ async fn create_hashed_password_test_data(db_pool: &AnyPool, table_name: &str, h
                 table_name
             ))
             .bind("hashuser")
-            .bind(format!("{:x}", md5::compute("hashpass")))
+            .bind(format!(
+                "{:x}",
+                Md5::new().chain_update(b"hashpass").finalize()
+            ))
             .execute(db_pool)
             .await
             .unwrap();
@@ -71,7 +75,10 @@ async fn create_hashed_password_test_data(db_pool: &AnyPool, table_name: &str, h
                 table_name
             ))
             .bind("hashuser")
-            .bind(format!("{:x}", md5::compute("hashpasssalt123")))
+            .bind(format!(
+                "{:x}",
+                Md5::new().chain_update(b"hashpasssalt123").finalize()
+            ))
             .execute(db_pool)
             .await
             .unwrap();

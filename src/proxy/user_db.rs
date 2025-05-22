@@ -46,96 +46,10 @@ impl DbBackend {
             password_salt,
         })
     }
-
-    fn hash_password(&self, password: &str) -> String {
-        match self
-            .password_hash
-            .as_ref()
-            .unwrap_or(&"".to_string())
-            .as_str()
-        {
-            "md5" => {
-                let mut hasher = md5::Context::new();
-                hasher.consume(format!(
-                    "{}{}",
-                    password,
-                    self.password_salt.as_ref().unwrap_or(&"".to_string())
-                ));
-                format!("{:x}", hasher.compute())
-            }
-            "sha1" => {
-                let mut hasher = sha1::Sha1::new();
-                hasher.update(
-                    format!(
-                        "{}{}",
-                        password,
-                        self.password_salt.as_ref().unwrap_or(&"".to_string())
-                    )
-                    .as_bytes(),
-                );
-                format!("{:x}", hasher.finalize())
-            }
-            "sha256" => {
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(
-                    format!(
-                        "{}{}",
-                        password,
-                        self.password_salt.as_ref().unwrap_or(&"".to_string())
-                    )
-                    .as_bytes(),
-                );
-                format!("{:x}", hasher.finalize())
-            }
-            "sha512" => {
-                let mut hasher = sha2::Sha512::new();
-                hasher.update(
-                    format!(
-                        "{}{}",
-                        password,
-                        self.password_salt.as_ref().unwrap_or(&"".to_string())
-                    )
-                    .as_bytes(),
-                );
-                format!("{:x}", hasher.finalize())
-            }
-            _ => password.to_string(),
-        }
-    }
 }
 
 #[async_trait]
 impl UserBackend for DbBackend {
-    async fn authenticate(
-        &self,
-        username: &str,
-        password: &str,
-        realm: Option<&str>,
-    ) -> Result<bool> {
-        // Hash the password if a hashing algorithm is specified
-        let hashed_password = self.hash_password(password);
-
-        // Use raw SQL query to be flexible with table and column names
-        let realm_column = match self.realm_column {
-            Some(ref realm_col) => format!("AND {} = $3", realm_col),
-            None => "".to_string(),
-        };
-        let query = format!(
-            "SELECT COUNT(*) FROM {} WHERE {} = $1 AND {} = $2 {}",
-            self.table_name, self.username_column, self.password_column, realm_column
-        );
-
-        let count: i64 = sqlx::query_scalar::<_, i64>(&query)
-            .bind(username)
-            .bind(&hashed_password)
-            .bind(realm)
-            .fetch_one(&self.db)
-            .await
-            .map_err(|e| anyhow!("Database query error: {}", e))?;
-
-        Ok(count > 0)
-    }
-
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
         let id_column = match self.id_column {
             Some(ref id_col) => format!("{},", id_col),

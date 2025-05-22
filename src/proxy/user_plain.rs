@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, fs::File, io, path::Path};
+use tracing::{info, warn};
 
 pub struct PlainTextBackend {
     users: Arc<Mutex<HashMap<String, SipUser>>>,
@@ -12,6 +13,7 @@ pub struct PlainTextBackend {
 
 impl PlainTextBackend {
     pub fn new(path: &String) -> Self {
+        info!("Creating PlainTextBackend");
         Self {
             users: Arc::new(Mutex::new(HashMap::new())),
             path: path.clone(),
@@ -20,7 +22,17 @@ impl PlainTextBackend {
 
     pub async fn load(&self) -> Result<()> {
         let path = Path::new(&self.path);
-        let file = File::open(path)?;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                warn!(
+                    "Files not found, creating empty file: {} {}",
+                    e,
+                    path.display()
+                );
+                return Err(e.into());
+            }
+        };
         let reader = io::BufReader::new(file);
         let mut users = self.users.lock().unwrap();
         users.clear();
@@ -48,26 +60,13 @@ impl PlainTextBackend {
             };
             users.insert(username.to_string(), user);
         }
-
+        info!("Loaded {} users from {}", users.len(), self.path);
         Ok(())
     }
 }
 
 #[async_trait]
 impl UserBackend for PlainTextBackend {
-    async fn authenticate(
-        &self,
-        username: &str,
-        password: &str,
-        _realm: Option<&str>,
-    ) -> Result<bool> {
-        if let Some(user) = self.users.lock().unwrap().get(username) {
-            Ok(user.password == Some(password.to_string()))
-        } else {
-            Ok(false)
-        }
-    }
-
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
         let key = if let Some(realm) = realm {
             format!("{}@{}", username, realm)
@@ -75,11 +74,14 @@ impl UserBackend for PlainTextBackend {
             username.to_string()
         };
 
-        self.users
-            .lock()
-            .unwrap()
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("User not found"))
+        let mut user = match self.users.lock().unwrap().get(&key) {
+            Some(user) => user.clone(),
+            None => return Err(anyhow::anyhow!("User not found")),
+        };
+        if !user.enabled {
+            return Err(anyhow::anyhow!("User is disabled"));
+        }
+        user.realm = realm.map(|r| r.to_string());
+        Ok(user)
     }
 }

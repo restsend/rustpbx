@@ -186,7 +186,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             http_addr: "0.0.0.0:8080".to_string(),
-            log_level: None,
+            log_level: Some("info".to_string()),
             log_file: None,
             console: Some(ConsoleConfig::default()),
             ua: Some(UseragentConfig::default()),

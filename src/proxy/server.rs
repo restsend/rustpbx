@@ -100,7 +100,6 @@ impl SipServerBuilder {
                 }
             }
         };
-
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
             cancel_token: self.cancel_token.unwrap_or_default(),
