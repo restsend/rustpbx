@@ -128,6 +128,7 @@ impl UserBackend for DbBackend {
         let count: i64 = sqlx::query_scalar::<_, i64>(&query)
             .bind(username)
             .bind(&hashed_password)
+            .bind(realm)
             .fetch_one(&self.db)
             .await
             .map_err(|e| anyhow!("Database query error: {}", e))?;

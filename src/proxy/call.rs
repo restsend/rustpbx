@@ -1,6 +1,5 @@
-use crate::config::ProxyConfig;
-
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
+use crate::config::ProxyConfig;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use rsip::headers::UntypedHeader;

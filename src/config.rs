@@ -80,13 +80,6 @@ pub enum LocatorConfig {
     },
     Database {
         url: String,
-        table_name: Option<String>,
-        id_column: Option<String>,
-        username_column: Option<String>,
-        expires_column: Option<String>,
-        realm_column: Option<String>,
-        destination_column: Option<String>,
-        transport_column: Option<String>,
     },
 }
 

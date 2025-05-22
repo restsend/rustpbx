@@ -83,27 +83,8 @@ pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> 
         LocatorConfig::Memory | LocatorConfig::Http { .. } => {
             Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>)
         }
-        LocatorConfig::Database {
-            url,
-            table_name,
-            id_column,
-            username_column,
-            expires_column,
-            realm_column,
-            destination_column,
-            transport_column,
-        } => {
-            let db_locator = DbLocator::new(
-                url.clone(),
-                table_name.clone(),
-                id_column.clone(),
-                username_column.clone(),
-                expires_column.clone(),
-                realm_column.clone(),
-                destination_column.clone(),
-                transport_column.clone(),
-            )
-            .await?;
+        LocatorConfig::Database { url } => {
+            let db_locator = DbLocator::new(url.clone()).await?;
             Ok(Box::new(db_locator) as Box<dyn Locator>)
         }
     }
