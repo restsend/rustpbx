@@ -60,8 +60,6 @@ pub enum UserBackendConfig {
         password_column: Option<String>,
         enabled_column: Option<String>,
         realm_column: Option<String>,
-        password_hash: Option<String>,
-        password_salt: Option<String>,
     },
 }
 

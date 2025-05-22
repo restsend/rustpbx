@@ -200,8 +200,6 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             username_column,
             password_column,
             enabled_column,
-            password_hash,
-            password_salt,
             id_column,
             realm_column,
         } => {
@@ -213,8 +211,6 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 password_column.clone(),
                 enabled_column.clone(),
                 realm_column.clone(),
-                password_hash.clone(),
-                password_salt.clone(),
             )
             .await?;
             Ok(Box::new(backend))
