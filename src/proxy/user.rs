@@ -153,8 +153,17 @@ impl MemoryUserBackend {
         Ok(())
     }
 }
+
 #[async_trait]
 impl UserBackend for MemoryUserBackend {
+    fn get_identifier(&self, user: &str, realm: Option<&str>) -> String {
+        if let Some(realm) = realm {
+            format!("{}@{}", user, realm)
+        } else {
+            user.to_string()
+        }
+    }
+
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
         let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
@@ -164,6 +173,12 @@ impl UserBackend for MemoryUserBackend {
         };
         user.realm = realm.map(|r| r.to_string());
         Ok(user)
+    }
+
+    async fn create_user(&self, user: SipUser) -> Result<()> {
+        let identifier = self.get_identifier(user.username.as_str(), user.realm.as_deref());
+        self.users.lock().await.insert(identifier, user);
+        Ok(())
     }
 }
 

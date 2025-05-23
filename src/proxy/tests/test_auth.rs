@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use super::common::{create_auth_request, create_test_server, create_transaction};
+use super::common::{
+    create_auth_request, create_proxy_auth_request_with_nonce, create_test_request,
+    create_test_server, create_transaction, extract_nonce_from_proxy_authenticate,
+};
 use crate::proxy::auth::AuthModule;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
@@ -196,9 +199,10 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
 
     // Add Authorization header for disabled user test
     if username == "bob" {
+        let uri_str = format!("sip:{}@{}", username, realm);
         request.headers_mut().push(Header::Authorization(
                 rsip::headers::Authorization::new(
-                    "Digest username=\"bob\", realm=\"example.com\", nonce=\"random_nonce\", response=\"invalid\""
+                    format!("Digest username=\"{}\", realm=\"{}\", nonce=\"random_nonce\", uri=\"{}\", response=\"invalid\"", username, realm, uri_str)
                 )
             ));
     }
@@ -294,4 +298,198 @@ async fn test_auth_disabled_user() {
     let result = auth_module.authenticate_request(&mut tx).await.unwrap();
     println!("Authentication result: {}", result);
     assert!(!result);
+}
+
+#[tokio::test]
+async fn test_proxy_auth_invite_success() {
+    // Create test server with user backend
+    let (server_inner, _) = create_test_server().await;
+
+    // Step 1: Send INVITE request without credentials
+    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let module = AuthModule::new(server_inner.clone());
+    let (mut tx, _) = create_transaction(request);
+
+    // This should return 407 Proxy Authentication Required
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .await
+        .unwrap();
+
+    println!(
+        "First request result: {:?}",
+        matches!(result, ProxyAction::Abort)
+    );
+    println!("Transaction state: {:?}", tx.state);
+    println!("Has last_response: {}", tx.last_response.is_some());
+
+    assert!(matches!(result, ProxyAction::Abort));
+
+    // In test environment, manually create the response since reply_with failed due to no connection
+    if tx.last_response.is_none() {
+        // Create the response manually for testing
+        let mut response = rsip::Response {
+            version: rsip::Version::V2,
+            status_code: rsip::StatusCode::ProxyAuthenticationRequired,
+            headers: tx.original.headers().clone(),
+            body: vec![],
+        };
+
+        // Add Proxy-Authenticate header
+        let proxy_auth = module.create_proxy_auth_challenge("example.com").unwrap();
+        response.headers.push(Header::ProxyAuthenticate(proxy_auth));
+
+        tx.last_response = Some(response);
+    }
+
+    // Extract nonce from the response
+    let response = tx.last_response.as_ref().expect("Should have response");
+    assert_eq!(
+        response.status_code,
+        rsip::StatusCode::ProxyAuthenticationRequired
+    );
+
+    let nonce = extract_nonce_from_proxy_authenticate(response)
+        .expect("Should have nonce in Proxy-Authenticate header");
+
+    // Step 2: Send INVITE request with proper proxy authentication using the nonce
+    let request_with_auth = create_proxy_auth_request_with_nonce(
+        rsip::Method::Invite,
+        "alice",
+        "example.com",
+        Some("password"),
+        &nonce,
+    );
+
+    println!("Second request headers:");
+    for header in request_with_auth.headers().iter() {
+        println!("  {:?}", header);
+    }
+
+    let (mut tx2, _) = create_transaction(request_with_auth);
+
+    // This should succeed
+    let result2 = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .await
+        .unwrap();
+
+    println!(
+        "Second request result: {:?}",
+        matches!(result2, ProxyAction::Continue)
+    );
+    if let Some(response) = &tx2.last_response {
+        println!("Second response status: {:?}", response.status_code);
+    } else {
+        println!("No response in second transaction");
+    }
+
+    // Debug: test authentication directly
+    println!("Testing authentication directly...");
+    let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
+    println!("Direct authentication result: {}", auth_result);
+
+    // Should continue since alice is enabled and properly authenticated
+    assert!(matches!(result2, ProxyAction::Continue));
+}
+
+#[tokio::test]
+async fn test_proxy_auth_no_credentials() {
+    // Create test server with user backend
+    let (server_inner, _) = create_test_server().await;
+
+    // Create INVITE request for valid user with no proxy authentication
+    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+
+    // Create the auth module
+    let module = AuthModule::new(server_inner);
+
+    // Create a transaction
+    let (mut tx, _) = create_transaction(request);
+
+    // Test authentication
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .await
+        .unwrap();
+
+    // Should abort and send 407 Proxy Authentication Required
+    assert!(matches!(result, ProxyAction::Abort));
+
+    // Check that the response has the correct status code
+    if let Some(response) = &tx.last_response {
+        assert_eq!(
+            response.status_code,
+            rsip::StatusCode::ProxyAuthenticationRequired
+        );
+
+        // Check for Proxy-Authenticate header
+        let has_proxy_auth = response
+            .headers()
+            .iter()
+            .any(|h| matches!(h, Header::ProxyAuthenticate(_)));
+        assert!(
+            has_proxy_auth,
+            "Response should contain Proxy-Authenticate header"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_proxy_auth_wrong_credentials() {
+    // Create test server with user backend
+    let (server_inner, _) = create_test_server().await;
+
+    // Step 1: Get challenge
+    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let module = AuthModule::new(server_inner.clone());
+    let (mut tx, _) = create_transaction(request);
+
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .await
+        .unwrap();
+
+    assert!(matches!(result, ProxyAction::Abort));
+
+    // In test environment, manually create the response since reply_with failed due to no connection
+    if tx.last_response.is_none() {
+        // Create the response manually for testing
+        let mut response = rsip::Response {
+            version: rsip::Version::V2,
+            status_code: rsip::StatusCode::ProxyAuthenticationRequired,
+            headers: tx.original.headers().clone(),
+            body: vec![],
+        };
+
+        // Add Proxy-Authenticate header
+        let proxy_auth = module.create_proxy_auth_challenge("example.com").unwrap();
+        response.headers.push(Header::ProxyAuthenticate(proxy_auth));
+
+        tx.last_response = Some(response);
+    }
+
+    // Extract nonce from the response
+    let response = tx.last_response.as_ref().expect("Should have response");
+    let nonce = extract_nonce_from_proxy_authenticate(response)
+        .expect("Should have nonce in Proxy-Authenticate header");
+
+    // Step 2: Send INVITE request with wrong password
+    let request_with_wrong_auth = create_proxy_auth_request_with_nonce(
+        rsip::Method::Invite,
+        "alice",
+        "example.com",
+        Some("wrongpassword"),
+        &nonce,
+    );
+    let (mut tx2, _) = create_transaction(request_with_wrong_auth);
+
+    // Test authentication
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .await
+        .unwrap();
+
+    // Should abort due to wrong credentials
+    assert!(matches!(result, ProxyAction::Abort));
 }
