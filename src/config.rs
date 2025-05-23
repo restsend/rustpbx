@@ -2,6 +2,8 @@ use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use crate::proxy::user::SipUser;
 const USER_AGENT: &str = "rustpbx";
 
 #[derive(Parser, Debug)]
@@ -11,7 +13,7 @@ pub(crate) struct Cli {
     pub conf: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub http_addr: String,
     pub log_level: Option<String>,
@@ -25,7 +27,7 @@ pub struct Config {
     pub ice_servers: Option<Vec<IceServerItem>>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct UseragentConfig {
     pub addr: String,
     pub udp_port: u16,
@@ -40,12 +42,13 @@ pub struct UseragentConfig {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum UserBackendConfig {
-    Memory,
+    Memory {
+        users: Option<Vec<SipUser>>,
+    },
     Http {
         url: String,
         method: Option<String>,
         username_field: Option<String>,
-        password_field: Option<String>,
         realm_field: Option<String>,
         headers: Option<HashMap<String, String>>,
     },
@@ -81,7 +84,7 @@ pub enum LocatorConfig {
     },
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
@@ -101,7 +104,7 @@ pub struct ProxyConfig {
     pub locator: LocatorConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ConsoleConfig {
     pub prefix: String,
     pub username: Option<String>,
@@ -156,7 +159,7 @@ impl Default for ProxyConfig {
 
 impl Default for UserBackendConfig {
     fn default() -> Self {
-        Self::Memory
+        Self::Memory { users: None }
     }
 }
 

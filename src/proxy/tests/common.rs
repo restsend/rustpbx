@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Creates a test SIP server with a memory user backend and locator
 pub async fn create_test_server() -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
-    let user_backend = Box::new(MemoryUserBackend::new());
+    let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(ProxyConfig::default());
 
@@ -63,7 +63,7 @@ pub async fn create_test_server() -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
 pub async fn create_test_server_with_config(
     config: ProxyConfig,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
-    let user_backend = Box::new(MemoryUserBackend::new());
+    let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(config);
 
