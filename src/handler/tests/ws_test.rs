@@ -144,7 +144,6 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
                 tungstenite::Message::Binary(data) => {
                     // We have received PCM samples back from the server
                     let pcm_samples = bytes_to_samples(&data);
-                    info!("Received {} PCM samples from server", pcm_samples.len());
                 }
                 _ => {}
             }
