@@ -410,3 +410,125 @@ pub fn create_ban_request(
         body: vec![],
     }
 }
+
+/// Creates a test request with proper proxy authentication
+pub fn create_proxy_auth_request(
+    method: rsip::Method,
+    username: &str,
+    realm: &str,
+    password: Option<&str>,
+) -> rsip::Request {
+    // Use a fixed nonce for reproducibility in tests
+    create_proxy_auth_request_with_nonce(method, username, realm, password, "0123456789abcdef")
+}
+
+/// Creates a test request with proper proxy authentication
+pub fn create_proxy_auth_request_with_nonce(
+    method: rsip::Method,
+    username: &str,
+    realm: &str,
+    password: Option<&str>,
+    nonce: &str,
+) -> rsip::Request {
+    let host_with_port = rsip::HostWithPort {
+        host: realm.parse().unwrap(),
+        port: Some(5060.into()),
+    };
+
+    let uri = rsip::Uri {
+        scheme: Some(rsip::Scheme::Sip),
+        auth: Some(rsip::Auth {
+            user: username.to_string(),
+            password: None,
+        }),
+        host_with_port: host_with_port.clone(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let from = rsip::typed::From {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+    };
+
+    let to = rsip::typed::To {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![],
+    };
+
+    let via = rsip::headers::Via::new(format!(
+        "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
+        realm,
+        random_text(8)
+    ));
+
+    let call_id = rsip::headers::CallId::new(random_text(16));
+    let cseq = rsip::headers::typed::CSeq {
+        seq: 1u32.into(),
+        method: method.clone(),
+    };
+
+    let mut request = rsip::Request {
+        method: method.clone(),
+        uri: uri.clone(),
+        version: rsip::Version::V2,
+        headers: vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            call_id.into(),
+            cseq.into(),
+        ]
+        .into(),
+        body: vec![],
+    };
+
+    // Add Proxy-Authorization header if password is provided
+    if let Some(password) = password {
+        // Create digest exactly as verify_credentials function expects
+        let response = DigestGenerator {
+            username,
+            password,
+            algorithm: rsip::headers::auth::Algorithm::Md5,
+            nonce,
+            method: &method,
+            qop: None,
+            uri: &uri,
+            realm,
+        }
+        .compute();
+
+        // Format the Proxy-Authorization header exactly as expected by verification function
+        let uri_str = format!("sip:{}@{}", username, realm);
+        request.headers_mut().push(Header::ProxyAuthorization(
+            rsip::headers::ProxyAuthorization::new(
+                format!(
+                    "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+                    username, realm, nonce, uri_str, response
+                )
+            )
+        ));
+    }
+
+    request
+}
+
+/// Extracts nonce from Proxy-Authenticate header
+pub fn extract_nonce_from_proxy_authenticate(response: &rsip::Response) -> Option<String> {
+    for header in response.headers().iter() {
+        if let Header::ProxyAuthenticate(proxy_auth) = header {
+            let auth_str = proxy_auth.value();
+            // Parse the Digest authentication string to extract nonce
+            for part in auth_str.split(',') {
+                let part = part.trim();
+                if part.starts_with("nonce=") {
+                    let nonce = part.strip_prefix("nonce=").unwrap().trim_matches('"');
+                    return Some(nonce.to_string());
+                }
+            }
+        }
+    }
+    None
+}
