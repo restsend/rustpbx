@@ -19,6 +19,10 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 
 This project is currently in active development (WIP). The core functionality is being implemented and refined. We welcome contributions and feedback from the community.
 
+## Quick run
+```bash
+cargo run --bin rustpbx -- --conf config.toml.example
+```
 ## License
 
 MIT License

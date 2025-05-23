@@ -43,60 +43,82 @@ impl DbBackend {
 #[async_trait]
 impl UserBackend for DbBackend {
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
-        let id_column = match self.id_column {
-            Some(ref id_col) => format!("{},", id_col),
-            None => "".to_string(),
-        };
-        let enabled_column = match self.enabled_column {
-            Some(ref enabled_col) => format!(", {}", enabled_col),
-            None => "".to_string(),
-        };
+        // Build SELECT clause with optional columns
+        let mut select_columns = vec![self.username_column.clone(), self.password_column.clone()];
+
+        if let Some(ref id_col) = self.id_column {
+            select_columns.push(id_col.clone());
+        }
+
+        if let Some(ref enabled_col) = self.enabled_column {
+            select_columns.push(enabled_col.clone());
+        }
+
+        if let Some(ref realm_col) = self.realm_column {
+            select_columns.push(realm_col.clone());
+        }
+
+        let select_clause = select_columns.join(", ");
+
+        // Build WHERE clause
+        let mut where_clause = format!("{} = ?", self.username_column);
+        let mut bind_params: Vec<&str> = vec![username];
+
+        if let Some(realm) = realm {
+            if let Some(ref realm_col) = self.realm_column {
+                where_clause.push_str(&format!(" AND {} = ?", realm_col));
+                bind_params.push(realm);
+            }
+        }
+
         let query = format!(
-            "SELECT {} {}, {} {} FROM {} WHERE {} = $1",
-            id_column,
-            self.username_column,
-            self.password_column,
-            enabled_column,
-            self.table_name,
-            self.username_column
+            "SELECT {} FROM {} WHERE {}",
+            select_clause, self.table_name, where_clause
         );
 
-        let row = sqlx::query(&query)
-            .bind(username)
+        let mut sqlx_query = sqlx::query(&query);
+        for param in bind_params {
+            sqlx_query = sqlx_query.bind(param);
+        }
+
+        let row = sqlx_query
             .fetch_one(&self.db)
             .await
             .map_err(|e| anyhow!("Database query error: {}", e))?;
 
         // Map the database row to a SipUser
-        let id: i64 = row
-            .try_get(
-                self.id_column
-                    .as_ref()
-                    .unwrap_or(&"id".to_string())
-                    .as_str(),
-            )
-            .unwrap_or(0);
+        let id: i64 = if let Some(ref id_col) = self.id_column {
+            row.try_get(id_col.as_str()).unwrap_or(0)
+        } else {
+            0
+        };
+
         let db_username: String = row
             .try_get(self.username_column.as_str())
             .unwrap_or_default();
+
         let password: String = row
             .try_get(self.password_column.as_str())
             .unwrap_or_default();
-        let enabled: bool = row
-            .try_get(
-                self.enabled_column
-                    .as_ref()
-                    .unwrap_or(&"enabled".to_string())
-                    .as_str(),
-            )
-            .unwrap_or(true);
+
+        let enabled: bool = if let Some(ref enabled_col) = self.enabled_column {
+            row.try_get(enabled_col.as_str()).unwrap_or(true)
+        } else {
+            true
+        };
+
+        let db_realm: Option<String> = if let Some(ref realm_col) = self.realm_column {
+            row.try_get(realm_col.as_str()).ok()
+        } else {
+            None
+        };
 
         Ok(SipUser {
             id: id as u64,
             username: db_username,
             password: Some(password),
             enabled,
-            realm: realm.map(|r| r.to_string()),
+            realm: realm.map(|r| r.to_string()).or(db_realm),
         })
     }
 }

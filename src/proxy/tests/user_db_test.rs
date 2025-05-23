@@ -2,14 +2,12 @@ use crate::proxy::user::UserBackend;
 use crate::proxy::user_db::DbBackend;
 use md5::Md5;
 use sha1::Digest as Sha1Digest;
-use sqlx::AnyPool;
+use sqlx::SqlitePool;
+use tempfile;
 
-async fn setup_test_db() -> AnyPool {
+async fn setup_test_db() -> SqlitePool {
     // Use SQLite in-memory database for testing
-    let db = sqlx::any::AnyPoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
 
     // Create test table
     sqlx::query(
@@ -38,7 +36,7 @@ async fn setup_test_db() -> AnyPool {
     db
 }
 
-async fn create_hashed_password_test_data(db_pool: &AnyPool, table_name: &str, hash_type: &str) {
+async fn create_hashed_password_test_data(db_pool: &SqlitePool, table_name: &str, hash_type: &str) {
     // Create test table with hashed passwords
     sqlx::query(&format!(
         "CREATE TABLE {} (
@@ -147,21 +145,69 @@ async fn create_hashed_password_test_data(db_pool: &AnyPool, table_name: &str, h
 #[tokio::test]
 #[ignore]
 async fn test_db_backend() {
-    // Setup test database
-    let db = setup_test_db().await;
+    // Create a temporary file for the database
+    let temp_db_file = tempfile::NamedTempFile::new().unwrap();
+    let db_url = format!("sqlite:{}", temp_db_file.path().to_str().unwrap());
 
-    // Create backend with in-memory SQLite
-    let backend = DbBackend::new(
-        "sqlite::memory:".to_string(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+    // Setup the database directly with SQLite
+    let setup_db = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+
+    // Create test table
+    sqlx::query(
+        "CREATE TABLE users (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            realm TEXT
+        )",
     )
+    .execute(&setup_db)
     .await
     .unwrap();
+
+    // Insert test data
+    sqlx::query("INSERT INTO users (username, password, realm) VALUES (?, ?, ?), (?, ?, ?)")
+        .bind("testuser")
+        .bind("testpass")
+        .bind("example.com")
+        .bind("admin")
+        .bind("adminpass")
+        .bind("example.com")
+        .execute(&setup_db)
+        .await
+        .unwrap();
+
+    // Create custom users table for testing optional columns
+    sqlx::query(
+        "CREATE TABLE custom_users (
+                id INTEGER PRIMARY KEY,
+                user_name TEXT NOT NULL,
+                pass_word TEXT NOT NULL,
+                is_enabled INTEGER DEFAULT 1,
+                realm_name TEXT
+            )",
+    )
+    .execute(&setup_db)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO custom_users (user_name, pass_word, is_enabled, realm_name) VALUES (?, ?, ?, ?)")
+        .bind("customuser")
+        .bind("custompass")
+        .bind(1)
+        .bind("example.com")
+        .execute(&setup_db)
+        .await
+        .unwrap();
+
+    // Close the setup connection
+    setup_db.close().await;
+
+    // Create backend with the database URL (this will create its own connection)
+    let backend = DbBackend::new(db_url.clone(), None, None, None, None, None, None)
+        .await
+        .unwrap();
 
     // Test get_user
     let user = backend.get_user("testuser", None).await.unwrap();
@@ -169,41 +215,21 @@ async fn test_db_backend() {
     assert_eq!(user.password, Some("testpass".to_string()));
     assert!(user.enabled);
 
-    // Create a separate connection for the custom table tests
-    let test_db = sqlx::any::AnyPoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    // Test another user
+    let admin_user = backend.get_user("admin", None).await.unwrap();
+    assert_eq!(admin_user.username, "admin");
+    assert_eq!(admin_user.password, Some("adminpass".to_string()));
+    assert!(admin_user.enabled);
 
     // Test with custom table and column names
-    sqlx::query(
-        "CREATE TABLE custom_users (
-                id INTEGER PRIMARY KEY,
-                user_name TEXT NOT NULL,
-                pass_word TEXT NOT NULL,
-                is_enabled INTEGER DEFAULT 1
-            )",
-    )
-    .execute(&test_db)
-    .await
-    .unwrap();
-
-    sqlx::query("INSERT INTO custom_users (user_name, pass_word, is_enabled) VALUES (?, ?, ?)")
-        .bind("customuser")
-        .bind("custompass")
-        .bind(1)
-        .execute(&test_db)
-        .await
-        .unwrap();
-
     let custom_backend = DbBackend::new(
-        "sqlite::memory:".to_string(),
+        db_url.clone(),
         Some("custom_users".to_string()),
         Some("id".to_string()),
         Some("user_name".to_string()),
         Some("pass_word".to_string()),
         Some("is_enabled".to_string()),
-        None,
+        Some("realm_name".to_string()),
     )
     .await
     .unwrap();
@@ -214,45 +240,11 @@ async fn test_db_backend() {
     assert_eq!(user.password, Some("custompass".to_string()));
     assert!(user.enabled);
 
-    // Test with different hash algorithms
-    for (hash_type, table_name) in [
-        ("md5", "md5_users"),
-        ("sha1", "sha1_users"),
-        ("sha256", "sha256_users"),
-        ("sha512", "sha512_users"),
-        ("md5_salt", "md5_salt_users"),
-    ] {
-        let salt = if hash_type == "md5_salt" {
-            "salt123"
-        } else {
-            ""
-        };
-
-        // Create a new connection for each hash test
-        let hash_db = sqlx::any::AnyPoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-
-        // Create table with hashed password
-        create_hashed_password_test_data(
-            &hash_db,
-            table_name,
-            hash_type.replace("_salt", "").as_str(),
-        )
-        .await;
-
-        // Create backend with hash algorithm
-        let hash_backend = DbBackend::new(
-            "sqlite::memory:".to_string(),
-            Some(table_name.to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+    // Test with realm filtering
+    let user_with_realm = custom_backend
+        .get_user("customuser", Some("example.com"))
         .await
         .unwrap();
-    }
+    assert_eq!(user_with_realm.username, "customuser");
+    assert_eq!(user_with_realm.realm, Some("example.com".to_string()));
 }

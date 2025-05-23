@@ -24,6 +24,8 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
+    sqlx::any::install_default_drivers();
+
     dotenv().ok();
     let cli = Cli::parse();
 
