@@ -8,13 +8,29 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::info;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SipUser {
+    #[serde(default)]
     pub id: u64,
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     pub username: String,
     pub password: Option<String>,
     pub realm: Option<String>,
+}
+fn default_enabled() -> bool {
+    true
+}
+impl Default for SipUser {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            enabled: true,
+            username: "".to_string(),
+            password: None,
+            realm: None,
+        }
+    }
 }
 
 impl SipUser {
@@ -110,8 +126,8 @@ impl MemoryUserBackend {
 
     pub fn new(builtin_users: Option<Vec<SipUser>>) -> Self {
         info!(
-            "Creating MemoryUserBackend, users: {:?}",
-            builtin_users.as_ref().map(|us| us.len())
+            "Creating MemoryUserBackend, users: {}",
+            builtin_users.as_ref().map(|us| us.len()).unwrap_or(0)
         );
         let mut users = HashMap::new();
         if let Some(builtin_users) = builtin_users {

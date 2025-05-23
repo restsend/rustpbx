@@ -100,7 +100,9 @@ pub struct ProxyConfig {
     pub denies: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
+    #[serde(default)]
     pub user_backend: UserBackendConfig,
+    #[serde(default)]
     pub locator: LocatorConfig,
 }
 
@@ -212,5 +214,17 @@ impl Config {
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
         )?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_load() {
+        let config = Config::default();
+        let config_str = toml::to_string(&config).unwrap();
+        println!("{}", config_str);
     }
 }

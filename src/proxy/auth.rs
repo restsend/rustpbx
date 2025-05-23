@@ -47,7 +47,6 @@ impl AuthModule {
                 .await
             {
                 Ok(stored_user) => {
-                    debug!("Found user in backend: enabled={}", stored_user.enabled);
                     if !stored_user.enabled {
                         info!(username = user.username, realm = ?user.realm, "User is disabled");
                         return Ok(false);
@@ -65,8 +64,7 @@ impl AuthModule {
                 Err(e) => {
                     info!(
                         username = user.username,
-                        realm = ?user.realm, "User not found: {}, continuing with default auth check", e
-                    );
+                        ?user.realm, "User not found: {}", e);
                     Ok(false)
                 }
             }
@@ -84,28 +82,25 @@ impl AuthModule {
         if let Some(auth_header) =
             rsip::header_opt!(tx.original.headers.iter(), Header::Authorization)
         {
-            debug!("Found Authorization header");
-
-            let user = match SipUser::try_from(&tx.original) {
-                Ok(user) => user,
-                Err(e) => return Err(anyhow!("Failed to extract user from request: {}", e)),
-            };
             let challenge = auth_header.typed()?;
+            let user = SipUser {
+                username: challenge.username.to_string(),
+                realm: Some(challenge.realm.to_string()),
+                ..Default::default()
+            };
             return Ok(Some((user, challenge)));
         }
-
         // Then try Proxy-Authorization header
         if let Some(proxy_auth_header) =
             rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
         {
-            debug!("Found Proxy-Authorization header");
-
-            let user = match SipUser::try_from(&tx.original) {
-                Ok(user) => user,
-                Err(e) => return Err(anyhow!("Failed to extract user from request: {}", e)),
-            };
             let challenge = proxy_auth_header.typed()?;
-            return Ok(Some((user, challenge.0))); // ProxyAuthorization contains Authorization
+            let user = SipUser {
+                username: challenge.0.username.to_string(),
+                realm: Some(challenge.0.realm.to_string()),
+                ..Default::default()
+            };
+            return Ok(Some((user, challenge.0)));
         }
 
         Ok(None)

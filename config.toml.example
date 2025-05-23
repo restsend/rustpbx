@@ -3,15 +3,24 @@
 # cargo run . --bin rustpbx --conf config.toml
 
 http_addr = "0.0.0.0:8080"
-log_level = "debug"
-log_file = "/var/log/rustpbx.log"
+log_level = "info"
+#log_file = "/tmp/rustpbx.log"
 stun_server = "stun.l.google.com:19302"
-recorder_path = "/app/recorders"
-media_cache_path = "/app/mediacache"
+recorder_path = "/tmp/recorders"
+media_cache_path = "/tmp/mediacache"
 
-[sip]
+[useragent]
 addr="0.0.0.0"
 udp_port=13050 # don't use 5060
 
-# Replace your EIP here for public ip
-# external_ip="1.2.3.4"
+[proxy]
+modules = ["ban", "auth", "registrar", "cdr", "call"]
+addr = "0.0.0.0"
+udp_port = 5060
+registrar_expires = 60
+
+[proxy.user_backend]
+type = "memory"
+users = [
+    { username = "test", password = "test", realm = "127.0.0.1" },
+]
