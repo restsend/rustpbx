@@ -10,7 +10,6 @@ pub struct HttpUserBackend {
     url: String,
     method: Method,
     username_field: String,
-    password_field: String,
     realm_field: String,
     headers: HashMap<String, String>,
     client: Client,
@@ -21,7 +20,6 @@ impl HttpUserBackend {
         url: &str,
         method: &Option<String>,
         username_field: &Option<String>,
-        password_field: &Option<String>,
         realm_field: &Option<String>,
         headers: &Option<HashMap<String, String>>,
     ) -> Self {
@@ -36,11 +34,6 @@ impl HttpUserBackend {
         let username_field = username_field
             .as_ref()
             .map_or_else(|| "username".to_string(), |s| s.clone());
-
-        let password_field = password_field
-            .as_ref()
-            .map_or_else(|| "password".to_string(), |s| s.clone());
-
         let realm_field = realm_field
             .as_ref()
             .map_or_else(|| "realm".to_string(), |s| s.clone());
@@ -51,7 +44,6 @@ impl HttpUserBackend {
             url: url.to_string(),
             method,
             username_field,
-            password_field,
             realm_field,
             headers,
             client: Client::new(),
@@ -134,14 +126,12 @@ mod tests {
             "http://example.com/auth",
             &Some("POST".to_string()),
             &Some("username".to_string()),
-            &Some("password".to_string()),
             &None,
             &None,
         );
 
         assert_eq!(backend.url, "http://example.com/auth");
         assert_eq!(backend.username_field, "username");
-        assert_eq!(backend.password_field, "password");
         assert!(backend.headers.is_empty());
 
         // Test with custom headers
@@ -153,13 +143,11 @@ mod tests {
             &None,
             &None,
             &None,
-            &None,
             &Some(headers.clone()),
         );
 
         assert_eq!(backend.url, "http://example.com/auth");
         assert_eq!(backend.username_field, "username");
-        assert_eq!(backend.password_field, "password");
         assert_eq!(backend.headers, headers);
     }
 }

@@ -35,7 +35,7 @@ async fn test_proxy_full_flow() {
     ]);
 
     // Create a user backend with a test user
-    let user_backend = Box::new(MemoryUserBackend::new());
+    let user_backend = Box::new(MemoryUserBackend::new(None));
     let test_user = SipUser {
         id: 1,
         username: "testuser".to_string(),

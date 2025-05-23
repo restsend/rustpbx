@@ -90,15 +90,39 @@ pub struct MemoryUserBackend {
 
 impl MemoryUserBackend {
     pub fn create(
-        _config: Arc<ProxyConfig>,
+        config: Arc<ProxyConfig>,
     ) -> Pin<Box<dyn Future<Output = Result<Box<dyn UserBackend>>> + Send>> {
-        Box::pin(async move { Ok(Box::new(MemoryUserBackend::new()) as Box<dyn UserBackend>) })
+        Box::pin(async move {
+            let builtin_users = match &config.user_backend {
+                UserBackendConfig::Memory { users } => users.clone(),
+                _ => None,
+            };
+            Ok(Box::new(MemoryUserBackend::new(builtin_users)) as Box<dyn UserBackend>)
+        })
+    }
+    fn get_identifier(user: &str, realm: Option<&str>) -> String {
+        if let Some(realm) = realm {
+            format!("{}@{}", user, realm)
+        } else {
+            user.to_string()
+        }
     }
 
-    pub fn new() -> Self {
-        info!("Creating MemoryUserBackend");
+    pub fn new(builtin_users: Option<Vec<SipUser>>) -> Self {
+        info!(
+            "Creating MemoryUserBackend, users: {:?}",
+            builtin_users.as_ref().map(|us| us.len())
+        );
+        let mut users = HashMap::new();
+        if let Some(builtin_users) = builtin_users {
+            for user in builtin_users {
+                let identifier =
+                    Self::get_identifier(user.username.as_str(), user.realm.as_deref());
+                users.insert(identifier, user);
+            }
+        }
         Self {
-            users: Mutex::new(HashMap::new()),
+            users: Mutex::new(users),
         }
     }
     pub async fn create_user(&self, user: SipUser) -> Result<()> {
@@ -157,11 +181,7 @@ impl MemoryUserBackend {
 #[async_trait]
 impl UserBackend for MemoryUserBackend {
     fn get_identifier(&self, user: &str, realm: Option<&str>) -> String {
-        if let Some(realm) = realm {
-            format!("{}@{}", user, realm)
-        } else {
-            user.to_string()
-        }
+        Self::get_identifier(user, realm)
     }
 
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
@@ -188,22 +208,13 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             url,
             method,
             username_field,
-            password_field,
             realm_field,
             headers,
         } => {
-            let backend = HttpUserBackend::new(
-                url,
-                method,
-                username_field,
-                password_field,
-                realm_field,
-                headers,
-            );
+            let backend = HttpUserBackend::new(url, method, username_field, realm_field, headers);
             Ok(Box::new(backend))
         }
-
-        UserBackendConfig::Memory => Ok(Box::new(MemoryUserBackend::new())),
+        UserBackendConfig::Memory { users } => Ok(Box::new(MemoryUserBackend::new(users.clone()))),
         UserBackendConfig::Plain { path } => {
             let backend = PlainTextBackend::new(path);
             backend.load().await?;
