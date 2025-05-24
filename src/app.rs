@@ -1,4 +1,5 @@
 use crate::{
+    callrecord::{CallRecordManager, CallRecordManagerBuilder},
     config::Config,
     handler::call::ActiveCallRef,
     media::engine::StreamEngine,
@@ -38,6 +39,7 @@ pub struct AppStateInner {
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
+    pub callrecord: Arc<CallRecordManager>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -138,6 +140,14 @@ impl AppStateBuilder {
             };
             Arc::new(proxy)
         };
+
+        let callrecord = Arc::new(
+            CallRecordManagerBuilder::new()
+                .with_cancel_token(token.child_token())
+                .with_config(config.call_record.clone().unwrap_or_default())
+                .build(),
+        );
+
         Ok(Arc::new(AppStateInner {
             config,
             useragent,
@@ -145,6 +155,7 @@ impl AppStateBuilder {
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             stream_engine,
             proxy,
+            callrecord,
         }))
     }
 }
