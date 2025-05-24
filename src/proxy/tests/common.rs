@@ -83,7 +83,7 @@ pub fn create_transaction(request: rsip::Request) -> (Transaction, Arc<EndpointI
     (tx, endpoint_inner)
 }
 
-pub(super) fn create_test_request(
+pub fn create_test_request(
     method: rsip::Method,
     username: &str,
     password: Option<&str>,
@@ -215,7 +215,7 @@ pub fn create_proxy_auth_request_with_nonce(
     username: &str,
     realm: &str,
     password: Option<&str>,
-    nonce: &str,
+    _nonce: &str,
 ) -> rsip::Request {
     create_auth_request(method, username, realm, password.unwrap_or(""))
 }
