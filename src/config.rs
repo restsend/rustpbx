@@ -121,6 +121,44 @@ pub enum CallRecordConfig {
     },
 }
 
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaProxyMode {
+    /// Do not handle media proxy
+    None,
+    /// Only handle NAT (private IP addresses)
+    NatOnly,
+    /// All media goes through proxy
+    All,
+}
+
+impl Default for MediaProxyMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct MediaProxyConfig {
+    pub mode: MediaProxyMode,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
+    pub external_ip: Option<String>,
+    pub force_proxy: Option<Vec<String>>, // List of IP addresses to always proxy
+}
+
+impl Default for MediaProxyConfig {
+    fn default() -> Self {
+        Self {
+            mode: MediaProxyMode::None,
+            rtp_start_port: Some(20000),
+            rtp_end_port: Some(30000),
+            external_ip: None,
+            force_proxy: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
@@ -141,6 +179,8 @@ pub struct ProxyConfig {
     pub user_backend: UserBackendConfig,
     #[serde(default)]
     pub locator: LocatorConfig,
+    #[serde(default)]
+    pub media_proxy: MediaProxyConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -176,6 +216,7 @@ impl Default for ProxyConfig {
                 "auth".to_string(),
                 "registrar".to_string(),
                 "cdr".to_string(),
+                "mediaproxy".to_string(),
                 "call".to_string(),
             ]),
             external_ip: None,
@@ -192,6 +233,7 @@ impl Default for ProxyConfig {
             registrar_expires: Some(60),
             user_backend: UserBackendConfig::default(),
             locator: LocatorConfig::default(),
+            media_proxy: MediaProxyConfig::default(),
         }
     }
 }
