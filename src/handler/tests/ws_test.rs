@@ -1,4 +1,6 @@
 use crate::app::{AppState, AppStateBuilder};
+use crate::callrecord::CallRecordManagerBuilder;
+use crate::config::{Config, ProxyConfig, UseragentConfig};
 use crate::event::SessionEvent;
 use crate::handler::{CallOption, Command};
 use crate::media::codecs::{bytes_to_samples, samples_to_bytes};
@@ -14,6 +16,7 @@ use axum::{
 };
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::{select, time};
@@ -43,13 +46,48 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
         .try_init()
         .ok();
 
+    // Create a custom config with different ports to avoid conflicts
+    let mut config = Config::default();
+    // Use different static ports for this test to avoid conflicts
+    let ua_port = 25061; // Different from default 25060
+    let proxy_port = 5061; // Different from default 5060
+
+    config.ua = Some(UseragentConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: ua_port,
+        external_ip: None,
+        rtp_start_port: Some(12000),
+        rtp_end_port: Some(42000),
+        stun_server: None,
+        useragent: Some("rustpbx-test".to_string()),
+    });
+
+    config.proxy = Some(ProxyConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: Some(proxy_port),
+        ..Default::default()
+    });
+
+    // Create a minimal state with call record manager but without proxy/useragent
+    let callrecord = Arc::new(
+        CallRecordManagerBuilder::new()
+            .with_config(config.call_record.clone().unwrap_or_default())
+            .build(),
+    );
+
     let app = Router::new()
         .route(
             "/call",
             axum::routing::get(crate::handler::handler::ws_handler),
         )
         .fallback(handle_error)
-        .with_state(AppStateBuilder::new().build().await?);
+        .with_state(
+            AppStateBuilder::new()
+                .config(config)
+                .with_callrecord(callrecord)
+                .build()
+                .await?,
+        );
 
     // Start the server
     let listener = match TcpListener::bind("127.0.0.1:0").await {

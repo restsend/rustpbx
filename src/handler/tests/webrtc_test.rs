@@ -1,4 +1,6 @@
 use crate::app::{AppState, AppStateBuilder};
+use crate::callrecord::CallRecordManagerBuilder;
+use crate::config::{Config, ProxyConfig, UseragentConfig};
 use crate::event::SessionEvent;
 use crate::media::codecs::g722::G722Encoder;
 use crate::media::codecs::resample::resample_mono;
@@ -55,13 +57,48 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .try_init()
         .ok();
 
+    // Create a custom config with different ports to avoid conflicts
+    let mut config = Config::default();
+    // Use different static ports for this test to avoid conflicts
+    let ua_port = 25062; // Different from default 25060 and ws_test 25061
+    let proxy_port = 5062; // Different from default 5060 and ws_test 5061
+
+    config.ua = Some(UseragentConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: ua_port,
+        external_ip: None,
+        rtp_start_port: Some(12000),
+        rtp_end_port: Some(42000),
+        stun_server: None,
+        useragent: Some("rustpbx-test".to_string()),
+    });
+
+    config.proxy = Some(ProxyConfig {
+        addr: "127.0.0.1".to_string(),
+        udp_port: Some(proxy_port),
+        ..Default::default()
+    });
+
+    // Create a minimal state with call record manager
+    let callrecord = Arc::new(
+        CallRecordManagerBuilder::new()
+            .with_config(config.call_record.clone().unwrap_or_default())
+            .build(),
+    );
+
     let app = Router::new()
         .route(
             "/ws",
             axum::routing::get(crate::handler::handler::webrtc_handler),
         )
         .fallback(handle_error)
-        .with_state(AppStateBuilder::new().build().await?);
+        .with_state(
+            AppStateBuilder::new()
+                .config(config)
+                .with_callrecord(callrecord)
+                .build()
+                .await?,
+        );
 
     // Start the server
     let listener = TcpListener::bind("127.0.0.1:0").await?;

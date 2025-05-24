@@ -7,6 +7,12 @@ use std::{
 
 pub struct ClientIp(String);
 
+impl ClientIp {
+    pub fn new(ip: String) -> Self {
+        ClientIp(ip)
+    }
+}
+
 impl<S> FromRequestParts<S> for ClientIp
 where
     S: Send + Sync,

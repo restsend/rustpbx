@@ -8,7 +8,7 @@ use object_store::{
     path::Path as ObjectPath, ObjectStore,
 };
 use reqwest;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::HashMap,
     future::Future,
@@ -21,13 +21,65 @@ use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+#[cfg(test)]
+mod tests;
+/// Custom serialization module for SystemTime to ISO 8601 format
+///
+/// This module provides custom serialization and deserialization for `SystemTime`
+/// to ensure it's formatted as ISO 8601 (RFC 3339) compliant strings in JSON.
+///
+/// ## Usage
+///
+/// Add the `#[serde(with = "iso8601_systemtime")]` attribute to any `SystemTime` field:
+///
+/// ```rust
+/// use std::time::SystemTime;
+/// use serde::{Serialize, Deserialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct MyStruct {
+///     #[serde(with = "iso8601_systemtime")]
+///     created_at: SystemTime,
+/// }
+/// ```
+///
+/// ## Output format
+///
+/// The serialized format follows ISO 8601 / RFC 3339:
+/// - `"2024-01-01T00:00:00+00:00"` (with timezone)
+/// - `"2024-01-01T12:30:45.123456789Z"` (with nanoseconds if present)
+mod iso8601_systemtime {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    /// Serialize SystemTime to ISO 8601 / RFC 3339 format
+    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let datetime: DateTime<Utc> = (*time).into();
+        serializer.serialize_str(&datetime.to_rfc3339())
+    }
+
+    /// Deserialize ISO 8601 / RFC 3339 format to SystemTime
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let datetime = DateTime::parse_from_rfc3339(&s).map_err(serde::de::Error::custom)?;
+        Ok(datetime.with_timezone(&Utc).into())
+    }
+}
+
 pub type CallRecordSender = tokio::sync::mpsc::UnboundedSender<CallRecord>;
 pub type CallRecordReceiver = tokio::sync::mpsc::UnboundedReceiver<CallRecord>;
 
 pub type FnSaveCallRecord = Arc<
     Box<
         dyn Fn(
-                &CancellationToken,
+                CancellationToken,
+                Arc<dyn CallRecordFormatter>,
                 Arc<CallRecordConfig>,
                 CallRecord,
             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
@@ -41,7 +93,9 @@ pub struct CallRecord {
     pub call_type: ActiveCallType,
     pub option: CallOption,
     pub call_id: String,
+    #[serde(with = "iso8601_systemtime")]
     pub start_time: SystemTime,
+    #[serde(with = "iso8601_systemtime")]
     pub end_time: SystemTime,
     pub duration: u64,
     pub caller: String,
@@ -59,7 +113,9 @@ pub struct CallRecordMedia {
     pub path: String,
     pub size: u64,
     pub duration: u64,
+    #[serde(with = "iso8601_systemtime")]
     pub start_time: SystemTime,
+    #[serde(with = "iso8601_systemtime")]
     pub end_time: SystemTime,
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -79,6 +135,29 @@ pub enum CallRecordHangupReason {
     Failed(u16, String),
     Other(String),
 }
+pub trait CallRecordFormatter: Send + Sync {
+    fn format(&self, record: &CallRecord) -> Result<String>;
+    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> Result<String>;
+}
+
+pub struct DefaultCallRecordFormatter;
+impl CallRecordFormatter for DefaultCallRecordFormatter {
+    fn format(&self, record: &CallRecord) -> Result<String> {
+        Ok(serde_json::to_string(record)?)
+    }
+    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> Result<String> {
+        let file_name = Path::new(&media.path)
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+            .to_string_lossy()
+            .to_string();
+
+        Ok(format!(
+            "{}/media/{}/{}",
+            record.call_id, media.track_id, file_name
+        ))
+    }
+}
 
 pub struct CallRecordManager {
     pub sender: CallRecordSender,
@@ -86,12 +165,14 @@ pub struct CallRecordManager {
     cancel_token: CancellationToken,
     receiver: CallRecordReceiver,
     saver_fn: FnSaveCallRecord,
+    formatter: Arc<dyn CallRecordFormatter>,
 }
 
 pub struct CallRecordManagerBuilder {
     pub cancel_token: Option<CancellationToken>,
     pub config: Option<CallRecordConfig>,
     saver_fn: Option<FnSaveCallRecord>,
+    formatter: Option<Arc<dyn CallRecordFormatter>>,
 }
 
 impl CallRecordManagerBuilder {
@@ -100,6 +181,7 @@ impl CallRecordManagerBuilder {
             cancel_token: None,
             config: None,
             saver_fn: None,
+            formatter: None,
         }
     }
 
@@ -118,6 +200,11 @@ impl CallRecordManagerBuilder {
         self
     }
 
+    pub fn with_formatter(mut self, formatter: Arc<dyn CallRecordFormatter>) -> Self {
+        self.formatter = Some(formatter);
+        self
+    }
+
     pub fn build(self) -> CallRecordManager {
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = Arc::new(self.config.unwrap_or_default());
@@ -125,6 +212,9 @@ impl CallRecordManagerBuilder {
         let saver_fn = self
             .saver_fn
             .unwrap_or_else(|| Arc::new(Box::new(CallRecordManager::default_saver)));
+        let formatter = self
+            .formatter
+            .unwrap_or_else(|| Arc::new(DefaultCallRecordFormatter));
 
         match config.as_ref() {
             CallRecordConfig::Local { root } => {
@@ -148,21 +238,23 @@ impl CallRecordManagerBuilder {
             receiver,
             config,
             saver_fn,
+            formatter,
         }
     }
 }
 
 impl CallRecordManager {
     fn default_saver(
-        _cancel_token: &CancellationToken,
+        cancel_token: CancellationToken,
+        formatter: Arc<dyn CallRecordFormatter>,
         config: Arc<CallRecordConfig>,
         record: CallRecord,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             let start_time = Instant::now();
-            let file_content = serde_json::to_string(&record).unwrap();
             let r = match config.as_ref() {
                 CallRecordConfig::Local { root } => {
+                    let file_content = formatter.format(&record)?;
                     let file_name = Path::new(&root).join(format!("{}.json", record.call_id));
                     let mut file = File::create(&file_name).await?;
                     file.write_all(file_content.as_bytes()).await?;
@@ -180,7 +272,16 @@ impl CallRecordManager {
                     with_media,
                 } => {
                     Self::save_with_s3_like(
-                        vendor, bucket, region, access_key, secret_key, endpoint, root, with_media,
+                        cancel_token.child_token(),
+                        formatter,
+                        vendor,
+                        bucket,
+                        region,
+                        access_key,
+                        secret_key,
+                        endpoint,
+                        root,
+                        with_media,
                         &record,
                     )
                     .await
@@ -189,7 +290,17 @@ impl CallRecordManager {
                     url,
                     headers,
                     with_media,
-                } => Self::save_with_http(url, headers, with_media, &record).await,
+                } => {
+                    Self::save_with_http(
+                        cancel_token.child_token(),
+                        formatter,
+                        url,
+                        headers,
+                        with_media,
+                        &record,
+                    )
+                    .await
+                }
             };
             let file_name = match r {
                 Ok(file_name) => file_name,
@@ -210,6 +321,8 @@ impl CallRecordManager {
     }
 
     async fn save_with_http(
+        cancel_token: CancellationToken,
+        formatter: Arc<dyn CallRecordFormatter>,
         url: &String,
         headers: &Option<HashMap<String, String>>,
         with_media: &Option<bool>,
@@ -218,7 +331,7 @@ impl CallRecordManager {
         let client = reqwest::Client::new();
 
         // Serialize call record to JSON
-        let call_log_json = serde_json::to_string(record)?;
+        let call_log_json = formatter.format(record)?;
 
         // Create multipart form
         let mut form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
@@ -259,18 +372,21 @@ impl CallRecordManager {
             }
         }
 
-        // Build request
         let mut request = client.post(url).multipart(form);
-
-        // Add custom headers if provided
         if let Some(headers_map) = headers {
             for (key, value) in headers_map {
                 request = request.header(key, value);
             }
         }
 
-        // Send request
-        let response = request.send().await?;
+        let response = select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow::anyhow!("CallRecordManager cancelled"));
+            }
+            response= request.send() => {
+                response?
+            }
+        };
 
         if response.status().is_success() {
             let response_text = response.text().await.unwrap_or_default();
@@ -285,6 +401,8 @@ impl CallRecordManager {
     }
 
     async fn save_with_s3_like(
+        cancel_token: CancellationToken,
+        formatter: Arc<dyn CallRecordFormatter>,
         vendor: &S3Vendor,
         bucket: &String,
         region: &String,
@@ -341,7 +459,7 @@ impl CallRecordManager {
         };
 
         // Serialize call record to JSON
-        let call_log_json = serde_json::to_string(record)?;
+        let call_log_json = formatter.format(record)?;
 
         // Upload call log JSON
         let json_path = ObjectPath::from(format!(
@@ -349,7 +467,11 @@ impl CallRecordManager {
             root.trim_end_matches('/'),
             record.call_id
         ));
-        object_store.put(&json_path, call_log_json.into()).await?;
+
+        select! {
+            _ = cancel_token.cancelled() => {}
+            _ = object_store.put(&json_path, call_log_json.into()) =>{}
+        };
 
         let mut uploaded_files = vec![json_path.to_string()];
 
@@ -359,21 +481,14 @@ impl CallRecordManager {
                 if Path::new(&media.path).exists() {
                     match tokio::fs::read(&media.path).await {
                         Ok(file_content) => {
-                            let file_name = Path::new(&media.path)
-                                .file_name()
-                                .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
-                                .to_string_lossy()
-                                .to_string();
-
-                            let media_path = ObjectPath::from(format!(
-                                "{}/media/{}/{}",
-                                root.trim_end_matches('/'),
-                                record.call_id,
-                                file_name
-                            ));
-
-                            object_store.put(&media_path, file_content.into()).await?;
-                            uploaded_files.push(media_path.to_string());
+                            let media_path =
+                                ObjectPath::from(formatter.format_media_path(record, media)?);
+                            select! {
+                                _ = cancel_token.cancelled() => {}
+                                _ = object_store.put(&media_path, file_content.into()) => {
+                                    uploaded_files.push(media_path.to_string());
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to read media file {}: {}", media.path, e);
@@ -400,6 +515,7 @@ impl CallRecordManager {
             }
             _ = Self::recv_loop(
                 token,
+                self.formatter.clone(),
                 self.config.clone(),
                 self.saver_fn.clone(),
                 &mut self.receiver,
@@ -411,6 +527,7 @@ impl CallRecordManager {
 
     async fn recv_loop(
         cancel_token: CancellationToken,
+        formatter: Arc<dyn CallRecordFormatter>,
         config: Arc<CallRecordConfig>,
         saver_fn: FnSaveCallRecord,
         receiver: &mut CallRecordReceiver,
@@ -419,12 +536,13 @@ impl CallRecordManager {
             let cancel_token_ref = cancel_token.clone();
             let save_fn_ref = saver_fn.clone();
             let config_ref = config.clone();
+            let formatter_ref = formatter.clone();
             tokio::spawn(async move {
                 select! {
                     _ = cancel_token_ref.cancelled() => {
                         info!("CallRecordManager cancelled");
                     }
-                    r = save_fn_ref(&cancel_token_ref, config_ref, record) => {
+                    r = save_fn_ref(cancel_token_ref.clone(), formatter_ref, config_ref, record) => {
                         match r {
                             Ok(_) => {
                             }
@@ -437,337 +555,5 @@ impl CallRecordManager {
             });
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    #[tokio::test]
-    async fn test_save_with_http_without_media() {
-        // Create a test CallRecord
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_call_123".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 60,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![],
-            extras,
-        };
-
-        // Test without media (should not fail if no server available)
-        let url = "http://httpbin.org/post".to_string();
-        let headers = None;
-        let with_media = Some(false);
-
-        // This test will only pass if httpbin.org is available
-        // In production, you might want to use a mock server
-        let result = CallRecordManager::save_with_http(&url, &headers, &with_media, &record).await;
-
-        // We expect this to succeed for the JSON upload
-        if result.is_ok() {
-            println!("HTTP upload test passed: {}", result.unwrap());
-        } else {
-            println!(
-                "HTTP upload test failed (expected if no internet): {:?}",
-                result.err()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_save_with_http_with_media() {
-        // Create a temporary media file
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let test_content = b"fake audio content";
-        temp_file.write_all(test_content).unwrap();
-        temp_file.flush().unwrap();
-
-        let media = CallRecordMedia {
-            track_id: "track_001".to_string(),
-            r#type: "audio/wav".to_string(),
-            path: temp_file.path().to_string_lossy().to_string(),
-            size: test_content.len() as u64,
-            duration: 5000,
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            extra: HashMap::new(),
-        };
-
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_call_with_media_456".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 120,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![media],
-            extras,
-        };
-
-        // Test with media
-        let url = "http://httpbin.org/post".to_string();
-        let headers = None;
-        let with_media = Some(true);
-
-        let result = CallRecordManager::save_with_http(&url, &headers, &with_media, &record).await;
-
-        if result.is_ok() {
-            println!("HTTP upload with media test passed: {}", result.unwrap());
-        } else {
-            println!(
-                "HTTP upload with media test failed (expected if no internet): {:?}",
-                result.err()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_save_with_http_with_custom_headers() {
-        let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer test_token".to_string());
-        headers.insert("X-Custom-Header".to_string(), "test_value".to_string());
-
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_call_headers_789".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 30,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![],
-            extras,
-        };
-
-        let url = "http://httpbin.org/post".to_string();
-        let with_media = Some(false);
-
-        let result =
-            CallRecordManager::save_with_http(&url, &Some(headers), &with_media, &record).await;
-
-        if result.is_ok() {
-            println!("HTTP upload with headers test passed: {}", result.unwrap());
-        } else {
-            println!(
-                "HTTP upload with headers test failed (expected if no internet): {:?}",
-                result.err()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_save_with_s3_like_with_custom_headers() {
-        let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer test_token".to_string());
-        headers.insert("X-Custom-Header".to_string(), "test_value".to_string());
-
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_call_headers_789".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 30,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![],
-            extras,
-        };
-
-        let url = "http://httpbin.org/post".to_string();
-        let with_media = Some(false);
-
-        let result =
-            CallRecordManager::save_with_http(&url, &Some(headers), &with_media, &record).await;
-
-        if result.is_ok() {
-            println!("HTTP upload with headers test passed: {}", result.unwrap());
-        } else {
-            println!(
-                "HTTP upload with headers test failed (expected if no internet): {:?}",
-                result.err()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_save_with_s3_like_memory_store() {
-        // Test using memory store for S3-like functionality without real cloud storage
-        let vendor = crate::config::S3Vendor::Minio;
-        let bucket = "test-bucket".to_string();
-        let region = "us-east-1".to_string();
-        let access_key = "minioadmin".to_string();
-        let secret_key = "minioadmin".to_string();
-        let endpoint = "http://localhost:9000".to_string(); // Local minio endpoint
-        let root = "test-records".to_string();
-        let with_media = Some(false);
-
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_s3_call_123".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 60,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![],
-            extras,
-        };
-
-        // This test will only succeed if there's a local minio instance running
-        // In real scenarios, this would use actual cloud storage credentials
-        let result = CallRecordManager::save_with_s3_like(
-            &vendor,
-            &bucket,
-            &region,
-            &access_key,
-            &secret_key,
-            &endpoint,
-            &root,
-            &with_media,
-            &record,
-        )
-        .await;
-
-        // We expect this might fail in test environment without real S3 storage
-        match result {
-            Ok(message) => println!("S3 upload test passed: {}", message),
-            Err(e) => println!(
-                "S3 upload test failed (expected without real S3 setup): {:?}",
-                e
-            ),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_save_with_s3_like_with_media() {
-        // Create a temporary media file
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let test_content = b"fake audio content for S3 test";
-        temp_file.write_all(test_content).unwrap();
-        temp_file.flush().unwrap();
-
-        let media = CallRecordMedia {
-            track_id: "s3_track_001".to_string(),
-            r#type: "audio/wav".to_string(),
-            path: temp_file.path().to_string_lossy().to_string(),
-            size: test_content.len() as u64,
-            duration: 5000,
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            extra: HashMap::new(),
-        };
-
-        let mut extras = HashMap::new();
-        extras.insert(
-            "test_key".to_string(),
-            serde_json::Value::String("test_value".to_string()),
-        );
-
-        let record = CallRecord {
-            call_type: crate::handler::call::ActiveCallType::Sip,
-            option: crate::handler::CallOption::default(),
-            call_id: "test_s3_media_456".to_string(),
-            start_time: SystemTime::now(),
-            end_time: SystemTime::now(),
-            duration: 120,
-            caller: "+1234567890".to_string(),
-            callee: "+0987654321".to_string(),
-            status_code: 200,
-            hangup_reason: CallRecordHangupReason::ByCaller,
-            recorder: vec![media],
-            extras,
-        };
-
-        // Test with different S3 vendors
-        let test_cases = vec![
-            (crate::config::S3Vendor::AWS, "https://s3.amazonaws.com"),
-            (crate::config::S3Vendor::Minio, "http://localhost:9000"),
-            (
-                crate::config::S3Vendor::Aliyun,
-                "https://oss-cn-hangzhou.aliyuncs.com",
-            ),
-        ];
-
-        for (vendor, endpoint) in test_cases {
-            let bucket = "test-bucket".to_string();
-            let region = "us-east-1".to_string();
-            let access_key = "test_access_key".to_string();
-            let secret_key = "test_secret_key".to_string();
-            let endpoint = endpoint.to_string();
-            let root = "test-records".to_string();
-            let with_media = Some(true);
-
-            let result = CallRecordManager::save_with_s3_like(
-                &vendor,
-                &bucket,
-                &region,
-                &access_key,
-                &secret_key,
-                &endpoint,
-                &root,
-                &with_media,
-                &record,
-            )
-            .await;
-
-            match result {
-                Ok(message) => println!("S3 {:?} upload with media test passed: {}", vendor, message),
-                Err(e) => println!("S3 {:?} upload with media test failed (expected without real credentials): {:?}", vendor, e),
-            }
-        }
     }
 }
