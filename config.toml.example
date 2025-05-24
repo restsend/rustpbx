@@ -14,10 +14,18 @@ addr="0.0.0.0"
 udp_port=13050 # don't use 5060
 
 [proxy]
-modules = ["ban", "auth", "registrar", "cdr", "call"]
+modules = ["ban", "auth", "registrar", "cdr", "mediaproxy", "call"]
 addr = "0.0.0.0"
 udp_port = 5060
 registrar_expires = 60
+
+# MediaProxy configuration
+[proxy.media_proxy]
+mode = "nat_only"  # Options: "none", "nat_only", "all"
+rtp_start_port = 20000
+rtp_end_port = 30000
+external_ip = "192.168.1.1"  # Set to your external IP
+# force_proxy = ["192.168.1.100"]  # Optional: IP addresses to always proxy
 
 [proxy.user_backend]
 type = "memory"

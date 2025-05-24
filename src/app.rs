@@ -8,6 +8,7 @@ use crate::{
         ban::BanModule,
         call::CallModule,
         cdr::CdrModule,
+        mediaproxy::MediaProxyModule,
         registrar::RegistrarModule,
         server::{SipServer, SipServerBuilder},
     },
@@ -135,6 +136,7 @@ impl AppStateBuilder {
                 .register_module("auth", AuthModule::create)
                 .register_module("registrar", RegistrarModule::create)
                 .register_module("cdr", CdrModule::create)
+                .register_module("mediaproxy", MediaProxyModule::create)
                 .register_module("call", CallModule::create);
 
             let proxy = match proxy_builder.build().await {
