@@ -127,7 +127,7 @@ async fn test_registrar_non_register_method() {
     let (server_inner, config) = create_test_server().await;
 
     // Create an INVITE request instead of REGISTER
-    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
     // Create the registrar module
     let module = RegistrarModule::new(server_inner, config);

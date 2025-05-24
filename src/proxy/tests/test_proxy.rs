@@ -155,12 +155,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
 
     // Try registration with wrong password multiple times to trigger ban
     for i in 0..3 {
-        let request = create_auth_request(
-            rsip::Method::Register,
-            username,
-            realm,
-            Some("wrongpassword"),
-        );
+        let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
         let (mut tx1, _endpoint_inner) = create_transaction(request);
 
         // Process the transaction (this won't actually send over network, just record the response locally)
@@ -171,12 +166,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
     }
 
     // Try one more time - in a real server this would be banned
-    let request = create_auth_request(
-        rsip::Method::Register,
-        username,
-        realm,
-        Some("wrongpassword"),
-    );
+    let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
     let (mut tx1, _endpoint_inner) = create_transaction(request);
     let _ = process_transaction_locally(&mut tx1).await;
 
@@ -202,7 +192,7 @@ async fn test_registration_module(
     let _ = process_transaction_locally(&mut tx1).await;
 
     // Create an authenticated request
-    let auth_request = create_auth_request(rsip::Method::Register, username, realm, Some(password));
+    let auth_request = create_auth_request(rsip::Method::Register, username, realm, password);
     let (mut tx2, _endpoint_inner) = create_transaction(auth_request);
     let _ = process_transaction_locally(&mut tx2).await;
 
@@ -281,7 +271,7 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
 
 // Helper function to create an INVITE request with SDP body
 fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsip::Request {
-    let mut request = create_test_request(rsip::Method::Invite, from_user, realm);
+    let mut request = create_test_request(rsip::Method::Invite, from_user, None, realm, None);
 
     // Update the request URI to target the callee
     let to_uri = rsip::Uri {

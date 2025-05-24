@@ -142,11 +142,19 @@ impl ProxyModule for RegistrarModule {
             last_modified: Instant::now(),
         };
 
-        self.server
+        match self
+            .server
             .locator
             .register(user.username.as_str(), user.realm.as_deref(), location)
             .await
-            .ok();
+        {
+            Ok(_) => {}
+            Err(e) => {
+                info!("failed to register user: {:?}", e);
+                tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
+                return Ok(ProxyAction::Abort);
+            }
+        }
 
         let mut headers = vec![
             contact.into(),

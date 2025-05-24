@@ -20,12 +20,7 @@ async fn test_auth_module_invite_success() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for valid user with proper authentication
-    let request = create_auth_request(
-        rsip::Method::Invite,
-        "alice",
-        "example.com",
-        Some("password"),
-    );
+    let request = create_auth_request(rsip::Method::Invite, "alice", "example.com", "password");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -49,12 +44,7 @@ async fn test_auth_module_register_success() {
     let (server_inner, _) = create_test_server().await;
 
     // Create REGISTER request for valid user with proper authentication
-    let request = create_auth_request(
-        rsip::Method::Register,
-        "alice",
-        "example.com",
-        Some("password"),
-    );
+    let request = create_auth_request(rsip::Method::Register, "alice", "example.com", "password");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -78,7 +68,7 @@ async fn test_auth_module_disabled_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for disabled user
-    let request = create_auth_request(rsip::Method::Invite, "bob", "example.com", Some("password"));
+    let request = create_auth_request(rsip::Method::Invite, "bob", "example.com", "password");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -102,7 +92,7 @@ async fn test_auth_module_unknown_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for unknown user
-    let request = create_auth_request(rsip::Method::Invite, "unknown", "example.com", None);
+    let request = create_auth_request(rsip::Method::Invite, "unknown", "example.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -126,7 +116,7 @@ async fn test_auth_module_bypass_other_methods() {
     let (server_inner, _) = create_test_server().await;
 
     // Create OPTIONS request for unknown user (should bypass auth)
-    let request = create_auth_request(rsip::Method::Options, "unknown", "example.com", None);
+    let request = create_auth_request(rsip::Method::Options, "unknown", "example.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -306,7 +296,7 @@ async fn test_proxy_auth_invite_success() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Send INVITE request without credentials
-    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request);
 
@@ -399,7 +389,7 @@ async fn test_proxy_auth_no_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for valid user with no proxy authentication
-    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -441,7 +431,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Get challenge
-    let request = create_test_request(rsip::Method::Invite, "alice", "example.com");
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request);
 
