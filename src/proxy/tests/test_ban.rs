@@ -11,12 +11,7 @@ async fn test_ban_module_allow_normal_request() {
     let config = Arc::new(ProxyConfig::default());
 
     // Create a normal request
-    let request = create_ban_request(
-        rsip::Method::Invite,
-        "alice",
-        "example.com",
-        Some("127.0.0.1"),
-    );
+    let request = create_ban_request(rsip::Method::Invite, "alice", "127.0.0.1");
 
     // Create the ban module
     let module = BanModule::new(config);
@@ -42,12 +37,7 @@ async fn test_ban_module_block_denied_ip() {
     let config = Arc::new(config);
 
     // Create a request from denied IP
-    let request = create_ban_request(
-        rsip::Method::Invite,
-        "alice",
-        "example.com",
-        Some("192.168.1.100"),
-    );
+    let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.100");
 
     // Create the ban module
     let module = BanModule::new(config);
@@ -73,12 +63,7 @@ async fn test_ban_module_allow_specific_ip() {
     let config = Arc::new(config);
 
     // Create a request from allowed IP
-    let request = create_ban_request(
-        rsip::Method::Invite,
-        "alice",
-        "example.com",
-        Some("192.168.1.100"),
-    );
+    let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.100");
 
     // Create the ban module
     let module = BanModule::new(config);
@@ -104,12 +89,7 @@ async fn test_ban_module_block_not_allowed_ip() {
     let config = Arc::new(config);
 
     // Create a request from a different IP (not allowed)
-    let request = create_ban_request(
-        rsip::Method::Invite,
-        "alice",
-        "example.com",
-        Some("192.168.1.101"),
-    );
+    let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.101");
 
     // Create the ban module
     let module = BanModule::new(config);
