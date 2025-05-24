@@ -1,6 +1,7 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
+    callrecord::CallRecordHangupReason,
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
         engine::StreamEngine,
@@ -44,6 +45,7 @@ pub struct CallParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
 pub enum ActiveCallType {
     Webrtc,
     Sip,
@@ -62,6 +64,7 @@ pub struct ActiveCall {
     pub option: CallOption,
     pub dialog_id: Mutex<Option<DialogId>>,
     pub state: AppState,
+    pub hangup_reason: Arc<Mutex<Option<CallRecordHangupReason>>>,
 }
 
 impl ActiveCall {
@@ -166,6 +169,7 @@ impl ActiveCall {
             tts_handle: Mutex::new(None),
             dialog_id: Mutex::new(dialog_id),
             state,
+            hangup_reason: Arc::new(Mutex::new(None)),
         };
         Ok(active_call)
     }
@@ -347,6 +351,22 @@ impl ActiveCall {
     async fn do_hangup(&self, reason: Option<String>, initiator: Option<String>) -> Result<()> {
         info!("Call {} do_hangup", self.session_id);
 
+        // Set hangup reason based on initiator and reason
+        let hangup_reason = match initiator.as_deref() {
+            Some("caller") => CallRecordHangupReason::ByCaller,
+            Some("callee") => CallRecordHangupReason::ByCallee,
+            Some("system") => CallRecordHangupReason::BySystem,
+            _ => match reason.as_deref() {
+                Some("autohangup") => CallRecordHangupReason::BySystem,
+                Some("canceled") => CallRecordHangupReason::Canceled,
+                Some("rejected") => CallRecordHangupReason::Rejected(486, "Rejected".to_string()),
+                Some("no_answer") => CallRecordHangupReason::NoAnswer,
+                _ => CallRecordHangupReason::BySystem,
+            },
+        };
+
+        *self.hangup_reason.lock().await = Some(hangup_reason);
+
         self.tts_handle.lock().await.take();
         self.cancel_token.cancel();
         self.media_stream.stop(reason, initiator);
@@ -375,6 +395,12 @@ impl ActiveCall {
 
     pub async fn cleanup(&self) -> Result<()> {
         info!("call cleanup: {}", self.session_id);
+
+        // Set default hangup reason if not already set
+        if self.hangup_reason.lock().await.is_none() {
+            *self.hangup_reason.lock().await = Some(CallRecordHangupReason::BySystem);
+        }
+
         self.tts_handle.lock().await.take();
         self.media_stream.stop(None, None);
         if let Some(dialog_id) = self.dialog_id.lock().await.take() {

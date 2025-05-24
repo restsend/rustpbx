@@ -49,6 +49,7 @@ pub struct AppStateBuilder {
     pub useragent: Option<Arc<UserAgent>>,
     pub stream_engine: Option<Arc<StreamEngine>>,
     pub proxy: Option<Arc<SipServer>>,
+    pub callrecord: Option<Arc<CallRecordManager>>,
 }
 
 impl AppStateInner {
@@ -82,6 +83,7 @@ impl AppStateBuilder {
             useragent: None,
             stream_engine: None,
             proxy: None,
+            callrecord: None,
         }
     }
 
@@ -100,6 +102,10 @@ impl AppStateBuilder {
     }
     pub fn with_stream_engine(mut self, stream_engine: Arc<StreamEngine>) -> Self {
         self.stream_engine = Some(stream_engine);
+        self
+    }
+    pub fn with_callrecord(mut self, callrecord: Arc<CallRecordManager>) -> Self {
+        self.callrecord = Some(callrecord);
         self
     }
     pub async fn build(self) -> Result<AppState> {
@@ -141,12 +147,16 @@ impl AppStateBuilder {
             Arc::new(proxy)
         };
 
-        let callrecord = Arc::new(
-            CallRecordManagerBuilder::new()
-                .with_cancel_token(token.child_token())
-                .with_config(config.call_record.clone().unwrap_or_default())
-                .build(),
-        );
+        let callrecord = if let Some(callrecord) = self.callrecord {
+            callrecord
+        } else {
+            Arc::new(
+                CallRecordManagerBuilder::new()
+                    .with_cancel_token(token.child_token())
+                    .with_config(config.call_record.clone().unwrap_or_default())
+                    .build(),
+            )
+        };
 
         Ok(Arc::new(AppStateInner {
             config,

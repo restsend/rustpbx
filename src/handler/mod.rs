@@ -20,6 +20,7 @@ use sip::SipOption;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CallOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub denoise: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer: Option<String>,

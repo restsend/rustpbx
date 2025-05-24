@@ -1,3 +1,4 @@
+pub mod callrecord_test;
 mod sip_test;
-mod webrtc_test;
-mod ws_test;
+pub mod webrtc_test;
+pub mod ws_test;
