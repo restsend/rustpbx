@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod app;
+pub mod callrecord;
 pub mod config;
 pub mod console;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod proxy;
 pub mod synthesis;
 pub mod transcription;
 pub mod useragent;
+
 pub use error::Error;
 pub type TrackId = String;
 pub type Sample = i16;

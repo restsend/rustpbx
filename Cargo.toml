@@ -50,7 +50,11 @@ chrono = "0.4.40"
 rsipstack = "0.2.3"
 #rsipstack = { path = "../rsipstack" }
 rsip = "0.4.0"
-reqwest = { version = "0.12.15", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.15", features = [
+    "json",
+    "rustls-tls",
+    "multipart",
+] }
 base64 = "0.22.1"
 hmac = "0.12"
 sha2 = "0.10"
@@ -83,6 +87,7 @@ sea-orm = { version = "1.1.11", features = [
     "sqlx-sqlite",
 ] }
 sea-orm-migration = "1.1.11"
+object_store = { version = "0.12.1", features = ["aws", "azure", "gcp"] }
 
 
 [dev-dependencies]

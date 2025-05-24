@@ -22,6 +22,7 @@ pub struct Config {
     pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
     pub recorder_path: String,
+    pub call_record: Option<CallRecordConfig>,
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub ice_servers: Option<Vec<IceServerItem>>,
@@ -81,6 +82,42 @@ pub enum LocatorConfig {
     },
     Database {
         url: String,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum S3Vendor {
+    Aliyun,
+    Tencent,
+    Minio,
+    AWS,
+    GCP,
+    Azure,
+    DigitalOcean,
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum CallRecordConfig {
+    Local {
+        root: String,
+    },
+    S3 {
+        vendor: S3Vendor,
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+        endpoint: String,
+        root: String,
+        with_media: Option<bool>,
+    },
+    Http {
+        url: String,
+        headers: Option<HashMap<String, String>>,
+        with_media: Option<bool>,
     },
 }
 
@@ -185,6 +222,14 @@ impl Default for UseragentConfig {
     }
 }
 
+impl Default for CallRecordConfig {
+    fn default() -> Self {
+        Self::Local {
+            root: "./cdr".to_string(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -202,6 +247,7 @@ impl Default for Config {
             media_cache_path: "./mediacache".to_string(),
             #[cfg(not(target_os = "windows"))]
             media_cache_path: "/tmp/mediacache".to_string(),
+            call_record: None,
             llmproxy: None,
             ice_servers: None,
         }
