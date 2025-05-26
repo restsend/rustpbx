@@ -398,41 +398,6 @@ impl MediaProxyModule {
         Ok(())
     }
 
-    async fn handle_response(&self, tx: &Transaction) -> Result<()> {
-        // Note: In a real implementation, we'd need to intercept SIP responses
-        // This is a simplified version for demonstration
-        if let Some((call_id, from_tag, _to_tag)) = self.extract_call_id_and_tags(tx) {
-            let session_key = format!("{}:{}", call_id, from_tag);
-            let sdp_answer = self.extract_sdp_from_transaction(tx);
-
-            // Extract callee's RTP endpoint from SDP
-            let callee_rtp_address = sdp_answer
-                .as_ref()
-                .and_then(|sdp| self.extract_rtp_endpoint_from_sdp(sdp));
-
-            let should_proxy = {
-                let mut sessions = self.sessions.lock().unwrap();
-                if let Some(session) = sessions.get_mut(&session_key) {
-                    session.sdp_answer = sdp_answer.clone();
-                    session.callee_rtp_address = callee_rtp_address;
-                    self.should_proxy_media(session.sdp_offer.as_deref(), sdp_answer.as_deref())
-                } else {
-                    false
-                }
-            };
-
-            if should_proxy {
-                info!(
-                    "MediaProxy: Starting media proxy for session {} with callee RTP: {:?}",
-                    session_key, callee_rtp_address
-                );
-                self.start_media_proxy(&session_key).await?;
-            }
-        }
-
-        Ok(())
-    }
-
     async fn handle_bye(&self, tx: &Transaction) -> Result<()> {
         if let Some((call_id, from_tag, _)) = self.extract_call_id_and_tags(tx) {
             let session_key = format!("{}:{}", call_id, from_tag);

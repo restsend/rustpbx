@@ -111,7 +111,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
     let media_stream_builder = MediaStreamBuilder::new(event_sender.clone());
     let media_stream = Arc::new(
         media_stream_builder
-            .cancel_token(cancel_token.clone())
+            .with_cancel_token(cancel_token.clone())
             .build(),
     );
     let track_id = format!("webrtc-{}", Uuid::new_v4());
