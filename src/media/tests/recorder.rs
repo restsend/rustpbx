@@ -107,3 +107,87 @@ fn verify_wav_file(path: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_recorder_intermittent_data() -> Result<()> {
+    // Test for intermittent data handling and clipping detection
+    let temp_dir = tempdir()?;
+    let file_path = temp_dir.path().join("test_intermittent.wav");
+    let file_path_clone = file_path.clone();
+    let cancel_token = CancellationToken::new();
+    let config = RecorderOption::default();
+
+    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    // Start recording
+    let recorder_clone = recorder.clone();
+    let recorder_handle =
+        tokio::spawn(async move { recorder_clone.process_recording(&file_path_clone, rx).await });
+
+    let track_id = "test_track".to_string();
+
+    // Test 1: Send intermittent small frames (less than chunk_size)
+    for i in 0..10 {
+        let small_samples: PcmBuf = (0..50) // Small frame, much less than chunk_size (320)
+            .map(|j| {
+                let t = (i * 50 + j) as f32 / 16000.0;
+                ((t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16384.0) as Sample
+            })
+            .collect();
+
+        let frame = AudioFrame {
+            track_id: track_id.clone(),
+            samples: Samples::PCM {
+                samples: small_samples,
+            },
+            timestamp: (i * 50) as u64,
+            sample_rate: 16000,
+        };
+
+        tx.send(frame)?;
+
+        // Simulate intermittent arrival with gaps
+        if i % 3 == 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    // Test 2: Send frames with clipping values
+    let clipped_samples: PcmBuf = vec![32767, -32768, 32767, -32768, 0, 0, 0, 0]; // Clipped values
+    let clipped_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: Samples::PCM {
+            samples: clipped_samples,
+        },
+        timestamp: 1000,
+        sample_rate: 16000,
+    };
+    tx.send(clipped_frame)?;
+
+    // Test 3: Send frames with constant values (freeze detection)
+    let constant_samples: PcmBuf = vec![1000; 20]; // 20 identical values
+    let constant_frame = AudioFrame {
+        track_id: track_id.clone(),
+        samples: Samples::PCM {
+            samples: constant_samples,
+        },
+        timestamp: 1100,
+        sample_rate: 16000,
+    };
+    tx.send(constant_frame)?;
+
+    // Wait for processing
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Stop recording
+    recorder.stop_recording()?;
+    recorder_handle.await??;
+
+    // Verify file exists and is valid
+    assert!(file_path.exists());
+    verify_wav_file(&file_path)?;
+
+    println!("Intermittent data test completed successfully");
+    Ok(())
+}

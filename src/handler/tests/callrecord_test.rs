@@ -1,6 +1,5 @@
 use crate::{
     app::AppStateBuilder,
-    callrecord::CallRecordManagerBuilder,
     config::{Config, ProxyConfig, UseragentConfig},
     handler::{
         call::{ActiveCallType, CallParams},

@@ -1,4 +1,5 @@
 use crate::media::processor::ProcessorChain;
+use crate::media::recorder::RecorderOption;
 use crate::media::track::TrackConfig;
 use crate::{
     event::EventSender,
@@ -231,7 +232,10 @@ async fn test_stream_recorder() -> Result<()> {
     let file_path = temp_dir.path().join("test_recording.wav");
     let stream = Arc::new(
         MediaStreamBuilder::new(event_sender)
-            .recorder(file_path.to_string_lossy().to_string())
+            .with_recorder_config(RecorderOption {
+                recorder_file: file_path.to_string_lossy().to_string(),
+                ..Default::default()
+            })
             .build(),
     );
 

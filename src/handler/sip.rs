@@ -18,7 +18,7 @@ use tracing::{error, info};
 pub struct SipOption {
     pub username: String,
     pub password: String,
-    pub domain: String,
+    pub realm: String,
     pub headers: Option<HashMap<String, String>>,
 }
 
@@ -81,6 +81,7 @@ pub async fn new_rtp_track_with_sip(
         credential: option.sip.as_ref().map(|opt| Credential {
             username: opt.username.clone(),
             password: opt.password.clone(),
+            realm: Some(opt.realm.clone()),
         }),
         headers,
     };

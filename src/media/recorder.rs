@@ -27,14 +27,25 @@ use tracing::{info, warn};
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct RecorderOption {
+    pub recorder_file: String,
     pub samplerate: u32,
     #[serde(skip)]
     pub ptime: Duration,
 }
 
+impl RecorderOption {
+    pub fn new(recorder_file: String) -> Self {
+        Self {
+            recorder_file,
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for RecorderOption {
     fn default() -> Self {
         Self {
+            recorder_file: "./recordings.wav".to_string(),
             samplerate: 16000,
             ptime: Duration::from_millis(20),
         }
@@ -42,7 +53,7 @@ impl Default for RecorderOption {
 }
 
 pub struct Recorder {
-    config: RecorderOption,
+    option: RecorderOption,
     samples_written: AtomicUsize,
     cancel_token: CancellationToken,
     channel_idx: AtomicUsize,
@@ -52,9 +63,9 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn new(cancel_token: CancellationToken, config: RecorderOption) -> Self {
+    pub fn new(cancel_token: CancellationToken, option: RecorderOption) -> Self {
         Self {
-            config,
+            option,
             samples_written: AtomicUsize::new(0),
             cancel_token,
             channel_idx: AtomicUsize::new(0),
@@ -72,7 +83,7 @@ impl Recorder {
         // Create a WavSpec for the WAV header
         let spec = WavSpec {
             channels: 2,
-            sample_rate: self.config.samplerate,
+            sample_rate: self.option.samplerate,
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
@@ -137,15 +148,15 @@ impl Recorder {
         // Create an initial WAV header
         self.update_wav_header(&mut file).await?;
         let chunk_size =
-            (self.config.samplerate / 1000 * self.config.ptime.as_millis() as u32) as usize;
+            (self.option.samplerate / 1000 * self.option.ptime.as_millis() as u32) as usize;
         info!(
             "Recording to {} ptime: {}ms chunk_size: {}",
             file_path.display(),
-            self.config.ptime.as_millis(),
+            self.option.ptime.as_millis(),
             chunk_size
         );
 
-        let mut interval = IntervalStream::new(tokio::time::interval(self.config.ptime));
+        let mut interval = IntervalStream::new(tokio::time::interval(self.option.ptime));
 
         let mut count: u32 = 0;
         loop {
@@ -155,13 +166,38 @@ impl Recorder {
                 }
                 _ = interval.next() => {
                     let (mono_buf, stereo_buf) = self.pop(chunk_size).await;
+
+                    // Verify data integrity
+                    if mono_buf.len() != chunk_size || stereo_buf.len() != chunk_size {
+                        warn!("Buffer size mismatch: mono={}, stereo={}, expected={}",
+                              mono_buf.len(), stereo_buf.len(), chunk_size);
+                    }
+
+                    // Detect clipping
+                    let mono_clipped = Self::detect_clipping(&mono_buf);
+                    let stereo_clipped = Self::detect_clipping(&stereo_buf);
+                    if mono_clipped || stereo_clipped {
+                        warn!("Audio clipping detected: mono={}, stereo={}", mono_clipped, stereo_clipped);
+                    }
+
+                    // Detect constant values (freeze detection)
+                    let mono_constant = Self::detect_constant_value(&mono_buf);
+                    let stereo_constant = Self::detect_constant_value(&stereo_buf);
+                    if mono_constant || stereo_constant {
+                        warn!("Constant value detected (possible freeze): mono={}, stereo={}",
+                              mono_constant, stereo_constant);
+                    }
+
                     let max_len = mono_buf.len().max(stereo_buf.len());
                     let mut mix_buff = vec![0; max_len * 2];
-                    for i in 0..mono_buf.len() {
-                        mix_buff[i * 2] = mono_buf[i];
-                    }
-                    for i in 0..stereo_buf.len() {
-                        mix_buff[i * 2 + 1] = stereo_buf[i];
+
+                    // Improved mixing logic with proper data alignment
+                    for i in 0..max_len {
+                        let mono_sample = if i < mono_buf.len() { mono_buf[i] } else { 0 };
+                        let stereo_sample = if i < stereo_buf.len() { stereo_buf[i] } else { 0 };
+
+                        mix_buff[i * 2] = mono_sample;      // Left channel
+                        mix_buff[i * 2 + 1] = stereo_sample; // Right channel
                     }
 
                     file.seek(std::io::SeekFrom::End(0)).await?;
@@ -187,18 +223,47 @@ impl Recorder {
             Samples::PCM { samples } => samples,
             _ => return Ok(()), // ignore non-PCM frames
         };
+
+        // Validate audio data
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        // Detect abnormal data
+        if Self::detect_clipping(&buffer) {
+            warn!("Clipping detected in frame from track: {}", frame.track_id);
+        }
+
+        if Self::detect_constant_value(&buffer) {
+            warn!(
+                "Constant value detected in frame from track: {}",
+                frame.track_id
+            );
+        }
+
         let mut channels = self.channels.lock().unwrap();
-        let channel_idx = if let Some(channel_idx) = channels.get(&frame.track_id) {
+        let channel_idx = if let Some(&channel_idx) = channels.get(&frame.track_id) {
             channel_idx % 2
         } else {
-            self.channel_idx.fetch_add(1, Ordering::SeqCst);
-            let new_idx = self.channel_idx.load(Ordering::SeqCst);
-            channels.insert(frame.track_id, new_idx);
+            let new_idx = self.channel_idx.fetch_add(1, Ordering::SeqCst);
+            channels.insert(frame.track_id.clone(), new_idx);
+            info!(
+                "Assigned channel {} to track: {}",
+                new_idx % 2,
+                frame.track_id
+            );
             new_idx % 2
         };
+
         match channel_idx {
-            0 => self.mono_buf.lock().unwrap().extend(buffer.iter()),
-            1 => self.stereo_buf.lock().unwrap().extend(buffer.iter()),
+            0 => {
+                let mut mono_buf = self.mono_buf.lock().unwrap();
+                mono_buf.extend(buffer.iter());
+            }
+            1 => {
+                let mut stereo_buf = self.stereo_buf.lock().unwrap();
+                stereo_buf.extend(buffer.iter());
+            }
             _ => {}
         }
         Ok(())
@@ -208,21 +273,58 @@ impl Recorder {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 
-        let mono_buf = if mono_buf.len() > chunk_size {
+        let mono_result = if mono_buf.len() >= chunk_size {
+            // Sufficient data available, extract normally
             mono_buf.drain(..chunk_size).collect()
+        } else if !mono_buf.is_empty() {
+            // Insufficient data but some available, extract all and pad with zeros
+            let mut result = mono_buf.drain(..).collect::<Vec<_>>();
+            result.resize(chunk_size, 0);
+            result
         } else {
+            // No data available, fill with zeros
             vec![0; chunk_size]
         };
-        let stereo_buf = if stereo_buf.len() > chunk_size {
+
+        let stereo_result = if stereo_buf.len() >= chunk_size {
+            // Sufficient data available, extract normally
             stereo_buf.drain(..chunk_size).collect()
+        } else if !stereo_buf.is_empty() {
+            // Insufficient data but some available, extract all and pad with zeros
+            let mut result = stereo_buf.drain(..).collect::<Vec<_>>();
+            result.resize(chunk_size, 0);
+            result
         } else {
+            // No data available, fill with zeros
             vec![0; chunk_size]
         };
-        (mono_buf, stereo_buf)
+
+        (mono_result, stereo_result)
     }
 
     pub fn stop_recording(&self) -> Result<()> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    /// Detect audio clipping
+    fn detect_clipping(samples: &PcmBuf) -> bool {
+        const CLIP_THRESHOLD: i16 = 32760; // Threshold close to maximum value
+        samples.iter().any(|&sample| sample.abs() >= CLIP_THRESHOLD)
+    }
+
+    /// Detect consecutive identical values (freeze detection)
+    fn detect_constant_value(samples: &PcmBuf) -> bool {
+        if samples.len() < 10 {
+            return false;
+        }
+
+        let first_value = samples[0];
+        let consecutive_count = samples
+            .iter()
+            .take_while(|&&sample| sample == first_value)
+            .count();
+
+        consecutive_count >= samples.len().min(10) // 10 or more consecutive identical values
     }
 }

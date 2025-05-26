@@ -20,7 +20,7 @@ use uuid;
 pub struct MediaStream {
     id: String,
     cancel_token: CancellationToken,
-    recorder: Option<String>,
+    recorder_config: Option<RecorderOption>,
     tracks: Mutex<HashMap<TrackId, Box<dyn Track>>>,
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
@@ -32,9 +32,9 @@ pub struct MediaStream {
 
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
-    recorder: Option<String>,
     id: Option<String>,
     event_sender: EventSender,
+    recorder_config: Option<RecorderOption>,
 }
 
 impl MediaStreamBuilder {
@@ -42,8 +42,8 @@ impl MediaStreamBuilder {
         Self {
             id: Some(format!("ms:{}", uuid::Uuid::new_v4())),
             cancel_token: None,
-            recorder: None,
             event_sender,
+            recorder_config: None,
         }
     }
     pub fn with_id(mut self, id: String) -> Self {
@@ -51,13 +51,13 @@ impl MediaStreamBuilder {
         self
     }
 
-    pub fn cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
     }
 
-    pub fn recorder(mut self, recorder: String) -> Self {
-        self.recorder = Some(recorder);
+    pub fn with_recorder_config(mut self, recorder_config: RecorderOption) -> Self {
+        self.recorder_config = Some(recorder_config);
         self
     }
 
@@ -71,7 +71,7 @@ impl MediaStreamBuilder {
         MediaStream {
             id: self.id.unwrap_or_default(),
             cancel_token,
-            recorder: self.recorder,
+            recorder_config: self.recorder_config,
             tracks,
             event_sender: self.event_sender,
             packet_sender: track_packet_sender,
@@ -138,7 +138,7 @@ impl MediaStream {
 
     pub async fn update_track(&self, mut track: Box<dyn Track>) {
         self.remove_track(track.id()).await;
-        if self.recorder.is_some() {
+        if self.recorder_config.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
                 self.recorder_sender.clone(),
             )));
@@ -186,12 +186,11 @@ impl Processor for RecorderProcessor {
 
 impl MediaStream {
     async fn handle_recorder(&self) -> Result<()> {
-        if let Some(ref recorder_path) = self.recorder {
-            let config = RecorderOption::default();
+        if let Some(ref recorder_config) = self.recorder_config {
             let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
-            let recorder = Recorder::new(self.cancel_token.child_token(), config);
+            let recorder = Recorder::new(self.cancel_token.child_token(), recorder_config.clone());
             recorder
-                .process_recording(Path::new(&recorder_path), recorder_receiver)
+                .process_recording(Path::new(&recorder_config.recorder_file), recorder_receiver)
                 .await?;
         }
         self.cancel_token.cancelled().await;

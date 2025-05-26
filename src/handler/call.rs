@@ -6,6 +6,7 @@ use crate::{
     media::{
         engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
+        recorder::RecorderOption,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
             file::FileTrack,
@@ -78,12 +79,34 @@ impl ActiveCall {
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(track_id.clone())
-            .cancel_token(cancel_token.clone());
+            .with_cancel_token(cancel_token.clone());
 
-        if let Some(_) = option.recorder {
+        if let Some(recorder_option) = &option.recorder {
             let recorder_file = state.get_recorder_file(&track_id);
             info!("created recording file: {}", recorder_file);
-            media_stream_builder = media_stream_builder.recorder(recorder_file);
+
+            let track_samplerate = caller_track.config().samplerate;
+            let recorder_samplerate = if track_samplerate > 0 {
+                track_samplerate
+            } else {
+                recorder_option.samplerate
+            };
+            let recorder_ptime = recorder_option.ptime;
+            let recorder_config = RecorderOption {
+                recorder_file,
+                samplerate: recorder_samplerate,
+                ptime: recorder_ptime,
+            };
+
+            info!(
+                "recorder config: samplerate={}, ptime={}ms (track_samplerate={}, option_samplerate={})",
+                recorder_samplerate,
+                recorder_ptime.as_millis(),
+                track_samplerate,
+                recorder_option.samplerate
+            );
+
+            media_stream_builder = media_stream_builder.with_recorder_config(recorder_config);
         }
 
         let media_stream = media_stream_builder.build();
