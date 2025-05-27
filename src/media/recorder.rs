@@ -47,7 +47,7 @@ impl Default for RecorderOption {
         Self {
             recorder_file: "./recordings.wav".to_string(),
             samplerate: 16000,
-            ptime: Duration::from_millis(20),
+            ptime: Duration::from_millis(200),
         }
     }
 }
@@ -157,8 +157,6 @@ impl Recorder {
         );
 
         let mut interval = IntervalStream::new(tokio::time::interval(self.option.ptime));
-
-        let mut count: u32 = 0;
         loop {
             select! {
                 Some(frame) = receiver.recv() => {
@@ -166,58 +164,35 @@ impl Recorder {
                 }
                 _ = interval.next() => {
                     let (mono_buf, stereo_buf) = self.pop(chunk_size).await;
-
-                    // Verify data integrity
-                    if mono_buf.len() != chunk_size || stereo_buf.len() != chunk_size {
-                        warn!("Buffer size mismatch: mono={}, stereo={}, expected={}",
-                              mono_buf.len(), stereo_buf.len(), chunk_size);
-                    }
-
-                    // Detect clipping
-                    let mono_clipped = Self::detect_clipping(&mono_buf);
-                    let stereo_clipped = Self::detect_clipping(&stereo_buf);
-                    if mono_clipped || stereo_clipped {
-                        warn!("Audio clipping detected: mono={}, stereo={}", mono_clipped, stereo_clipped);
-                    }
-
-                    // Detect constant values (freeze detection)
-                    let mono_constant = Self::detect_constant_value(&mono_buf);
-                    let stereo_constant = Self::detect_constant_value(&stereo_buf);
-                    if mono_constant || stereo_constant {
-                        warn!("Constant value detected (possible freeze): mono={}, stereo={}",
-                              mono_constant, stereo_constant);
-                    }
-
-                    let max_len = mono_buf.len().max(stereo_buf.len());
-                    let mut mix_buff = vec![0; max_len * 2];
-
-                    // Improved mixing logic with proper data alignment
-                    for i in 0..max_len {
-                        let mono_sample = if i < mono_buf.len() { mono_buf[i] } else { 0 };
-                        let stereo_sample = if i < stereo_buf.len() { stereo_buf[i] } else { 0 };
-
-                        mix_buff[i * 2] = mono_sample;      // Left channel
-                        mix_buff[i * 2 + 1] = stereo_sample; // Right channel
-                    }
-
-                    file.seek(std::io::SeekFrom::End(0)).await?;
-                    file.write_all(&samples_to_bytes(&mix_buff)).await?;
-
-                    self.samples_written.fetch_add(max_len as usize, Ordering::SeqCst);
-                    count += 1;
-
-                    if count % 5 == 0 {
-                        self.update_wav_header(&mut file).await?;
-                    }
+                    self.process_buffers(&mut file, mono_buf, stereo_buf).await?;
+                    self.update_wav_header(&mut file).await?;
                 }
                 _ = self.cancel_token.cancelled() => {
+                    // Flush remaining buffer content before exiting
+                    self.flush_buffers(&mut file).await?;
+
                     // Update the final header before finishing
                     self.update_wav_header(&mut file).await?;
+                    info!("Recording stopped, final header updated");
                     return Ok(());
                 }
             }
         }
     }
+
+    /// Get or assign channel index for a track
+    fn get_channel_index(&self, track_id: &str) -> usize {
+        let mut channels = self.channels.lock().unwrap();
+        if let Some(&channel_idx) = channels.get(track_id) {
+            channel_idx % 2
+        } else {
+            let new_idx = self.channel_idx.fetch_add(1, Ordering::SeqCst);
+            channels.insert(track_id.to_string(), new_idx);
+            info!("Assigned channel {} to track: {}", new_idx % 2, track_id);
+            new_idx % 2
+        }
+    }
+
     async fn append_frame(&self, frame: AudioFrame) -> Result<()> {
         let buffer = match frame.samples {
             Samples::PCM { samples } => samples,
@@ -229,32 +204,10 @@ impl Recorder {
             return Ok(());
         }
 
-        // Detect abnormal data
-        if Self::detect_clipping(&buffer) {
-            warn!("Clipping detected in frame from track: {}", frame.track_id);
-        }
+        // Get channel assignment
+        let channel_idx = self.get_channel_index(&frame.track_id);
 
-        if Self::detect_constant_value(&buffer) {
-            warn!(
-                "Constant value detected in frame from track: {}",
-                frame.track_id
-            );
-        }
-
-        let mut channels = self.channels.lock().unwrap();
-        let channel_idx = if let Some(&channel_idx) = channels.get(&frame.track_id) {
-            channel_idx % 2
-        } else {
-            let new_idx = self.channel_idx.fetch_add(1, Ordering::SeqCst);
-            channels.insert(frame.track_id.clone(), new_idx);
-            info!(
-                "Assigned channel {} to track: {}",
-                new_idx % 2,
-                frame.track_id
-            );
-            new_idx % 2
-        };
-
+        // Add to appropriate buffer
         match channel_idx {
             0 => {
                 let mut mono_buf = self.mono_buf.lock().unwrap();
@@ -266,38 +219,38 @@ impl Recorder {
             }
             _ => {}
         }
+
         Ok(())
+    }
+
+    /// Extract samples from a buffer without padding
+    fn extract_samples(buffer: &mut PcmBuf, extract_size: usize) -> PcmBuf {
+        if extract_size > 0 && !buffer.is_empty() {
+            let take_size = extract_size.min(buffer.len());
+            buffer.drain(..take_size).collect()
+        } else {
+            Vec::new()
+        }
     }
 
     async fn pop(&self, chunk_size: usize) -> (PcmBuf, PcmBuf) {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 
-        let mono_result = if mono_buf.len() >= chunk_size {
-            // Sufficient data available, extract normally
-            mono_buf.drain(..chunk_size).collect()
-        } else if !mono_buf.is_empty() {
-            // Insufficient data but some available, extract all and pad with zeros
-            let mut result = mono_buf.drain(..).collect::<Vec<_>>();
-            result.resize(chunk_size, 0);
-            result
+        // Calculate how much data we can extract without padding
+        let mono_available = mono_buf.len();
+        let stereo_available = stereo_buf.len();
+
+        // Take the minimum of available data and chunk_size, but at least some data if available
+        let extract_size = if mono_available > 0 || stereo_available > 0 {
+            let max_available = mono_available.max(stereo_available);
+            max_available.min(chunk_size).max(1) // At least 1 sample if any data available
         } else {
-            // No data available, fill with zeros
-            vec![0; chunk_size]
+            0 // No data available at all
         };
 
-        let stereo_result = if stereo_buf.len() >= chunk_size {
-            // Sufficient data available, extract normally
-            stereo_buf.drain(..chunk_size).collect()
-        } else if !stereo_buf.is_empty() {
-            // Insufficient data but some available, extract all and pad with zeros
-            let mut result = stereo_buf.drain(..).collect::<Vec<_>>();
-            result.resize(chunk_size, 0);
-            result
-        } else {
-            // No data available, fill with zeros
-            vec![0; chunk_size]
-        };
+        let mono_result = Self::extract_samples(&mut mono_buf, extract_size);
+        let stereo_result = Self::extract_samples(&mut stereo_buf, extract_size);
 
         (mono_result, stereo_result)
     }
@@ -315,16 +268,142 @@ impl Recorder {
 
     /// Detect consecutive identical values (freeze detection)
     fn detect_constant_value(samples: &PcmBuf) -> bool {
-        if samples.len() < 10 {
+        if samples.len() < 50 {
+            // Increase minimum length threshold further
             return false;
         }
 
         let first_value = samples[0];
+
+        // For zero values (silence), use much higher threshold
+        if first_value == 0 {
+            // Only warn about very large zero buffers that might indicate data flow issues
+            let all_zeros = samples.iter().all(|&sample| sample == 0);
+            return all_zeros && samples.len() > 1600; // Only warn for >100ms of continuous silence at 16kHz
+        }
+
         let consecutive_count = samples
             .iter()
             .take_while(|&&sample| sample == first_value)
             .count();
 
-        consecutive_count >= samples.len().min(10) // 10 or more consecutive identical values
+        // Keep stricter threshold for non-zero constant values (actual hardware issues)
+        consecutive_count >= samples.len().min(50) // 50 or more consecutive identical non-zero values
+    }
+
+    /// Mix mono and stereo buffers into interleaved stereo output
+    fn mix_buffers(mono_buf: &PcmBuf, stereo_buf: &PcmBuf) -> Vec<i16> {
+        let max_len = mono_buf.len().max(stereo_buf.len());
+        let mut mix_buff = vec![0; max_len * 2];
+
+        for i in 0..max_len {
+            let mono_sample = mono_buf.get(i).copied().unwrap_or(0);
+            let stereo_sample = stereo_buf.get(i).copied().unwrap_or(0);
+
+            mix_buff[i * 2] = mono_sample; // Left channel
+            mix_buff[i * 2 + 1] = stereo_sample; // Right channel
+        }
+
+        mix_buff
+    }
+
+    /// Perform audio quality checks on buffers
+    fn check_audio_quality(&self, mono_buf: &PcmBuf, stereo_buf: &PcmBuf) {
+        // Check clipping
+        if !mono_buf.is_empty() && Self::detect_clipping(mono_buf) {
+            warn!("Audio clipping detected: mono=true");
+        }
+
+        if !stereo_buf.is_empty() && Self::detect_clipping(stereo_buf) {
+            warn!("Audio clipping detected: stereo=true");
+        }
+
+        // Check constant values
+        let mono_constant = !mono_buf.is_empty() && Self::detect_constant_value(mono_buf);
+        let stereo_constant = !stereo_buf.is_empty() && Self::detect_constant_value(stereo_buf);
+
+        if mono_constant || stereo_constant {
+            let mono_info = if mono_constant {
+                let first_val = mono_buf.first().unwrap_or(&0);
+                format!("mono(value={}, len={})", first_val, mono_buf.len())
+            } else {
+                "mono(ok)".to_string()
+            };
+
+            let stereo_info = if stereo_constant {
+                let first_val = stereo_buf.first().unwrap_or(&0);
+                format!("stereo(value={}, len={})", first_val, stereo_buf.len())
+            } else {
+                "stereo(ok)".to_string()
+            };
+
+            warn!("Constant value detected: {} {}", mono_info, stereo_info);
+        }
+    }
+
+    /// Write mixed audio data to file
+    async fn write_audio_data(
+        &self,
+        file: &mut File,
+        mono_buf: &PcmBuf,
+        stereo_buf: &PcmBuf,
+    ) -> Result<usize> {
+        let max_len = mono_buf.len().max(stereo_buf.len());
+        if max_len == 0 {
+            return Ok(0);
+        }
+
+        let mix_buff = Self::mix_buffers(mono_buf, stereo_buf);
+
+        file.seek(std::io::SeekFrom::End(0)).await?;
+        file.write_all(&samples_to_bytes(&mix_buff)).await?;
+
+        Ok(max_len)
+    }
+
+    /// Process buffers with quality checks and write to file
+    async fn process_buffers(
+        &self,
+        file: &mut File,
+        mono_buf: PcmBuf,
+        stereo_buf: PcmBuf,
+    ) -> Result<()> {
+        // Skip if no data
+        if mono_buf.is_empty() && stereo_buf.is_empty() {
+            return Ok(());
+        }
+
+        // Quality checks
+        self.check_audio_quality(&mono_buf, &stereo_buf);
+
+        // Write audio data
+        let samples_written = self.write_audio_data(file, &mono_buf, &stereo_buf).await?;
+        if samples_written > 0 {
+            self.samples_written
+                .fetch_add(samples_written, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Flush all remaining buffer content
+    async fn flush_buffers(&self, file: &mut File) -> Result<()> {
+        info!("Flushing remaining buffer content before stopping...");
+
+        loop {
+            let (mono_buf, stereo_buf) = self.pop(usize::MAX).await;
+
+            if mono_buf.is_empty() && stereo_buf.is_empty() {
+                break;
+            }
+
+            let samples_written = self.write_audio_data(file, &mono_buf, &stereo_buf).await?;
+            if samples_written > 0 {
+                self.samples_written
+                    .fetch_add(samples_written, Ordering::SeqCst);
+                info!("Flushed {} samples", samples_written);
+            }
+        }
+
+        Ok(())
     }
 }
