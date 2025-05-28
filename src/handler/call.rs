@@ -31,7 +31,13 @@ use rsipstack::dialog::{
     DialogId,
 };
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     select,
     sync::{mpsc, Mutex},
@@ -52,20 +58,29 @@ pub enum ActiveCallType {
     Sip,
     WebSocket,
 }
+pub struct ActiveCallState {
+    pub created_at: DateTime<Utc>,
+    pub ring_time: Mutex<Option<DateTime<Utc>>>,
+    pub answer_time: Mutex<Option<DateTime<Utc>>>,
+    pub hangup_reason: Mutex<Option<CallRecordHangupReason>>,
+    pub last_status_code: AtomicU16,
+    pub option: Mutex<Option<CallOption>>,
+}
+pub type ActiveCallStateRef = Arc<ActiveCallState>;
+
 pub struct ActiveCall {
+    pub call_state: ActiveCallStateRef,
+    pub option: CallOption,
     pub cancel_token: CancellationToken,
     pub call_type: ActiveCallType,
     pub session_id: String,
-    pub created_at: DateTime<Utc>,
     pub media_stream: MediaStream,
     pub track_config: TrackConfig,
     pub tts_handle: Mutex<Option<TtsHandle>>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
     pub event_sender: EventSender,
-    pub option: CallOption,
     pub dialog_id: Mutex<Option<DialogId>>,
-    pub state: AppState,
-    pub hangup_reason: Mutex<Option<CallRecordHangupReason>>,
+    pub app_state: AppState,
 }
 
 impl ActiveCall {
@@ -170,6 +185,7 @@ impl ActiveCall {
     }
 
     pub async fn new(
+        call_state: ActiveCallStateRef,
         call_type: ActiveCallType,
         cancel_token: CancellationToken,
         event_sender: EventSender,
@@ -179,11 +195,13 @@ impl ActiveCall {
         dialog_id: Option<DialogId>,
         state: AppState,
     ) -> Result<Self> {
+        *call_state.option.lock().await = Some(option.clone());
+
         let active_call = ActiveCall {
             cancel_token,
             call_type,
             session_id,
-            created_at: Utc::now(),
+            call_state,
             media_stream,
             track_config: TrackConfig::default(),
             auto_hangup: Arc::new(Mutex::new(None)),
@@ -191,8 +209,7 @@ impl ActiveCall {
             option,
             tts_handle: Mutex::new(None),
             dialog_id: Mutex::new(dialog_id),
-            state,
-            hangup_reason: Mutex::new(None),
+            app_state: state,
         };
         Ok(active_call)
     }
@@ -318,7 +335,7 @@ impl ActiveCall {
         }
 
         let (new_handle, tts_track) = StreamEngine::create_tts_track(
-            self.state.stream_engine.clone(),
+            self.app_state.stream_engine.clone(),
             self.cancel_token.child_token(),
             self.track_config.server_side_track_id.clone(),
             play_id,
@@ -388,14 +405,14 @@ impl ActiveCall {
             },
         };
 
-        *self.hangup_reason.lock().await = Some(hangup_reason);
+        *self.call_state.hangup_reason.lock().await = Some(hangup_reason);
 
         self.tts_handle.lock().await.take();
         self.cancel_token.cancel();
         self.media_stream.stop(reason, initiator);
 
         if let Some(dialog_id) = self.dialog_id.lock().await.take() {
-            self.state
+            self.app_state
                 .useragent
                 .hangup(dialog_id)
                 .await
@@ -420,21 +437,21 @@ impl ActiveCall {
         info!("call cleanup: {}", self.session_id);
 
         // Set default hangup reason if not already set
-        if self.hangup_reason.lock().await.is_none() {
-            *self.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
+        if self.call_state.hangup_reason.lock().await.is_none() {
+            *self.call_state.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
         }
 
         self.tts_handle.lock().await.take();
         self.media_stream.stop(None, None);
         if let Some(dialog_id) = self.dialog_id.lock().await.take() {
-            self.state.useragent.hangup(dialog_id).await.ok();
+            self.app_state.useragent.hangup(dialog_id).await.ok();
         }
         self.cancel_token.cancel();
         Ok(())
     }
     pub async fn get_callrecord(&self) -> CallRecord {
         let recorder_files = if self.option.recorder.is_some() {
-            let recorder_file = self.state.get_recorder_file(&self.session_id);
+            let recorder_file = self.app_state.get_recorder_file(&self.session_id);
             if std::path::Path::new(&recorder_file).exists() {
                 let file_size = std::fs::metadata(&recorder_file)
                     .map(|m| m.len())
@@ -453,14 +470,13 @@ impl ActiveCall {
         };
 
         CallRecord {
-            option: self.option.clone(),
+            option: self.call_state.option.lock().await.clone(),
             call_id: self.session_id.clone(),
             call_type: self.call_type.clone(),
-            start_time: self.created_at,
+            start_time: self.call_state.created_at,
+            ring_time: self.call_state.ring_time.lock().await.clone(),
+            answer_time: self.call_state.answer_time.lock().await.clone(),
             end_time: Utc::now(),
-            duration: Utc::now()
-                .signed_duration_since(self.created_at)
-                .num_milliseconds() as u64,
             caller: self
                 .option
                 .caller
@@ -471,14 +487,9 @@ impl ActiveCall {
                 .callee
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
-            hangup_reason: self
-                .hangup_reason
-                .lock()
-                .await
-                .clone()
-                .unwrap_or(CallRecordHangupReason::Autohangup),
+            hangup_reason: self.call_state.hangup_reason.lock().await.clone(),
             recorder: recorder_files,
-            status_code: 200,
+            status_code: self.call_state.last_status_code.load(Ordering::Relaxed) as u16,
             extras: None,
         }
     }
@@ -488,6 +499,7 @@ async fn sip_event_loop(
     track_id: TrackId,
     event_sender: &mut EventSender,
     dlg_state_receiver: &mut DialogStateReceiver,
+    call_state: ActiveCallStateRef,
 ) -> Result<()> {
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
@@ -496,6 +508,7 @@ async fn sip_event_loop(
             }
             DialogState::Early(dialog_id, _) => {
                 info!("dialog early: {}", dialog_id);
+                *call_state.ring_time.lock().await = Some(Utc::now());
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -504,6 +517,7 @@ async fn sip_event_loop(
             }
             DialogState::Calling(dialog_id) => {
                 info!("dialog calling: {}", dialog_id);
+                *call_state.ring_time.lock().await = Some(Utc::now());
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -511,6 +525,8 @@ async fn sip_event_loop(
                 })?;
             }
             DialogState::Confirmed(dialog_id) => {
+                *call_state.answer_time.lock().await = Some(Utc::now());
+                call_state.last_status_code.store(200, Ordering::Relaxed);
                 info!("dialog confirmed: {}", dialog_id);
             }
             DialogState::Terminated(dialog_id, _) => {
@@ -556,6 +572,7 @@ pub async fn handle_call(
     session_id: String,
     socket: axum::extract::ws::WebSocket,
     state: AppState,
+    call_state: ActiveCallStateRef,
 ) -> Result<()> {
     let cancel_token = CancellationToken::new();
     let (mut ws_sender, ws_receiver) = socket.split();
@@ -567,7 +584,7 @@ pub async fn handle_call(
             info!("prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
-        r = process_call(cancel_token.clone(), call_type, session_id.clone(),ws_receiver, event_sender, state) => {
+        r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(),ws_receiver, event_sender, state) => {
             match r {
                 Ok(_) => {}
                 Err(e) => {
@@ -598,6 +615,7 @@ pub async fn handle_call(
 async fn process_call(
     cancel_token: CancellationToken,
     call_type: ActiveCallType,
+    call_state: ActiveCallStateRef,
     session_id: String,
     mut ws_receiver: SplitStream<WebSocket>,
     mut event_sender: EventSender,
@@ -614,6 +632,7 @@ async fn process_call(
     let audio_from_ws = Arc::new(Mutex::new(None));
     let audio_from_ws_ref = audio_from_ws.clone();
 
+    let call_state_clone = call_state.clone();
     let prepare_call = async move {
         let mut option = match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
@@ -683,6 +702,7 @@ async fn process_call(
         .await?;
 
         let active_call = ActiveCall::new(
+            call_state_clone,
             call_type,
             cancel_token,
             event_sender_ref,
@@ -695,7 +715,6 @@ async fn process_call(
         .await?;
         Ok((Arc::new(active_call), ws_receiver))
     };
-
     let (active_call, mut ws_receiver) = select! {
         _ = cancel_token_ref.cancelled() => {
             info!("prepare call cancelled");
@@ -712,7 +731,7 @@ async fn process_call(
         }
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
-                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver).await
+                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver, call_state.clone()).await
             } else {
                 cancel_token_ref.cancelled().await;
                 Ok(())
@@ -775,7 +794,7 @@ async fn process_call(
         },
         _ = async {
             if matches!(call_type_ref, ActiveCallType::Sip) {
-                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver).await
+                sip_event_loop(track_id_clone.clone(), &mut event_sender, &mut dlg_state_receiver, call_state.clone()).await
             } else {
                 cancel_token_ref.cancelled().await;
                 Ok(())
