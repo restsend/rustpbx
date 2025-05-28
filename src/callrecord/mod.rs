@@ -37,15 +37,16 @@ pub type FnSaveCallRecord = Arc<
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
-    pub option: CallOption,
+    pub option: Option<CallOption>,
     pub call_id: String,
     pub start_time: DateTime<Utc>,
+    pub ring_time: Option<DateTime<Utc>>,
+    pub answer_time: Option<DateTime<Utc>>,
     pub end_time: DateTime<Utc>,
-    pub duration: u64,
     pub caller: String,
     pub callee: String,
     pub status_code: u16,
-    pub hangup_reason: CallRecordHangupReason,
+    pub hangup_reason: Option<CallRecordHangupReason>,
     pub recorder: Vec<CallRecordMedia>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
 }

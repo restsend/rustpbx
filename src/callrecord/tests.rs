@@ -14,15 +14,16 @@ async fn test_save_with_http_without_media() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_call_123".to_string(),
         start_time: Utc::now(),
+        ring_time: None,
+        answer_time: None,
         end_time: Utc::now(),
-        duration: 60,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: None,
         recorder: vec![],
         extras: Some(extras),
     };
@@ -78,15 +79,16 @@ async fn test_save_with_http_with_media() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_call_with_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        duration: 120,
+        ring_time: None,
+        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
     };
@@ -130,15 +132,16 @@ async fn test_save_with_http_with_custom_headers() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        duration: 30,
+        ring_time: None,
+        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
     };
@@ -180,15 +183,16 @@ async fn test_save_with_s3_like_with_custom_headers() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        duration: 30,
+        ring_time: None,
+        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
     };
@@ -236,15 +240,16 @@ async fn test_save_with_s3_like_memory_store() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        duration: 60,
+        ring_time: None,
+        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
     };
@@ -299,15 +304,16 @@ async fn test_save_with_s3_like_with_media() {
 
     let record = CallRecord {
         call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
+        option: Some(crate::handler::CallOption::default()),
         call_id: "test_s3_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        duration: 120,
+        ring_time: None,
+        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
     };

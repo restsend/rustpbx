@@ -22,6 +22,8 @@ struct CallSession {
     dialog_id: DialogId,
     call_id: String,
     start_time: DateTime<Utc>,
+    ring_time: Option<DateTime<Utc>>,
+    answer_time: Option<DateTime<Utc>>,
     caller: String,
     callee: String,
     status_code: u16,
@@ -40,6 +42,8 @@ impl CallSession {
             dialog_id,
             call_id,
             start_time: Utc::now(),
+            ring_time: None,
+            answer_time: None,
             caller,
             callee,
             status_code: 180, // Ringing as default
@@ -55,15 +59,16 @@ impl CallSession {
 
         CallRecord {
             call_type: ActiveCallType::Sip,
-            option: self.call_option.clone(),
+            option: Some(self.call_option.clone()),
             call_id: self.call_id.clone(),
             start_time: self.start_time,
+            ring_time: self.ring_time,
+            answer_time: self.answer_time,
             end_time,
-            duration,
             caller: self.caller.clone(),
             callee: self.callee.clone(),
             status_code: self.status_code,
-            hangup_reason,
+            hangup_reason: Some(hangup_reason),
             recorder: vec![], // CDR module doesn't handle media recording
             extras: None,
         }
@@ -213,7 +218,7 @@ impl CdrModule {
                     info!(
                         "CDR: Call record generated - Call-ID: {}, Duration: {}s, Caller: {}, Callee: {}",
                         call_record.call_id,
-                        call_record.duration,
+                        call_record.end_time.signed_duration_since(call_record.start_time).as_seconds_f32(),
                         call_record.caller,
                         call_record.callee
                     );
@@ -276,7 +281,11 @@ impl CdrModule {
                     Ok(_) => {
                         warn!(
                             "CDR: Stale call session cleaned up - Call-ID: {}, Duration: {}s",
-                            call_record.call_id, call_record.duration
+                            call_record.call_id,
+                            call_record
+                                .end_time
+                                .signed_duration_since(call_record.start_time)
+                                .as_seconds_f32()
                         );
                     }
                     Err(e) => {
@@ -433,9 +442,8 @@ mod tests {
         assert_eq!(call_record.status_code, 180);
         assert!(matches!(
             call_record.hangup_reason,
-            CallRecordHangupReason::ByCaller
+            Some(CallRecordHangupReason::ByCaller)
         ));
-        assert!(call_record.duration <= 1); // Very small duration for test
         assert!(call_record.recorder.is_empty()); // CDR module doesn't handle media
     }
 
@@ -484,7 +492,7 @@ mod tests {
         assert_eq!(call_record.call_id, "old-call-123");
         assert!(matches!(
             call_record.hangup_reason,
-            CallRecordHangupReason::Autohangup
+            Some(CallRecordHangupReason::Autohangup)
         ));
     }
 
