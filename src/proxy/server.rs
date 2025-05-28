@@ -3,7 +3,7 @@ use super::{
     user::{create_user_backend, UserBackend},
     FnCreateProxyModule, ProxyAction, ProxyModule,
 };
-use crate::config::ProxyConfig;
+use crate::{callrecord::CallRecordSender, config::ProxyConfig};
 use anyhow::{anyhow, Result};
 use rsipstack::{
     transaction::{transaction::Transaction, Endpoint, TransactionReceiver},
@@ -28,6 +28,7 @@ pub struct SipServerInner {
     pub config: Arc<ProxyConfig>,
     pub user_backend: Arc<Box<dyn UserBackend>>,
     pub locator: Arc<Box<dyn Locator>>,
+    pub callrecord_sender: Option<CallRecordSender>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -44,6 +45,7 @@ pub struct SipServerBuilder {
     user_backend: Option<Box<dyn UserBackend>>,
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
+    callrecord_sender: Option<CallRecordSender>,
 }
 
 impl SipServerBuilder {
@@ -54,6 +56,7 @@ impl SipServerBuilder {
             user_backend: None,
             module_fns: HashMap::new(),
             locator: None,
+            callrecord_sender: None,
         }
     }
 
@@ -74,6 +77,12 @@ impl SipServerBuilder {
         self.module_fns.insert(name.to_lowercase(), module_fn);
         self
     }
+
+    pub fn with_callrecord_sender(mut self, callrecord_sender: Option<CallRecordSender>) -> Self {
+        self.callrecord_sender = callrecord_sender;
+        self
+    }
+
     pub async fn build(self) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
@@ -105,6 +114,7 @@ impl SipServerBuilder {
             cancel_token: self.cancel_token.unwrap_or_default(),
             user_backend: Arc::new(user_backend),
             locator: Arc::new(locator),
+            callrecord_sender: self.callrecord_sender,
         });
 
         let mut allow_methods = Vec::new();

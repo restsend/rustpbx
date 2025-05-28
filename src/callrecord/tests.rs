@@ -16,15 +16,15 @@ async fn test_save_with_http_without_media() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_call_123".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 60,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![],
-        extras,
+        extras: Some(extras),
     };
 
     // Test without media (should not fail if no server available)
@@ -65,13 +65,9 @@ async fn test_save_with_http_with_media() {
 
     let media = CallRecordMedia {
         track_id: "track_001".to_string(),
-        r#type: "audio/wav".to_string(),
         path: temp_file.path().to_string_lossy().to_string(),
         size: test_content.len() as u64,
-        duration: 5000,
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
-        extra: HashMap::new(),
+        extra: None,
     };
 
     let mut extras = HashMap::new();
@@ -84,15 +80,15 @@ async fn test_save_with_http_with_media() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_call_with_media_456".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 120,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![media],
-        extras,
+        extras: Some(extras),
     };
 
     // Test with media
@@ -136,15 +132,15 @@ async fn test_save_with_http_with_custom_headers() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_call_headers_789".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 30,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![],
-        extras,
+        extras: Some(extras),
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -186,15 +182,15 @@ async fn test_save_with_s3_like_with_custom_headers() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_call_headers_789".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 30,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![],
-        extras,
+        extras: Some(extras),
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -242,15 +238,15 @@ async fn test_save_with_s3_like_memory_store() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_s3_call_123".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 60,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![],
-        extras,
+        extras: Some(extras),
     };
 
     // This test will only succeed if there's a local minio instance running
@@ -290,13 +286,9 @@ async fn test_save_with_s3_like_with_media() {
 
     let media = CallRecordMedia {
         track_id: "s3_track_001".to_string(),
-        r#type: "audio/wav".to_string(),
         path: temp_file.path().to_string_lossy().to_string(),
         size: test_content.len() as u64,
-        duration: 5000,
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
-        extra: HashMap::new(),
+        extra: None,
     };
 
     let mut extras = HashMap::new();
@@ -309,15 +301,15 @@ async fn test_save_with_s3_like_with_media() {
         call_type: crate::handler::call::ActiveCallType::Sip,
         option: crate::handler::CallOption::default(),
         call_id: "test_s3_media_456".to_string(),
-        start_time: SystemTime::now(),
-        end_time: SystemTime::now(),
+        start_time: Utc::now(),
+        end_time: Utc::now(),
         duration: 120,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: CallRecordHangupReason::ByCaller,
         recorder: vec![media],
-        extras,
+        extras: Some(extras),
     };
 
     // Test with different S3 vendors
@@ -362,51 +354,4 @@ async fn test_save_with_s3_like_with_media() {
             ),
         }
     }
-}
-
-#[test]
-fn test_systemtime_iso8601_serialization() {
-    // Test SystemTime serialization to ISO 8601 format
-    use std::time::{Duration, UNIX_EPOCH};
-
-    // Create a specific time for testing (2024-01-01 00:00:00 UTC)
-    let test_time = UNIX_EPOCH + Duration::from_secs(1704067200); // 2024-01-01 00:00:00 UTC
-
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test".to_string(),
-        serde_json::Value::String("value".to_string()),
-    );
-
-    let record = CallRecord {
-        call_type: crate::handler::call::ActiveCallType::Sip,
-        option: crate::handler::CallOption::default(),
-        call_id: "test_iso8601".to_string(),
-        start_time: test_time,
-        end_time: test_time,
-        duration: 60,
-        caller: "+1234567890".to_string(),
-        callee: "+0987654321".to_string(),
-        status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
-        recorder: vec![],
-        extras,
-    };
-
-    // Serialize to JSON
-    let json = serde_json::to_string_pretty(&record).unwrap();
-    println!("Serialized CallRecord:\n{}", json);
-
-    // Check that the JSON contains ISO 8601 formatted time
-    assert!(json.contains("2024-01-01T00:00:00"));
-    assert!(json.contains("start_time"));
-    assert!(json.contains("end_time"));
-
-    // Test deserialization
-    let deserialized: CallRecord = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.call_id, "test_iso8601");
-    assert_eq!(deserialized.start_time, test_time);
-    assert_eq!(deserialized.end_time, test_time);
-
-    println!("✅ SystemTime ISO 8601 serialization test passed!");
 }

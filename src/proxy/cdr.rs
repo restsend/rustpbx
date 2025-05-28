@@ -7,12 +7,12 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rsip::prelude::{HeadersExt, ToTypedHeader, UntypedHeader};
 use rsipstack::{dialog::DialogId, transaction::transaction::Transaction};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::SystemTime,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 struct CallSession {
     dialog_id: DialogId,
     call_id: String,
-    start_time: SystemTime,
+    start_time: DateTime<Utc>,
     caller: String,
     callee: String,
     status_code: u16,
@@ -39,7 +39,7 @@ impl CallSession {
         Self {
             dialog_id,
             call_id,
-            start_time: SystemTime::now(),
+            start_time: Utc::now(),
             caller,
             callee,
             status_code: 180, // Ringing as default
@@ -48,11 +48,10 @@ impl CallSession {
     }
 
     fn to_call_record(&self, hangup_reason: CallRecordHangupReason) -> CallRecord {
-        let end_time = SystemTime::now();
+        let end_time = Utc::now();
         let duration = end_time
-            .duration_since(self.start_time)
-            .unwrap_or_default()
-            .as_secs();
+            .signed_duration_since(self.start_time)
+            .num_milliseconds() as u64;
 
         CallRecord {
             call_type: ActiveCallType::Sip,
@@ -66,7 +65,7 @@ impl CallSession {
             status_code: self.status_code,
             hangup_reason,
             recorder: vec![], // CDR module doesn't handle media recording
-            extras: HashMap::new(),
+            extras: None,
         }
     }
 }
@@ -88,18 +87,14 @@ impl CdrModule {
         Ok(Box::new(module))
     }
 
-    pub fn new(_server: SipServerRef, _config: Arc<ProxyConfig>) -> Self {
+    pub fn new(server: SipServerRef, _config: Arc<ProxyConfig>) -> Self {
+        let callrecord_sender = server.callrecord_sender.clone();
         let inner = Arc::new(CdrModuleInner {
-            callrecord_sender: None,
+            callrecord_sender,
             active_sessions: Mutex::new(HashMap::new()),
             transaction_counter: Mutex::new(0),
         });
         Self { inner }
-    }
-
-    pub fn set_callrecord_sender(&self, _sender: CallRecordSender) {
-        // This method would be called externally to set the sender
-        // For now, we'll handle this in the transaction processing
     }
 
     fn extract_caller_callee_from_invite(&self, tx: &Transaction) -> Result<(String, String)> {
@@ -260,21 +255,21 @@ impl CdrModule {
 
     // Clean up sessions that have been active too long without proper termination
     fn cleanup_stale_sessions(&self, sender: &CallRecordSender, max_duration_secs: u64) {
-        let now = SystemTime::now();
+        let now = Utc::now();
         let mut active_sessions = self.inner.active_sessions.lock().unwrap();
         let mut to_remove = Vec::new();
 
         for (call_id, session) in active_sessions.iter() {
-            if let Ok(duration) = now.duration_since(session.start_time) {
-                if duration.as_secs() > max_duration_secs {
-                    to_remove.push(call_id.clone());
-                }
+            if now.signed_duration_since(session.start_time).num_seconds() as u64
+                > max_duration_secs
+            {
+                to_remove.push(call_id.clone());
             }
         }
 
         for call_id in to_remove {
             if let Some(session) = active_sessions.remove(&call_id) {
-                let hangup_reason = CallRecordHangupReason::BySystem;
+                let hangup_reason = CallRecordHangupReason::Autohangup;
                 let call_record = session.to_call_record(hangup_reason);
 
                 match sender.send(call_record.clone()) {
@@ -328,13 +323,9 @@ impl ProxyModule for CdrModule {
         _token: CancellationToken,
         tx: &mut Transaction,
     ) -> Result<ProxyAction> {
-        // We need access to CallRecordSender - in a real implementation,
-        // this would be injected during module creation
-        // For now, we'll try to get it from the global app state if available
-        let sender = match self.get_callrecord_sender() {
+        let sender = match self.inner.callrecord_sender.as_ref() {
             Some(sender) => sender,
             None => {
-                debug!("CDR: No CallRecord sender available, skipping CDR processing");
                 return Ok(ProxyAction::Continue);
             }
         };
@@ -346,12 +337,12 @@ impl ProxyModule for CdrModule {
                 }
             }
             rsip::Method::Bye => {
-                if let Err(e) = self.handle_bye(tx, &sender) {
+                if let Err(e) = self.handle_bye(tx, sender) {
                     error!("CDR: Error handling BYE: {}", e);
                 }
             }
             rsip::Method::Cancel => {
-                if let Err(e) = self.handle_cancel(tx, &sender) {
+                if let Err(e) = self.handle_cancel(tx, sender) {
                     error!("CDR: Error handling CANCEL: {}", e);
                 }
             }
@@ -371,7 +362,7 @@ impl ProxyModule for CdrModule {
         let mut counter = self.inner.transaction_counter.lock().unwrap();
         *counter += 1;
         if *counter % 100 == 0 {
-            if let Some(sender) = self.get_callrecord_sender() {
+            if let Some(sender) = self.inner.callrecord_sender.as_ref() {
                 self.cleanup_stale_sessions(&sender, 3600); // 1 hour timeout
             }
         }
@@ -380,22 +371,7 @@ impl ProxyModule for CdrModule {
     }
 }
 
-impl CdrModule {
-    // Helper method to get CallRecord sender - in practice this would be injected
-    fn get_callrecord_sender(&self) -> Option<CallRecordSender> {
-        // This is a placeholder - in a real implementation, you would:
-        // 1. Inject the sender during module creation, or
-        // 2. Get it from a global application state, or
-        // 3. Use a service locator pattern
-
-        // For now, return None to avoid compilation errors
-        None
-
-        // In a real implementation, it might look like:
-        // crate::app::get_global_app_state()
-        //     .map(|state| state.callrecord.sender.clone())
-    }
-}
+impl CdrModule {}
 
 #[cfg(test)]
 mod tests {
@@ -413,6 +389,7 @@ mod tests {
             config: Arc::new(ProxyConfig::default()),
             user_backend: Arc::new(Box::new(crate::proxy::user::MemoryUserBackend::new(None))),
             locator: Arc::new(Box::new(crate::proxy::locator::MemoryLocator::new())),
+            callrecord_sender: None,
         })
     }
 
@@ -487,7 +464,7 @@ mod tests {
         );
 
         // Set old start time (more than 1 hour ago)
-        session.start_time = SystemTime::now() - std::time::Duration::from_secs(3700);
+        session.start_time = Utc::now() - chrono::Duration::hours(1);
 
         {
             let mut active_sessions = module.inner.active_sessions.lock().unwrap();
@@ -507,7 +484,7 @@ mod tests {
         assert_eq!(call_record.call_id, "old-call-123");
         assert!(matches!(
             call_record.hangup_reason,
-            CallRecordHangupReason::BySystem
+            CallRecordHangupReason::Autohangup
         ));
     }
 

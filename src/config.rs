@@ -267,7 +267,10 @@ impl Default for UseragentConfig {
 impl Default for CallRecordConfig {
     fn default() -> Self {
         Self::Local {
+            #[cfg(target_os = "windows")]
             root: "./cdr".to_string(),
+            #[cfg(not(target_os = "windows"))]
+            root: "/tmp/cdr".to_string(),
         }
     }
 }
@@ -280,7 +283,7 @@ impl Default for Config {
             log_file: None,
             console: Some(ConsoleConfig::default()),
             ua: Some(UseragentConfig::default()),
-            proxy: Some(ProxyConfig::default()),
+            proxy: None,
             #[cfg(target_os = "windows")]
             recorder_path: "./recorder".to_string(),
             #[cfg(not(target_os = "windows"))]

@@ -80,12 +80,14 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     });
 
     // Create a minimal state with call record manager
-    let callrecord = Arc::new(
-        CallRecordManagerBuilder::new()
-            .with_config(config.call_record.clone().unwrap_or_default())
-            .build(),
-    );
+    let mut callrecord = CallRecordManagerBuilder::new()
+        .with_config(config.call_record.clone().unwrap_or_default())
+        .build();
+    let callrecord_sender = callrecord.sender.clone();
 
+    tokio::spawn(async move {
+        callrecord.serve().await;
+    });
     let app = Router::new()
         .route(
             "/ws",
@@ -95,7 +97,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .with_state(
             AppStateBuilder::new()
                 .config(config)
-                .with_callrecord(callrecord)
+                .with_callrecord_sender(callrecord_sender)
                 .build()
                 .await?,
         );
