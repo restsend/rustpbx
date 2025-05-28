@@ -44,6 +44,7 @@ pub struct AppStateBuilder {
     pub useragent: Option<Arc<UserAgent>>,
     pub stream_engine: Option<Arc<StreamEngine>>,
     pub callrecord_sender: Option<CallRecordSender>,
+    pub cancel_token: Option<CancellationToken>,
 }
 
 impl AppStateInner {
@@ -77,6 +78,7 @@ impl AppStateBuilder {
             useragent: None,
             stream_engine: None,
             callrecord_sender: None,
+            cancel_token: None,
         }
     }
 
@@ -98,10 +100,16 @@ impl AppStateBuilder {
         self.callrecord_sender = Some(sender);
         self
     }
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
+    }
 
     pub async fn build(self) -> Result<AppState> {
         let config = Arc::new(self.config.unwrap_or_default());
-        let token = CancellationToken::new();
+        let token = self
+            .cancel_token
+            .unwrap_or_else(|| CancellationToken::new());
         let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
 
         let useragent = if let Some(ua) = self.useragent {
