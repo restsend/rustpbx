@@ -3,74 +3,20 @@ use crate::{
     handler::{call::ActiveCallType, CallOption},
 };
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use object_store::{
     aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder,
     path::Path as ObjectPath, ObjectStore,
 };
 use reqwest;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{
-    collections::HashMap,
-    future::Future,
-    path::Path,
-    pin::Pin,
-    sync::Arc,
-    time::{Instant, SystemTime},
-};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, future::Future, path::Path, pin::Pin, sync::Arc, time::Instant};
 use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[cfg(test)]
 mod tests;
-/// Custom serialization module for SystemTime to ISO 8601 format
-///
-/// This module provides custom serialization and deserialization for `SystemTime`
-/// to ensure it's formatted as ISO 8601 (RFC 3339) compliant strings in JSON.
-///
-/// ## Usage
-///
-/// Add the `#[serde(with = "iso8601_systemtime")]` attribute to any `SystemTime` field:
-///
-/// ```rust
-/// use std::time::SystemTime;
-/// use serde::{Serialize, Deserialize};
-///
-/// #[derive(Serialize, Deserialize)]
-/// struct MyStruct {
-///     #[serde(with = "iso8601_systemtime")]
-///     created_at: SystemTime,
-/// }
-/// ```
-///
-/// ## Output format
-///
-/// The serialized format follows ISO 8601 / RFC 3339:
-/// - `"2024-01-01T00:00:00+00:00"` (with timezone)
-/// - `"2024-01-01T12:30:45.123456789Z"` (with nanoseconds if present)
-mod iso8601_systemtime {
-    use super::*;
-    use chrono::{DateTime, Utc};
-
-    /// Serialize SystemTime to ISO 8601 / RFC 3339 format
-    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let datetime: DateTime<Utc> = (*time).into();
-        serializer.serialize_str(&datetime.to_rfc3339())
-    }
-
-    /// Deserialize ISO 8601 / RFC 3339 format to SystemTime
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let datetime = DateTime::parse_from_rfc3339(&s).map_err(serde::de::Error::custom)?;
-        Ok(datetime.with_timezone(&Utc).into())
-    }
-}
 
 pub type CallRecordSender = tokio::sync::mpsc::UnboundedSender<CallRecord>;
 pub type CallRecordReceiver = tokio::sync::mpsc::UnboundedReceiver<CallRecord>;
@@ -93,31 +39,23 @@ pub struct CallRecord {
     pub call_type: ActiveCallType,
     pub option: CallOption,
     pub call_id: String,
-    #[serde(with = "iso8601_systemtime")]
-    pub start_time: SystemTime,
-    #[serde(with = "iso8601_systemtime")]
-    pub end_time: SystemTime,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
     pub duration: u64,
     pub caller: String,
     pub callee: String,
     pub status_code: u16,
     pub hangup_reason: CallRecordHangupReason,
     pub recorder: Vec<CallRecordMedia>,
-    pub extras: HashMap<String, serde_json::Value>,
+    pub extras: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecordMedia {
     pub track_id: String,
-    pub r#type: String,
     pub path: String,
     pub size: u64,
-    pub duration: u64,
-    #[serde(with = "iso8601_systemtime")]
-    pub start_time: SystemTime,
-    #[serde(with = "iso8601_systemtime")]
-    pub end_time: SystemTime,
-    pub extra: HashMap<String, serde_json::Value>,
+    pub extra: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,14 +64,15 @@ pub enum CallRecordHangupReason {
     ByCaller,
     ByCallee,
     BySystem,
+    Autohangup,
     NoAnswer,
     NoBalance,
     AnswerMachine,
     ServerUnavailable,
     Canceled,
-    Rejected(u16, String),
-    Failed(u16, String),
-    Other(String),
+    Rejected,
+    Failed,
+    Other,
 }
 pub trait CallRecordFormatter: Send + Sync {
     fn format(&self, record: &CallRecord) -> Result<String>;
@@ -350,7 +289,7 @@ impl CallRecordManager {
 
                             let part = match reqwest::multipart::Part::bytes(file_content)
                                 .file_name(file_name.clone())
-                                .mime_str(&media.r#type)
+                                .mime_str("application/octet-stream")
                             {
                                 Ok(part) => part,
                                 Err(_) => {
@@ -508,7 +447,7 @@ impl CallRecordManager {
 
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
-
+        info!("CallRecordManager serving");
         select! {
             _ = self.cancel_token.cancelled() => {
                 info!("CallRecordManager cancelled");
@@ -523,6 +462,7 @@ impl CallRecordManager {
                 info!("CallRecordManager received done");
             }
         }
+        info!("CallRecordManager served");
     }
 
     async fn recv_loop(

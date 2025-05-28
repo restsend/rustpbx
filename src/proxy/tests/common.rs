@@ -33,6 +33,7 @@ pub async fn create_test_server_with_config(
         cancel_token: CancellationToken::new(),
         user_backend: Arc::new(user_backend),
         locator: Arc::new(locator),
+        callrecord_sender: None,
     });
 
     // Add test users

@@ -16,7 +16,7 @@ udp_port=13050 # don't use 5060
 [proxy]
 modules = ["ban", "auth", "registrar", "cdr", "mediaproxy", "call"]
 addr = "0.0.0.0"
-udp_port = 5060
+udp_port = 15060
 registrar_expires = 60
 
 # MediaProxy configuration
@@ -30,5 +30,6 @@ external_ip = "192.168.1.1"  # Set to your external IP
 [proxy.user_backend]
 type = "memory"
 users = [
-    { username = "test", password = "test", realm = "127.0.0.1" },
+    { username = "bob", password = "123456", realm = "127.0.0.1" },
+    { username = "alice", password = "123456", realm = "127.0.0.1" },
 ]

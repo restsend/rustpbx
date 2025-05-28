@@ -16,7 +16,6 @@ use axum::{
 };
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::{select, time};
@@ -69,11 +68,14 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
     });
 
     // Create a minimal state with call record manager but without proxy/useragent
-    let callrecord = Arc::new(
-        CallRecordManagerBuilder::new()
-            .with_config(config.call_record.clone().unwrap_or_default())
-            .build(),
-    );
+    let mut callrecord = CallRecordManagerBuilder::new()
+        .with_config(config.call_record.clone().unwrap_or_default())
+        .build();
+
+    let callrecord_sender = callrecord.sender.clone();
+    tokio::spawn(async move {
+        callrecord.serve().await;
+    });
 
     let app = Router::new()
         .route(
@@ -84,7 +86,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
         .with_state(
             AppStateBuilder::new()
                 .config(config)
-                .with_callrecord(callrecord)
+                .with_callrecord_sender(callrecord_sender)
                 .build()
                 .await?,
         );

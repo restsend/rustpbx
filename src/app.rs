@@ -1,16 +1,11 @@
 use crate::{
-    callrecord::{CallRecordManager, CallRecordManagerBuilder},
-    config::Config,
+    callrecord::{CallRecordManagerBuilder, CallRecordSender},
+    config::{Config, ProxyConfig},
     handler::call::ActiveCallRef,
     media::engine::StreamEngine,
     proxy::{
-        auth::AuthModule,
-        ban::BanModule,
-        call::CallModule,
-        cdr::CdrModule,
-        mediaproxy::MediaProxyModule,
-        registrar::RegistrarModule,
-        server::{SipServer, SipServerBuilder},
+        auth::AuthModule, ban::BanModule, call::CallModule, cdr::CdrModule,
+        mediaproxy::MediaProxyModule, registrar::RegistrarModule, server::SipServerBuilder,
     },
     useragent::UserAgent,
 };
@@ -36,11 +31,10 @@ use tracing::{info, warn};
 pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Arc<UserAgent>,
-    pub proxy: Arc<SipServer>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
-    pub callrecord: Arc<CallRecordManager>,
+    pub callrecord_sender: tokio::sync::Mutex<Option<CallRecordSender>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -49,8 +43,7 @@ pub struct AppStateBuilder {
     pub config: Option<Config>,
     pub useragent: Option<Arc<UserAgent>>,
     pub stream_engine: Option<Arc<StreamEngine>>,
-    pub proxy: Option<Arc<SipServer>>,
-    pub callrecord: Option<Arc<CallRecordManager>>,
+    pub callrecord_sender: Option<CallRecordSender>,
 }
 
 impl AppStateInner {
@@ -83,8 +76,7 @@ impl AppStateBuilder {
             config: None,
             useragent: None,
             stream_engine: None,
-            proxy: None,
-            callrecord: None,
+            callrecord_sender: None,
         }
     }
 
@@ -97,18 +89,16 @@ impl AppStateBuilder {
         self.useragent = Some(useragent);
         self
     }
-    pub fn with_proxy(mut self, proxy: Arc<SipServer>) -> Self {
-        self.proxy = Some(proxy);
-        self
-    }
     pub fn with_stream_engine(mut self, stream_engine: Arc<StreamEngine>) -> Self {
         self.stream_engine = Some(stream_engine);
         self
     }
-    pub fn with_callrecord(mut self, callrecord: Arc<CallRecordManager>) -> Self {
-        self.callrecord = Some(callrecord);
+
+    pub fn with_callrecord_sender(mut self, sender: CallRecordSender) -> Self {
+        self.callrecord_sender = Some(sender);
         self
     }
+
     pub async fn build(self) -> Result<AppState> {
         let config = Arc::new(self.config.unwrap_or_default());
         let token = CancellationToken::new();
@@ -124,41 +114,6 @@ impl AppStateBuilder {
             Arc::new(ua_builder.build().await?)
         };
         let stream_engine = self.stream_engine.unwrap_or_default();
-        let proxy = if let Some(proxy) = self.proxy {
-            proxy
-        } else {
-            let proxy_config = Arc::new(config.proxy.clone().unwrap_or_default());
-            let mut proxy_builder =
-                SipServerBuilder::new(proxy_config.clone()).with_cancel_token(token.child_token());
-
-            proxy_builder = proxy_builder
-                .register_module("ban", BanModule::create)
-                .register_module("auth", AuthModule::create)
-                .register_module("registrar", RegistrarModule::create)
-                .register_module("cdr", CdrModule::create)
-                .register_module("mediaproxy", MediaProxyModule::create)
-                .register_module("call", CallModule::create);
-
-            let proxy = match proxy_builder.build().await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("Failed to build proxy: {}", e);
-                    return Err(anyhow::anyhow!("Failed to build proxy: {}", e));
-                }
-            };
-            Arc::new(proxy)
-        };
-
-        let callrecord = if let Some(callrecord) = self.callrecord {
-            callrecord
-        } else {
-            Arc::new(
-                CallRecordManagerBuilder::new()
-                    .with_cancel_token(token.child_token())
-                    .with_config(config.call_record.clone().unwrap_or_default())
-                    .build(),
-            )
-        };
 
         Ok(Arc::new(AppStateInner {
             config,
@@ -166,15 +121,49 @@ impl AppStateBuilder {
             token,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             stream_engine,
-            proxy,
-            callrecord,
+            callrecord_sender: tokio::sync::Mutex::new(self.callrecord_sender),
         }))
     }
 }
 
+pub async fn serve_proxy(
+    token: CancellationToken,
+    config: ProxyConfig,
+    callrecord_sender: Option<CallRecordSender>,
+) -> Result<()> {
+    let proxy_config = Arc::new(config);
+    let mut proxy_builder = SipServerBuilder::new(proxy_config)
+        .with_cancel_token(token.child_token())
+        .with_callrecord_sender(callrecord_sender);
+
+    proxy_builder = proxy_builder
+        .register_module("ban", BanModule::create)
+        .register_module("auth", AuthModule::create)
+        .register_module("registrar", RegistrarModule::create)
+        .register_module("cdr", CdrModule::create)
+        .register_module("mediaproxy", MediaProxyModule::create)
+        .register_module("call", CallModule::create);
+
+    let proxy = match proxy_builder.build().await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to build proxy: {}", e);
+            return Err(anyhow::anyhow!("Failed to build proxy: {}", e));
+        }
+    };
+    info!("Proxy server started");
+    match proxy.serve().await {
+        Ok(_) => {}
+        Err(e) => {
+            warn!("Proxy server error: {}", e);
+            return Err(anyhow::anyhow!("Proxy server error: {}", e));
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(state: AppState) -> Result<()> {
     let ua = state.useragent.clone();
-    let proxy = state.proxy.clone();
     let token = state.token.clone();
 
     let app = create_router(state.clone());
@@ -192,6 +181,35 @@ pub async fn run(state: AppState) -> Result<()> {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     );
 
+    if let Some(ref callrecord) = state.config.call_record {
+        let mut callrecord_sender = state.callrecord_sender.lock().await;
+        if callrecord_sender.is_none() {
+            let mut callrecord_manager = CallRecordManagerBuilder::new()
+                .with_cancel_token(token.child_token())
+                .with_config(callrecord.clone())
+                .build();
+            callrecord_sender.replace(callrecord_manager.sender.clone());
+
+            tokio::spawn(async move {
+                callrecord_manager.serve().await;
+            });
+        }
+    }
+
+    if let Some(ref proxy) = state.config.proxy {
+        let token_proxy = token.clone();
+        let proxy_config = proxy.clone();
+        let callrecord_sender = state.callrecord_sender.lock().await.clone();
+        tokio::spawn(async move {
+            match serve_proxy(token_proxy, proxy_config, callrecord_sender).await {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Proxy server error: {}", e);
+                }
+            }
+        });
+    }
+
     select! {
         http_result = http_task => {
             match http_result {
@@ -206,12 +224,6 @@ pub async fn run(state: AppState) -> Result<()> {
             if let Err(e) = ua_result {
                 tracing::error!("User agent server error: {}", e);
                 return Err(anyhow::anyhow!("User agent server error: {}", e));
-            }
-        }
-        proxy_result = proxy.serve() => {
-            if let Err(e) = proxy_result {
-                tracing::error!("Proxy server error: {}", e);
-                return Err(anyhow::anyhow!("Proxy server error: {}", e));
             }
         }
         _ = token.cancelled() => {

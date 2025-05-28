@@ -1,7 +1,7 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
-    callrecord::CallRecordHangupReason,
+    callrecord::{CallRecord, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
         engine::StreamEngine,
@@ -65,7 +65,7 @@ pub struct ActiveCall {
     pub option: CallOption,
     pub dialog_id: Mutex<Option<DialogId>>,
     pub state: AppState,
-    pub hangup_reason: Arc<Mutex<Option<CallRecordHangupReason>>>,
+    pub hangup_reason: Mutex<Option<CallRecordHangupReason>>,
 }
 
 impl ActiveCall {
@@ -192,7 +192,7 @@ impl ActiveCall {
             tts_handle: Mutex::new(None),
             dialog_id: Mutex::new(dialog_id),
             state,
-            hangup_reason: Arc::new(Mutex::new(None)),
+            hangup_reason: Mutex::new(None),
         };
         Ok(active_call)
     }
@@ -378,11 +378,11 @@ impl ActiveCall {
         let hangup_reason = match initiator.as_deref() {
             Some("caller") => CallRecordHangupReason::ByCaller,
             Some("callee") => CallRecordHangupReason::ByCallee,
-            Some("system") => CallRecordHangupReason::BySystem,
+            Some("system") => CallRecordHangupReason::Autohangup,
             _ => match reason.as_deref() {
-                Some("autohangup") => CallRecordHangupReason::BySystem,
+                Some("autohangup") => CallRecordHangupReason::Autohangup,
                 Some("canceled") => CallRecordHangupReason::Canceled,
-                Some("rejected") => CallRecordHangupReason::Rejected(486, "Rejected".to_string()),
+                Some("rejected") => CallRecordHangupReason::Rejected,
                 Some("no_answer") => CallRecordHangupReason::NoAnswer,
                 _ => CallRecordHangupReason::BySystem,
             },
@@ -421,7 +421,7 @@ impl ActiveCall {
 
         // Set default hangup reason if not already set
         if self.hangup_reason.lock().await.is_none() {
-            *self.hangup_reason.lock().await = Some(CallRecordHangupReason::BySystem);
+            *self.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
         }
 
         self.tts_handle.lock().await.take();
@@ -431,6 +431,56 @@ impl ActiveCall {
         }
         self.cancel_token.cancel();
         Ok(())
+    }
+    pub async fn get_callrecord(&self) -> CallRecord {
+        let recorder_files = if self.option.recorder.is_some() {
+            let recorder_file = self.state.get_recorder_file(&self.session_id);
+            if std::path::Path::new(&recorder_file).exists() {
+                let file_size = std::fs::metadata(&recorder_file)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                vec![crate::callrecord::CallRecordMedia {
+                    track_id: self.session_id.clone(),
+                    path: recorder_file,
+                    size: file_size,
+                    extra: None,
+                }]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        CallRecord {
+            option: self.option.clone(),
+            call_id: self.session_id.clone(),
+            call_type: self.call_type.clone(),
+            start_time: self.created_at,
+            end_time: Utc::now(),
+            duration: Utc::now()
+                .signed_duration_since(self.created_at)
+                .num_milliseconds() as u64,
+            caller: self
+                .option
+                .caller
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            callee: self
+                .option
+                .callee
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            hangup_reason: self
+                .hangup_reason
+                .lock()
+                .await
+                .clone()
+                .unwrap_or(CallRecordHangupReason::Autohangup),
+            recorder: recorder_files,
+            status_code: 200,
+            extras: None,
+        }
     }
 }
 
