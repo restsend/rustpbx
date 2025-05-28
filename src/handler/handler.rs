@@ -3,10 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::{
-    app::AppState,
-    callrecord::{CallRecord, CallRecordHangupReason},
-};
+use crate::{app::AppState, callrecord::CallRecord};
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
     response::{IntoResponse, Response},
