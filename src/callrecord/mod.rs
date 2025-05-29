@@ -419,7 +419,16 @@ impl CallRecordManager {
 
         select! {
             _ = cancel_token.cancelled() => {}
-            _ = object_store.put(&json_path, call_log_json.into()) =>{}
+            r = object_store.put(&json_path, call_log_json.into()) =>{
+                match r {
+                    Ok(r) => {
+                        info!("Upload call record: {:?}", r);
+                    }
+                    Err(e) => {
+                        error!("Failed to upload call record: {}", e);
+                    }
+                }
+            }
         };
 
         let mut uploaded_files = vec![json_path.to_string()];
@@ -434,8 +443,19 @@ impl CallRecordManager {
                                 ObjectPath::from(formatter.format_media_path(record, media));
                             select! {
                                 _ = cancel_token.cancelled() => {}
-                                _ = object_store.put(&media_path, file_content.into()) => {
-                                    uploaded_files.push(media_path.to_string());
+                                r = object_store.put(&media_path, file_content.into()) => {
+                                    match r {
+                                        Ok(_) => {
+                                            uploaded_files.push(media_path.to_string());
+                                            info!("Upload media file: {:?}", media_path);
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to upload media file: {} {}",
+                                                media_path, e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -448,10 +468,10 @@ impl CallRecordManager {
         }
 
         Ok(format!(
-            "S3 upload successful: {} files uploaded to {}/{}",
+            "S3 upload successful: {} files uploaded to {}:{}",
             uploaded_files.len(),
             bucket,
-            root
+            json_path
         ))
     }
 
