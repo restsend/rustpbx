@@ -205,8 +205,8 @@ pub fn create_auth_request(
     create_test_request(method, username, Some(password), realm, None)
 }
 
-/// Creates a test request with specific source IP (for ban module tests)
-pub fn create_ban_request(method: rsip::Method, username: &str, realm: &str) -> rsip::Request {
+/// Creates a test request with specific source IP (for acl module tests)
+pub fn create_acl_request(method: rsip::Method, username: &str, realm: &str) -> rsip::Request {
     create_test_request(method, username, None, realm, None)
 }
 

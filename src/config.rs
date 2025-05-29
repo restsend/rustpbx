@@ -1,9 +1,9 @@
+use crate::proxy::user::SipUser;
 use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::proxy::{acl::AclConfig, user::SipUser};
 const USER_AGENT: &str = "rustpbx";
 
 #[derive(Parser, Debug)]
@@ -26,6 +26,30 @@ pub struct Config {
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub ice_servers: Option<Vec<IceServerItem>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConsoleConfig {
+    pub prefix: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default, Serialize)]
+pub struct IceServerItem {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl Default for ConsoleConfig {
+    fn default() -> Self {
+        Self {
+            prefix: "/console".to_string(),
+            username: None,
+            password: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -171,9 +195,7 @@ pub struct ProxyConfig {
     pub tcp_port: Option<u16>,
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
-    pub acl: Option<AclConfig>,
-    pub allows: Option<Vec<String>>,
-    pub denies: Option<Vec<String>>,
+    pub acl_rules: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     #[serde(default)]
@@ -184,34 +206,10 @@ pub struct ProxyConfig {
     pub media_proxy: MediaProxyConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ConsoleConfig {
-    pub prefix: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default, Serialize)]
-pub struct IceServerItem {
-    pub urls: Vec<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
-impl Default for ConsoleConfig {
-    fn default() -> Self {
-        Self {
-            prefix: "/console".to_string(),
-            username: None,
-            password: None,
-        }
-    }
-}
-
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            acl: Some(AclConfig::default()),
+            acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
             addr: "0.0.0.0".to_string(),
             modules: Some(vec![
                 "acl".to_string(),
@@ -229,8 +227,6 @@ impl Default for ProxyConfig {
             tcp_port: None,
             tls_port: None,
             ws_port: None,
-            allows: None,
-            denies: None,
             max_concurrency: None,
             registrar_expires: Some(60),
             user_backend: UserBackendConfig::default(),
