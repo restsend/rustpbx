@@ -27,9 +27,11 @@ use tracing::{info, warn};
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct RecorderOption {
+    #[serde(default)]
     pub recorder_file: String,
+    #[serde(default)]
     pub samplerate: u32,
-    #[serde(skip)]
+    #[serde(default)]
     pub ptime: Duration,
 }
 

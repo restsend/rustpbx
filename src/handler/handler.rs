@@ -115,17 +115,9 @@ pub async fn call_handler(
                 error!("Error handling connection {client_ip}: {}", e);
             }
         }
-        let mut active_calls = state_clone.active_calls.lock().await;
-        let call_record = match active_calls.remove(&session_id) {
+
+        let call_record = match state_clone.active_calls.lock().await.remove(&session_id) {
             Some(call) => {
-                info!(
-                    client_ip = client_ip.to_string(),
-                    session_id,
-                    "call end, duration {}s",
-                    Utc::now()
-                        .signed_duration_since(start_time)
-                        .as_seconds_f32()
-                );
                 call.cancel_token.cancel();
                 call.get_callrecord().await
             }
@@ -136,7 +128,7 @@ pub async fn call_handler(
                 let hangup_reason = call_state.hangup_reason.lock().await.clone();
                 CallRecord {
                     call_type: call_type.clone(),
-                    call_id: session_id,
+                    call_id: session_id.clone(),
                     start_time,
                     end_time: Utc::now(),
                     ring_time: call_state.ring_time.lock().await.clone(),
@@ -151,6 +143,15 @@ pub async fn call_handler(
                 }
             }
         };
+        info!(
+            client_ip = client_ip.to_string(),
+            session_id,
+            hangup_reason = format!("{:?}", call_record.hangup_reason),
+            "call end, duration {}s",
+            Utc::now()
+                .signed_duration_since(start_time)
+                .as_seconds_f32()
+        );
         if let Some(sender) = state_clone.callrecord_sender.lock().await.as_ref() {
             if let Err(e) = sender.send(call_record) {
                 error!("Failed to send call record: {}", e);
