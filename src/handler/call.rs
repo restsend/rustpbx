@@ -622,9 +622,13 @@ pub async fn handle_call(
             info!(session_id, "prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
-        _ = sip_event_loop(session_id.clone(),  event_sender.clone(), dlg_state_receiver, call_state.clone()) => {
-            info!("sip event loop");
-            return Err(anyhow::anyhow!("Sip event loop failed"));
+        r = sip_event_loop(session_id.clone(),  event_sender.clone(), dlg_state_receiver, call_state.clone()) => {
+            match r {
+                Ok(_) => {}
+                Err(e) => {
+                    info!(session_id, "sip event loop error: {}", e);
+                }
+            }
         }
         r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state) => {
             match r {
