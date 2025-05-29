@@ -81,7 +81,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
 
     // Create a minimal state with call record manager
     let mut callrecord = CallRecordManagerBuilder::new()
-        .with_config(config.call_record.clone().unwrap_or_default())
+        .with_config(config.callrecord.clone().unwrap_or_default())
         .build();
     let callrecord_sender = callrecord.sender.clone();
 

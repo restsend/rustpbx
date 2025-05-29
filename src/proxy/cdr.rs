@@ -53,9 +53,6 @@ impl CallSession {
 
     fn to_call_record(&self, hangup_reason: CallRecordHangupReason) -> CallRecord {
         let end_time = Utc::now();
-        let duration = end_time
-            .signed_duration_since(self.start_time)
-            .num_milliseconds() as u64;
 
         CallRecord {
             call_type: ActiveCallType::Sip,

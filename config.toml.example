@@ -33,3 +33,7 @@ users = [
     { username = "bob", password = "123456", realm = "127.0.0.1" },
     { username = "alice", password = "123456", realm = "127.0.0.1" },
 ]
+
+[callrecord]
+type = "local"
+root = "./cdr"

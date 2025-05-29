@@ -69,7 +69,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
 
     // Create a minimal state with call record manager but without proxy/useragent
     let mut callrecord = CallRecordManagerBuilder::new()
-        .with_config(config.call_record.clone().unwrap_or_default())
+        .with_config(config.callrecord.clone().unwrap_or_default())
         .build();
 
     let callrecord_sender = callrecord.sender.clone();
