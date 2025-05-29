@@ -189,7 +189,7 @@ pub async fn run(state: AppState) -> Result<()> {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     );
 
-    if let Some(ref callrecord) = state.config.call_record {
+    if let Some(ref callrecord) = state.config.callrecord {
         let mut callrecord_sender = state.callrecord_sender.lock().await;
         if callrecord_sender.is_none() {
             let mut callrecord_manager = CallRecordManagerBuilder::new()

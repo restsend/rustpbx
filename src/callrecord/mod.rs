@@ -37,17 +37,23 @@ pub type FnSaveCallRecord = Arc<
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub option: Option<CallOption>,
     pub call_id: String,
     pub start_time: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ring_time: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_time: Option<DateTime<Utc>>,
     pub end_time: DateTime<Utc>,
     pub caller: String,
     pub callee: String,
     pub status_code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hangup_reason: Option<CallRecordHangupReason>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recorder: Vec<CallRecordMedia>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extras: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -56,6 +62,7 @@ pub struct CallRecordMedia {
     pub track_id: String,
     pub path: String,
     pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -76,28 +83,34 @@ pub enum CallRecordHangupReason {
     Other,
 }
 pub trait CallRecordFormatter: Send + Sync {
-    fn format(&self, record: &CallRecord) -> Result<String>;
-    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> Result<String>;
-}
-
-pub struct DefaultCallRecordFormatter;
-impl CallRecordFormatter for DefaultCallRecordFormatter {
+    fn format_file_name(&self, root: &str, record: &CallRecord) -> String {
+        let root = root
+            .is_empty()
+            .then_some("".to_string())
+            .unwrap_or(format!("{}/", root.trim_end_matches('/')));
+        format!(
+            "{}{}_{}.json",
+            root,
+            record.start_time.format("%Y%m%d-%H%M%S"),
+            record.call_id
+        )
+    }
     fn format(&self, record: &CallRecord) -> Result<String> {
         Ok(serde_json::to_string(record)?)
     }
-    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> Result<String> {
+    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String {
         let file_name = Path::new(&media.path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
             .to_string_lossy()
             .to_string();
 
-        Ok(format!(
-            "{}/media/{}/{}",
-            record.call_id, media.track_id, file_name
-        ))
+        format!("{}/media/{}/{}", record.call_id, media.track_id, file_name)
     }
 }
+
+pub struct DefaultCallRecordFormatter;
+impl CallRecordFormatter for DefaultCallRecordFormatter {}
 
 pub struct CallRecordManager {
     pub sender: CallRecordSender,
@@ -195,11 +208,11 @@ impl CallRecordManager {
             let r = match config.as_ref() {
                 CallRecordConfig::Local { root } => {
                     let file_content = formatter.format(&record)?;
-                    let file_name = Path::new(&root).join(format!("{}.json", record.call_id));
+                    let file_name = formatter.format_file_name(root, &record);
                     let mut file = File::create(&file_name).await?;
                     file.write_all(file_content.as_bytes()).await?;
                     file.flush().await?;
-                    Ok(file_name.to_string_lossy().to_string())
+                    Ok(file_name.to_string())
                 }
                 CallRecordConfig::S3 {
                     vendor,
@@ -402,11 +415,7 @@ impl CallRecordManager {
         let call_log_json = formatter.format(record)?;
 
         // Upload call log JSON
-        let json_path = ObjectPath::from(format!(
-            "{}/{}.json",
-            root.trim_end_matches('/'),
-            record.call_id
-        ));
+        let json_path = ObjectPath::from(formatter.format_file_name(root, record));
 
         select! {
             _ = cancel_token.cancelled() => {}
@@ -422,7 +431,7 @@ impl CallRecordManager {
                     match tokio::fs::read(&media.path).await {
                         Ok(file_content) => {
                             let media_path =
-                                ObjectPath::from(formatter.format_media_path(record, media)?);
+                                ObjectPath::from(formatter.format_media_path(record, media));
                             select! {
                                 _ = cancel_token.cancelled() => {}
                                 _ = object_store.put(&media_path, file_content.into()) => {

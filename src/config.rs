@@ -22,7 +22,7 @@ pub struct Config {
     pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
     pub recorder_path: String,
-    pub call_record: Option<CallRecordConfig>,
+    pub callrecord: Option<CallRecordConfig>,
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub ice_servers: Option<Vec<IceServerItem>>,
@@ -292,7 +292,7 @@ impl Default for Config {
             media_cache_path: "./mediacache".to_string(),
             #[cfg(not(target_os = "windows"))]
             media_cache_path: "/tmp/mediacache".to_string(),
-            call_record: None,
+            callrecord: None,
             llmproxy: None,
             ice_servers: None,
         }
