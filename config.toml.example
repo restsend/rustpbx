@@ -14,7 +14,7 @@ addr="0.0.0.0"
 udp_port=13050 # don't use 5060
 
 [proxy]
-modules = ["ban", "auth", "registrar", "cdr", "mediaproxy", "call"]
+modules = ["acl", "auth", "registrar", "cdr", "mediaproxy", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60

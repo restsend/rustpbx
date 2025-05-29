@@ -4,7 +4,7 @@ use crate::{
     handler::call::ActiveCallRef,
     media::engine::StreamEngine,
     proxy::{
-        auth::AuthModule, ban::BanModule, call::CallModule, cdr::CdrModule,
+        acl::AclModule, auth::AuthModule, call::CallModule, cdr::CdrModule,
         mediaproxy::MediaProxyModule, registrar::RegistrarModule, server::SipServerBuilder,
     },
     useragent::UserAgent,
@@ -145,7 +145,7 @@ pub async fn serve_proxy(
         .with_callrecord_sender(callrecord_sender);
 
     proxy_builder = proxy_builder
-        .register_module("ban", BanModule::create)
+        .register_module("acl", AclModule::create)
         .register_module("auth", AuthModule::create)
         .register_module("registrar", RegistrarModule::create)
         .register_module("cdr", CdrModule::create)

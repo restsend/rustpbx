@@ -84,28 +84,37 @@ pub enum CallRecordHangupReason {
 }
 pub trait CallRecordFormatter: Send + Sync {
     fn format_file_name(&self, root: &str, record: &CallRecord) -> String {
-        let root = root
-            .is_empty()
-            .then_some("".to_string())
-            .unwrap_or(format!("{}/", root.trim_end_matches('/')));
         format!(
-            "{}{}_{}.json",
-            root,
+            "{}/{}_{}.json",
+            root.trim_end_matches('/'),
             record.start_time.format("%Y%m%d-%H%M%S"),
             record.call_id
         )
     }
+
     fn format(&self, record: &CallRecord) -> Result<String> {
         Ok(serde_json::to_string(record)?)
     }
-    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String {
+
+    fn format_media_path(
+        &self,
+        root: &str,
+        record: &CallRecord,
+        media: &CallRecordMedia,
+    ) -> String {
         let file_name = Path::new(&media.path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
             .to_string_lossy()
             .to_string();
 
-        format!("{}/media/{}/{}", record.call_id, media.track_id, file_name)
+        format!(
+            "{}/{}_{}_{}",
+            root.trim_end_matches('/'),
+            record.call_id,
+            media.track_id,
+            file_name
+        )
     }
 }
 
@@ -440,7 +449,7 @@ impl CallRecordManager {
                     match tokio::fs::read(&media.path).await {
                         Ok(file_content) => {
                             let media_path =
-                                ObjectPath::from(formatter.format_media_path(record, media));
+                                ObjectPath::from(formatter.format_media_path(root, record, media));
                             select! {
                                 _ = cancel_token.cancelled() => {}
                                 r = object_store.put(&media_path, file_content.into()) => {

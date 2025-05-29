@@ -33,7 +33,7 @@ external_ip = "192.168.1.1" # External IP address for proxy
 
 ```toml
 [proxy]
-modules = ["ban", "auth", "registrar", "cdr", "mediaproxy", "call"]
+modules = ["acl", "auth", "registrar", "cdr", "mediaproxy", "call"]
 ```
 
 ## Architecture
