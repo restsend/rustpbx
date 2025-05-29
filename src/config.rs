@@ -3,7 +3,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::proxy::user::SipUser;
+use crate::proxy::{acl::AclConfig, user::SipUser};
 const USER_AGENT: &str = "rustpbx";
 
 #[derive(Parser, Debug)]
@@ -171,6 +171,7 @@ pub struct ProxyConfig {
     pub tcp_port: Option<u16>,
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
+    pub acl: Option<AclConfig>,
     pub allows: Option<Vec<String>>,
     pub denies: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
@@ -210,9 +211,10 @@ impl Default for ConsoleConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            acl: Some(AclConfig::default()),
             addr: "0.0.0.0".to_string(),
             modules: Some(vec![
-                "ban".to_string(),
+                "acl".to_string(),
                 "auth".to_string(),
                 "registrar".to_string(),
                 "cdr".to_string(),

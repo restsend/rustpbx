@@ -1,6 +1,6 @@
 use crate::config::ProxyConfig;
+use crate::proxy::acl::AclModule;
 use crate::proxy::auth::AuthModule;
-use crate::proxy::ban::BanModule;
 use crate::proxy::call::CallModule;
 use crate::proxy::registrar::RegistrarModule;
 use crate::proxy::server::SipServerBuilder;
@@ -28,7 +28,7 @@ async fn test_proxy_full_flow() {
 
     // Add the required modules
     config.modules = Some(vec![
-        "ban".to_string(),
+        "acl".to_string(),
         "auth".to_string(),
         "registrar".to_string(),
         "call".to_string(),
@@ -60,7 +60,7 @@ async fn test_proxy_full_flow() {
         .with_user_backend(user_backend);
 
     proxy_builder = proxy_builder
-        .register_module("ban", BanModule::create)
+        .register_module("acl", AclModule::create)
         .register_module("auth", AuthModule::create)
         .register_module("registrar", RegistrarModule::create)
         .register_module("call", CallModule::create);

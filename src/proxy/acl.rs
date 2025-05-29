@@ -4,9 +4,27 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
+use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AclConfig {
+    pub order: Vec<String>,
+    pub allows: Vec<String>,
+    pub denies: Vec<String>,
+}
+
+impl Default for AclConfig {
+    fn default() -> Self {
+        Self {
+            order: vec!["allow".to_string(), "deny".to_string()],
+            allows: vec![],
+            denies: vec![],
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct IpNetwork {
@@ -63,82 +81,83 @@ impl IpNetwork {
     }
 }
 
-struct BanModuleInner {
+struct AclModuleInner {
+    order: Vec<String>, // allow, deny
     allows: Vec<IpNetwork>,
     denies: Vec<IpNetwork>,
 }
 
 #[derive(Clone)]
-pub struct BanModule {
-    inner: Arc<BanModuleInner>,
+pub struct AclModule {
+    inner: Arc<AclModuleInner>,
 }
 
-impl BanModule {
+impl AclModule {
     pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = BanModule::new(config);
+        let module = AclModule::new(config);
         Ok(Box::new(module))
     }
     pub fn new(config: Arc<ProxyConfig>) -> Self {
+        let acl_config = match config.acl.as_ref() {
+            Some(acl_config) => acl_config,
+            None => &AclConfig::default(),
+        };
         let mut allows = Vec::new();
         let mut denies = Vec::new();
 
-        if let Some(allows_list) = config.allows.as_ref() {
-            for allow in allows_list {
-                if let Ok((network, prefix_len)) = parse_network(allow) {
-                    allows.push(IpNetwork::new(network, prefix_len));
-                }
+        for allow in &acl_config.allows {
+            if let Ok((network, prefix_len)) = parse_network(allow) {
+                allows.push(IpNetwork::new(network, prefix_len));
             }
         }
 
-        if let Some(denies_list) = config.denies.as_ref() {
-            for deny in denies_list {
-                if let Ok((network, prefix_len)) = parse_network(deny) {
-                    denies.push(IpNetwork::new(network, prefix_len));
-                }
+        for deny in &acl_config.denies {
+            if let Ok((network, prefix_len)) = parse_network(deny) {
+                denies.push(IpNetwork::new(network, prefix_len));
             }
         }
 
-        let inner = Arc::new(BanModuleInner { allows, denies });
+        let mut order = acl_config.order.clone();
+        order.retain(|x| x == "allow" || x == "deny");
+        if order.is_empty() {
+            order.push("allow".to_string());
+            order.push("deny".to_string());
+        }
+
+        let inner = Arc::new(AclModuleInner {
+            order: order.clone(),
+            allows,
+            denies,
+        });
         Self { inner }
     }
 
     fn is_allowed(&self, addr: &IpAddr) -> bool {
-        // If no allow rules, all IPs are allowed by default
-        if self.inner.allows.is_empty() {
-            // Check deny rules
-            for deny in &self.inner.denies {
-                if deny.contains(addr) {
-                    debug!("IP {} is denied by rule", addr);
-                    return false;
+        let mut result = false;
+        for order in &self.inner.order {
+            if order == "allow" {
+                // Check if IP is in any allow list
+                for allow in &self.inner.allows {
+                    if allow.contains(addr) {
+                        result = true;
+                        break;
+                    }
+                }
+            } else if order == "deny" {
+                // Check if IP is in any deny list
+                for deny in &self.inner.denies {
+                    if deny.contains(addr) {
+                        debug!("IP {} is denied by rule", addr);
+                        return false;
+                    }
                 }
             }
-            return true;
         }
-
-        // If there are allow rules, IP must match at least one allow rule
-        // and not match any deny rules
-        let mut allowed = false;
-        for allow in &self.inner.allows {
-            if allow.contains(addr) {
-                allowed = true;
-                break;
-            }
+        // If no explicit allow rules exist, allow by default
+        if self.inner.allows.is_empty() {
+            result = true;
         }
-
-        if !allowed {
-            debug!("IP {} is not allowed by any rule", addr);
-            return false;
-        }
-
-        // Check deny rules
-        for deny in &self.inner.denies {
-            if deny.contains(addr) {
-                debug!("IP {} is denied by rule", addr);
-                return false;
-            }
-        }
-
-        true
+        result
     }
 }
 
@@ -200,9 +219,9 @@ fn parse_network(addr: &str) -> Result<(IpAddr, u8)> {
 }
 
 #[async_trait]
-impl ProxyModule for BanModule {
+impl ProxyModule for AclModule {
     fn name(&self) -> &str {
-        "ban"
+        "acl"
     }
 
     async fn on_start(&mut self) -> Result<()> {
@@ -227,7 +246,7 @@ impl ProxyModule for BanModule {
         info!(
             method = tx.original.method().to_string(),
             via = via.to_string(),
-            "IP is denied by ban module"
+            "IP is denied by acl module"
         );
         tx.reply(rsip::StatusCode::Forbidden).await.ok();
         Ok(ProxyAction::Abort)
@@ -237,13 +256,15 @@ impl ProxyModule for BanModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProxyConfig;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn create_test_config(allows: Vec<String>, denies: Vec<String>) -> Arc<ProxyConfig> {
         Arc::new(ProxyConfig {
-            allows: Some(allows),
-            denies: Some(denies),
+            acl: Some(AclConfig {
+                allows,
+                denies,
+                ..Default::default()
+            }),
             ..Default::default()
         })
     }
@@ -282,7 +303,7 @@ mod tests {
             vec!["192.168.1.100".to_string(), "10.1.1.0/24".to_string()],
         );
 
-        let ban = BanModule::new(config);
+        let ban = AclModule::new(config);
 
         // Test allowed IPs
         assert!(ban.is_allowed(&"192.168.1.1".parse().unwrap()));
@@ -299,7 +320,7 @@ mod tests {
     #[test]
     fn test_default_allow() {
         let config = create_test_config(vec![], vec!["192.168.1.0/24".to_string()]);
-        let ban = BanModule::new(config);
+        let ban = AclModule::new(config);
 
         // Test allowed IPs (everything except denied subnet)
         assert!(ban.is_allowed(&"10.0.0.1".parse().unwrap()));

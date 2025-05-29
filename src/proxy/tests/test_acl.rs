@@ -1,6 +1,6 @@
 use super::common::{create_ban_request, create_transaction};
 use crate::config::ProxyConfig;
-use crate::proxy::ban::BanModule;
+use crate::proxy::acl::AclModule;
 use crate::proxy::{ProxyAction, ProxyModule};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -14,7 +14,7 @@ async fn test_ban_module_allow_normal_request() {
     let request = create_ban_request(rsip::Method::Invite, "alice", "127.0.0.1");
 
     // Create the ban module
-    let module = BanModule::new(config);
+    let module = AclModule::new(config);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -40,7 +40,7 @@ async fn test_ban_module_block_denied_ip() {
     let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.100");
 
     // Create the ban module
-    let module = BanModule::new(config);
+    let module = AclModule::new(config);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -66,7 +66,7 @@ async fn test_ban_module_allow_specific_ip() {
     let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.100");
 
     // Create the ban module
-    let module = BanModule::new(config);
+    let module = AclModule::new(config);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
@@ -92,7 +92,7 @@ async fn test_ban_module_block_not_allowed_ip() {
     let request = create_ban_request(rsip::Method::Invite, "alice", "192.168.1.101");
 
     // Create the ban module
-    let module = BanModule::new(config);
+    let module = AclModule::new(config);
 
     // Create a transaction
     let (mut tx, _) = create_transaction(request);
