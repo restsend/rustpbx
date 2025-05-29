@@ -19,6 +19,14 @@ addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
 
+# ACL rules
+acl_rules = [
+    "allow 10.0.0.0/8",
+    "deny 0.123.4.0/16",
+    "allow all",
+    "deny all"
+]
+
 # MediaProxy configuration
 [proxy.media_proxy]
 mode = "nat_only"  # Options: "none", "nat_only", "all"
@@ -36,4 +44,4 @@ users = [
 
 [callrecord]
 type = "local"
-root = "./cdr"
+root = "/tmp/cdr"

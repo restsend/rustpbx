@@ -4,27 +4,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AclConfig {
-    pub order: Vec<String>,
-    pub allows: Vec<String>,
-    pub denies: Vec<String>,
-}
-
-impl Default for AclConfig {
-    fn default() -> Self {
-        Self {
-            order: vec!["allow".to_string(), "deny".to_string()],
-            allows: vec![],
-            denies: vec![],
-        }
-    }
-}
+use tracing::info;
 
 #[derive(Debug, Clone)]
 struct IpNetwork {
@@ -81,10 +63,45 @@ impl IpNetwork {
     }
 }
 
+#[derive(Debug, Clone)]
+enum AclAction {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+struct AclRule {
+    action: AclAction,
+    network: Option<IpNetwork>,
+}
+
+impl AclRule {
+    fn new(rule: &str) -> Option<Self> {
+        let parts: Vec<&str> = rule.split_whitespace().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let action = match parts[0].to_lowercase().as_str() {
+            "allow" => AclAction::Allow,
+            "deny" => AclAction::Deny,
+            _ => return None,
+        };
+        let network = if parts[1] == "all" {
+            None
+        } else {
+            match parse_network(parts[1]) {
+                Ok((network, prefix_len)) => Some(IpNetwork::new(network, prefix_len)),
+                Err(_) => return None,
+            }
+        };
+
+        Some(Self { action, network })
+    }
+}
+
 struct AclModuleInner {
-    order: Vec<String>, // allow, deny
-    allows: Vec<IpNetwork>,
-    denies: Vec<IpNetwork>,
+    rules: Vec<AclRule>,
 }
 
 #[derive(Clone)]
@@ -97,67 +114,34 @@ impl AclModule {
         let module = AclModule::new(config);
         Ok(Box::new(module))
     }
+
     pub fn new(config: Arc<ProxyConfig>) -> Self {
-        let acl_config = match config.acl.as_ref() {
-            Some(acl_config) => acl_config,
-            None => &AclConfig::default(),
-        };
-        let mut allows = Vec::new();
-        let mut denies = Vec::new();
+        let rules = config.acl_rules.as_ref().map_or_else(
+            || vec!["allow all".to_string(), "deny all".to_string()],
+            |rules| rules.clone(),
+        );
 
-        for allow in &acl_config.allows {
-            if let Ok((network, prefix_len)) = parse_network(allow) {
-                allows.push(IpNetwork::new(network, prefix_len));
-            }
-        }
+        let acl_rules: Vec<AclRule> = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
 
-        for deny in &acl_config.denies {
-            if let Ok((network, prefix_len)) = parse_network(deny) {
-                denies.push(IpNetwork::new(network, prefix_len));
-            }
-        }
-
-        let mut order = acl_config.order.clone();
-        order.retain(|x| x == "allow" || x == "deny");
-        if order.is_empty() {
-            order.push("allow".to_string());
-            order.push("deny".to_string());
-        }
-
-        let inner = Arc::new(AclModuleInner {
-            order: order.clone(),
-            allows,
-            denies,
-        });
+        let inner = Arc::new(AclModuleInner { rules: acl_rules });
         Self { inner }
     }
 
-    fn is_allowed(&self, addr: &IpAddr) -> bool {
-        let mut result = false;
-        for order in &self.inner.order {
-            if order == "allow" {
-                // Check if IP is in any allow list
-                for allow in &self.inner.allows {
-                    if allow.contains(addr) {
-                        result = true;
-                        break;
+    pub fn is_allowed(&self, addr: &IpAddr) -> bool {
+        for rule in &self.inner.rules {
+            match &rule.network {
+                Some(network) => {
+                    if network.contains(addr) {
+                        return matches!(rule.action, AclAction::Allow);
                     }
                 }
-            } else if order == "deny" {
-                // Check if IP is in any deny list
-                for deny in &self.inner.denies {
-                    if deny.contains(addr) {
-                        debug!("IP {} is denied by rule", addr);
-                        return false;
-                    }
+                None => {
+                    // "all" rule
+                    return matches!(rule.action, AclAction::Allow);
                 }
             }
         }
-        // If no explicit allow rules exist, allow by default
-        if self.inner.allows.is_empty() {
-            result = true;
-        }
-        result
+        false // Default deny if no rules match
     }
 }
 
@@ -258,13 +242,9 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    fn create_test_config(allows: Vec<String>, denies: Vec<String>) -> Arc<ProxyConfig> {
+    fn create_test_config(rules: Vec<String>) -> Arc<ProxyConfig> {
         Arc::new(ProxyConfig {
-            acl: Some(AclConfig {
-                allows,
-                denies,
-                ..Default::default()
-            }),
+            acl_rules: Some(rules),
             ..Default::default()
         })
     }
@@ -293,42 +273,37 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_deny_rules() {
-        let config = create_test_config(
-            vec![
-                "192.168.1.0/24".to_string(),
-                "10.0.0.0/8".to_string(),
-                "2001:db8::/32".to_string(),
-            ],
-            vec!["192.168.1.100".to_string(), "10.1.1.0/24".to_string()],
-        );
+    fn test_acl_rules() {
+        let config = create_test_config(vec![
+            "deny 192.168.1.100".to_string(),
+            "allow 192.168.1.0/24".to_string(),
+            "allow 10.0.0.0/8".to_string(),
+            "deny all".to_string(),
+        ]);
 
-        let ban = AclModule::new(config);
+        let acl = AclModule::new(config);
 
         // Test allowed IPs
-        assert!(ban.is_allowed(&"192.168.1.1".parse().unwrap()));
-        assert!(ban.is_allowed(&"10.2.3.4".parse().unwrap()));
-        assert!(ban.is_allowed(&"2001:db8::1".parse().unwrap()));
+        assert!(acl.is_allowed(&"192.168.1.1".parse().unwrap()));
+        assert!(acl.is_allowed(&"10.2.3.4".parse().unwrap()));
 
         // Test denied IPs
-        assert!(!ban.is_allowed(&"192.168.1.100".parse().unwrap())); // Explicitly denied
-        assert!(!ban.is_allowed(&"10.1.1.50".parse().unwrap())); // Denied subnet
-        assert!(!ban.is_allowed(&"172.16.1.1".parse().unwrap())); // Not in allowed list
-        assert!(!ban.is_allowed(&"2001:db9::1".parse().unwrap())); // Not in allowed list
+        assert!(!acl.is_allowed(&"192.168.1.100".parse().unwrap())); // Explicitly denied
+        assert!(!acl.is_allowed(&"172.16.1.1".parse().unwrap())); // Denied by default
     }
 
     #[test]
-    fn test_default_allow() {
-        let config = create_test_config(vec![], vec!["192.168.1.0/24".to_string()]);
-        let ban = AclModule::new(config);
+    fn test_default_rules() {
+        // Test with None (no ACL rules configured)
+        let config = Arc::new(ProxyConfig {
+            acl_rules: None,
+            ..Default::default()
+        });
+        let acl = AclModule::new(config);
 
-        // Test allowed IPs (everything except denied subnet)
-        assert!(ban.is_allowed(&"10.0.0.1".parse().unwrap()));
-        assert!(ban.is_allowed(&"172.16.1.1".parse().unwrap()));
-        assert!(ban.is_allowed(&"2001:db8::1".parse().unwrap()));
-
-        // Test denied IPs
-        assert!(!ban.is_allowed(&"192.168.1.100".parse().unwrap()));
-        assert!(!ban.is_allowed(&"192.168.1.1".parse().unwrap()));
+        // Test with default rules (allow all, deny all)
+        // The first rule "allow all" matches all IPs, so they should be allowed
+        assert!(acl.is_allowed(&"192.168.1.1".parse().unwrap()));
+        assert!(acl.is_allowed(&"10.0.0.1".parse().unwrap()));
     }
 }
