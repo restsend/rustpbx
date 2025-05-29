@@ -27,7 +27,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use rsipstack::dialog::{
-    dialog::{DialogState, DialogStateReceiver},
+    dialog::{DialogState, DialogStateReceiver, TerminatedReason},
     DialogId,
 };
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,11 @@ impl ActiveCall {
             } else {
                 recorder_option.samplerate
             };
-            let recorder_ptime = recorder_option.ptime;
+            let recorder_ptime = if recorder_option.ptime.is_zero() {
+                Duration::from_millis(200)
+            } else {
+                recorder_option.ptime
+            };
             let recorder_config = RecorderOption {
                 recorder_file,
                 samplerate: recorder_samplerate,
@@ -529,8 +533,39 @@ async fn sip_event_loop(
                 call_state.last_status_code.store(200, Ordering::Relaxed);
                 info!("dialog confirmed: {}", dialog_id);
             }
-            DialogState::Terminated(dialog_id, _) => {
-                info!("dialog terminated: {}", dialog_id);
+            DialogState::Terminated(dialog_id, reason) => {
+                info!("dialog terminated: {} {:?}", dialog_id, reason);
+                let mut hangup_reason = call_state.hangup_reason.lock().await;
+                if hangup_reason.is_none() {
+                    *hangup_reason = Some(match reason {
+                        TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
+                        TerminatedReason::UacBye | TerminatedReason::UacBusy => {
+                            CallRecordHangupReason::ByCaller
+                        }
+                        TerminatedReason::UasBye | TerminatedReason::UasBusy => {
+                            CallRecordHangupReason::ByCallee
+                        }
+                        TerminatedReason::UasDecline => CallRecordHangupReason::ByCallee,
+                        TerminatedReason::UacOther(_) => CallRecordHangupReason::ByCaller,
+                        TerminatedReason::UasOther(_) => CallRecordHangupReason::ByCallee,
+                        _ => CallRecordHangupReason::BySystem,
+                    });
+                };
+                let initiator = match reason {
+                    TerminatedReason::UacCancel => "caller".to_string(),
+                    TerminatedReason::UacBye | TerminatedReason::UacBusy => "caller".to_string(),
+                    TerminatedReason::UasBye
+                    | TerminatedReason::UasBusy
+                    | TerminatedReason::UasDecline => "callee".to_string(),
+                    _ => "system".to_string(),
+                };
+                event_sender
+                    .send(crate::event::SessionEvent::Hangup {
+                        timestamp: crate::get_timestamp(),
+                        reason: Some(format!("{:?}", hangup_reason)),
+                        initiator: Some(initiator),
+                    })
+                    .ok();
                 break;
             }
             _ => (),
