@@ -643,6 +643,27 @@ pub async fn handle_call(
             info!("cancelled");
         }
     };
+
+    // Ensure all remaining events are sent to the websocket before exit
+    while let Ok(event) = event_receiver.try_recv() {
+        match event {
+            SessionEvent::Binary { data, .. } => {
+                ws_sender.send(data.into()).await.ok();
+            }
+            _ => {
+                let data = match serde_json::to_string(&event) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("error serializing event during flush: {} {:?}", e, event);
+                        continue;
+                    }
+                };
+                if let Err(e) = ws_sender.send(data.into()).await {
+                    break;
+                }
+            }
+        }
+    }
     ws_sender.flush().await.ok();
     Ok(())
 }
