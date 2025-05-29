@@ -477,10 +477,9 @@ impl CallRecordManager {
         }
 
         Ok(format!(
-            "S3 upload successful: {} files uploaded to {}:{}",
-            uploaded_files.len(),
-            bucket,
-            json_path
+            "{}/{}",
+            endpoint.trim_end_matches('/'),
+            json_path.to_string().trim_start_matches('/')
         ))
     }
 
