@@ -226,7 +226,7 @@ impl Recorder {
     }
 
     /// Extract samples from a buffer without padding
-    fn extract_samples(buffer: &mut PcmBuf, extract_size: usize) -> PcmBuf {
+    pub(crate) fn extract_samples(buffer: &mut PcmBuf, extract_size: usize) -> PcmBuf {
         if extract_size > 0 && !buffer.is_empty() {
             let take_size = extract_size.min(buffer.len());
             buffer.drain(..take_size).collect()
@@ -239,20 +239,50 @@ impl Recorder {
         let mut mono_buf = self.mono_buf.lock().unwrap();
         let mut stereo_buf = self.stereo_buf.lock().unwrap();
 
-        // Calculate how much data we can extract without padding
-        let mono_available = mono_buf.len();
-        let stereo_available = stereo_buf.len();
+        // Limit chunk_size to prevent capacity overflow
+        let safe_chunk_size = chunk_size.min(16000 * 10); // Max 10 seconds at 16kHz
 
-        // Take the minimum of available data and chunk_size, but at least some data if available
-        let extract_size = if mono_available > 0 || stereo_available > 0 {
-            let max_available = mono_available.max(stereo_available);
-            max_available.min(chunk_size).max(1) // At least 1 sample if any data available
+        let mono_result = if mono_buf.len() >= safe_chunk_size {
+            // Sufficient data, extract complete chunk
+            Self::extract_samples(&mut mono_buf, safe_chunk_size)
+        } else if !mono_buf.is_empty() {
+            // Partial data, extract all and pad with silence
+            let available_len = mono_buf.len(); // Store length before mutable borrow
+            let mut result = Self::extract_samples(&mut mono_buf, available_len);
+            if chunk_size != usize::MAX {
+                // Don't pad when flushing
+                result.resize(safe_chunk_size, 0); // Pad with silence to chunk_size
+            }
+            result
         } else {
-            0 // No data available at all
+            // No data, output silence (only when not flushing)
+            if chunk_size != usize::MAX {
+                vec![0; safe_chunk_size]
+            } else {
+                Vec::new()
+            }
         };
 
-        let mono_result = Self::extract_samples(&mut mono_buf, extract_size);
-        let stereo_result = Self::extract_samples(&mut stereo_buf, extract_size);
+        let stereo_result = if stereo_buf.len() >= safe_chunk_size {
+            // Sufficient data, extract complete chunk
+            Self::extract_samples(&mut stereo_buf, safe_chunk_size)
+        } else if !stereo_buf.is_empty() {
+            // Partial data, extract all and pad with silence
+            let available_len = stereo_buf.len(); // Store length before mutable borrow
+            let mut result = Self::extract_samples(&mut stereo_buf, available_len);
+            if chunk_size != usize::MAX {
+                // Don't pad when flushing
+                result.resize(safe_chunk_size, 0); // Pad with silence to chunk_size
+            }
+            result
+        } else {
+            // No data, output silence (only when not flushing)
+            if chunk_size != usize::MAX {
+                vec![0; safe_chunk_size]
+            } else {
+                Vec::new()
+            }
+        };
 
         (mono_result, stereo_result)
     }
@@ -262,85 +292,24 @@ impl Recorder {
         Ok(())
     }
 
-    /// Detect audio clipping
-    fn detect_clipping(samples: &PcmBuf) -> bool {
-        const CLIP_THRESHOLD: i16 = 32760; // Threshold close to maximum value
-        samples.iter().any(|&sample| sample.abs() >= CLIP_THRESHOLD)
-    }
-
-    /// Detect consecutive identical values (freeze detection)
-    fn detect_constant_value(samples: &PcmBuf) -> bool {
-        if samples.len() < 50 {
-            // Increase minimum length threshold further
-            return false;
-        }
-
-        let first_value = samples[0];
-
-        // For zero values (silence), use much higher threshold
-        if first_value == 0 {
-            // Only warn about very large zero buffers that might indicate data flow issues
-            let all_zeros = samples.iter().all(|&sample| sample == 0);
-            return all_zeros && samples.len() > 1600; // Only warn for >100ms of continuous silence at 16kHz
-        }
-
-        let consecutive_count = samples
-            .iter()
-            .take_while(|&&sample| sample == first_value)
-            .count();
-
-        // Keep stricter threshold for non-zero constant values (actual hardware issues)
-        consecutive_count >= samples.len().min(50) // 50 or more consecutive identical non-zero values
-    }
-
     /// Mix mono and stereo buffers into interleaved stereo output
-    fn mix_buffers(mono_buf: &PcmBuf, stereo_buf: &PcmBuf) -> Vec<i16> {
-        let max_len = mono_buf.len().max(stereo_buf.len());
-        let mut mix_buff = vec![0; max_len * 2];
+    pub(crate) fn mix_buffers(mono_buf: &PcmBuf, stereo_buf: &PcmBuf) -> Vec<i16> {
+        // Ensure both buffers have equal length (guaranteed by pop() method)
+        assert_eq!(
+            mono_buf.len(),
+            stereo_buf.len(),
+            "Buffer lengths must be equal after pop()"
+        );
 
-        for i in 0..max_len {
-            let mono_sample = mono_buf.get(i).copied().unwrap_or(0);
-            let stereo_sample = stereo_buf.get(i).copied().unwrap_or(0);
+        let len = mono_buf.len();
+        let mut mix_buff = Vec::with_capacity(len * 2);
 
-            mix_buff[i * 2] = mono_sample; // Left channel
-            mix_buff[i * 2 + 1] = stereo_sample; // Right channel
+        for i in 0..len {
+            mix_buff.push(mono_buf[i]); // Left channel
+            mix_buff.push(stereo_buf[i]); // Right channel
         }
 
         mix_buff
-    }
-
-    /// Perform audio quality checks on buffers
-    fn check_audio_quality(&self, mono_buf: &PcmBuf, stereo_buf: &PcmBuf) {
-        // Check clipping
-        if !mono_buf.is_empty() && Self::detect_clipping(mono_buf) {
-            warn!("Audio clipping detected: mono=true");
-        }
-
-        if !stereo_buf.is_empty() && Self::detect_clipping(stereo_buf) {
-            warn!("Audio clipping detected: stereo=true");
-        }
-
-        // Check constant values
-        let mono_constant = !mono_buf.is_empty() && Self::detect_constant_value(mono_buf);
-        let stereo_constant = !stereo_buf.is_empty() && Self::detect_constant_value(stereo_buf);
-
-        if mono_constant || stereo_constant {
-            let mono_info = if mono_constant {
-                let first_val = mono_buf.first().unwrap_or(&0);
-                format!("mono(value={}, len={})", first_val, mono_buf.len())
-            } else {
-                "mono(ok)".to_string()
-            };
-
-            let stereo_info = if stereo_constant {
-                let first_val = stereo_buf.first().unwrap_or(&0);
-                format!("stereo(value={}, len={})", first_val, stereo_buf.len())
-            } else {
-                "stereo(ok)".to_string()
-            };
-
-            warn!("Constant value detected: {} {}", mono_info, stereo_info);
-        }
     }
 
     /// Write mixed audio data to file
@@ -374,10 +343,6 @@ impl Recorder {
         if mono_buf.is_empty() && stereo_buf.is_empty() {
             return Ok(());
         }
-
-        // Quality checks
-        self.check_audio_quality(&mono_buf, &stereo_buf);
-
         // Write audio data
         let samples_written = self.write_audio_data(file, &mono_buf, &stereo_buf).await?;
         if samples_written > 0 {

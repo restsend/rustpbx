@@ -621,6 +621,65 @@ impl RtpTrack {
                 continue;
             }
 
+            // RTCP packet detection and filtering for rtcp-mux scenarios
+            if n >= 2 {
+                let version = (buf[0] >> 6) & 0x03;
+
+                // Check if this is a STUN packet first
+                // STUN packets have specific message types and magic cookie
+                if n >= 8 {
+                    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+                    let msg_length = u16::from_be_bytes([buf[2], buf[3]]);
+                    let magic_cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+
+                    // STUN magic cookie is 0x2112A442
+                    // STUN message types are in specific ranges (0x0001, 0x0101, etc.)
+                    if magic_cookie == 0x2112A442
+                        || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
+                    {
+                        debug!(
+                            "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
+                            msg_type, n
+                        );
+                        continue;
+                    }
+                }
+
+                // Check if this is an RTCP packet
+                // RTCP packet structure: V(2) + P(1) + RC(5) + PT(8) + Length(16) + ...
+                // For RTCP: PT is the full second byte (200-207)
+                let rtcp_pt = buf[1]; // Full second byte for RTCP
+                if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
+                    info!(
+                        "Received RTCP packet with PT: {}, length: {}, skipping RTP processing",
+                        rtcp_pt, n
+                    );
+                    continue;
+                }
+
+                // For RTP packets: V(2) + P(1) + X(1) + CC(4) + M(1) + PT(7) + ...
+                // PT is only 7 bits for RTP
+                let rtp_pt = buf[1] & 0x7F; // Extract payload type (7 bits) for RTP
+
+                // Additional validation for RTP packets
+                if version != 2 {
+                    info!(
+                        "Received packet with invalid RTP version: {}, skipping",
+                        version
+                    );
+                    continue;
+                }
+
+                // RTP payload types should be < 128 (7 bits)
+                if rtp_pt >= 128 {
+                    debug!(
+                        "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
+                        rtp_pt
+                    );
+                    continue;
+                }
+            }
+
             let packet = match Packet::unmarshal(&mut &buf[0..n]) {
                 Ok(packet) => packet,
                 Err(e) => {
@@ -628,12 +687,14 @@ impl RtpTrack {
                     continue;
                 }
             };
+
             let payload_type = packet.header.payload_type;
             let payload = packet.payload.to_vec();
             let sample_rate = match payload_type {
                 9 => 16000, // G.722
                 _ => 8000,
             };
+
             let frame = AudioFrame {
                 track_id: track_id.clone(),
                 samples: Samples::RTP {
