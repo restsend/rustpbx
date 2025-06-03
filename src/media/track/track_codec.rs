@@ -9,7 +9,7 @@ use crate::{
     },
     AudioFrame, PcmBuf, Samples,
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::cell::RefCell;
 
 pub struct TrackCodec {
     pub pcmu_encoder: RefCell<PcmuEncoder>,
@@ -19,7 +19,7 @@ pub struct TrackCodec {
 
     pub g722_encoder: RefCell<G722Encoder>,
     pub g722_decoder: RefCell<G722Decoder>,
-    pub resamplers: RefCell<HashMap<String, LinearResampler>>,
+    pub resampler: RefCell<Option<LinearResampler>>,
 }
 unsafe impl Send for TrackCodec {}
 unsafe impl Sync for TrackCodec {}
@@ -39,7 +39,7 @@ impl TrackCodec {
             pcma_decoder: RefCell::new(PcmaDecoder::new()),
             g722_encoder: RefCell::new(G722Encoder::new()),
             g722_decoder: RefCell::new(G722Decoder::new()),
-            resamplers: RefCell::new(HashMap::new()),
+            resampler: RefCell::new(None),
         }
     }
 
@@ -57,13 +57,16 @@ impl TrackCodec {
             _ => 8000,
         };
         if sample_rate != target_sample_rate {
-            self.resamplers
-                .borrow_mut()
-                .entry(format!("{}-{}", sample_rate, target_sample_rate))
-                .or_insert(
+            if self.resampler.borrow().is_none() {
+                self.resampler.borrow_mut().replace(
                     LinearResampler::new(sample_rate as usize, target_sample_rate as usize)
                         .unwrap(),
-                )
+                );
+            }
+            self.resampler
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
                 .resample(&payload)
         } else {
             payload
@@ -81,18 +84,16 @@ impl TrackCodec {
                 };
 
                 if frame.sample_rate != target_samplerate {
-                    pcm = self
-                        .resamplers
-                        .borrow_mut()
-                        .entry(format!("{}-{}", frame.sample_rate, target_samplerate))
-                        .or_insert(
+                    if self.resampler.borrow().is_none() {
+                        self.resampler.borrow_mut().replace(
                             LinearResampler::new(
                                 frame.sample_rate as usize,
                                 target_samplerate as usize,
                             )
                             .unwrap(),
-                        )
-                        .resample(&pcm);
+                        );
+                    }
+                    pcm = self.resampler.borrow_mut().as_mut().unwrap().resample(&pcm);
                 }
 
                 match payload_type {

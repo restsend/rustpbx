@@ -478,7 +478,7 @@ async fn test_jitter_buffer_integration() -> Result<()> {
     {
         let mut jb = jitter_buffer.lock().unwrap();
         for frame in frames {
-            jb.push(frame);
+            let _ = jb.push(frame);
         }
 
         // Verify jitter buffer has three frames
