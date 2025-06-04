@@ -89,8 +89,9 @@ pub async fn call_handler(
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let state_clone = state.clone();
+    let dump_events = params.dump_events.unwrap_or(true);
 
-    ws.on_upgrade(|socket| async move {
+    ws.on_upgrade(move |socket| async move {
         let start_time = Utc::now();
         let call_state = Arc::new(ActiveCallState {
             created_at: Utc::now(),
@@ -100,13 +101,13 @@ pub async fn call_handler(
             last_status_code: AtomicU16::new(0),
             option: Mutex::new(None),
         });
-
         match handle_call(
             call_type.clone(),
             session_id.clone(),
             socket,
             state.clone(),
             call_state.clone(),
+            dump_events,
         )
         .await
         {
@@ -126,6 +127,14 @@ pub async fn call_handler(
                 let caller = option.as_ref().map(|o| o.caller.clone()).flatten();
                 let callee = option.as_ref().map(|o| o.callee.clone()).flatten();
                 let hangup_reason = call_state.hangup_reason.lock().await.clone();
+
+                let dump_events_file = state_clone.get_dump_events_file(&session_id);
+                let dump_events = if std::path::Path::new(&dump_events_file).exists() {
+                    Some(dump_events_file)
+                } else {
+                    None
+                };
+
                 CallRecord {
                     call_type: call_type.clone(),
                     call_id: session_id.clone(),
@@ -140,6 +149,7 @@ pub async fn call_handler(
                     recorder: vec![],
                     extras: None,
                     option,
+                    dump_events,
                 }
             }
         };

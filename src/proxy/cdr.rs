@@ -68,6 +68,7 @@ impl CallSession {
             hangup_reason: Some(hangup_reason),
             recorder: vec![], // CDR module doesn't handle media recording
             extras: None,
+            dump_events: None,
         }
     }
 }

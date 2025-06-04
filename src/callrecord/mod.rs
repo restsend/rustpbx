@@ -55,6 +55,8 @@ pub struct CallRecord {
     pub recorder: Vec<CallRecordMedia>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extras: Option<HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dump_events: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +98,14 @@ pub trait CallRecordFormatter: Send + Sync {
         Ok(serde_json::to_string(record)?)
     }
 
+    fn format_dump_events_path(&self, root: &str, record: &CallRecord) -> String {
+        format!(
+            "{}/{}_{}.jsonl",
+            root.trim_end_matches('/'),
+            record.start_time.format("%Y%m%d"),
+            record.call_id
+        )
+    }
     fn format_media_path(
         &self,
         root: &str,
@@ -234,17 +244,8 @@ impl CallRecordManager {
                     with_media,
                 } => {
                     Self::save_with_s3_like(
-                        cancel_token.child_token(),
-                        formatter,
-                        vendor,
-                        bucket,
-                        region,
-                        access_key,
-                        secret_key,
-                        endpoint,
-                        root,
-                        with_media,
-                        &record,
+                        formatter, vendor, bucket, region, access_key, secret_key, endpoint, root,
+                        with_media, &record,
                     )
                     .await
                 }
@@ -252,17 +253,7 @@ impl CallRecordManager {
                     url,
                     headers,
                     with_media,
-                } => {
-                    Self::save_with_http(
-                        cancel_token.child_token(),
-                        formatter,
-                        url,
-                        headers,
-                        with_media,
-                        &record,
-                    )
-                    .await
-                }
+                } => Self::save_with_http(formatter, url, headers, with_media, &record).await,
             };
             let file_name = match r {
                 Ok(file_name) => file_name,
@@ -283,7 +274,6 @@ impl CallRecordManager {
     }
 
     async fn save_with_http(
-        cancel_token: CancellationToken,
         formatter: Arc<dyn CallRecordFormatter>,
         url: &String,
         headers: &Option<HashMap<String, String>>,
@@ -291,10 +281,8 @@ impl CallRecordManager {
         record: &CallRecord,
     ) -> Result<String> {
         let client = reqwest::Client::new();
-
         // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
-
         // Create multipart form
         let mut form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
 
@@ -332,6 +320,24 @@ impl CallRecordManager {
                     }
                 }
             }
+            if let Some(dump_events_file) = &record.dump_events {
+                if Path::new(&dump_events_file).exists() {
+                    let file_name = Path::new(&dump_events_file)
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+                        .to_string_lossy()
+                        .to_string();
+                    match reqwest::multipart::Part::bytes(tokio::fs::read(&dump_events_file).await?)
+                        .file_name(file_name.clone())
+                        .mime_str("application/octet-stream")
+                    {
+                        Ok(part) => {
+                            form = form.part(format!("dump_events_{}", file_name), part);
+                        }
+                        Err(_) => {}
+                    };
+                }
+            }
         }
 
         let mut request = client.post(url).multipart(form);
@@ -340,16 +346,7 @@ impl CallRecordManager {
                 request = request.header(key, value);
             }
         }
-
-        let response = select! {
-            _ = cancel_token.cancelled() => {
-                return Err(anyhow::anyhow!("CallRecordManager cancelled"));
-            }
-            response= request.send() => {
-                response?
-            }
-        };
-
+        let response = request.send().await?;
         if response.status().is_success() {
             let response_text = response.text().await.unwrap_or_default();
             Ok(format!("HTTP upload successful: {}", response_text))
@@ -363,7 +360,6 @@ impl CallRecordManager {
     }
 
     async fn save_with_s3_like(
-        cancel_token: CancellationToken,
         formatter: Arc<dyn CallRecordFormatter>,
         vendor: &S3Vendor,
         bucket: &String,
@@ -425,55 +421,50 @@ impl CallRecordManager {
 
         // Upload call log JSON
         let json_path = ObjectPath::from(formatter.format_file_name(root, record));
-
-        select! {
-            _ = cancel_token.cancelled() => {}
-            r = object_store.put(&json_path, call_log_json.into()) =>{
-                match r {
-                    Ok(r) => {
-                        info!("Upload call record: {:?}", r);
-                    }
-                    Err(e) => {
-                        error!("Failed to upload call record: {}", e);
-                    }
-                }
+        match object_store.put(&json_path, call_log_json.into()).await {
+            Ok(r) => {
+                info!("Upload call record: {:?}", r);
             }
-        };
-
-        let mut uploaded_files = vec![json_path.to_string()];
-
+            Err(e) => {
+                error!("Failed to upload call record: {}", e);
+            }
+        }
+        let mut uploaded_files = vec![(json_path.to_string(), json_path.clone())];
         // Upload media files if with_media is true
         if with_media.unwrap_or(false) {
+            let mut media_files = vec![];
             for media in &record.recorder {
                 if Path::new(&media.path).exists() {
-                    match tokio::fs::read(&media.path).await {
-                        Ok(file_content) => {
-                            let media_path =
-                                ObjectPath::from(formatter.format_media_path(root, record, media));
-                            select! {
-                                _ = cancel_token.cancelled() => {}
-                                r = object_store.put(&media_path, file_content.into()) => {
-                                    match r {
-                                        Ok(_) => {
-                                            uploaded_files.push(media_path.to_string());
-                                            info!("Upload media file: {:?}", media_path);
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Failed to upload media file: {} {}",
-                                                media_path, e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to read media file {}: {}", media.path, e);
-                        }
+                    let media_path =
+                        ObjectPath::from(formatter.format_media_path(root, record, media));
+                    media_files.push((media.path.clone(), media_path));
+                }
+            }
+            if let Some(dump_events_file) = &record.dump_events {
+                if Path::new(&dump_events_file).exists() {
+                    let dump_events_path =
+                        ObjectPath::from(formatter.format_dump_events_path(root, record));
+                    media_files.push((dump_events_file.clone(), dump_events_path));
+                }
+            }
+            for (path, media_path) in &media_files {
+                let file_content = match tokio::fs::read(path).await {
+                    Ok(file_content) => file_content,
+                    Err(e) => {
+                        error!("Failed to read media file {}: {}", path, e);
+                        continue;
+                    }
+                };
+                match object_store.put(media_path, file_content.into()).await {
+                    Ok(r) => {
+                        info!("Upload media file: {:?}", r);
+                    }
+                    Err(e) => {
+                        error!("Failed to upload media file: {}", e);
                     }
                 }
             }
+            uploaded_files.extend(media_files);
         }
 
         Ok(format!(

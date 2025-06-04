@@ -48,6 +48,13 @@ pub struct AppStateBuilder {
 }
 
 impl AppStateInner {
+    pub fn get_dump_events_file(&self, session_id: &String) -> String {
+        let root = Path::new(&self.config.recorder_path);
+        root.join(format!("{}.events.jsonl", session_id))
+            .to_string_lossy()
+            .to_string()
+    }
+
     pub fn get_recorder_file(&self, session_id: &String) -> String {
         let root = Path::new(&self.config.recorder_path);
         if !root.exists() {
