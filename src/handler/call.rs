@@ -32,6 +32,8 @@ use rsipstack::dialog::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    fs::OpenOptions,
+    io::Write,
     sync::{
         atomic::{AtomicU16, Ordering},
         Arc,
@@ -49,6 +51,8 @@ pub type ActiveCallRef = Arc<ActiveCall>;
 #[derive(Deserialize)]
 pub struct CallParams {
     pub id: Option<String>,
+    #[serde(rename = "dump")]
+    pub dump_events: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -453,6 +457,7 @@ impl ActiveCall {
         self.cancel_token.cancel();
         Ok(())
     }
+
     pub async fn get_callrecord(&self) -> CallRecord {
         let recorder_files = if self.option.recorder.is_some() {
             let recorder_file = self.app_state.get_recorder_file(&self.session_id);
@@ -471,6 +476,13 @@ impl ActiveCall {
             }
         } else {
             vec![]
+        };
+
+        let dump_events_file = self.app_state.get_dump_events_file(&self.session_id);
+        let dump_events = if std::path::Path::new(&dump_events_file).exists() {
+            Some(dump_events_file)
+        } else {
+            None
         };
 
         CallRecord {
@@ -495,6 +507,7 @@ impl ActiveCall {
             recorder: recorder_files,
             status_code: self.call_state.last_status_code.load(Ordering::Relaxed) as u16,
             extras: None,
+            dump_events,
         }
     }
 }
@@ -580,6 +593,7 @@ async fn sip_event_loop(
 async fn send_to_ws_loop(
     ws_sender: &mut SplitSink<WebSocket, Message>,
     event_receiver: &mut EventReceiver,
+    dump_events_file: &Option<String>,
 ) -> Result<()> {
     while let Ok(event) = event_receiver.recv().await {
         match event {
@@ -596,6 +610,9 @@ async fn send_to_ws_loop(
                         continue;
                     }
                 };
+                if let Some(dump_events_file) = dump_events_file {
+                    save_event_to_file(dump_events_file.as_str(), &data).ok();
+                }
                 if let Err(e) = ws_sender.send(data.into()).await {
                     warn!("error sending event to WebSocket: {}", e);
                 }
@@ -605,20 +622,41 @@ async fn send_to_ws_loop(
     Ok(())
 }
 
+fn save_event_to_file(events_file: &str, data: &str) -> Result<()> {
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_file)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            warn!("Failed to create events file {}: {}", events_file, e);
+            return Err(e.into());
+        }
+    };
+    writeln!(file, "{}", data).map_err(|e| anyhow::anyhow!("Failed to write event to file: {}", e))
+}
+
 pub async fn handle_call(
     call_type: ActiveCallType,
     session_id: String,
     socket: axum::extract::ws::WebSocket,
     state: AppState,
     call_state: ActiveCallStateRef,
+    dump_events: bool,
 ) -> Result<()> {
     let cancel_token = CancellationToken::new();
     let (mut ws_sender, ws_receiver) = socket.split();
     let event_sender = crate::event::create_event_sender();
     let mut event_receiver = event_sender.subscribe();
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
+    let dump_events_file = if dump_events {
+        Some(state.get_dump_events_file(&session_id))
+    } else {
+        None
+    };
     select! {
-        _ = send_to_ws_loop(&mut ws_sender, &mut event_receiver) => {
+        _ = send_to_ws_loop( &mut ws_sender, &mut event_receiver, &dump_events_file) => {
             info!(session_id, "prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
@@ -636,13 +674,15 @@ pub async fn handle_call(
                 Err(e) => {
                     info!(session_id,"call error: {}", e);
                     let error_event = SessionEvent::Error {
-                        track_id:session_id,
+                        track_id:session_id.clone(),
                         timestamp:crate::get_timestamp(),
                         error:e.to_string(),
                         sender: "handle_call".to_string(),
                         code: None };
                     match serde_json::to_string(&error_event) {
-                        Ok(data) => {ws_sender.send(data.into()).await.ok();},
+                        Ok(data) => {
+                            ws_sender.send(data.into()).await.ok();
+                        },
                         Err(_) => {
                             warn!("error serializing error event: {}", e);
                         }
@@ -669,6 +709,9 @@ pub async fn handle_call(
                         continue;
                     }
                 };
+                if let Some(ref dump_events_file) = dump_events_file {
+                    save_event_to_file(dump_events_file.as_str(), &data).ok();
+                }
                 if let Err(_) = ws_sender.send(data.into()).await {
                     break;
                 }

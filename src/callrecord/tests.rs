@@ -26,6 +26,7 @@ async fn test_save_with_http_without_media() {
         hangup_reason: None,
         recorder: vec![],
         extras: Some(extras),
+        dump_events: None,
     };
 
     // Test without media (should not fail if no server available)
@@ -36,7 +37,6 @@ async fn test_save_with_http_without_media() {
     // This test will only pass if httpbin.org is available
     // In production, you might want to use a mock server
     let result = CallRecordManager::save_with_http(
-        CancellationToken::new(),
         Arc::new(DefaultCallRecordFormatter),
         &url,
         &headers,
@@ -91,6 +91,7 @@ async fn test_save_with_http_with_media() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
+        dump_events: None,
     };
 
     // Test with media
@@ -99,7 +100,6 @@ async fn test_save_with_http_with_media() {
     let with_media = Some(true);
 
     let result = CallRecordManager::save_with_http(
-        CancellationToken::new(),
         Arc::new(DefaultCallRecordFormatter),
         &url,
         &headers,
@@ -144,13 +144,13 @@ async fn test_save_with_http_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
+        dump_events: None,
     };
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
 
     let result = CallRecordManager::save_with_http(
-        CancellationToken::new(),
         Arc::new(DefaultCallRecordFormatter),
         &url,
         &Some(headers),
@@ -195,13 +195,13 @@ async fn test_save_with_s3_like_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
+        dump_events: None,
     };
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
 
     let result = CallRecordManager::save_with_http(
-        CancellationToken::new(),
         Arc::new(DefaultCallRecordFormatter),
         &url,
         &Some(headers),
@@ -252,12 +252,12 @@ async fn test_save_with_s3_like_memory_store() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
+        dump_events: None,
     };
 
     // This test will only succeed if there's a local minio instance running
     // In real scenarios, this would use actual cloud storage credentials
     let result = CallRecordManager::save_with_s3_like(
-        CancellationToken::new(),
         Arc::new(DefaultCallRecordFormatter),
         &vendor,
         &bucket,
@@ -316,6 +316,7 @@ async fn test_save_with_s3_like_with_media() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
+        dump_events: None,
     };
 
     // Test with different S3 vendors
@@ -338,7 +339,6 @@ async fn test_save_with_s3_like_with_media() {
         let with_media = Some(true);
 
         let result = CallRecordManager::save_with_s3_like(
-            CancellationToken::new(),
             Arc::new(DefaultCallRecordFormatter),
             &vendor,
             &bucket,
