@@ -32,8 +32,6 @@ use rsipstack::dialog::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::OpenOptions,
-    io::Write,
     sync::{
         atomic::{AtomicU16, Ordering},
         Arc,
@@ -41,6 +39,8 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    fs::File,
+    io::AsyncWriteExt,
     select,
     sync::{mpsc, Mutex},
 };
@@ -443,18 +443,19 @@ impl ActiveCall {
 
     pub async fn cleanup(&self) -> Result<()> {
         info!(session_id = self.session_id, "call cleanup");
+        if let Some(dialog_id) = self.dialog_id.lock().await.take() {
+            self.app_state.useragent.hangup(dialog_id).await.ok();
+        }
 
+        self.cancel_token.cancel();
         // Set default hangup reason if not already set
         if self.call_state.hangup_reason.lock().await.is_none() {
             *self.call_state.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
         }
 
         self.tts_handle.lock().await.take();
-        self.media_stream.stop(None, None);
-        if let Some(dialog_id) = self.dialog_id.lock().await.take() {
-            self.app_state.useragent.hangup(dialog_id).await.ok();
-        }
-        self.cancel_token.cancel();
+        self.media_stream.cleanup().await.ok();
+
         Ok(())
     }
 
@@ -507,7 +508,7 @@ impl ActiveCall {
             recorder: recorder_files,
             status_code: self.call_state.last_status_code.load(Ordering::Relaxed) as u16,
             extras: None,
-            dump_events,
+            dump_event_file: dump_events,
         }
     }
 }
@@ -593,7 +594,7 @@ async fn sip_event_loop(
 async fn send_to_ws_loop(
     ws_sender: &mut SplitSink<WebSocket, Message>,
     event_receiver: &mut EventReceiver,
-    dump_events_file: &Option<String>,
+    dump_events_file: &mut Option<File>,
 ) -> Result<()> {
     while let Ok(event) = event_receiver.recv().await {
         match event {
@@ -611,7 +612,10 @@ async fn send_to_ws_loop(
                     }
                 };
                 if let Some(dump_events_file) = dump_events_file {
-                    save_event_to_file(dump_events_file.as_str(), &data).ok();
+                    dump_events_file
+                        .write_all(format!("{}\n", data).as_bytes())
+                        .await
+                        .ok();
                 }
                 if let Err(e) = ws_sender.send(data.into()).await {
                     warn!("error sending event to WebSocket: {}", e);
@@ -620,21 +624,6 @@ async fn send_to_ws_loop(
         };
     }
     Ok(())
-}
-
-fn save_event_to_file(events_file: &str, data: &str) -> Result<()> {
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&events_file)
-    {
-        Ok(file) => file,
-        Err(e) => {
-            warn!("Failed to create events file {}: {}", events_file, e);
-            return Err(e.into());
-        }
-    };
-    writeln!(file, "{}", data).map_err(|e| anyhow::anyhow!("Failed to write event to file: {}", e))
 }
 
 pub async fn handle_call(
@@ -650,13 +639,30 @@ pub async fn handle_call(
     let event_sender = crate::event::create_event_sender();
     let mut event_receiver = event_sender.subscribe();
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
-    let dump_events_file = if dump_events {
-        Some(state.get_dump_events_file(&session_id))
+    let mut dump_events_file = if dump_events {
+        let file_name = state.get_dump_events_file(&session_id);
+        File::options()
+            .create(true)
+            .append(true)
+            .open(file_name)
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let dump_command_file = if dump_events {
+        let file_name = state.get_dump_events_file(&session_id);
+        File::options()
+            .create(true)
+            .append(true)
+            .open(file_name)
+            .await
+            .ok()
     } else {
         None
     };
     select! {
-        _ = send_to_ws_loop( &mut ws_sender, &mut event_receiver, &dump_events_file) => {
+        _ = send_to_ws_loop( &mut ws_sender, &mut event_receiver, &mut dump_events_file) => {
             info!(session_id, "prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
@@ -668,7 +674,7 @@ pub async fn handle_call(
                 }
             }
         }
-        r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state) => {
+        r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state, dump_command_file) => {
             match r {
                 Ok(_) => {}
                 Err(e) => {
@@ -709,8 +715,11 @@ pub async fn handle_call(
                         continue;
                     }
                 };
-                if let Some(ref dump_events_file) = dump_events_file {
-                    save_event_to_file(dump_events_file.as_str(), &data).ok();
+                if let Some(dump_events_file) = &mut dump_events_file {
+                    dump_events_file
+                        .write_all(format!("{}\n", data).as_bytes())
+                        .await
+                        .ok();
                 }
                 if let Err(_) = ws_sender.send(data.into()).await {
                     break;
@@ -731,12 +740,23 @@ async fn process_call(
     event_sender: EventSender,
     dlg_state_sender: DialogStateSender,
     state: AppState,
+    mut dump_command_file: Option<File>,
 ) -> Result<()> {
     let audio_from_ws = Arc::new(Mutex::new(None));
-
     let mut option = match ws_receiver.next().await {
         Some(Ok(Message::Text(text))) => {
             let command = serde_json::from_str::<Command>(&text)?;
+            if let Some(dump_command_file) = &mut dump_command_file {
+                match serde_json::to_string(&command) {
+                    Ok(text) => {
+                        dump_command_file
+                            .write_all(format!("{}\n", text).as_bytes())
+                            .await
+                            .ok();
+                    }
+                    _ => {}
+                }
+            }
             match command {
                 Command::Invite { option: options } => options,
                 _ => {
@@ -852,13 +872,28 @@ async fn process_call(
     let recv_from_ws = async move {
         while let Some(msg) = ws_receiver.next().await {
             let command = match msg {
-                Ok(Message::Text(text)) => match serde_json::from_str::<Command>(&text) {
-                    Ok(command) => command,
-                    Err(e) => {
-                        warn!("error deserializing command: {} {}", e, text);
-                        continue;
+                Ok(Message::Text(text)) => {
+                    let command = match serde_json::from_str::<Command>(&text) {
+                        Ok(command) => command,
+                        Err(e) => {
+                            warn!("error deserializing command: {} {}", e, text);
+                            continue;
+                        }
+                    };
+
+                    if let Some(dump_command_file) = &mut dump_command_file {
+                        match serde_json::to_string(&command) {
+                            Ok(text) => {
+                                dump_command_file
+                                    .write_all(format!("{}\n", text).as_bytes())
+                                    .await
+                                    .ok();
+                            }
+                            _ => {}
+                        }
                     }
-                },
+                    command
+                }
                 Ok(Message::Binary(data)) => {
                     if let Some(sender) = audio_from_ws.as_ref() {
                         if let Err(e) = sender.send(data) {
