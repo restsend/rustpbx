@@ -129,7 +129,7 @@ pub async fn call_handler(
                 let hangup_reason = call_state.hangup_reason.lock().await.clone();
 
                 let dump_events_file = state_clone.get_dump_events_file(&session_id);
-                let dump_events = if std::path::Path::new(&dump_events_file).exists() {
+                let dump_events = if tokio::fs::metadata(&dump_events_file).await.is_ok() {
                     Some(dump_events_file)
                 } else {
                     None
@@ -149,7 +149,7 @@ pub async fn call_handler(
                     recorder: vec![],
                     extras: None,
                     option,
-                    dump_events,
+                    dump_event_file: dump_events,
                 }
             }
         };

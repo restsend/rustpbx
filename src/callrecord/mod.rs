@@ -56,7 +56,7 @@ pub struct CallRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extras: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dump_events: Option<String>,
+    pub dump_event_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ pub trait CallRecordFormatter: Send + Sync {
 
     fn format_dump_events_path(&self, root: &str, record: &CallRecord) -> String {
         format!(
-            "{}/{}_{}.jsonl",
+            "{}/{}_{}.events.jsonl",
             root.trim_end_matches('/'),
             record.start_time.format("%Y%m%d"),
             record.call_id
@@ -320,7 +320,7 @@ impl CallRecordManager {
                     }
                 }
             }
-            if let Some(dump_events_file) = &record.dump_events {
+            if let Some(dump_events_file) = &record.dump_event_file {
                 if Path::new(&dump_events_file).exists() {
                     let file_name = Path::new(&dump_events_file)
                         .file_name()
@@ -440,7 +440,7 @@ impl CallRecordManager {
                     media_files.push((media.path.clone(), media_path));
                 }
             }
-            if let Some(dump_events_file) = &record.dump_events {
+            if let Some(dump_events_file) = &record.dump_event_file {
                 if Path::new(&dump_events_file).exists() {
                     let dump_events_path =
                         ObjectPath::from(formatter.format_dump_events_path(root, record));

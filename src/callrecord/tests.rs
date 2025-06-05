@@ -26,7 +26,7 @@ async fn test_save_with_http_without_media() {
         hangup_reason: None,
         recorder: vec![],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     // Test without media (should not fail if no server available)
@@ -91,7 +91,7 @@ async fn test_save_with_http_with_media() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     // Test with media
@@ -144,7 +144,7 @@ async fn test_save_with_http_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -195,7 +195,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -252,7 +252,7 @@ async fn test_save_with_s3_like_memory_store() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     // This test will only succeed if there's a local minio instance running
@@ -316,7 +316,7 @@ async fn test_save_with_s3_like_with_media() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
         extras: Some(extras),
-        dump_events: None,
+        dump_event_file: None,
     };
 
     // Test with different S3 vendors
