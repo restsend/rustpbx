@@ -747,7 +747,10 @@ async fn process_call(
         Some(Ok(Message::Text(text))) => {
             let command = serde_json::from_str::<Command>(&text)?;
             if let Some(dump_command_file) = &mut dump_command_file {
-                match serde_json::to_string(&command) {
+                match serde_json::to_string(&serde_json::json!({
+                    "command": command,
+                    "timestamp": crate::get_timestamp(),
+                })) {
                     Ok(text) => {
                         dump_command_file
                             .write_all(format!("{}\n", text).as_bytes())
@@ -882,7 +885,10 @@ async fn process_call(
                     };
 
                     if let Some(dump_command_file) = &mut dump_command_file {
-                        match serde_json::to_string(&command) {
+                        match serde_json::to_string(&serde_json::json!({
+                            "command": command,
+                            "timestamp": crate::get_timestamp(),
+                        })) {
                             Ok(text) => {
                                 dump_command_file
                                     .write_all(format!("{}\n", text).as_bytes())
