@@ -154,6 +154,7 @@ impl CdrModule {
             sip: None,
             extra: None,
             codec: None,
+            eou: None,
         };
 
         let session = CallSession::new(dialog_id, call_id.clone(), caller, callee, call_option);

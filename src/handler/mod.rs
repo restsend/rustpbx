@@ -46,6 +46,8 @@ pub struct CallOption {
     pub extra: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>, // pcmu, pcma, g722, pcm, only for websocket call
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eou: Option<EouOption>,
 }
 
 impl Default for CallOption {
@@ -64,6 +66,7 @@ impl Default for CallOption {
             sip: None,
             extra: None,
             codec: None,
+            eou: None,
         }
     }
 }
@@ -93,6 +96,15 @@ pub struct ReferOption {
     auto_hangup: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EouOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// max timeout in milliseconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u32>,
+}
 // WebSocket Commands
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "command")]
