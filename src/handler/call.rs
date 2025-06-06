@@ -1,7 +1,7 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
-    callrecord::{CallRecord, CallRecordHangupReason},
+    callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
         engine::StreamEngine,
@@ -40,7 +40,6 @@ use std::{
 };
 use tokio::{
     fs::File,
-    io::AsyncWriteExt,
     select,
     sync::{mpsc, Mutex},
 };
@@ -612,10 +611,9 @@ async fn send_to_ws_loop(
                     }
                 };
                 if let Some(dump_events_file) = dump_events_file {
-                    dump_events_file
-                        .write_all(format!("{}\n", data).as_bytes())
-                        .await
-                        .ok();
+                    CallRecordEvent::new(CallRecordEventType::Event, &data)
+                        .write_to_file(dump_events_file)
+                        .await;
                 }
                 if let Err(e) = ws_sender.send(data.into()).await {
                     warn!("error sending event to WebSocket: {}", e);
@@ -716,10 +714,9 @@ pub async fn handle_call(
                     }
                 };
                 if let Some(dump_events_file) = &mut dump_events_file {
-                    dump_events_file
-                        .write_all(format!("{}\n", data).as_bytes())
-                        .await
-                        .ok();
+                    CallRecordEvent::new(CallRecordEventType::Event, &data)
+                        .write_to_file(dump_events_file)
+                        .await;
                 }
                 if let Err(_) = ws_sender.send(data.into()).await {
                     break;
@@ -747,18 +744,9 @@ async fn process_call(
         Some(Ok(Message::Text(text))) => {
             let command = serde_json::from_str::<Command>(&text)?;
             if let Some(dump_command_file) = &mut dump_command_file {
-                match serde_json::to_string(&serde_json::json!({
-                    "command": command,
-                    "timestamp": crate::get_timestamp(),
-                })) {
-                    Ok(text) => {
-                        dump_command_file
-                            .write_all(format!("{}\n", text).as_bytes())
-                            .await
-                            .ok();
-                    }
-                    _ => {}
-                }
+                CallRecordEvent::new(CallRecordEventType::Command, &text)
+                    .write_to_file(dump_command_file)
+                    .await;
             }
             match command {
                 Command::Invite { option: options } => options,
@@ -876,29 +864,18 @@ async fn process_call(
         while let Some(msg) = ws_receiver.next().await {
             let command = match msg {
                 Ok(Message::Text(text)) => {
-                    let command = match serde_json::from_str::<Command>(&text) {
+                    if let Some(dump_command_file) = &mut dump_command_file {
+                        CallRecordEvent::new(CallRecordEventType::Command, &text)
+                            .write_to_file(dump_command_file)
+                            .await;
+                    }
+                    match serde_json::from_str::<Command>(&text) {
                         Ok(command) => command,
                         Err(e) => {
                             warn!("error deserializing command: {} {}", e, text);
                             continue;
                         }
-                    };
-
-                    if let Some(dump_command_file) = &mut dump_command_file {
-                        match serde_json::to_string(&serde_json::json!({
-                            "command": command,
-                            "timestamp": crate::get_timestamp(),
-                        })) {
-                            Ok(text) => {
-                                dump_command_file
-                                    .write_all(format!("{}\n", text).as_bytes())
-                                    .await
-                                    .ok();
-                            }
-                            _ => {}
-                        }
                     }
-                    command
                 }
                 Ok(Message::Binary(data)) => {
                     if let Some(sender) = audio_from_ws.as_ref() {

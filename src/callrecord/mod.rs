@@ -35,6 +35,40 @@ pub type FnSaveCallRecord = Arc<
 >;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CallRecordEventType {
+    Event,
+    Command,
+    Sip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRecordEvent<'a> {
+    pub r#type: CallRecordEventType,
+    pub timestamp: u64,
+    pub content: &'a str,
+}
+
+impl<'a> CallRecordEvent<'a> {
+    pub fn new(r#type: CallRecordEventType, content: &'a str) -> Self {
+        Self {
+            r#type,
+            timestamp: crate::get_timestamp(),
+            content,
+        }
+    }
+    pub async fn write_to_file(&self, file: &mut File) {
+        match serde_json::to_string(self) {
+            Ok(line) => {
+                file.write_all(format!("{}\n", line).as_bytes()).await.ok();
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
     #[serde(skip_serializing_if = "Option::is_none")]
