@@ -103,6 +103,10 @@ pub struct EouOption {
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_id: Option<String>,
     /// max timeout in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u32>,
