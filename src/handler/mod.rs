@@ -100,11 +100,14 @@ pub struct ReferOption {
 #[serde(rename_all = "camelCase")]
 pub struct EouOption {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// max timeout in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u32>,
 }
+
 // WebSocket Commands
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "command")]

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     event::EventSender,
-    handler::CallOption,
+    handler::{CallOption, EouOption},
     synthesis::{
         SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
     },
@@ -30,6 +30,12 @@ pub type FnCreateVadProcessor = fn(
     token: CancellationToken,
     event_sender: EventSender,
     option: VADOption,
+) -> Result<Box<dyn Processor>>;
+
+pub type FnCreateEouProcessor = fn(
+    token: CancellationToken,
+    event_sender: EventSender,
+    option: EouOption,
 ) -> Result<Box<dyn Processor>>;
 
 pub type FnCreateAsrClient = Box<
@@ -59,9 +65,10 @@ pub type CreateProcessorsHook = Box<
 
 pub struct StreamEngine {
     vad_creators: HashMap<VadType, FnCreateVadProcessor>,
+    eou_creators: HashMap<String, FnCreateEouProcessor>,
     asr_creators: HashMap<TranscriptionType, FnCreateAsrClient>,
     tts_creators: HashMap<SynthesisType, FnCreateTtsClient>,
-    pub create_processors_hook: Arc<CreateProcessorsHook>,
+    create_processors_hook: Arc<CreateProcessorsHook>,
 }
 
 impl Default for StreamEngine {
@@ -92,12 +99,18 @@ impl StreamEngine {
             vad_creators: HashMap::new(),
             asr_creators: HashMap::new(),
             tts_creators: HashMap::new(),
+            eou_creators: HashMap::new(),
             create_processors_hook: Arc::new(Box::new(Self::default_create_procesors_hook)),
         }
     }
 
     pub fn register_vad(&mut self, vad_type: VadType, creator: FnCreateVadProcessor) -> &mut Self {
         self.vad_creators.insert(vad_type, creator);
+        self
+    }
+
+    pub fn register_eou(&mut self, name: String, creator: FnCreateEouProcessor) -> &mut Self {
+        self.eou_creators.insert(name, creator);
         self
     }
 
@@ -130,6 +143,21 @@ impl StreamEngine {
             creator(token, event_sender, option)
         } else {
             Err(anyhow::anyhow!("VAD type not found: {}", option.r#type))
+        }
+    }
+    pub fn create_eou_processor(
+        &self,
+        token: CancellationToken,
+        event_sender: EventSender,
+        option: EouOption,
+    ) -> Result<Box<dyn Processor>> {
+        let creator = self
+            .eou_creators
+            .get(&option.r#type.clone().unwrap_or_default());
+        if let Some(creator) = creator {
+            creator(token, event_sender, option)
+        } else {
+            Err(anyhow::anyhow!("EOU type not found: {:?}", option.r#type))
         }
     }
 
@@ -205,6 +233,11 @@ impl StreamEngine {
         Ok((new_handle, Box::new(tts_track) as Box<dyn Track>))
     }
 
+    pub fn with_processor_hook(&mut self, hook_fn: CreateProcessorsHook) -> &mut Self {
+        self.create_processors_hook = Arc::new(Box::new(hook_fn));
+        self
+    }
+
     fn default_create_procesors_hook(
         engine: Arc<StreamEngine>,
         track: &dyn Track,
@@ -247,6 +280,17 @@ impl StreamEngine {
                         .await?;
                     info!("Asr processor added {:?}", option);
                     processors.push(asr_processor);
+                }
+                None => {}
+            }
+            match option.eou {
+                Some(ref option) => {
+                    let eou_processor = engine.create_eou_processor(
+                        cancel_token.child_token(),
+                        event_sender.clone(),
+                        option.to_owned(),
+                    )?;
+                    processors.push(eou_processor);
                 }
                 None => {}
             }
