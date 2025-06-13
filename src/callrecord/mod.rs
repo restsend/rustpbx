@@ -251,7 +251,7 @@ impl CallRecordManagerBuilder {
 
 impl CallRecordManager {
     fn default_saver(
-        cancel_token: CancellationToken,
+        _cancel_token: CancellationToken,
         formatter: Arc<dyn CallRecordFormatter>,
         config: Arc<CallRecordConfig>,
         record: CallRecord,

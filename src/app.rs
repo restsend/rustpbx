@@ -98,6 +98,7 @@ impl AppStateBuilder {
         self.useragent = Some(useragent);
         self
     }
+
     pub fn with_stream_engine(mut self, stream_engine: Arc<StreamEngine>) -> Self {
         self.stream_engine = Some(stream_engine);
         self
@@ -107,13 +108,14 @@ impl AppStateBuilder {
         self.callrecord_sender = Some(sender);
         self
     }
+
     pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
         self
     }
 
     pub async fn build(self) -> Result<AppState> {
-        let config = Arc::new(self.config.unwrap_or_default());
+        let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
         let token = self
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
@@ -124,7 +126,7 @@ impl AppStateBuilder {
         } else {
             let config = config.ua.clone();
             let ua_builder = crate::useragent::UserAgentBuilder::new()
-                .with_token(token.child_token())
+                .with_cancel_token(token.child_token())
                 .with_config(config);
             Arc::new(ua_builder.build().await?)
         };

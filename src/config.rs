@@ -1,4 +1,4 @@
-use crate::proxy::user::SipUser;
+use crate::{proxy::user::SipUser, useragent::RegisterOption};
 use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,8 @@ pub struct UseragentConfig {
     pub rtp_start_port: Option<u16>,
     pub rtp_end_port: Option<u16>,
     pub useragent: Option<String>,
+    pub register_users: Option<Vec<RegisterOption>>,
+    pub graceful_shutdown: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -258,6 +260,8 @@ impl Default for UseragentConfig {
             rtp_end_port: Some(42000),
             stun_server: None,
             useragent: Some(USER_AGENT.to_string()),
+            register_users: None,
+            graceful_shutdown: Some(true),
         }
     }
 }
