@@ -66,11 +66,10 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     config.ua = Some(UseragentConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: ua_port,
-        external_ip: None,
         rtp_start_port: Some(12000),
         rtp_end_port: Some(42000),
-        stun_server: None,
         useragent: Some("rustpbx-test".to_string()),
+        ..Default::default()
     });
 
     config.proxy = Some(ProxyConfig {

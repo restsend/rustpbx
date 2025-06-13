@@ -1,13 +1,51 @@
 use super::UserAgent;
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use rsipstack::dialog::{
     client_dialog::ClientInviteDialog,
-    dialog::{Dialog, DialogStateSender},
+    dialog::{Dialog, DialogStateSender, TerminatedReason},
     invitation::InviteOption,
     server_dialog::ServerInviteDialog,
     DialogId,
 };
 use tracing::info;
+
+#[async_trait]
+
+pub trait InvitationHandler: Send + Sync {
+    async fn on_invite(&self, _dialog: ServerInviteDialog) -> Result<()> {
+        return Err(anyhow!("invite not handled"));
+    }
+    async fn on_confirmed(&self, _dialog: ServerInviteDialog) -> Result<()> {
+        Ok(())
+    }
+    async fn on_terminate(
+        &self,
+        _dialog: ServerInviteDialog,
+        _reason: TerminatedReason,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn on_early_media(
+        &self,
+        _dialog: ServerInviteDialog,
+        _resp: rsip::Response,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn on_update(&self, _dialog: ServerInviteDialog, _req: rsip::Request) -> Result<()> {
+        Ok(())
+    }
+    async fn on_info(&self, _dialog: ServerInviteDialog, _req: rsip::Request) -> Result<()> {
+        Ok(())
+    }
+    async fn on_options(&self, _dialog: ServerInviteDialog, _req: rsip::Request) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub struct UnavailableInvitationHandler;
+impl InvitationHandler for UnavailableInvitationHandler {}
 
 impl UserAgent {
     pub(super) async fn handle_server_invite(&self, dialog: ServerInviteDialog) -> Result<()> {
