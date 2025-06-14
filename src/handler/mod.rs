@@ -13,7 +13,6 @@ pub mod middleware;
 pub mod sip;
 #[cfg(test)]
 mod tests;
-pub mod webhook;
 pub mod webrtc;
 pub use handler::router;
 use sip::SipOption;

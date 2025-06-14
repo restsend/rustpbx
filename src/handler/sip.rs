@@ -2,6 +2,7 @@ use super::CallOption;
 use crate::app::AppState;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
 use crate::media::track::TrackConfig;
+use crate::useragent::invitation::PendingDialog;
 use crate::TrackId;
 use anyhow::Result;
 use rsipstack::dialog::authenticate::Credential;
@@ -20,6 +21,94 @@ pub struct SipOption {
     pub password: String,
     pub realm: String,
     pub headers: Option<HashMap<String, String>>,
+}
+
+pub async fn new_rtp_track_with_pending_call(
+    state: AppState,
+    token: CancellationToken,
+    track_id: TrackId,
+    track_config: TrackConfig,
+    _option: &CallOption,
+    dlg_state_sender: DialogStateSender,
+    pending_call: PendingDialog,
+) -> Result<(DialogId, RtpTrack)> {
+    let mut rtp_track =
+        RtpTrackBuilder::new(track_id.clone(), track_config).with_cancel_token(token);
+
+    if let Some(ref sip) = state.config.ua {
+        if let Some(rtp_start_port) = sip.rtp_start_port {
+            rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
+        }
+        if let Some(rtp_end_port) = sip.rtp_end_port {
+            rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
+        }
+
+        if let Some(ref external_ip) = sip.external_ip {
+            rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
+        }
+
+        if let Some(ref stun_server) = sip.stun_server {
+            rtp_track = rtp_track.with_stun_server(stun_server.clone());
+        }
+    }
+
+    let mut rtp_track = rtp_track.build().await?;
+    let initial_request = pending_call.dialog.initial_request();
+
+    let offer = if !initial_request.body.is_empty() {
+        String::from_utf8(initial_request.body.clone())?
+    } else {
+        return Err(anyhow::anyhow!("no SDP offer in incoming INVITE"));
+    };
+
+    match rtp_track.set_remote_description(offer.as_str()) {
+        Ok(_) => (),
+        Err(e) => {
+            error!("failed to set remote description: {}", e);
+            return Err(anyhow::anyhow!("failed to set remote description"));
+        }
+    }
+
+    let answer = match rtp_track.local_description() {
+        Ok(answer) => answer,
+        Err(e) => {
+            error!("failed to get local description: {}", e);
+            return Err(anyhow::anyhow!("failed to get local description"));
+        }
+    };
+    let headers = vec![rsip::Header::ContentType(
+        "application/sdp".to_string().into(),
+    )];
+
+    match pending_call
+        .dialog
+        .accept(Some(headers), Some(answer.as_bytes().to_vec()))
+    {
+        Ok(_) => (),
+        Err(e) => {
+            error!("failed to accept call: {}", e);
+            return Err(anyhow::anyhow!("failed to accept call"));
+        }
+    }
+
+    let dialog_id = pending_call.dialog.id();
+
+    let mut state_receiver = pending_call.state_receiver;
+    let token_clone = pending_call.token;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = token_clone.cancelled() => {}
+            _ = async {
+                while let Some(state) = state_receiver.recv().await {
+                    if let Err(_) = dlg_state_sender.send(state) {
+                        break;
+                    }
+                }
+            } => {}
+        }
+    });
+
+    Ok((dialog_id, rtp_track))
 }
 
 pub async fn new_rtp_track_with_sip(
