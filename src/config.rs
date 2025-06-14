@@ -63,6 +63,19 @@ pub struct UseragentConfig {
     pub useragent: Option<String>,
     pub register_users: Option<Vec<RegisterOption>>,
     pub graceful_shutdown: Option<bool>,
+    pub handler: Option<InviteHandlerConfig>,
+    pub accept_timeout: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
+pub enum InviteHandlerConfig {
+    Webhook {
+        url: String,
+        method: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -262,6 +275,8 @@ impl Default for UseragentConfig {
             useragent: Some(USER_AGENT.to_string()),
             register_users: None,
             graceful_shutdown: Some(true),
+            handler: None,
+            accept_timeout: Some("50s".to_string()),
         }
     }
 }

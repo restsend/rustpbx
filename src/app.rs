@@ -7,7 +7,7 @@ use crate::{
         acl::AclModule, auth::AuthModule, call::CallModule, cdr::CdrModule,
         mediaproxy::MediaProxyModule, registrar::RegistrarModule, server::SipServerBuilder,
     },
-    useragent::UserAgent,
+    useragent::{invitation::create_invite_handler, UserAgent},
 };
 use anyhow::Result;
 use axum::{
@@ -125,8 +125,14 @@ impl AppStateBuilder {
             ua
         } else {
             let config = config.ua.clone();
+            let invite_handler = config
+                .as_ref()
+                .and_then(|c| c.handler.as_ref())
+                .map(|c| create_invite_handler(c))
+                .flatten();
             let ua_builder = crate::useragent::UserAgentBuilder::new()
                 .with_cancel_token(token.child_token())
+                .with_invitation_handler(invite_handler)
                 .with_config(config);
             Arc::new(ua_builder.build().await?)
         };

@@ -749,7 +749,8 @@ async fn process_call(
                     .await;
             }
             match command {
-                Command::Invite { option: options } => options,
+                Command::Invite { option } => option,
+                Command::Accept { option } => option,
                 _ => {
                     info!(
                         session_id,
@@ -787,16 +788,30 @@ async fn process_call(
             Box::new(webrtc_track)
         }
         ActiveCallType::Sip => {
-            let (dlg_id, rtp_track) = match super::sip::new_rtp_track_with_sip(
-                state.clone(),
-                cancel_token.child_token(),
-                session_id.clone(),
-                track_config,
-                &option,
-                dlg_state_sender,
-            )
-            .await
+            let r = if let Some(pending_call) = state.useragent.get_pending_call(&session_id).await
             {
+                super::sip::new_rtp_track_with_pending_call(
+                    state.clone(),
+                    cancel_token.child_token(),
+                    session_id.clone(),
+                    track_config,
+                    &option,
+                    dlg_state_sender,
+                    pending_call,
+                )
+                .await
+            } else {
+                super::sip::new_rtp_track_with_sip(
+                    state.clone(),
+                    cancel_token.child_token(),
+                    session_id.clone(),
+                    track_config,
+                    &option,
+                    dlg_state_sender,
+                )
+                .await
+            };
+            let (dlg_id, rtp_track) = match r {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(session_id, "error creating rtp track: {}", e);
