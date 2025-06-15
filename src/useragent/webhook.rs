@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use rsip::prelude::HeadersExt;
-use rsipstack::dialog::{dialog::TerminatedReason, server_dialog::ServerInviteDialog};
+use rsipstack::dialog::server_dialog::ServerInviteDialog;
 use serde_json::json;
 use std::{collections::HashMap, time::Instant};
 use tokio::select;

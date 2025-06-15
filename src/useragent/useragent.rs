@@ -7,7 +7,6 @@ use anyhow::{anyhow, Result};
 use humantime::parse_duration;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::dialog_layer::DialogLayer;
-use rsipstack::dialog::DialogId;
 use rsipstack::transaction::{Endpoint, TransactionReceiver};
 use rsipstack::transport::{udp::UdpConnection, TransportLayer};
 use rsipstack::EndpointBuilder;
@@ -252,8 +251,8 @@ impl UserAgent {
         let dialog_layer = self.dialog_layer.clone();
 
         match self.start_registration().await {
-            Ok(_) => {
-                info!("registration started");
+            Ok(count) => {
+                info!("registration started, count: {}", count);
             }
             Err(e) => {
                 warn!("failed to start registration: {:?}", e);
