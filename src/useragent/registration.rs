@@ -65,18 +65,21 @@ pub struct RegistrationHandle {
 }
 
 impl UserAgent {
-    pub async fn start_registration(&self) -> Result<()> {
+    pub async fn start_registration(&self) -> Result<usize> {
+        let mut count = 0;
         if let Some(register_users) = &self.config.register_users {
             for option in register_users.iter() {
                 match self.register(option.clone()).await {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        count += 1;
+                    }
                     Err(e) => {
                         warn!("failed to register user: {:?} {:?}", e, option);
                     }
                 }
             }
         }
-        Ok(())
+        Ok(count)
     }
 
     pub async fn stop_registration(&self, wait_for_clear: Option<Duration>) -> Result<()> {

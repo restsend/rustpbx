@@ -102,6 +102,5 @@ pub fn create_invite_handler(config: &InviteHandlerConfig) -> Option<Box<dyn Inv
             method.clone(),
             headers.clone(),
         ))),
-        _ => None,
     }
 }
