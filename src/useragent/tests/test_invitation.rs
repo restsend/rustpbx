@@ -68,12 +68,6 @@ async fn create_simple_useragent(listen_addr: String) -> Result<UserAgent> {
 
 #[tokio::test]
 async fn test_bob_call_alice_webhook_accept() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .try_init()
-        .ok();
-
     // 1. Create webhook server to capture Alice's incoming calls
     let webhook_requests = Arc::new(Mutex::new(Vec::<WebhookRequest>::new()));
     let webhook_requests_clone = webhook_requests.clone();

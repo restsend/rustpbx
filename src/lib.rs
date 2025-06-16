@@ -4,7 +4,6 @@ pub mod app;
 pub mod callrecord;
 pub mod config;
 pub mod console;
-pub mod error;
 pub mod event;
 pub mod handler;
 pub mod llm;
@@ -15,7 +14,6 @@ pub mod synthesis;
 pub mod transcription;
 pub mod useragent;
 
-pub use error::Error;
 pub type TrackId = String;
 pub type Sample = i16;
 pub type PcmBuf = Vec<Sample>;

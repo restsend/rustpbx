@@ -215,6 +215,7 @@ impl UserAgent {
                     });
                     let mut dialog_ref = dialog.clone();
                     let token_ref = token.clone();
+                    
                     tokio::spawn(async move {
                         select! {
                             _ = token_ref.cancelled() => {}
