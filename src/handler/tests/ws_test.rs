@@ -38,13 +38,6 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
         .install_default()
         .ok();
     dotenv().ok();
-
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .try_init()
-        .ok();
-
     // Create a custom config with different ports to avoid conflicts
     let mut config = Config::default();
     // Use different static ports for this test to avoid conflicts

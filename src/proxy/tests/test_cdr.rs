@@ -1,22 +1,23 @@
-use anyhow::Result;
-use rustpbx::{
+use crate::{
     callrecord::{CallRecord, CallRecordHangupReason},
     config::ProxyConfig,
     handler::CallOption,
     proxy::{cdr::CdrModule, server::SipServerInner, ProxyModule},
 };
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 fn create_test_server() -> Arc<SipServerInner> {
-    use rustpbx::proxy::{locator::MemoryLocator, user::MemoryUserBackend};
+    use crate::proxy::{locator::MemoryLocator, user::MemoryUserBackend};
 
     Arc::new(SipServerInner {
         cancel_token: CancellationToken::new(),
         config: Arc::new(ProxyConfig::default()),
         user_backend: Arc::new(Box::new(MemoryUserBackend::new(None))),
         locator: Arc::new(Box::new(MemoryLocator::new())),
+        callrecord_sender: None,
     })
 }
 
@@ -186,18 +187,20 @@ async fn test_cdr_call_record_sender() -> Result<()> {
 
     // Create a test call record
     let call_record = CallRecord {
-        call_type: rustpbx::handler::call::ActiveCallType::Sip,
-        option: CallOption::default(),
+        call_type: crate::handler::call::ActiveCallType::Sip,
+        option: Some(CallOption::default()),
         call_id: "test-call-123".to_string(),
-        start_time: std::time::SystemTime::now(),
-        end_time: std::time::SystemTime::now(),
-        duration: 10,
+        start_time: chrono::Utc::now(),
+        ring_time: None,
+        answer_time: None,
+        end_time: chrono::Utc::now(),
         caller: "alice@example.com".to_string(),
         callee: "bob@example.com".to_string(),
         status_code: 200,
-        hangup_reason: CallRecordHangupReason::ByCaller,
+        hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![],
-        extras: std::collections::HashMap::new(),
+        extras: Some(std::collections::HashMap::new()),
+        dump_event_file: None,
     };
 
     // Send the record
@@ -213,7 +216,6 @@ async fn test_cdr_call_record_sender() -> Result<()> {
     assert_eq!(received_record.caller, "alice@example.com");
     assert_eq!(received_record.callee, "bob@example.com");
     assert_eq!(received_record.status_code, 200);
-    assert_eq!(received_record.duration, 10);
 
     Ok(())
 }

@@ -265,7 +265,7 @@ impl CdrModule {
 
         for (call_id, session) in active_sessions.iter() {
             if now.signed_duration_since(session.start_time).num_seconds() as u64
-                > max_duration_secs
+                >= max_duration_secs
             {
                 to_remove.push(call_id.clone());
             }
