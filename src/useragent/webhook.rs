@@ -6,7 +6,7 @@ use reqwest::Client;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::server_dialog::ServerInviteDialog;
 use serde_json::json;
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -14,14 +14,14 @@ use tracing::info;
 pub struct WebhookInvitationHandler {
     url: String,
     method: Option<String>,
-    headers: Option<HashMap<String, String>>,
+    headers: Option<Vec<(String, String)>>,
 }
 
 impl WebhookInvitationHandler {
     pub fn new(
         url: String,
         method: Option<String>,
-        headers: Option<HashMap<String, String>>,
+        headers: Option<Vec<(String, String)>>,
     ) -> Self {
         Self {
             url,
@@ -47,11 +47,12 @@ impl InvitationHandler for WebhookInvitationHandler {
         let callee = invite_request.to_header()?.uri()?.to_string();
 
         let payload = json!({
-            "dialog_id": dialog_id,
-            "create_time": create_time,
+            "dialogId": dialog_id,
+            "createdAt": create_time,
             "caller": caller,
             "callee": callee,
-            "event": "invite"
+            "event": "invite",
+            "offer": String::from_utf8_lossy(&invite_request.body()),
         });
 
         let method = self.method.as_deref().unwrap_or("POST");

@@ -80,12 +80,14 @@ impl UserAgentBuilder {
             .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
 
         transport_layer.add_transport(udp_conn.into());
+        info!("start useragent, addr: {}", local_addr);
 
         let endpoint = EndpointBuilder::new()
             .with_cancel_token(token.child_token())
             .with_transport_layer(transport_layer)
             .build();
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
+
         Ok(UserAgent {
             token,
             config,
@@ -143,11 +145,21 @@ impl UserAgent {
             let (state_sender, state_receiver) = unbounded_channel();
             match tx.original.method {
                 rsip::Method::Invite | rsip::Method::Ack => {
+                    let contact = match dialog_layer.endpoint.get_addrs().first() {
+                        Some(addr) => Some(rsip::Uri {
+                            scheme: Some(rsip::Scheme::Sip),
+                            auth: None,
+                            host_with_port: addr.addr.clone(),
+                            params: vec![],
+                            headers: vec![],
+                        }),
+                        None => None,
+                    };
                     let dialog = match dialog_layer.get_or_create_server_invite(
                         &tx,
                         state_sender,
                         None,
-                        None,
+                        contact,
                     ) {
                         Ok(d) => d,
                         Err(e) => {
@@ -206,9 +218,9 @@ impl UserAgent {
                     tokio::spawn(async move {
                         select! {
                             _ = token_ref.cancelled() => {}
-                            _ = dialog_ref.handle(tx) => {}
+                            _ = dialog_ref.handle(tx) => {
+                            }
                         }
-                        token_ref.cancel();
                     });
 
                     match self

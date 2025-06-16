@@ -9,9 +9,10 @@ stun_server = "stun.l.google.com:19302"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
 
-[useragent]
+[ua]
 addr="0.0.0.0"
 udp_port=13050 # don't use 5060
+
 
 [proxy]
 modules = ["acl", "auth", "registrar", "cdr", "mediaproxy", "call"]
@@ -26,6 +27,12 @@ acl_rules = [
     "allow all",
     "deny all"
 ]
+
+[ua.handler]
+type = "webhook"
+url = "http://localhost:8090/webhook"
+method = "POST"
+
 
 # MediaProxy configuration
 [proxy.media_proxy]
