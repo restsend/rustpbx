@@ -74,7 +74,7 @@ pub enum InviteHandlerConfig {
     Webhook {
         url: String,
         method: Option<String>,
-        headers: Option<HashMap<String, String>>,
+        headers: Option<Vec<(String, String)>>,
     },
 }
 
@@ -331,6 +331,12 @@ mod tests {
 
     #[test]
     fn test_config_load() {
+        let config = Config::default();
+        let config_str = toml::to_string(&config).unwrap();
+        println!("{}", config_str);
+    }
+    #[test]
+    fn test_config_dump() {
         let config = Config::default();
         let config_str = toml::to_string(&config).unwrap();
         println!("{}", config_str);

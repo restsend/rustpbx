@@ -31,10 +31,10 @@ async fn create_test_useragent(webhook_url: String) -> Result<UserAgent> {
         url: webhook_url,
         method: Some("POST".to_string()),
         headers: Some({
-            let mut headers = HashMap::new();
-            headers.insert("Content-Type".to_string(), "application/json".to_string());
-            headers.insert("X-Test-Header".to_string(), "test-value".to_string());
-            headers
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("X-Test-Header".to_string(), "test-value".to_string()),
+            ]
         }),
     });
 

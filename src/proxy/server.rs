@@ -189,6 +189,7 @@ impl SipServerBuilder {
                 .await
                 .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
             transport_layer.add_transport(udp_conn.into());
+            info!("start proxy, udp port: {}", local_addr);
         }
 
         let mut endpoint_builder = EndpointBuilder::new();
