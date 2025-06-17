@@ -103,6 +103,11 @@
                             :class="config.uiState.activeTab === 'llm' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
                             LLM
                         </button>
+                        <button @click="config.uiState.activeTab = 'asr'"
+                            class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
+                            :class="config.uiState.activeTab === 'asr' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
+                            ASR
+                        </button>
                         <button @click="config.uiState.activeTab = 'tts'"
                             class="py-2 px-4 font-medium border-b-2 transition-colors duration-200"
                             :class="config.uiState.activeTab === 'tts' ? 'border-blue-500 text-blue-600' : 'border-transparent hover:text-blue-500'">
@@ -128,12 +133,140 @@
                     <!-- Tab Content -->
                     <div class="py-4">
                         <!-- TTS Tab -->
-                        <div x-show="config.uiState.activeTab === 'tts'" class="space-y-2">
-                            <label for="ttsSpeaker" class="text-sm">Speaker</label>
-                            <select id="ttsSpeaker" x-model="config.tts.speaker" class="border p-2 rounded w-full">
-                                <option value="301030">Female</option>
-                                <option value="301031">Male</option>
-                            </select>
+                        <div x-show="config.uiState.activeTab === 'tts'" class="space-y-3">
+                            <div>
+                                <label for="ttsProvider" class="text-sm font-medium">Provider</label>
+                                <select id="ttsProvider" x-model="config.tts.provider"
+                                    class="border p-2 rounded w-full">
+                                    <option value="tencent">Tencent Cloud</option>
+                                    <option value="voiceapi">Voice API</option>
+                                </select>
+                            </div>
+
+                            <div x-show="config.tts.provider === 'tencent'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Tencent Cloud 配置</p>
+                                <div>
+                                    <label for="ttsAppId" class="text-sm">App ID</label>
+                                    <input type="text" id="ttsAppId" x-model="config.tts.appId"
+                                        placeholder="Enter Tencent App ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="ttsSecretId" class="text-sm">Secret ID</label>
+                                    <input type="text" id="ttsSecretId" x-model="config.tts.secretId"
+                                        placeholder="Enter Tencent Secret ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="ttsSecretKey" class="text-sm">Secret Key</label>
+                                    <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
+                                        placeholder="Enter Tencent Secret Key" class="border p-2 rounded w-full">
+                                </div>
+                            </div>
+
+                            <div x-show="config.tts.provider === 'voiceapi'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Voice API 配置</p>
+                                <div>
+                                    <label for="ttsEndpoint" class="text-sm">Endpoint</label>
+                                    <input type="text" id="ttsEndpoint" x-model="config.tts.endpoint"
+                                        placeholder="http://localhost:8000" class="border p-2 rounded w-full">
+                                </div>
+                            </div>
+
+                            <div class="border-t pt-3 space-y-2">
+                                <div>
+                                    <label for="ttsSpeaker" class="text-sm">Speaker</label>
+                                    <select id="ttsSpeaker" x-model="config.tts.speaker"
+                                        class="border p-2 rounded w-full">
+                                        <option value="301030">Female</option>
+                                        <option value="301031">Male</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="ttsSpeed" class="text-sm">Speech Speed</label>
+                                    <input type="range" id="ttsSpeed" x-model="config.tts.speed" min="0.5" max="2.0"
+                                        step="0.1" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.tts.speed"></span>
+                                </div>
+                                <div>
+                                    <label for="ttsVolume" class="text-sm">Volume</label>
+                                    <input type="range" id="ttsVolume" x-model="config.tts.volume" min="0" max="10"
+                                        step="1" class="w-full">
+                                    <span class="text-xs text-right" x-text="config.tts.volume"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ASR Tab -->
+                        <div x-show="config.uiState.activeTab === 'asr'" class="space-y-3">
+                            <div>
+                                <label for="asrProvider" class="text-sm font-medium">Provider</label>
+                                <select id="asrProvider" x-model="config.asr.provider"
+                                    class="border p-2 rounded w-full">
+                                    <option value="tencent">Tencent Cloud</option>
+                                    <option value="voiceapi">Voice API</option>
+                                </select>
+                            </div>
+
+                            <div x-show="config.asr.provider === 'tencent'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Tencent Cloud 配置</p>
+                                <div>
+                                    <label for="asrAppId" class="text-sm">App ID</label>
+                                    <input type="text" id="asrAppId" x-model="config.asr.appId"
+                                        placeholder="Enter Tencent App ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrSecretId" class="text-sm">Secret ID</label>
+                                    <input type="text" id="asrSecretId" x-model="config.asr.secretId"
+                                        placeholder="Enter Tencent Secret ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrSecretKey" class="text-sm">Secret Key</label>
+                                    <input type="password" id="asrSecretKey" x-model="config.asr.secretKey"
+                                        placeholder="Enter Tencent Secret Key" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrModel" class="text-sm">Model</label>
+                                    <input type="text" id="asrModel" x-model="config.asr.model"
+                                        placeholder="e.g. 16k_zh" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrLanguage" class="text-sm">Language</label>
+                                    <select id="asrLanguage" x-model="config.asr.language"
+                                        class="border p-2 rounded w-full">
+                                        <option value="zh-cn">中文 (简体)</option>
+                                        <option value="en-us">English (US)</option>
+                                        <option value="zh-tw">中文 (繁体)</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div x-show="config.asr.provider === 'voiceapi'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Voice API 配置</p>
+                                <div>
+                                    <label for="asrEndpoint" class="text-sm">Endpoint</label>
+                                    <input type="text" id="asrEndpoint" x-model="config.asr.endpoint"
+                                        placeholder="http://localhost:8000" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrModelVoiceapi" class="text-sm">Model</label>
+                                    <input type="text" id="asrModelVoiceapi" x-model="config.asr.model"
+                                        placeholder="e.g. whisper-large-v3" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrLanguageVoiceapi" class="text-sm">Language</label>
+                                    <input type="text" id="asrLanguageVoiceapi" x-model="config.asr.language"
+                                        placeholder="zh" class="border p-2 rounded w-full">
+                                </div>
+                            </div>
+
+                            <div class="border-t pt-3 space-y-2">
+                                <div>
+                                    <label for="asrInactivityTimeout" class="text-sm">Inactivity Timeout (ms)</label>
+                                    <input type="number" id="asrInactivityTimeout"
+                                        x-model="config.asr.inactivityTimeout" placeholder="35000"
+                                        class="border p-2 rounded w-full">
+                                    <p class="text-xs text-gray-600 mt-1">通话将在ASR无活动超过此时间后自动挂断</p>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- LLM Tab -->

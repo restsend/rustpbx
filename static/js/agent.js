@@ -26,11 +26,23 @@ function mainApp() {
             },
             asr: {
                 provider: 'tencent', // 'tencent' or 'voiceapi'
+                appId: '',
+                secretId: '',
+                secretKey: '',
+                model: '',
+                language: 'zh-cn',
+                endpoint: '',
                 inactivityTimeout: 35000 // 35 seconds timeout for ASR inactivity
             },
             tts: {
                 provider: 'tencent', // 'tencent' or 'voiceapi'
+                appId: '',
+                secretId: '',
+                secretKey: '',
+                endpoint: '',
                 speaker: '301030', // '301030'
+                speed: 1.0,
+                volume: 5,
                 greeting: "Hello, how can I help you today?"
             },
             llm: {
@@ -74,6 +86,10 @@ function mainApp() {
         init() {
             this.loadConfigFromLocalStorage();
             this.addLogEntry('info', 'Application initialized');
+            // Watch for config changes and save to localStorage
+            this.$watch('config', () => {
+                this.saveConfigToLocalStorage();
+            }, { deep: true });
         },
 
         // Format timestamp for log entries
@@ -772,17 +788,47 @@ function mainApp() {
                 } : undefined;
                 let denoise = this.config.denoise.enabled ? true : undefined;
 
+                // Build ASR configuration
+                let asrConfig = {
+                    provider: this.config.asr.provider
+                };
+
+                // Add provider-specific ASR configuration
+                if (this.config.asr.provider === 'tencent') {
+                    if (this.config.asr.appId) asrConfig.appId = this.config.asr.appId;
+                    if (this.config.asr.secretId) asrConfig.secretId = this.config.asr.secretId;
+                    if (this.config.asr.secretKey) asrConfig.secretKey = this.config.asr.secretKey;
+                    if (this.config.asr.model) asrConfig.model = this.config.asr.model;
+                    if (this.config.asr.language) asrConfig.language = this.config.asr.language;
+                } else if (this.config.asr.provider === 'voiceapi') {
+                    if (this.config.asr.endpoint) asrConfig.endpoint = this.config.asr.endpoint;
+                    if (this.config.asr.model) asrConfig.model = this.config.asr.model;
+                    if (this.config.asr.language) asrConfig.language = this.config.asr.language;
+                }
+
+                // Build TTS configuration
+                let ttsConfig = {
+                    provider: this.config.tts.provider,
+                    speaker: this.config.tts.speaker || '301030'
+                };
+
+                // Add provider-specific TTS configuration
+                if (this.config.tts.provider === 'tencent') {
+                    if (this.config.tts.appId) ttsConfig.appId = this.config.tts.appId;
+                    if (this.config.tts.secretId) ttsConfig.secretId = this.config.tts.secretId;
+                    if (this.config.tts.secretKey) ttsConfig.secretKey = this.config.tts.secretKey;
+                    if (this.config.tts.speed) ttsConfig.speed = this.config.tts.speed;
+                    if (this.config.tts.volume) ttsConfig.volume = this.config.tts.volume;
+                } else if (this.config.tts.provider === 'voiceapi') {
+                    if (this.config.tts.endpoint) ttsConfig.endpoint = this.config.tts.endpoint;
+                }
+
                 const invite = {
                     command: 'invite',
                     option: {
-                        asr: {
-                            provider: this.config.asr.provider
-                        },
+                        asr: asrConfig,
                         recorder,
-                        tts: {
-                            provider: this.config.tts.provider,
-                            speaker: this.config.tts.speaker || '301030'
-                        },
+                        tts: ttsConfig,
                         vad,
                         denoise
                     },
