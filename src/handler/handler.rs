@@ -1,8 +1,7 @@
-use std::sync::{
-    atomic::{AtomicU16, Ordering},
-    Arc,
+use super::{
+    call::{handle_call, ActiveCallState, ActiveCallType, CallParams},
+    middleware::clientip::ClientIp,
 };
-
 use crate::{app::AppState, callrecord::CallRecord};
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
@@ -11,14 +10,9 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, RwLock};
 use tracing::{error, info};
 use uuid::Uuid;
-
-use super::{
-    call::{handle_call, ActiveCallState, ActiveCallType, CallParams},
-    middleware::clientip::ClientIp,
-};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -37,7 +31,7 @@ async fn list_calls(State(state): State<AppState>) -> Response {
             serde_json::json!({
                 "id": id,
                 "call_type": call.call_type,
-                "created_at": call.call_state.created_at.to_rfc3339(),
+                "created_at": call.call_state.read().unwrap().created_at.to_rfc3339(),
                 "option": call.option,
             })
         }).collect::<Vec<_>>(),
@@ -93,14 +87,15 @@ pub async fn call_handler(
 
     ws.on_upgrade(move |socket| async move {
         let start_time = Utc::now();
-        let call_state = Arc::new(ActiveCallState {
+        let call_state = Arc::new(RwLock::new(ActiveCallState {
             created_at: Utc::now(),
-            ring_time: Mutex::new(None),
-            answer_time: Mutex::new(None),
-            hangup_reason: Mutex::new(None),
-            last_status_code: AtomicU16::new(0),
-            option: Mutex::new(None),
-        });
+            ring_time: None,
+            answer_time: None,
+            hangup_reason: None,
+            last_status_code: 0,
+            answer: None,
+            option: None,
+        }));
         match handle_call(
             call_type.clone(),
             session_id.clone(),
@@ -123,11 +118,6 @@ pub async fn call_handler(
                 call.get_callrecord().await
             }
             _ => {
-                let option = call_state.option.lock().await.clone();
-                let caller = option.as_ref().map(|o| o.caller.clone()).flatten();
-                let callee = option.as_ref().map(|o| o.callee.clone()).flatten();
-                let hangup_reason = call_state.hangup_reason.lock().await.clone();
-
                 let dump_events_file = state_clone.get_dump_events_file(&session_id);
                 let dump_events = if tokio::fs::metadata(&dump_events_file).await.is_ok() {
                     Some(dump_events_file)
@@ -135,16 +125,26 @@ pub async fn call_handler(
                     None
                 };
 
+                let call_state = call_state.read().unwrap();
+                let option = call_state.option.clone();
+                let caller = option.as_ref().map(|o| o.caller.clone()).flatten();
+                let callee = option.as_ref().map(|o| o.callee.clone()).flatten();
+                let hangup_reason = call_state.hangup_reason.clone();
+                let offer = option.as_ref().map(|o| o.offer.clone()).flatten();
+                let answer = call_state.answer.clone();
+
                 CallRecord {
                     call_type: call_type.clone(),
                     call_id: session_id.clone(),
                     start_time,
                     end_time: Utc::now(),
-                    ring_time: call_state.ring_time.lock().await.clone(),
-                    answer_time: call_state.answer_time.lock().await.clone(),
+                    ring_time: call_state.ring_time.clone(),
+                    answer_time: call_state.answer_time.clone(),
                     caller: caller.unwrap_or_else(|| "".to_string()),
                     callee: callee.unwrap_or_else(|| "".to_string()),
-                    status_code: call_state.last_status_code.load(Ordering::Relaxed),
+                    status_code: call_state.last_status_code,
+                    offer,
+                    answer,
                     hangup_reason,
                     recorder: vec![],
                     extras: None,
