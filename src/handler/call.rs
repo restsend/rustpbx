@@ -32,10 +32,7 @@ use rsipstack::dialog::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{
-        atomic::{AtomicU16, Ordering},
-        Arc,
-    },
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::{
@@ -63,13 +60,14 @@ pub enum ActiveCallType {
 }
 pub struct ActiveCallState {
     pub created_at: DateTime<Utc>,
-    pub ring_time: Mutex<Option<DateTime<Utc>>>,
-    pub answer_time: Mutex<Option<DateTime<Utc>>>,
-    pub hangup_reason: Mutex<Option<CallRecordHangupReason>>,
-    pub last_status_code: AtomicU16,
-    pub option: Mutex<Option<CallOption>>,
+    pub ring_time: Option<DateTime<Utc>>,
+    pub answer_time: Option<DateTime<Utc>>,
+    pub hangup_reason: Option<CallRecordHangupReason>,
+    pub last_status_code: u16,
+    pub answer: Option<String>,
+    pub option: Option<CallOption>,
 }
-pub type ActiveCallStateRef = Arc<ActiveCallState>;
+pub type ActiveCallStateRef = Arc<RwLock<ActiveCallState>>;
 
 pub struct ActiveCall {
     pub call_state: ActiveCallStateRef,
@@ -202,7 +200,7 @@ impl ActiveCall {
         dialog_id: Option<DialogId>,
         state: AppState,
     ) -> Result<Self> {
-        *call_state.option.lock().await = Some(option.clone());
+        call_state.write().unwrap().option.replace(option.clone());
 
         let active_call = ActiveCall {
             cancel_token,
@@ -412,7 +410,11 @@ impl ActiveCall {
             },
         };
 
-        *self.call_state.hangup_reason.lock().await = Some(hangup_reason);
+        self.call_state
+            .write()
+            .unwrap()
+            .hangup_reason
+            .replace(hangup_reason);
 
         self.tts_handle.lock().await.take();
         self.cancel_token.cancel();
@@ -448,9 +450,9 @@ impl ActiveCall {
 
         self.cancel_token.cancel();
         // Set default hangup reason if not already set
-        if self.call_state.hangup_reason.lock().await.is_none() {
-            *self.call_state.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
-        }
+        // if self.call_state.hangup_reason.lock().await.is_none() {
+        //     *self.call_state.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
+        // }
 
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
@@ -484,28 +486,36 @@ impl ActiveCall {
         } else {
             None
         };
-
+        let call_state = self.call_state.read().unwrap();
         CallRecord {
-            option: self.call_state.option.lock().await.clone(),
+            option: call_state.option.clone(),
             call_id: self.session_id.clone(),
             call_type: self.call_type.clone(),
-            start_time: self.call_state.created_at,
-            ring_time: self.call_state.ring_time.lock().await.clone(),
-            answer_time: self.call_state.answer_time.lock().await.clone(),
+            start_time: call_state.created_at,
+            ring_time: call_state.ring_time.clone(),
+            answer_time: call_state.answer_time.clone(),
             end_time: Utc::now(),
             caller: self
                 .option
                 .caller
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
+                .as_ref()
+                .map(|v| v.clone())
+                .unwrap_or_default(),
             callee: self
                 .option
                 .callee
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            hangup_reason: self.call_state.hangup_reason.lock().await.clone(),
+                .as_ref()
+                .map(|v| v.clone())
+                .unwrap_or_default(),
+            hangup_reason: call_state.hangup_reason.clone(),
             recorder: recorder_files,
-            status_code: self.call_state.last_status_code.load(Ordering::Relaxed) as u16,
+            status_code: call_state.last_status_code,
+            answer: call_state.answer.clone(),
+            offer: call_state
+                .option
+                .as_ref()
+                .map(|o| o.offer.clone())
+                .flatten(),
             extras: None,
             dump_event_file: dump_events,
         }
@@ -519,13 +529,15 @@ async fn sip_event_loop(
     call_state: ActiveCallStateRef,
 ) -> Result<()> {
     while let Some(event) = dlg_state_receiver.recv().await {
+        let mut call_state_ref = call_state.write().unwrap();
+
         match event {
             DialogState::Trying(dialog_id) => {
                 info!(session_id = track_id, "dialog trying: {}", dialog_id);
             }
             DialogState::Early(dialog_id, _) => {
                 info!(session_id = track_id, "dialog early: {}", dialog_id);
-                *call_state.ring_time.lock().await = Some(Utc::now());
+                call_state_ref.ring_time.replace(Utc::now());
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -534,7 +546,7 @@ async fn sip_event_loop(
             }
             DialogState::Calling(dialog_id) => {
                 info!(session_id = track_id, "dialog calling: {}", dialog_id);
-                *call_state.ring_time.lock().await = Some(Utc::now());
+                call_state_ref.ring_time.replace(Utc::now());
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -542,8 +554,8 @@ async fn sip_event_loop(
                 })?;
             }
             DialogState::Confirmed(dialog_id) => {
-                *call_state.answer_time.lock().await = Some(Utc::now());
-                call_state.last_status_code.store(200, Ordering::Relaxed);
+                call_state_ref.answer_time.replace(Utc::now());
+                call_state_ref.last_status_code = 200;
                 info!(session_id = track_id, "dialog confirmed: {}", dialog_id);
             }
             DialogState::Terminated(dialog_id, reason) => {
@@ -551,9 +563,8 @@ async fn sip_event_loop(
                     session_id = track_id,
                     "dialog terminated: {} {:?}", dialog_id, reason
                 );
-                let mut hangup_reason = call_state.hangup_reason.lock().await;
-                if hangup_reason.is_none() {
-                    *hangup_reason = Some(match reason {
+                if call_state_ref.hangup_reason.is_none() {
+                    call_state_ref.hangup_reason.replace(match reason {
                         TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
                         TerminatedReason::UacBye | TerminatedReason::UacBusy => {
                             CallRecordHangupReason::ByCaller
@@ -578,7 +589,7 @@ async fn sip_event_loop(
                 event_sender
                     .send(crate::event::SessionEvent::Hangup {
                         timestamp: crate::get_timestamp(),
-                        reason: Some(format!("{:?}", hangup_reason)),
+                        reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
                         initiator: Some(initiator),
                     })
                     .ok();

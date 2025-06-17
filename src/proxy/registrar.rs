@@ -71,20 +71,13 @@ impl ProxyModule for RegistrarModule {
         };
         let addr = match tx.endpoint_inner.get_addrs().first() {
             Some(addr) => addr.clone(),
-            None => {
-                info!("proxy addrs is empty, using default test address");
-                // 为测试环境提供默认地址
-                SipAddr {
-                    r#type: Some(rsip::transport::Transport::Udp),
-                    addr: rsip::HostWithPort {
-                        host: rsip::Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                            127, 0, 0, 1,
-                        ))),
-                        port: Some(rsip::Port::from(5060)),
-                    },
-                }
-            }
+            None => return Err(anyhow::anyhow!("endpoint not available addr")),
         };
+
+        let contact_params = destination
+            .r#type
+            .map(|t| vec![rsip::Param::Transport(t)])
+            .unwrap_or_default();
 
         let contact = rsip::typed::Contact {
             display_name: None,
@@ -95,6 +88,7 @@ impl ProxyModule for RegistrarModule {
                     password: None,
                 }),
                 host_with_port: addr.addr,
+                params: contact_params,
                 ..Default::default()
             },
             params: vec![],

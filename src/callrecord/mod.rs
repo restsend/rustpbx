@@ -84,6 +84,10 @@ pub struct CallRecord {
     pub callee: String,
     pub status_code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hangup_reason: Option<CallRecordHangupReason>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recorder: Vec<CallRecordMedia>,
