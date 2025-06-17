@@ -90,10 +90,10 @@ impl RtpPortManager {
 }
 
 pub struct RtpProxy {
-    local_port: u16,
-    remote_addr: SocketAddr,
-    socket: Arc<UdpSocket>,
-    cancel_token: CancellationToken,
+    pub local_port: u16,
+    pub remote_addr: SocketAddr,
+    pub socket: Arc<UdpSocket>,
+    pub cancel_token: CancellationToken,
 }
 
 impl RtpProxy {

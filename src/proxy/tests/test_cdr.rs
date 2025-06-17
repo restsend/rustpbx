@@ -1,10 +1,13 @@
+use crate::config::ProxyConfig;
+use crate::proxy::cdr::CallSession;
 use crate::{
     callrecord::{CallRecord, CallRecordHangupReason},
-    config::ProxyConfig,
     handler::CallOption,
     proxy::{cdr::CdrModule, server::SipServerInner, ProxyModule},
 };
 use anyhow::Result;
+use chrono::Utc;
+use rsipstack::dialog::DialogId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -262,4 +265,157 @@ async fn test_cdr_proxy_module_trait() -> Result<()> {
     assert!(stop_result.is_ok());
 
     Ok(())
+}
+
+#[tokio::test]
+async fn test_cdr_module_creation() {
+    let server = create_test_server();
+    let config = Arc::new(ProxyConfig::default());
+
+    let module = CdrModule::new(server, config);
+
+    assert_eq!(module.name(), "cdr");
+    assert!(module.allow_methods().contains(&rsip::Method::Invite));
+    assert!(module.allow_methods().contains(&rsip::Method::Bye));
+    assert!(module.allow_methods().contains(&rsip::Method::Cancel));
+    assert_eq!(module.get_active_session_count(), 0);
+}
+
+#[tokio::test]
+async fn test_call_session_to_call_record() {
+    let dialog_id = DialogId {
+        call_id: "test-call".to_string(),
+        from_tag: "from-tag".to_string(),
+        to_tag: "to-tag".to_string(),
+    };
+
+    let call_option = CallOption::default();
+    let session = CallSession::new(
+        dialog_id,
+        "test-call-123".to_string(),
+        "caller@example.com".to_string(),
+        "callee@example.com".to_string(),
+        call_option,
+    );
+
+    let hangup_reason = CallRecordHangupReason::ByCaller;
+    let call_record = session.to_call_record(hangup_reason);
+
+    assert_eq!(call_record.call_id, "test-call-123");
+    assert_eq!(call_record.caller, "caller@example.com");
+    assert_eq!(call_record.callee, "callee@example.com");
+    assert_eq!(call_record.status_code, 180);
+    assert!(matches!(
+        call_record.hangup_reason,
+        Some(CallRecordHangupReason::ByCaller)
+    ));
+    assert!(call_record.recorder.is_empty()); // CDR module doesn't handle media
+}
+
+#[tokio::test]
+async fn test_cleanup_stale_sessions() {
+    let server = create_test_server();
+    let config = Arc::new(ProxyConfig::default());
+    let module = CdrModule::new(server, config);
+
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+
+    // Create a session manually with old timestamp
+    let dialog_id = DialogId {
+        call_id: "old-call".to_string(),
+        from_tag: "from-tag".to_string(),
+        to_tag: "to-tag".to_string(),
+    };
+
+    let call_option = CallOption::default();
+    let mut session = CallSession::new(
+        dialog_id,
+        "old-call-123".to_string(),
+        "caller@example.com".to_string(),
+        "callee@example.com".to_string(),
+        call_option,
+    );
+
+    // Set old start time (more than 1 hour ago)
+    session.start_time = Utc::now() - chrono::Duration::hours(1);
+
+    {
+        let mut active_sessions = module.inner.active_sessions.lock().unwrap();
+        active_sessions.insert("old-call-123".to_string(), session);
+    }
+
+    assert_eq!(module.get_active_session_count(), 1);
+
+    // Run cleanup with 1 hour timeout
+    module.cleanup_stale_sessions(&sender, 3600);
+
+    // Should have no active sessions now
+    assert_eq!(module.get_active_session_count(), 0);
+
+    // Should have received a call record for the cleaned up session
+    let call_record = receiver.try_recv().unwrap();
+    assert_eq!(call_record.call_id, "old-call-123");
+    assert!(matches!(
+        call_record.hangup_reason,
+        Some(CallRecordHangupReason::Autohangup)
+    ));
+}
+
+#[tokio::test]
+async fn test_module_interface_compliance() {
+    let server = create_test_server();
+    let config = Arc::new(ProxyConfig::default());
+    let mut module = CdrModule::new(server, config);
+
+    // Test ProxyModule interface
+    assert!(module.on_start().await.is_ok());
+    assert!(module.on_stop().await.is_ok());
+
+    // Verify module allows expected methods
+    let allowed_methods = module.allow_methods();
+    assert!(allowed_methods.contains(&rsip::Method::Invite));
+    assert!(allowed_methods.contains(&rsip::Method::Bye));
+    assert!(allowed_methods.contains(&rsip::Method::Cancel));
+    assert!(allowed_methods.contains(&rsip::Method::Ack));
+}
+
+#[test]
+fn test_cdr_module_session_tracking() {
+    let server = create_test_server();
+    let config = Arc::new(ProxyConfig::default());
+    let module = CdrModule::new(server, config);
+
+    // Initially no sessions
+    assert_eq!(module.get_active_session_count(), 0);
+
+    // Add a session manually
+    let dialog_id = DialogId {
+        call_id: "test-call-id".to_string(),
+        from_tag: "from-tag".to_string(),
+        to_tag: "to-tag".to_string(),
+    };
+
+    let call_option = CallOption::default();
+    let session = CallSession::new(
+        dialog_id,
+        "test-session-123".to_string(),
+        "alice@example.com".to_string(),
+        "bob@example.com".to_string(),
+        call_option,
+    );
+
+    {
+        let mut active_sessions = module.inner.active_sessions.lock().unwrap();
+        active_sessions.insert("test-session-123".to_string(), session);
+    }
+
+    // Should have one session
+    assert_eq!(module.get_active_session_count(), 1);
+
+    // Verify session data
+    let active_sessions = module.inner.active_sessions.lock().unwrap();
+    let session = active_sessions.get("test-session-123").unwrap();
+    assert_eq!(session.caller, "alice@example.com");
+    assert_eq!(session.callee, "bob@example.com");
+    assert_eq!(session.call_id, "test-session-123");
 }
