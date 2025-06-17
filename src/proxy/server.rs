@@ -150,11 +150,29 @@ impl SipServerBuilder {
                     error!("module {} not found", name);
                 }
             }
-            allow_methods.dedup();
+            // remove duplicate methods
+            let mut i = 0;
+            while i < allow_methods.len() {
+                let mut j = i + 1;
+                while j < allow_methods.len() {
+                    if allow_methods[i] == allow_methods[j] {
+                        allow_methods.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+
             info!(
-                "modules loaded in {:?} modules: {:?}",
+                "modules loaded in {:?} modules: {:?} allows: {}",
                 start_time.elapsed(),
-                modules.iter().map(|m| m.name()).collect::<Vec<_>>()
+                modules.iter().map(|m| m.name()).collect::<Vec<_>>(),
+                allow_methods
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
         }
 

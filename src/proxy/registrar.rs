@@ -2,9 +2,10 @@ use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
 use crate::{config::ProxyConfig, proxy::locator::Location};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::prelude::{HeadersExt, ToTypedHeader, UntypedHeader};
+use rsip::prelude::{HeadersExt, UntypedHeader};
 use rsipstack::{
-    rsip_ext::extract_uri_from_contact, transaction::transaction::Transaction, transport::SipAddr,
+    transaction::transaction::Transaction,
+    transport::{SipAddr, SipConnection},
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -53,50 +54,47 @@ impl ProxyModule for RegistrarModule {
         let user = match SipUser::try_from(&tx.original) {
             Ok(u) => u,
             Err(e) => {
-                info!("failed to parse contact: {:?}", e);
+                info!("failed to parse user: {:?}", e);
                 tx.reply(rsip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
         };
 
-        let contact = extract_uri_from_contact(tx.original.contact_header()?.value())
-            .map_err(|e| anyhow::anyhow!("failed to parse contact: {:?}", e))?;
+        // Use rsipstack's via_received functionality to get destination
+        let via_header = tx.original.via_header()?;
+        let destination_addr = SipConnection::parse_target_from_via(via_header)
+            .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
 
-        let via = tx.original.via_header()?.typed()?;
-
-        let mut destination = SipAddr {
-            r#type: via.uri.transport().cloned(),
-            addr: contact.host_with_port,
+        let destination = SipAddr {
+            r#type: via_header.uri()?.transport().cloned(),
+            addr: destination_addr,
         };
-
-        via.params.iter().for_each(|param| match param {
-            rsip::Param::Transport(t) => {
-                destination.r#type = Some(t.clone());
-            }
-            rsip::Param::Received(r) => match r.value().try_into() {
-                Ok(addr) => destination.addr.host = addr,
-                Err(_) => {}
-            },
-            rsip::Param::Other(o, Some(v)) => {
-                if o.value().eq_ignore_ascii_case("rport") {
-                    match v.value().try_into() {
-                        Ok(port) => destination.addr.port = Some(port),
-                        Err(_) => {}
-                    }
+        let addr = match tx.endpoint_inner.get_addrs().first() {
+            Some(addr) => addr.clone(),
+            None => {
+                info!("proxy addrs is empty, using default test address");
+                // 为测试环境提供默认地址
+                SipAddr {
+                    r#type: Some(rsip::transport::Transport::Udp),
+                    addr: rsip::HostWithPort {
+                        host: rsip::Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                            127, 0, 0, 1,
+                        ))),
+                        port: Some(rsip::Port::from(5060)),
+                    },
                 }
             }
-            _ => {}
-        });
+        };
 
         let contact = rsip::typed::Contact {
             display_name: None,
             uri: rsip::Uri {
-                scheme: Some(rsip::Scheme::Sip),
+                scheme: addr.r#type.map(|t| t.sip_scheme()),
                 auth: Some(rsip::Auth {
                     user: user.username.clone(),
                     password: None,
                 }),
-                host_with_port: destination.addr.clone(),
+                host_with_port: addr.addr,
                 ..Default::default()
             },
             params: vec![],
@@ -104,40 +102,42 @@ impl ProxyModule for RegistrarModule {
 
         let expires = match tx.original.expires_header() {
             Some(expires) => match expires.value().parse::<u32>() {
-                Ok(v) => {
-                    if v == 0 {
-                        // delete user
-                        info!(
-                            username = user.username,
-                            ?contact,
-                            ?destination,
-                            "unregistered user"
-                        );
-                        self.server
-                            .locator
-                            .unregister(user.username.as_str(), user.realm.as_deref())
-                            .await
-                            .ok();
-                        tx.reply(rsip::StatusCode::OK).await.ok();
-                        return Ok(ProxyAction::Abort);
-                    }
-                    self.config.registrar_expires.clone()
-                }
+                Ok(v) => Some(v),
                 Err(_) => self.config.registrar_expires.clone(),
             },
-            None => self.config.registrar_expires.clone(),
-        };
+            _ => self.config.registrar_expires.clone(),
+        }
+        .unwrap_or(60);
+
+        if expires == 0 {
+            // delete user
+            info!(
+                username = user.username,
+                contact = contact.to_string(),
+                destination = destination.to_string(),
+                realm = user.realm,
+                "unregistered user"
+            );
+            self.server
+                .locator
+                .unregister(user.username.as_str(), user.realm.as_deref())
+                .await
+                .ok();
+            tx.reply(rsip::StatusCode::OK).await.ok();
+            return Ok(ProxyAction::Abort);
+        }
 
         info!(
             username = user.username,
-            ?contact,
-            ?destination,
+            contact = contact.to_string(),
+            destination = destination.to_string(),
+            realm = user.realm,
             "registered user"
         );
 
         let location = Location {
             aor: contact.uri.clone(),
-            expires: expires.unwrap_or(60),
+            expires,
             destination,
             last_modified: Instant::now(),
         };
@@ -156,10 +156,7 @@ impl ProxyModule for RegistrarModule {
             }
         }
 
-        let mut headers = vec![
-            contact.into(),
-            rsip::Header::Expires(expires.unwrap_or(60).into()),
-        ];
+        let mut headers = vec![contact.into(), rsip::Header::Expires(expires.into())];
 
         if !tx.endpoint_inner.allows.is_empty() {
             headers.push(rsip::Header::Allow(

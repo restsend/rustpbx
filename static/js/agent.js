@@ -670,7 +670,12 @@ function mainApp() {
             if (this.peerConnection) {
                 this.peerConnection.close();
             }
-            let iceServers = await fetch('/iceservers').then(res => res.json())
+            let iceServers = undefined
+
+            try {
+                iceServers = await fetch('/iceservers').then(res => res.json())
+            } catch { }
+
             const configuration = {
                 iceServers
             };

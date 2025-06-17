@@ -219,6 +219,31 @@ pub struct ProxyConfig {
     pub locator: LocatorConfig,
     #[serde(default)]
     pub media_proxy: MediaProxyConfig,
+    #[serde(default)]
+    pub realms: Option<Vec<String>>,
+    #[serde(default)]
+    pub enable_forwarding: Option<bool>,
+}
+
+impl ProxyConfig {
+    pub fn is_same_realm(&self, callee_realm: &str) -> bool {
+        match callee_realm {
+            "localhost" | "127.0.0.1" | "::1" => true,
+            _ => {
+                if let Some(external_ip) = self.external_ip.as_ref() {
+                    return external_ip.starts_with(callee_realm);
+                }
+                if let Some(realms) = self.realms.as_ref() {
+                    for item in realms {
+                        if item == callee_realm {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
 }
 
 impl Default for ProxyConfig {
@@ -247,6 +272,8 @@ impl Default for ProxyConfig {
             user_backend: UserBackendConfig::default(),
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyConfig::default(),
+            realms: Some(vec![]),
+            enable_forwarding: Some(true),
         }
     }
 }

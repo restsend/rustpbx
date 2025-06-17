@@ -18,20 +18,20 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
-struct CallSession {
-    dialog_id: DialogId,
-    call_id: String,
-    start_time: DateTime<Utc>,
-    ring_time: Option<DateTime<Utc>>,
-    answer_time: Option<DateTime<Utc>>,
-    caller: String,
-    callee: String,
-    status_code: u16,
-    call_option: CallOption,
+pub(crate) struct CallSession {
+    pub dialog_id: DialogId,
+    pub call_id: String,
+    pub start_time: DateTime<Utc>,
+    pub ring_time: Option<DateTime<Utc>>,
+    pub answer_time: Option<DateTime<Utc>>,
+    pub caller: String,
+    pub callee: String,
+    pub status_code: u16,
+    pub call_option: CallOption,
 }
 
 impl CallSession {
-    fn new(
+    pub fn new(
         dialog_id: DialogId,
         call_id: String,
         caller: String,
@@ -51,7 +51,7 @@ impl CallSession {
         }
     }
 
-    fn to_call_record(&self, hangup_reason: CallRecordHangupReason) -> CallRecord {
+    pub fn to_call_record(&self, hangup_reason: CallRecordHangupReason) -> CallRecord {
         let end_time = Utc::now();
 
         CallRecord {
@@ -73,15 +73,15 @@ impl CallSession {
     }
 }
 
-struct CdrModuleInner {
-    callrecord_sender: Option<CallRecordSender>,
-    active_sessions: Mutex<HashMap<String, CallSession>>, // key: call_id
-    transaction_counter: Mutex<u64>,                      // For cleanup logic
+pub(crate) struct CdrModuleInner {
+    pub callrecord_sender: Option<CallRecordSender>,
+    pub active_sessions: Mutex<HashMap<String, CallSession>>, // key: call_id
+    pub transaction_counter: Mutex<u64>,                      // For cleanup logic
 }
 
 #[derive(Clone)]
 pub struct CdrModule {
-    inner: Arc<CdrModuleInner>,
+    pub(crate) inner: Arc<CdrModuleInner>,
 }
 
 impl CdrModule {
@@ -258,7 +258,7 @@ impl CdrModule {
     }
 
     // Clean up sessions that have been active too long without proper termination
-    fn cleanup_stale_sessions(&self, sender: &CallRecordSender, max_duration_secs: u64) {
+    pub(crate) fn cleanup_stale_sessions(&self, sender: &CallRecordSender, max_duration_secs: u64) {
         let now = Utc::now();
         let mut active_sessions = self.inner.active_sessions.lock().unwrap();
         let mut to_remove = Vec::new();
@@ -380,177 +380,3 @@ impl ProxyModule for CdrModule {
 }
 
 impl CdrModule {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::ProxyConfig;
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
-
-    fn create_test_server() -> SipServerRef {
-        use crate::proxy::server::SipServerInner;
-        use tokio_util::sync::CancellationToken;
-
-        Arc::new(SipServerInner {
-            cancel_token: CancellationToken::new(),
-            config: Arc::new(ProxyConfig::default()),
-            user_backend: Arc::new(Box::new(crate::proxy::user::MemoryUserBackend::new(None))),
-            locator: Arc::new(Box::new(crate::proxy::locator::MemoryLocator::new())),
-            callrecord_sender: None,
-        })
-    }
-
-    #[tokio::test]
-    async fn test_cdr_module_creation() {
-        let server = create_test_server();
-        let config = Arc::new(ProxyConfig::default());
-
-        let module = CdrModule::new(server, config);
-
-        assert_eq!(module.name(), "cdr");
-        assert!(module.allow_methods().contains(&rsip::Method::Invite));
-        assert!(module.allow_methods().contains(&rsip::Method::Bye));
-        assert!(module.allow_methods().contains(&rsip::Method::Cancel));
-        assert_eq!(module.get_active_session_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_call_session_to_call_record() {
-        let dialog_id = DialogId {
-            call_id: "test-call".to_string(),
-            from_tag: "from-tag".to_string(),
-            to_tag: "to-tag".to_string(),
-        };
-
-        let call_option = CallOption::default();
-        let session = CallSession::new(
-            dialog_id,
-            "test-call-123".to_string(),
-            "caller@example.com".to_string(),
-            "callee@example.com".to_string(),
-            call_option,
-        );
-
-        let hangup_reason = CallRecordHangupReason::ByCaller;
-        let call_record = session.to_call_record(hangup_reason);
-
-        assert_eq!(call_record.call_id, "test-call-123");
-        assert_eq!(call_record.caller, "caller@example.com");
-        assert_eq!(call_record.callee, "callee@example.com");
-        assert_eq!(call_record.status_code, 180);
-        assert!(matches!(
-            call_record.hangup_reason,
-            Some(CallRecordHangupReason::ByCaller)
-        ));
-        assert!(call_record.recorder.is_empty()); // CDR module doesn't handle media
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_stale_sessions() {
-        let server = create_test_server();
-        let config = Arc::new(ProxyConfig::default());
-        let module = CdrModule::new(server, config);
-
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-
-        // Create a session manually with old timestamp
-        let dialog_id = DialogId {
-            call_id: "old-call".to_string(),
-            from_tag: "from-tag".to_string(),
-            to_tag: "to-tag".to_string(),
-        };
-
-        let call_option = CallOption::default();
-        let mut session = CallSession::new(
-            dialog_id,
-            "old-call-123".to_string(),
-            "caller@example.com".to_string(),
-            "callee@example.com".to_string(),
-            call_option,
-        );
-
-        // Set old start time (more than 1 hour ago)
-        session.start_time = Utc::now() - chrono::Duration::hours(1);
-
-        {
-            let mut active_sessions = module.inner.active_sessions.lock().unwrap();
-            active_sessions.insert("old-call-123".to_string(), session);
-        }
-
-        assert_eq!(module.get_active_session_count(), 1);
-
-        // Run cleanup with 1 hour timeout
-        module.cleanup_stale_sessions(&sender, 3600);
-
-        // Should have no active sessions now
-        assert_eq!(module.get_active_session_count(), 0);
-
-        // Should have received a call record for the cleaned up session
-        let call_record = receiver.try_recv().unwrap();
-        assert_eq!(call_record.call_id, "old-call-123");
-        assert!(matches!(
-            call_record.hangup_reason,
-            Some(CallRecordHangupReason::Autohangup)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_module_interface_compliance() {
-        let server = create_test_server();
-        let config = Arc::new(ProxyConfig::default());
-        let mut module = CdrModule::new(server, config);
-
-        // Test ProxyModule interface
-        assert!(module.on_start().await.is_ok());
-        assert!(module.on_stop().await.is_ok());
-
-        // Verify module allows expected methods
-        let allowed_methods = module.allow_methods();
-        assert!(allowed_methods.contains(&rsip::Method::Invite));
-        assert!(allowed_methods.contains(&rsip::Method::Bye));
-        assert!(allowed_methods.contains(&rsip::Method::Cancel));
-        assert!(allowed_methods.contains(&rsip::Method::Ack));
-    }
-
-    #[test]
-    fn test_cdr_module_session_tracking() {
-        let server = create_test_server();
-        let config = Arc::new(ProxyConfig::default());
-        let module = CdrModule::new(server, config);
-
-        // Initially no sessions
-        assert_eq!(module.get_active_session_count(), 0);
-
-        // Add a session manually
-        let dialog_id = DialogId {
-            call_id: "test-call-id".to_string(),
-            from_tag: "from-tag".to_string(),
-            to_tag: "to-tag".to_string(),
-        };
-
-        let call_option = CallOption::default();
-        let session = CallSession::new(
-            dialog_id,
-            "test-session-123".to_string(),
-            "alice@example.com".to_string(),
-            "bob@example.com".to_string(),
-            call_option,
-        );
-
-        {
-            let mut active_sessions = module.inner.active_sessions.lock().unwrap();
-            active_sessions.insert("test-session-123".to_string(), session);
-        }
-
-        // Should have one session
-        assert_eq!(module.get_active_session_count(), 1);
-
-        // Verify session data
-        let active_sessions = module.inner.active_sessions.lock().unwrap();
-        let session = active_sessions.get("test-session-123").unwrap();
-        assert_eq!(session.caller, "alice@example.com");
-        assert_eq!(session.callee, "bob@example.com");
-        assert_eq!(session.call_id, "test-session-123");
-    }
-}
