@@ -17,7 +17,7 @@ async fn test_acl_module_allow_normal_request() {
     let module = AclModule::new(config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test_acl module
     let result = module
@@ -43,7 +43,7 @@ async fn test_acl_module_block_denied_ip() {
     let module = AclModule::new(config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test_acl module
     let result = module
@@ -69,7 +69,7 @@ async fn test_acl_module_allow_specific_ip() {
     let module = AclModule::new(config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test_acl module
     let result = module
@@ -95,7 +95,7 @@ async fn test_acl_module_block_not_allowed_ip() {
     let module = AclModule::new(config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test_acl module
     let result = module
@@ -121,7 +121,7 @@ async fn test_acl_cidr_rules() {
 
     // Test allowed IP in CIDR range
     let request1 = create_acl_request(rsip::Method::Invite, "alice", "192.168.1.1");
-    let (mut tx1, _) = create_transaction(request1);
+    let (mut tx1, _) = create_transaction(request1).await;
     assert!(matches!(
         module
             .on_transaction_begin(CancellationToken::new(), &mut tx1)
@@ -132,7 +132,7 @@ async fn test_acl_cidr_rules() {
 
     // Test denied IP in CIDR range
     let request2 = create_acl_request(rsip::Method::Invite, "alice", "192.168.1.100");
-    let (mut tx2, _) = create_transaction(request2);
+    let (mut tx2, _) = create_transaction(request2).await;
     assert!(matches!(
         module
             .on_transaction_begin(CancellationToken::new(), &mut tx2)
@@ -152,7 +152,7 @@ async fn test_acl_invalid_rules() {
 
     // Should use default rules when invalid rules are present
     let request = create_acl_request(rsip::Method::Invite, "alice", "192.168.1.1");
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
         module
             .on_transaction_begin(CancellationToken::new(), &mut tx)
@@ -196,7 +196,7 @@ async fn test_acl_rule_order() {
 
     // Test that deny all takes precedence
     let request = create_acl_request(rsip::Method::Invite, "alice", "192.168.1.100");
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
         module
             .on_transaction_begin(CancellationToken::new(), &mut tx)

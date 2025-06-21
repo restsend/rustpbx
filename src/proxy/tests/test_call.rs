@@ -84,7 +84,7 @@ async fn test_media_proxy_nat_only() {
         "application/sdp".to_string(),
     )));
 
-    let (tx, _) = create_transaction(request);
+    let (tx, _) = create_transaction(request).await;
 
     let should_proxy = module.should_use_media_proxy(&tx).unwrap();
     assert!(should_proxy);
@@ -101,7 +101,7 @@ async fn test_media_proxy_none_mode() {
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
-    let (tx, _) = create_transaction(request);
+    let (tx, _) = create_transaction(request).await;
 
     let should_proxy = module.should_use_media_proxy(&tx).unwrap();
     assert!(!should_proxy);
@@ -118,7 +118,7 @@ async fn test_media_proxy_all_mode() {
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
-    let (tx, _) = create_transaction(request);
+    let (tx, _) = create_transaction(request).await;
 
     let should_proxy = module.should_use_media_proxy(&tx).unwrap();
     assert!(should_proxy);

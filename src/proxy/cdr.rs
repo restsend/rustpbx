@@ -6,7 +6,7 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use rsip::prelude::{HeadersExt, ToTypedHeader, UntypedHeader};
+use rsip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::{
     dialog::DialogId,
     transaction::{key::TransactionKey, transaction::Transaction},
