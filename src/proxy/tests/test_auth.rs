@@ -26,7 +26,7 @@ async fn test_auth_module_invite_success() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -50,7 +50,7 @@ async fn test_auth_module_register_success() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -74,7 +74,7 @@ async fn test_auth_module_disabled_user() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -98,7 +98,7 @@ async fn test_auth_module_unknown_user() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -122,7 +122,7 @@ async fn test_auth_module_bypass_other_methods() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -298,7 +298,7 @@ async fn test_proxy_auth_invite_success() {
     // Step 1: Send INVITE request without credentials
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let module = AuthModule::new(server_inner.clone());
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // This should return 407 Proxy Authentication Required
     let result = module
@@ -356,7 +356,7 @@ async fn test_proxy_auth_invite_success() {
         println!("  {:?}", header);
     }
 
-    let (mut tx2, _) = create_transaction(request_with_auth);
+    let (mut tx2, _) = create_transaction(request_with_auth).await;
 
     // This should succeed
     let result2 = module
@@ -395,7 +395,7 @@ async fn test_proxy_auth_no_credentials() {
     let module = AuthModule::new(server_inner);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test authentication
     let result = module
@@ -433,7 +433,7 @@ async fn test_proxy_auth_wrong_credentials() {
     // Step 1: Get challenge
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let module = AuthModule::new(server_inner.clone());
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     let result = module
         .on_transaction_begin(CancellationToken::new(), &mut tx)
@@ -472,7 +472,7 @@ async fn test_proxy_auth_wrong_credentials() {
         Some("wrongpassword"),
         &nonce,
     );
-    let (mut tx2, _) = create_transaction(request_with_wrong_auth);
+    let (mut tx2, _) = create_transaction(request_with_wrong_auth).await;
 
     // Test authentication
     let result = module

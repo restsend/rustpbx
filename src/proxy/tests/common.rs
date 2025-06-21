@@ -2,16 +2,18 @@ use crate::config::ProxyConfig;
 use crate::proxy::locator::MemoryLocator;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::{MemoryUserBackend, SipUser};
-use rsip::prelude::*;
 use rsip::services::DigestGenerator;
 use rsip::Header;
+use rsip::{prelude::*, HostWithPort};
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
-use rsipstack::transport::TransportLayer;
+use rsipstack::transport::channel::ChannelConnection;
+use rsipstack::transport::{SipAddr, TransportLayer};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Creates a test SIP server with a memory user backend and locator
@@ -68,8 +70,21 @@ pub async fn create_test_server_with_config(
 }
 
 /// Creates a basic SIP transaction for testing
-pub fn create_transaction(request: rsip::Request) -> (Transaction, Arc<EndpointInner>) {
+pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<EndpointInner>) {
+    let mock_addr = SipAddr {
+        r#type: Some(rsip::Transport::Udp),
+        addr: HostWithPort {
+            host: "127.0.0.1".parse().unwrap(),
+            port: Some(5060.into()),
+        },
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let connection = ChannelConnection::create_connection(rx, tx, mock_addr)
+        .await
+        .expect("failed to create channel connection");
     let transport_layer = TransportLayer::new(CancellationToken::new());
+    transport_layer.add_transport(connection.into());
+
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
         transport_layer,

@@ -19,7 +19,7 @@ async fn test_registrar_register_success() {
     let module = RegistrarModule::new(server_inner.clone(), config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test registration
     let result = module
@@ -50,7 +50,7 @@ async fn test_registrar_unregister() {
 
     let module = RegistrarModule::new(server_inner.clone(), config.clone());
 
-    let (mut tx, _) = create_transaction(register_request);
+    let (mut tx, _) = create_transaction(register_request).await;
 
     // Register the user
     let result = module
@@ -63,7 +63,7 @@ async fn test_registrar_unregister() {
     // Now unregister by sending a REGISTER with Expires: 0
     let unregister_request = create_register_request("alice", "example.com", Some(0));
 
-    let (mut tx, _) = create_transaction(unregister_request);
+    let (mut tx, _) = create_transaction(unregister_request).await;
 
     // Test unregistration
     let result = module
@@ -99,7 +99,7 @@ async fn test_registrar_with_custom_expires() {
     let module = RegistrarModule::new(server_inner.clone(), config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test registration
     let result = module
@@ -133,7 +133,7 @@ async fn test_registrar_non_register_method() {
     let module = RegistrarModule::new(server_inner, config);
 
     // Create a transaction
-    let (mut tx, _) = create_transaction(request);
+    let (mut tx, _) = create_transaction(request).await;
 
     // Test the module with an INVITE request
     let result = module

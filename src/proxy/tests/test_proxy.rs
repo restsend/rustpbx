@@ -156,7 +156,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
     // Try registration with wrong password multiple times to trigger ban
     for i in 0..3 {
         let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
-        let (mut tx1, _endpoint_inner) = create_transaction(request);
+        let (mut tx1, _endpoint_inner) = create_transaction(request).await;
 
         // Process the transaction (this won't actually send over network, just record the response locally)
         let _ = process_transaction_locally(&mut tx1).await;
@@ -167,7 +167,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
 
     // Try one more time - in a real server this would be banned
     let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
-    let (mut tx1, _endpoint_inner) = create_transaction(request);
+    let (mut tx1, _endpoint_inner) = create_transaction(request).await;
     let _ = process_transaction_locally(&mut tx1).await;
 
     // In real test we'd check for 403 Forbidden
@@ -188,12 +188,12 @@ async fn test_registration_module(
 
     // Create a registration request
     let register_request = create_register_request(username, realm, Some(3600));
-    let (mut tx1, _endpoint_inner) = create_transaction(register_request);
+    let (mut tx1, _endpoint_inner) = create_transaction(register_request).await;
     let _ = process_transaction_locally(&mut tx1).await;
 
     // Create an authenticated request
     let auth_request = create_auth_request(rsip::Method::Register, username, realm, password);
-    let (mut tx2, _endpoint_inner) = create_transaction(auth_request);
+    let (mut tx2, _endpoint_inner) = create_transaction(auth_request).await;
     let _ = process_transaction_locally(&mut tx2).await;
 
     tx.send("Registration test completed".to_string())
@@ -214,7 +214,7 @@ async fn test_call_module(
 
     // Create INVITE request
     let invite_request = create_invite_request(from_user, to_user, realm);
-    let (mut tx1, _endpoint_inner) = create_transaction(invite_request);
+    let (mut tx1, _endpoint_inner) = create_transaction(invite_request).await;
     let _ = process_transaction_locally(&mut tx1).await;
 
     tx.send("Call test completed".to_string()).await.unwrap();
