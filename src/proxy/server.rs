@@ -7,7 +7,9 @@ use crate::{callrecord::CallRecordSender, config::ProxyConfig};
 use anyhow::{anyhow, Result};
 use rsipstack::{
     transaction::{transaction::Transaction, Endpoint, TransactionReceiver},
-    transport::{udp::UdpConnection, TransportLayer},
+    transport::{
+        udp::UdpConnection, TcpListenerConnection, TransportLayer, WebSocketListenerConnection,
+    },
     EndpointBuilder,
 };
 use std::{
@@ -34,8 +36,8 @@ pub struct SipServerInner {
 pub type SipServerRef = Arc<SipServerInner>;
 
 pub struct SipServer {
-    inner: SipServerRef,
-    endpoint: Endpoint,
+    pub inner: SipServerRef,
+    pub endpoint: Endpoint,
     modules: Arc<Vec<Box<dyn ProxyModule>>>,
 }
 
@@ -208,6 +210,24 @@ impl SipServerBuilder {
                 .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
             transport_layer.add_transport(udp_conn.into());
             info!("start proxy, udp port: {}", local_addr);
+        }
+
+        if let Some(tcp_port) = inner.config.tcp_port {
+            let local_addr = SocketAddr::new(local_addr, tcp_port);
+            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_ip)
+                .await
+                .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
+            transport_layer.add_transport(tcp_conn.into());
+            info!("start proxy, tcp port: {}", local_addr);
+        }
+
+        if let Some(ws_port) = inner.config.ws_port {
+            let local_addr = SocketAddr::new(local_addr, ws_port);
+            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_ip, false)
+                .await
+                .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
+            transport_layer.add_transport(ws_conn.into());
+            info!("start proxy, ws port: {}", local_addr);
         }
 
         let mut endpoint_builder = EndpointBuilder::new();

@@ -5,6 +5,7 @@ use rsipstack::transaction::transaction::Transaction;
 use server::SipServerRef;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
 pub mod acl;
 pub mod auth;
 pub mod call;
@@ -21,6 +22,7 @@ pub mod user;
 pub mod user_db;
 pub mod user_http;
 pub mod user_plain;
+pub mod ws;
 
 pub enum ProxyAction {
     Continue,

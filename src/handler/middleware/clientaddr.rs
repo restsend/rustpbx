@@ -2,25 +2,38 @@ use axum::extract::{ConnectInfo, FromRequestParts};
 use http::{request::Parts, StatusCode};
 use std::{
     fmt::{self, Formatter},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-pub struct ClientIp(String);
+pub struct ClientAddr {
+    pub addr: SocketAddr,
+}
 
-impl ClientIp {
-    pub fn new(ip: String) -> Self {
-        ClientIp(ip)
+impl ClientAddr {
+    pub fn new(addr: SocketAddr) -> Self {
+        ClientAddr { addr }
+    }
+    pub fn ip(&self) -> IpAddr {
+        self.addr.ip()
     }
 }
 
-impl<S> FromRequestParts<S> for ClientIp
+impl<S> FromRequestParts<S> for ClientAddr
 where
     S: Send + Sync,
 {
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Try to get IP from common proxy headers
+        let mut remote_addr = match parts.extensions.get::<ConnectInfo<SocketAddr>>() {
+            Some(ConnectInfo(addr)) => addr.clone(),
+            None => {
+                return Ok(ClientAddr {
+                    addr: SocketAddr::from((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)),
+                })
+            }
+        };
+
         for header in [
             "x-client-ip",
             "x-forwarded-for",
@@ -31,23 +44,17 @@ where
                 if let Ok(ip) = value.to_str() {
                     // Handle comma-separated IPs (e.g. X-Forwarded-For can have multiple)
                     let first_ip = ip.split(',').next().unwrap_or(ip).trim();
-                    return Ok(ClientIp(first_ip.to_string()));
+                    remote_addr.set_ip(IpAddr::V4(first_ip.parse().unwrap()));
+                    break;
                 }
             }
         }
-
-        // Fall back to connection info if available
-        if let Some(ConnectInfo(addr)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-            return Ok(ClientIp(addr.ip().to_string()));
-        }
-
-        // Default fallback
-        Ok(ClientIp("*:*".to_string()))
+        Ok(ClientAddr { addr: remote_addr })
     }
 }
 
-impl fmt::Display for ClientIp {
+impl fmt::Display for ClientAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.addr)
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     config::{Config, ProxyConfig, UseragentConfig},
     handler::{
         call::{ActiveCallType, CallParams},
-        middleware::clientip::ClientIp,
+        middleware::clientaddr::ClientAddr,
     },
     media::engine::StreamEngine,
 };
@@ -12,14 +12,18 @@ use axum::{
     response::Response,
 };
 use futures::{SinkExt, StreamExt};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpListener, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
 async fn test_call_handler(
-    client_ip: ClientIp,
+    client_ip: ClientAddr,
     call_type: ActiveCallType,
     ws: WebSocketUpgrade,
     state: crate::app::AppState,
@@ -71,7 +75,7 @@ async fn test_call_record_creation() {
                  Query(params): Query<CallParams>,
                  State(state): State<crate::app::AppState>| async move {
                     test_call_handler(
-                        ClientIp::new("127.0.0.1:12345".to_string()),
+                        ClientAddr::new(SocketAddr::from((Ipv4Addr::LOCALHOST, 12345))),
                         ActiveCallType::WebSocket,
                         ws,
                         state,
