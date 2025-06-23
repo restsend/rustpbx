@@ -1,17 +1,24 @@
 use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
     config::{Config, ProxyConfig},
-    handler::call::ActiveCallRef,
+    handler::{call::ActiveCallRef, middleware::clientaddr::ClientAddr},
     media::engine::StreamEngine,
     proxy::{
-        acl::AclModule, auth::AuthModule, call::CallModule, cdr::CdrModule,
-        mediaproxy::MediaProxyModule, registrar::RegistrarModule, server::SipServerBuilder,
+        acl::AclModule,
+        auth::AuthModule,
+        call::CallModule,
+        cdr::CdrModule,
+        mediaproxy::MediaProxyModule,
+        registrar::RegistrarModule,
+        server::{SipServer, SipServerBuilder},
+        ws::sip_ws_handler,
     },
     useragent::{invitation::create_invite_handler, UserAgent},
 };
 use anyhow::Result;
 use axum::{
-    response::{Html, IntoResponse},
+    extract::WebSocketUpgrade,
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -149,11 +156,11 @@ impl AppStateBuilder {
     }
 }
 
-pub async fn serve_proxy(
+pub async fn build_sip_server(
     token: CancellationToken,
     config: ProxyConfig,
     callrecord_sender: Option<CallRecordSender>,
-) -> Result<()> {
+) -> Result<SipServer> {
     let proxy_config = Arc::new(config);
     let mut proxy_builder = SipServerBuilder::new(proxy_config)
         .with_cancel_token(token.child_token())
@@ -174,22 +181,14 @@ pub async fn serve_proxy(
             return Err(anyhow::anyhow!("Failed to build proxy: {}", e));
         }
     };
-    info!("Proxy server started");
-    match proxy.serve().await {
-        Ok(_) => {}
-        Err(e) => {
-            warn!("Proxy server error: {}", e);
-            return Err(anyhow::anyhow!("Proxy server error: {}", e));
-        }
-    }
-    Ok(())
+    Ok(proxy)
 }
 
 pub async fn run(state: AppState) -> Result<()> {
     let ua = state.useragent.clone();
     let token = state.token.clone();
 
-    let app = create_router(state.clone());
+    let mut router = create_router(state.clone());
     let addr: SocketAddr = state.config.http_addr.parse()?;
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -198,11 +197,6 @@ pub async fn run(state: AppState) -> Result<()> {
             return Err(anyhow::anyhow!("Failed to bind to {}: {}", addr, e));
         }
     };
-
-    let http_task = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    );
 
     if let Some(ref callrecord) = state.config.callrecord {
         let mut callrecord_sender = state.callrecord_sender.lock().await;
@@ -223,8 +217,38 @@ pub async fn run(state: AppState) -> Result<()> {
         let token_proxy = token.clone();
         let proxy_config = proxy.clone();
         let callrecord_sender = state.callrecord_sender.lock().await.clone();
+        let sip_server = match build_sip_server(token_proxy, proxy_config, callrecord_sender).await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Proxy server error: {}", e);
+                return Err(anyhow::anyhow!("Proxy server error: {}", e));
+            }
+        };
+
+        if let Some(ref ws_handler) = proxy.ws_handler {
+            info!(
+                "Registering WebSocket handler to sip server: {}",
+                ws_handler
+            );
+            let endpoint_ref = sip_server.endpoint.inner.clone();
+            let token = sip_server.inner.cancel_token.clone();
+            router = router.route(
+                ws_handler,
+                axum::routing::get(
+                    async move |client_ip: ClientAddr, ws: WebSocketUpgrade| -> Response {
+                        let token = token.clone();
+                        ws.protocols(["sip"]).on_upgrade(async move |socket| {
+                            sip_ws_handler(token, client_ip, socket, endpoint_ref.clone()).await
+                        })
+                    },
+                ),
+            );
+        }
+
         tokio::spawn(async move {
-            match serve_proxy(token_proxy, proxy_config, callrecord_sender).await {
+            info!("Proxy server started");
+            match sip_server.serve().await {
                 Ok(_) => {}
                 Err(e) => {
                     warn!("Proxy server error: {}", e);
@@ -233,6 +257,10 @@ pub async fn run(state: AppState) -> Result<()> {
         });
     }
 
+    let http_task = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    );
     select! {
         http_result = http_task => {
             match http_result {

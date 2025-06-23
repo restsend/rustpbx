@@ -1,4 +1,4 @@
-use super::middleware::clientip::ClientIp;
+use super::middleware::clientaddr::ClientAddr;
 use crate::app::AppState;
 use axum::{
     extract::State,
@@ -19,7 +19,10 @@ pub struct IceServer {
     credential: Option<String>,
 }
 
-pub(crate) async fn get_iceservers(client_ip: ClientIp, State(state): State<AppState>) -> Response {
+pub(crate) async fn get_iceservers(
+    client_ip: ClientAddr,
+    State(state): State<AppState>,
+) -> Response {
     let rs_token = env::var("RESTSEND_TOKEN").unwrap_or_default();
     let default_ice_servers = state.config.ice_servers.as_ref();
     if rs_token.is_empty() {
@@ -31,7 +34,9 @@ pub(crate) async fn get_iceservers(client_ip: ClientIp, State(state): State<AppS
     let timeout = std::time::Duration::from_secs(5);
     let url = format!(
         "https://restsend.com/api/iceservers?token={}&user={}&client={}",
-        rs_token, user_id, client_ip
+        rs_token,
+        user_id,
+        client_ip.ip().to_string()
     );
 
     // Create a reqwest client with proper timeout

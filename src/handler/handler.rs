@@ -1,6 +1,6 @@
 use super::{
     call::{handle_call, ActiveCallState, ActiveCallType, CallParams},
-    middleware::clientip::ClientIp,
+    middleware::clientaddr::ClientAddr,
 };
 use crate::{app::AppState, callrecord::CallRecord};
 use axum::{
@@ -48,7 +48,7 @@ async fn kill_call(State(state): State<AppState>, Path(id): Path<String>) -> Res
 }
 
 pub async fn ws_handler(
-    client_ip: ClientIp,
+    client_ip: ClientAddr,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<CallParams>,
@@ -57,7 +57,7 @@ pub async fn ws_handler(
 }
 
 pub async fn sip_handler(
-    client_ip: ClientIp,
+    client_ip: ClientAddr,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<CallParams>,
@@ -66,7 +66,7 @@ pub async fn sip_handler(
 }
 
 pub async fn webrtc_handler(
-    client_ip: ClientIp,
+    client_ip: ClientAddr,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<CallParams>,
@@ -75,7 +75,7 @@ pub async fn webrtc_handler(
 }
 
 pub async fn call_handler(
-    client_ip: ClientIp,
+    client_ip: ClientAddr,
     call_type: ActiveCallType,
     ws: WebSocketUpgrade,
     state: AppState,

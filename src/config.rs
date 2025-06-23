@@ -223,6 +223,7 @@ pub struct ProxyConfig {
     pub realms: Option<Vec<String>>,
     #[serde(default)]
     pub enable_forwarding: Option<bool>,
+    pub ws_handler: Option<String>,
 }
 
 impl ProxyConfig {
@@ -274,6 +275,7 @@ impl Default for ProxyConfig {
             media_proxy: MediaProxyConfig::default(),
             realms: Some(vec![]),
             enable_forwarding: Some(true),
+            ws_handler: None,
         }
     }
 }
