@@ -19,6 +19,7 @@ modules = ["acl", "auth", "registrar", "cdr", "mediaproxy", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
+ws_handler= "/ws"
 
 # ACL rules
 acl_rules = [

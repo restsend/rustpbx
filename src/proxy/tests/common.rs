@@ -45,6 +45,7 @@ pub async fn create_test_server_with_config(
         password: Some("password".to_string()),
         enabled: true,
         realm: Some("example.com".to_string()),
+        ..Default::default()
     };
 
     let disabled_user = SipUser {
@@ -53,6 +54,7 @@ pub async fn create_test_server_with_config(
         password: Some("password".to_string()),
         enabled: false,
         realm: Some("example.com".to_string()),
+        ..Default::default()
     };
 
     server_inner

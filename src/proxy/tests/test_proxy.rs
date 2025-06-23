@@ -42,6 +42,7 @@ async fn test_proxy_full_flow() {
         password: Some("testpassword".to_string()),
         enabled: true,
         realm: Some("example.com".to_string()),
+        ..Default::default()
     };
 
     // Add the test user to the backend directly

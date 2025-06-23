@@ -2,7 +2,10 @@ use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTex
 use crate::config::{ProxyConfig, UserBackendConfig};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::{headers::auth::Algorithm, prelude::HeadersExt};
+use rsip::{
+    headers::auth::Algorithm,
+    prelude::{HeadersExt, ToTypedHeader},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
@@ -17,6 +20,8 @@ pub struct SipUser {
     pub username: String,
     pub password: Option<String>,
     pub realm: Option<String>,
+    #[serde(skip)]
+    pub origin_contact: Option<rsip::typed::Contact>,
 }
 fn default_enabled() -> bool {
     true
@@ -29,11 +34,18 @@ impl Default for SipUser {
             username: "".to_string(),
             password: None,
             realm: None,
+            origin_contact: None,
         }
     }
 }
 
 impl SipUser {
+    pub fn get_contact_username(&self) -> String {
+        match self.origin_contact {
+            Some(ref contact) => contact.uri.user().unwrap_or_default().to_string(),
+            None => self.username.clone(),
+        }
+    }
     pub fn auth_digest(&self, algorithm: Algorithm) -> String {
         use md5::{Digest, Md5};
         use sha2::{Sha256, Sha512};
@@ -74,13 +86,14 @@ impl TryFrom<&rsip::Request> for SipUser {
             .unwrap_or_default()
             .to_string();
         let realm = req.to_header()?.uri()?.host().to_string();
-
+        let origin_contact = req.contact_header()?.typed().ok();
         Ok(SipUser {
             id: 0,
             username,
             password: None,
             enabled: true,
             realm: Some(realm),
+            origin_contact,
         })
     }
 }

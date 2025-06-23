@@ -57,6 +57,7 @@ impl PlainTextBackend {
                 password: Some(password.to_string()),
                 enabled: true,
                 realm: None,
+                origin_contact: None,
             };
             users.insert(username.to_string(), user);
         }

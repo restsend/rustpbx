@@ -44,6 +44,7 @@ fn create_test_users() -> Vec<SipUser> {
             password: Some("password123".to_string()),
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
         },
         SipUser {
             id: 2,
@@ -51,6 +52,7 @@ fn create_test_users() -> Vec<SipUser> {
             password: Some("password456".to_string()),
             enabled: true,
             realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
         },
         SipUser {
             id: 3,
@@ -58,6 +60,7 @@ fn create_test_users() -> Vec<SipUser> {
             password: Some("wrongpassword".to_string()),
             enabled: false,
             realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
         },
         SipUser {
             id: 4,
@@ -65,6 +68,7 @@ fn create_test_users() -> Vec<SipUser> {
             password: Some("password789".to_string()),
             enabled: true,
             realm: Some("other.com".to_string()),
+            ..Default::default()
         },
     ]
 }
