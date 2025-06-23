@@ -66,32 +66,12 @@ impl ProxyModule for RegistrarModule {
             .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
 
         let destination = SipAddr {
-            r#type: via_header.uri()?.transport().cloned(),
+            r#type: via_header.trasnport().ok(),
             addr: destination_addr,
         };
         let addr = match tx.endpoint_inner.get_addrs().first() {
             Some(addr) => addr.clone(),
             None => return Err(anyhow::anyhow!("endpoint not available addr")),
-        };
-
-        let contact_params = destination
-            .r#type
-            .map(|t| vec![rsip::Param::Transport(t)])
-            .unwrap_or_default();
-
-        let contact = rsip::typed::Contact {
-            display_name: None,
-            uri: rsip::Uri {
-                scheme: addr.r#type.map(|t| t.sip_scheme()),
-                auth: Some(rsip::Auth {
-                    user: user.username.clone(),
-                    password: None,
-                }),
-                host_with_port: addr.addr,
-                params: contact_params,
-                ..Default::default()
-            },
-            params: vec![],
         };
 
         let expires = match tx.original.expires_header() {
@@ -102,6 +82,30 @@ impl ProxyModule for RegistrarModule {
             _ => self.config.registrar_expires.clone(),
         }
         .unwrap_or(60);
+
+        let contact_params = destination
+            .r#type
+            .map(|t| {
+                vec![
+                    rsip::Param::Transport(t),
+                    rsip::Param::Expires(expires.to_string().into()),
+                ]
+            })
+            .unwrap_or_default();
+
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: rsip::Uri {
+                scheme: addr.r#type.map(|t| t.sip_scheme()),
+                auth: Some(rsip::Auth {
+                    user: user.get_contact_username(),
+                    password: None,
+                }),
+                host_with_port: addr.addr,
+                ..Default::default()
+            },
+            params: contact_params,
+        };
 
         if expires == 0 {
             // delete user

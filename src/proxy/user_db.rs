@@ -119,6 +119,7 @@ impl UserBackend for DbBackend {
             password: Some(password),
             enabled,
             realm: realm.map(|r| r.to_string()).or(db_realm),
+            origin_contact: None,
         })
     }
 }
