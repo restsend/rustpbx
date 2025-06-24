@@ -128,10 +128,7 @@ impl CdrModule {
             record.hangup_reason.replace(reason);
             sender.send(record).ok();
         } else {
-            info!(
-                dialog_id = format!("{}", call_id),
-                "CDR: BYE received for unknown call"
-            );
+            info!(dialog_id = ?call_id, "CDR: BYE received for unknown call");
         }
 
         Ok(())

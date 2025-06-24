@@ -26,7 +26,15 @@ pub(crate) async fn get_iceservers(
     let rs_token = env::var("RESTSEND_TOKEN").unwrap_or_default();
     let default_ice_servers = state.config.ice_servers.as_ref();
     if rs_token.is_empty() {
-        return Json(default_ice_servers).into_response();
+        if let Some(ice_servers) = default_ice_servers {
+            return Json(ice_servers).into_response();
+        }
+        return Json(vec![IceServer {
+            urls: vec!["stun:restsend.com:3478".to_string()],
+            username: None,
+            credential: None,
+        }])
+        .into_response();
     }
 
     let start_time = Instant::now();

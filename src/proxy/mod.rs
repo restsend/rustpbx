@@ -16,6 +16,7 @@ pub mod mediaproxy;
 pub mod presence;
 pub mod registrar;
 pub mod server;
+pub mod status;
 #[cfg(test)]
 pub mod tests;
 pub mod user;
