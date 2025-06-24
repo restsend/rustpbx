@@ -17,11 +17,31 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+#[derive(Clone, Debug)]
+pub(crate) struct SessionParty {
+    pub aor: rsip::Uri, // Address of Record
+}
+
+impl SessionParty {
+    pub fn new(aor: rsip::Uri) -> Self {
+        Self { aor }
+    }
+
+    pub fn get_user(&self) -> String {
+        self.aor.user().unwrap_or_default().to_string()
+    }
+
+    pub fn get_realm(&self) -> String {
+        self.aor.host().to_string()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Session {
     pub dialog_id: DialogId,
     pub last_activity: Instant,
-    pub parties: (String, String), // (caller, callee)
+    pub caller: SessionParty,
+    pub callees: Vec<SessionParty>,
 }
 
 #[derive(Clone)]
@@ -175,7 +195,7 @@ impl CallModule {
             }
         };
 
-        let target_location = &target_locations[0];
+        let target_location = self.select_location_from_multiple(&target_locations, &callee_uri);
 
         let should_proxy_media = self.should_use_media_proxy(tx)?;
         if should_proxy_media {
@@ -204,17 +224,6 @@ impl CallModule {
         inv_tx.destination = Some(target_location.destination.clone());
         inv_tx.send().await.map_err(|e| anyhow!(e))?;
 
-        let dialog_id = match DialogId::try_from(&tx.original) {
-            Ok(id) => id,
-            Err(e) => {
-                error!("Failed to create dialog ID: {}", e);
-                return tx
-                    .reply(rsip::StatusCode::ServerInternalError)
-                    .await
-                    .map_err(|e| anyhow!(e));
-            }
-        };
-
         loop {
             if inv_tx.is_terminated() {
                 break;
@@ -225,16 +234,31 @@ impl CallModule {
                     if let Some(msg) = msg {
                         match msg {
                             rsip::message::SipMessage::Response(mut resp) => {
-                                header_pop!(resp.headers, rsip::Header::Via);
                                 if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
+                                    let dialog_id = match DialogId::try_from(&resp) {
+                                        Ok(id) => id,
+                                        Err(e) => {
+                                            error!("Failed to create dialog ID: {}", e);
+                                            return tx
+                                                .reply(rsip::StatusCode::ServerInternalError)
+                                                .await
+                                                .map_err(|e| anyhow!(e));
+                                        }
+                                    };
+
+                                    // Note: We no longer store the caller's destination in the session
+                                    // Each BYE request will query the locator for the current location
+
                                     let session = Session {
                                         dialog_id: dialog_id.clone(),
                                         last_activity: Instant::now(),
-                                        parties: (caller.clone(), callee.clone()),
+                                        caller: SessionParty::new(tx.original.from_header()?.uri()?.clone()),
+                                        callees: vec![SessionParty::new(callee_uri.clone())],
                                     };
                                     self.inner.sessions.lock().unwrap().insert(dialog_id.clone(), session);
                                     info!("Session established: {}", dialog_id);
                                 }
+                                header_pop!(resp.headers, rsip::Header::Via);
                                 tx.respond(resp).await.map_err(|e| anyhow!(e))?;
                             }
                             _ => {}
@@ -265,7 +289,7 @@ impl CallModule {
         Ok(())
     }
 
-    async fn handle_bye(&self, tx: &mut Transaction) -> Result<()> {
+    pub(crate) async fn handle_bye(&self, tx: &mut Transaction) -> Result<()> {
         let dialog_id = match DialogId::try_from(&tx.original) {
             Ok(id) => id,
             Err(e) => {
@@ -281,9 +305,45 @@ impl CallModule {
             let sessions = self.inner.sessions.lock().unwrap();
             sessions.get(&dialog_id).cloned()
         };
+        if let Some(ref s) = session {
+            info!(
+                "Session found for BYE caller: {} callees: {:?}",
+                s.caller.aor,
+                s.callees.iter().map(|p| p.aor.clone()).collect::<Vec<_>>()
+            );
+        }
+        // Determine who is sending the BYE and route to the other party
+        let target_aor = match session {
+            Some(s) => {
+                // Get the URI of the party sending the BYE
+                let bye_sender_uri = tx.original.from_header()?.uri()?;
 
-        let (_, callee) = match session {
-            Some(s) => s.parties,
+                // Check if the BYE is from caller or one of the callees
+                if s.caller.aor.user() == bye_sender_uri.user()
+                    && s.caller.aor.host() == bye_sender_uri.host()
+                {
+                    // BYE from caller, route to first callee
+                    if let Some(first_callee) = s.callees.first() {
+                        info!(
+                            "BYE from caller {} to callee {}",
+                            s.caller.aor, first_callee.aor
+                        );
+                        first_callee.aor.clone()
+                    } else {
+                        return tx
+                            .reply(rsip::StatusCode::BadRequest)
+                            .await
+                            .map_err(|e| anyhow!(e));
+                    }
+                } else {
+                    // BYE from one of the callees, route to caller
+                    info!(
+                        "BYE from callee {} to caller {}",
+                        bye_sender_uri, s.caller.aor
+                    );
+                    s.caller.aor.clone()
+                }
+            }
             None => {
                 info!("Session not found for BYE: {}", dialog_id);
                 return tx
@@ -293,18 +353,96 @@ impl CallModule {
             }
         };
 
-        let target_locations = match self.inner.server.locator.lookup(&callee, None).await {
+        // Query locator to get current location for the target AOR
+        let target_user = target_aor.user().unwrap_or_default();
+        let target_realm = target_aor.host().to_string();
+
+        // Try to lookup with the original realm first
+        let target_locations = match self
+            .inner
+            .server
+            .locator
+            .lookup(&target_user, Some(&target_realm))
+            .await
+        {
             Ok(locations) => locations,
             Err(_) => {
-                info!("Target user not found for BYE: {}", callee);
-                return tx
-                    .reply(rsip::StatusCode::NotFound)
-                    .await
-                    .map_err(|e| anyhow!(e));
+                // If not found with original realm, try with configured realms and localhost variants
+                // This handles cases where session AOR contains IP address but user is registered with domain
+                let mut found_locations = None;
+
+                // Try with localhost/127.0.0.1 first (common case for internal users)
+                for local_realm in &["localhost", "127.0.0.1"] {
+                    if let Ok(locations) = self
+                        .inner
+                        .server
+                        .locator
+                        .lookup(&target_user, Some(local_realm))
+                        .await
+                    {
+                        info!(
+                            "Found user {} in realm {} instead of {}",
+                            target_user, local_realm, target_realm
+                        );
+                        found_locations = Some(locations);
+                        break;
+                    }
+                }
+
+                // If still not found, try configured realms
+                if found_locations.is_none() {
+                    if let Some(realms) = &self.inner.config.realms {
+                        for realm in realms {
+                            if let Ok(locations) = self
+                                .inner
+                                .server
+                                .locator
+                                .lookup(&target_user, Some(realm))
+                                .await
+                            {
+                                info!(
+                                    "Found user {} in configured realm {} instead of {}",
+                                    target_user, realm, target_realm
+                                );
+                                found_locations = Some(locations);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Finally try without realm (realm=None)
+                if found_locations.is_none() {
+                    if let Ok(locations) =
+                        self.inner.server.locator.lookup(&target_user, None).await
+                    {
+                        info!(
+                            "Found user {} without realm instead of {}@{}",
+                            target_user, target_user, target_realm
+                        );
+                        found_locations = Some(locations);
+                    }
+                }
+
+                match found_locations {
+                    Some(locations) => locations,
+                    None => {
+                        info!(
+                            "Target user not found for BYE: {}@{} (tried all known realms)",
+                            target_user, target_realm
+                        );
+                        return tx
+                            .reply(rsip::StatusCode::NotFound)
+                            .await
+                            .map_err(|e| anyhow!(e));
+                    }
+                }
             }
         };
 
-        let target_location = &target_locations[0];
+        // Select a location using the load balancing strategy
+        let selected_location = self.select_location_from_multiple(&target_locations, &target_aor);
+        let target_destination = &selected_location.destination;
         let mut bye_req = tx.original.clone();
         let via = tx
             .endpoint_inner
@@ -315,7 +453,7 @@ impl CallModule {
         let key = TransactionKey::from_request(&bye_req, TransactionRole::Client)
             .map_err(|e| anyhow!(e))?;
         let mut bye_tx = Transaction::new_client(key, bye_req, tx.endpoint_inner.clone(), None);
-        bye_tx.destination = Some(target_location.destination.clone());
+        bye_tx.destination = Some(target_destination.clone());
         bye_tx.send().await.map_err(|e| anyhow!(e))?;
 
         while let Some(msg) = bye_tx.receive().await {
@@ -361,6 +499,23 @@ impl CallModule {
             .await
             .map_err(|e| anyhow!(e))?;
         Ok(())
+    }
+
+    /// Select a location from multiple locations using a load balancing strategy
+    /// Currently implements simple round-robin by selecting the first location
+    /// Can be enhanced with more sophisticated strategies
+    pub(crate) fn select_location_from_multiple<'a>(
+        &self,
+        locations: &'a [super::locator::Location],
+        _aor: &rsip::Uri,
+    ) -> &'a super::locator::Location {
+        // For now, just select the first location
+        // TODO: Implement proper load balancing strategies:
+        // - Round-robin
+        // - Least connections
+        // - Random selection
+        // - Priority-based selection
+        &locations[0]
     }
 }
 

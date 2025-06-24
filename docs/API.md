@@ -72,7 +72,7 @@ Establish a WebRTC-based call connection for browser clients.
 
 **Query Parameters:**
 - `id` (optional): Custom call session ID
-- Additional parameters can be passed as JSON in the option field
+- `dump` (optional): Whether to dump events, defaults to true
 
 ### SIP Call Connection
 
@@ -84,7 +84,7 @@ Establish a SIP-based call connection.
 
 **Query Parameters:**
 - `id` (optional): Custom call session ID
-- SIP-specific parameters in the option field
+- `dump` (optional): Whether to dump events, defaults to true
 
 ### General WebSocket Call Interface
 
@@ -96,6 +96,7 @@ Generic call interface supporting multiple protocols.
 
 **Query Parameters:**
 - `id` (optional): Custom call session ID
+- `dump` (optional): Whether to dump events, defaults to true
 
 ---
 
@@ -116,22 +117,41 @@ Initiate a call with specified configuration.
     "denoise": true,
     "vad": {
       "type": "silero",
-      "enabled": true,
-      "voiceThreshold": 0.6
+      "samplerate": 16000,
+      "speechPadding": 160,
+      "silencePadding": 200,
+      "ratio": 0.5,
+      "voiceThreshold": 0.5,
+      "maxBufferDurationSecs": 50
     },
     "asr": {
       "provider": "tencent",
-      "language": "zh-CN"
+      "language": "zh-CN",
+      "model": "16k_zh_en",
+      "appId": "your_app_id",
+      "secretId": "your_secret_id",
+      "secretKey": "your_secret_key"
     },
     "tts": {
       "provider": "tencent",
       "speaker": "301030",
-      "emotion": "neutral"
+      "speed": 1.0,
+      "volume": 5,
+      "emotion": "neutral",
+      "samplerate": 16000
     },
     "sip": {
       "username": "alice",
       "password": "secret123",
-      "realm": "example.com"
+      "realm": "example.com",
+      "headers": {
+        "X-Custom-Header": "value"
+      }
+    },
+    "recorder": {
+      "recorderFile": "/path/to/recording.wav",
+      "samplerate": 16000,
+      "ptime": "200ms"
     }
   }
 }
@@ -174,7 +194,8 @@ Convert text to speech and play it during the call.
   "speaker": "301030",
   "playId": "greeting-001",
   "autoHangup": false,
-  "streaming": true
+  "streaming": true,
+  "endOfStream": false
 }
 ```
 
@@ -369,42 +390,100 @@ Complete configuration options for call setup:
   "enableIpv6": false,
   "codec": "pcmu",
   "recorder": {
-    "enabled": true,
+    "recorderFile": "/tmp/recordings/call.wav",
     "samplerate": 16000,
-    "path": "/tmp/recordings"
+    "ptime": "200ms"
   },
   "vad": {
     "type": "silero",
-    "enabled": true,
-    "voiceThreshold": 0.6,
-    "ratio": 0.5,
+    "samplerate": 16000,
     "speechPadding": 160,
-    "silencePadding": 300
+    "silencePadding": 200,
+    "ratio": 0.5,
+    "voiceThreshold": 0.5,
+    "maxBufferDurationSecs": 50
   },
   "asr": {
     "provider": "tencent",
     "language": "zh-CN",
     "model": "16k_zh_en",
-    "inactivityTimeout": 35000
+    "appId": "your_app_id",
+    "secretId": "your_secret_id",
+    "secretKey": "your_secret_key",
+    "modelType": "realtime",
+    "bufferSize": 1024,
+    "samplerate": 16000,
+    "endpoint": "https://asr.tencentcloudapi.com/"
   },
   "tts": {
     "provider": "tencent",
     "speaker": "301030",
     "speed": 1.0,
     "volume": 5,
-    "emotion": "neutral"
+    "emotion": "neutral",
+    "samplerate": 16000,
+    "codec": "pcm",
+    "subtitle": false,
+    "appId": "your_app_id",
+    "secretId": "your_secret_id",
+    "secretKey": "your_secret_key"
   },
   "sip": {
     "username": "alice",
     "password": "secret123",
     "realm": "example.com",
-    "proxy": "sip.example.com:5060"
+    "headers": {
+      "X-Custom-Header": "value"
+    }
+  },
+  "eou": {
+    "type": "tencent",
+    "endpoint": "https://asr.tencentcloudapi.com/",
+    "secretKey": "your_secret_key",
+    "secretId": "your_secret_id",
+    "timeout": 5000
   },
   "extra": {
     "customKey": "customValue"
   }
 }
 ```
+
+### VAD Options Details
+
+Voice Activity Detection (VAD) configuration:
+
+- `type`: VAD engine type ("webrtc", "silero", or others)
+- `samplerate`: Sample rate (default: 16000)
+- `speechPadding`: Padding before speech detection (default: 160)
+- `silencePadding`: Padding after silence detection (default: 200)
+- `ratio`: Threshold ratio for detection (default: 0.5)
+- `voiceThreshold`: Voice threshold (default: 0.5)
+- `maxBufferDurationSecs`: Maximum buffer duration (default: 50)
+
+### ASR Options Details
+
+Automatic Speech Recognition (ASR) configuration:
+
+- `provider`: Provider ("tencent" or "voiceapi")
+- `language`: Language code (e.g., "zh-CN", "en-US")
+- `model`: Model name
+- `appId`: Application ID (for Tencent Cloud)
+- `secretId`: Secret ID
+- `secretKey`: Secret Key
+- `endpoint`: API endpoint URL
+
+### TTS Options Details
+
+Text-to-Speech (TTS) configuration:
+
+- `provider`: Provider ("tencent" or "voiceapi")
+- `speaker`: Speaker ID
+- `speed`: Speech speed (default: 1.0)
+- `volume`: Volume (0-10, default: 5)
+- `emotion`: Emotion ("neutral", "happy", "sad", etc.)
+- `samplerate`: Sample rate (default: 16000)
+- `codec`: Audio codec (default: "pcm")
 
 ---
 
@@ -627,15 +706,6 @@ The server sends various events through WebSocket connections:
 
 ---
 
-## Rate Limits and Quotas
-
-- WebSocket connections: 100 concurrent connections per IP
-- API calls: 1000 requests per minute per IP
-- LLM proxy: Subject to upstream provider limits
-- Media processing: Limited by server resources
-
----
-
 ## Error Codes
 
 ### HTTP Status Codes
@@ -645,12 +715,3 @@ The server sends various events through WebSocket connections:
 - `404`: Not Found - Resource not found
 - `429`: Too Many Requests - Rate limit exceeded
 - `500`: Internal Server Error - Server error
-
-### WebSocket Error Codes
-- `4001`: Invalid command format
-- `4002`: Missing required parameters
-- `4003`: Unsupported operation
-- `4004`: Resource not available
-- `4005`: Configuration error
-
-For more detailed error information, check the server logs and WebSocket error events. 

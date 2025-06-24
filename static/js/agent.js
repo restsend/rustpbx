@@ -686,7 +686,9 @@ function mainApp() {
             if (this.peerConnection) {
                 this.peerConnection.close();
             }
-            let iceServers = undefined
+            let iceServers = {
+                urls: ['stun:stun.l.google.com:19302']
+            }
 
             try {
                 iceServers = await fetch('/iceservers').then(res => res.json())

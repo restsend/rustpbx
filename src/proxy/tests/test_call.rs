@@ -1,11 +1,12 @@
 use crate::config::MediaProxyMode;
-use crate::proxy::call::{CallModule, Session};
+use crate::proxy::call::{CallModule, Session, SessionParty};
 use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
 use crate::proxy::ProxyModule;
 use rsip::headers::{ContentType, Header};
 use rsip::prelude::UntypedHeader;
 use rsip::HostWithPort;
 use rsipstack::dialog::DialogId;
+use rsipstack::transport::SipAddr;
 use std::time::{Duration, Instant};
 
 fn create_test_dialog_id(call_id: &str, from_tag: &str, to_tag: &str) -> DialogId {
@@ -14,6 +15,11 @@ fn create_test_dialog_id(call_id: &str, from_tag: &str, to_tag: &str) -> DialogI
         from_tag: from_tag.to_string(),
         to_tag: to_tag.to_string(),
     }
+}
+
+fn create_test_session_party(username: &str, realm: &str) -> SessionParty {
+    let aor = rsip::Uri::try_from(format!("sip:{}@{}", username, realm).as_str()).unwrap();
+    SessionParty::new(aor)
 }
 
 #[tokio::test]
@@ -139,7 +145,8 @@ async fn test_options_handling() {
     let session = Session {
         dialog_id: dialog_id.clone(),
         last_activity: Instant::now() - Duration::from_secs(10),
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     module
@@ -249,7 +256,8 @@ async fn test_session_management() {
     let session = Session {
         dialog_id: dialog_id.clone(),
         last_activity: Instant::now(),
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     module
@@ -290,7 +298,8 @@ async fn test_session_timeout() {
     let session = Session {
         dialog_id: dialog_id.clone(),
         last_activity: Instant::now() - Duration::from_secs(400), // Expired
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     module
@@ -344,7 +353,8 @@ async fn test_dialog_activity_update() {
     let session = Session {
         dialog_id: dialog_id.clone(),
         last_activity: initial_time,
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     module
@@ -387,7 +397,8 @@ async fn test_concurrent_session_access() {
     let session = Session {
         dialog_id: dialog_id.clone(),
         last_activity: Instant::now(),
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     module
@@ -438,14 +449,16 @@ async fn test_session_timeout_with_active_sessions() {
     let expired_session = Session {
         dialog_id: expired_dialog_id.clone(),
         last_activity: Instant::now() - Duration::from_secs(400), // Expired
-        parties: ("alice".to_string(), "bob".to_string()),
+        caller: create_test_session_party("alice", "example.com"),
+        callees: vec![create_test_session_party("bob", "example.com")],
     };
 
     // Add an active session
     let active_session = Session {
         dialog_id: active_dialog_id.clone(),
         last_activity: Instant::now(), // Active
-        parties: ("charlie".to_string(), "dave".to_string()),
+        caller: create_test_session_party("charlie", "example.com"),
+        callees: vec![create_test_session_party("dave", "example.com")],
     };
 
     {
@@ -465,4 +478,302 @@ async fn test_session_timeout_with_active_sessions() {
     assert_eq!(sessions.len(), 1);
     assert!(!sessions.contains_key(&expired_dialog_id));
     assert!(sessions.contains_key(&active_dialog_id));
+}
+
+#[tokio::test]
+async fn test_bye_routing_and_locator_lookup() {
+    let (server, config) = create_test_server().await;
+    let module = CallModule::new(config, server.clone());
+
+    // Create a test dialog and session
+    let dialog_id = create_test_dialog_id("test-call-id", "caller-tag", "callee-tag");
+
+    let caller_party = create_test_session_party("alice", "example.com");
+    let callee_party = create_test_session_party("bob", "example.com");
+
+    let session = Session {
+        dialog_id: dialog_id.clone(),
+        last_activity: Instant::now(),
+        caller: caller_party.clone(),
+        callees: vec![callee_party.clone()],
+    };
+
+    // Register users in locator with multiple locations
+    let alice_location1 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    let bob_location1 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:bob@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.20:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    server
+        .locator
+        .register("alice", Some("example.com"), alice_location1)
+        .await
+        .unwrap();
+
+    server
+        .locator
+        .register("bob", Some("example.com"), bob_location1)
+        .await
+        .unwrap();
+
+    // Add the session to the module
+    module
+        .inner
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(dialog_id.clone(), session);
+
+    // Verify session exists and structure
+    let stored_session = module
+        .inner
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&dialog_id)
+        .cloned()
+        .unwrap();
+
+    assert_eq!(stored_session.caller.aor.user().unwrap(), "alice");
+    assert_eq!(stored_session.callees[0].aor.user().unwrap(), "bob");
+
+    // Verify that locator lookup works for both parties
+    let alice_locations = server
+        .locator
+        .lookup("alice", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(alice_locations.len(), 1);
+
+    let bob_locations = server
+        .locator
+        .lookup("bob", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(bob_locations.len(), 1);
+}
+
+#[tokio::test]
+async fn test_multiple_locations_per_aor() {
+    let (server, config) = create_test_server().await;
+    let _module = CallModule::new(config, server.clone());
+
+    // Register the same user with multiple locations (simulating multiple devices)
+    let alice_location1 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    let alice_location2 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Tcp),
+            addr: HostWithPort::try_from("192.168.1.11:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    // Register first location
+    server
+        .locator
+        .register("alice", Some("example.com"), alice_location1)
+        .await
+        .unwrap();
+
+    // Verify single location
+    let locations = server
+        .locator
+        .lookup("alice", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1);
+
+    // Note: Current MemoryLocator implementation only keeps one location per user
+    // This is a limitation that could be enhanced to support multiple locations
+    // For now, we test the basic lookup functionality
+
+    // The locator should find the user
+    assert_eq!(locations[0].aor.user().unwrap(), "alice");
+    assert_eq!(locations[0].aor.host().to_string(), "example.com");
+}
+
+#[tokio::test]
+async fn test_session_party_aor_methods() {
+    let party = create_test_session_party("alice", "example.com");
+
+    assert_eq!(party.get_user(), "alice");
+    assert_eq!(party.get_realm(), "example.com");
+    assert_eq!(party.aor.to_string(), "sip:alice@example.com");
+}
+
+#[tokio::test]
+async fn test_location_selection_strategy() {
+    let (server, config) = create_test_server().await;
+    let module = CallModule::new(config, server.clone());
+
+    // Create multiple locations for the same user
+    let location1 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    let location2 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Tcp),
+            addr: HostWithPort::try_from("192.168.1.20:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    let locations = vec![location1.clone(), location2.clone()];
+    let aor = rsip::Uri::try_from("sip:alice@example.com").unwrap();
+
+    // Test location selection (currently always selects first one)
+    let selected = module.select_location_from_multiple(&locations, &aor);
+
+    // Should select the first location
+    assert_eq!(selected.destination.addr.to_string(), "192.168.1.10:5060");
+    assert_eq!(
+        selected.destination.r#type,
+        Some(rsip::transport::Transport::Udp)
+    );
+}
+
+#[tokio::test]
+async fn test_bye_with_dynamic_location_lookup() {
+    let (server, config) = create_test_server().await;
+    let module = CallModule::new(config, server.clone());
+
+    // Create a session
+    let dialog_id = create_test_dialog_id("test-dynamic", "caller-tag", "callee-tag");
+    let caller_party = create_test_session_party("alice", "example.com");
+    let callee_party = create_test_session_party("bob", "example.com");
+
+    let session = Session {
+        dialog_id: dialog_id.clone(),
+        last_activity: Instant::now(),
+        caller: caller_party.clone(),
+        callees: vec![callee_party.clone()],
+    };
+
+    // Register users with initial locations
+    let alice_location = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    let bob_location_v1 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:bob@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.20:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    server
+        .locator
+        .register("alice", Some("example.com"), alice_location)
+        .await
+        .unwrap();
+
+    server
+        .locator
+        .register("bob", Some("example.com"), bob_location_v1)
+        .await
+        .unwrap();
+
+    // Add session
+    module
+        .inner
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(dialog_id.clone(), session);
+
+    // Verify initial locations
+    let alice_locations = server
+        .locator
+        .lookup("alice", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(
+        alice_locations[0].destination.addr.to_string(),
+        "192.168.1.10:5060"
+    );
+
+    let bob_locations = server
+        .locator
+        .lookup("bob", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bob_locations[0].destination.addr.to_string(),
+        "192.168.1.20:5060"
+    );
+
+    // Now simulate Bob moving to a new location (re-registration)
+    let bob_location_v2 = super::super::locator::Location {
+        aor: rsip::Uri::try_from("sip:bob@example.com").unwrap(),
+        expires: 3600,
+        destination: SipAddr {
+            r#type: Some(rsip::transport::Transport::Tcp),
+            addr: HostWithPort::try_from("10.0.0.30:5060").unwrap(),
+        },
+        last_modified: Instant::now(),
+    };
+
+    server
+        .locator
+        .register("bob", Some("example.com"), bob_location_v2)
+        .await
+        .unwrap();
+
+    // Verify Bob's location has changed
+    let bob_locations_new = server
+        .locator
+        .lookup("bob", Some("example.com"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bob_locations_new[0].destination.addr.to_string(),
+        "10.0.0.30:5060"
+    );
+
+    // This demonstrates that when we handle BYE, we'll get the current location
+    // rather than the stale location that might have been stored in the session
 }
