@@ -17,8 +17,8 @@ impl VoiceActivityDetector {
         }
         let sample_rate = ndarray::arr1::<i64>(&[self.sample_rate as i64]);
 
-        let input_value = ort::value::Value::from_array(input.clone())?;
-        let sr_value = ort::value::Value::from_array(sample_rate.clone())?;
+        let input_value = ort::value::Value::from_array(input)?;
+        let sr_value = ort::value::Value::from_array(sample_rate)?;
         let state_value = ort::value::Value::from_array(self.state.clone())?;
 
         let inputs = ort::inputs![
