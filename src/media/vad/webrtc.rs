@@ -35,4 +35,8 @@ impl VadEngine for WebRtcVad {
             frame.timestamp,
         ))
     }
+
+    fn get_last_score(&self) -> Option<f32> {
+        None // WebRTC VAD doesn't provide probability scores
+    }
 }
