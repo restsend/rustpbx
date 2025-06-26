@@ -256,7 +256,6 @@ impl Default for ProxyConfig {
                 "acl".to_string(),
                 "auth".to_string(),
                 "registrar".to_string(),
-                "cdr".to_string(),
                 "mediaproxy".to_string(),
                 "call".to_string(),
             ]),
