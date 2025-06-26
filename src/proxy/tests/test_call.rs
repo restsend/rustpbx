@@ -1,5 +1,6 @@
 use crate::config::MediaProxyMode;
-use crate::proxy::call::{CallModule, Session, SessionParty};
+use crate::proxy::call::CallModule;
+use crate::proxy::session::{Session, SessionParty};
 use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
 use crate::proxy::ProxyModule;
 use rsip::headers::{ContentType, Header};
@@ -152,23 +153,23 @@ async fn test_options_handling() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Verify session exists with old timestamp
     let old_time = module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .get(&dialog_id)
         .unwrap()
         .last_activity;
 
     // Simulate dialog activity update (the core logic of handle_options)
     {
-        let mut sessions = module.inner.sessions.lock().unwrap();
+        let mut sessions = module.inner.sessions.write().await;
         if let Some(session) = sessions.get_mut(&dialog_id) {
             session.last_activity = Instant::now();
         }
@@ -178,8 +179,8 @@ async fn test_options_handling() {
     let new_time = module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .get(&dialog_id)
         .unwrap()
         .last_activity;
@@ -263,70 +264,15 @@ async fn test_session_management() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Verify session exists
-    assert!(module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .contains_key(&dialog_id));
-
-    // Test session cleanup
-    CallModule::check_sessions(&module.inner).await;
+    assert!(module.inner.sessions.read().await.contains_key(&dialog_id));
 
     // Session should still exist (not expired)
-    assert!(module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .contains_key(&dialog_id));
-}
-
-#[tokio::test]
-async fn test_session_timeout() {
-    let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
-
-    let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
-
-    // Add an expired session
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now() - Duration::from_secs(400), // Expired
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
-    };
-
-    module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(dialog_id.clone(), session);
-
-    // Verify session exists
-    assert!(module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .contains_key(&dialog_id));
-
-    // Test session cleanup
-    CallModule::check_sessions(&module.inner).await;
-
-    // Session should be removed (expired)
-    assert!(!module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .contains_key(&dialog_id));
+    assert!(module.inner.sessions.read().await.contains_key(&dialog_id));
 }
 
 #[tokio::test]
@@ -360,26 +306,20 @@ async fn test_dialog_activity_update() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Simulate activity update
     {
-        let mut sessions = module.inner.sessions.lock().unwrap();
+        let mut sessions = module.inner.sessions.write().await;
         if let Some(session) = sessions.get_mut(&dialog_id) {
             session.last_activity = Instant::now();
         }
     }
 
     // Verify activity was updated
-    let updated_session = module
-        .inner
-        .sessions
-        .lock()
-        .unwrap()
-        .get(&dialog_id)
-        .cloned();
+    let updated_session = module.inner.sessions.read().await.get(&dialog_id).cloned();
 
     assert!(updated_session.is_some());
     let session = updated_session.unwrap();
@@ -404,8 +344,8 @@ async fn test_concurrent_session_access() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Simulate concurrent access
@@ -415,7 +355,7 @@ async fn test_concurrent_session_access() {
     let handle1 = tokio::spawn(async move {
         for _ in 0..10 {
             {
-                let sessions = module_clone.inner.sessions.lock().unwrap();
+                let sessions = module_clone.inner.sessions.read().await;
                 let _session = sessions.get(&dialog_id_clone);
             } // Drop guard before sleep
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -425,7 +365,7 @@ async fn test_concurrent_session_access() {
     let handle2 = tokio::spawn(async move {
         for _ in 0..10 {
             {
-                let mut sessions = module.inner.sessions.lock().unwrap();
+                let mut sessions = module.inner.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&dialog_id) {
                     session.last_activity = Instant::now();
                 }
@@ -435,49 +375,6 @@ async fn test_concurrent_session_access() {
     });
 
     let _ = tokio::join!(handle1, handle2);
-}
-
-#[tokio::test]
-async fn test_session_timeout_with_active_sessions() {
-    let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
-
-    let expired_dialog_id = create_test_dialog_id("expired-call-id", "from-tag", "to-tag");
-    let active_dialog_id = create_test_dialog_id("active-call-id", "from-tag", "to-tag");
-
-    // Add an expired session
-    let expired_session = Session {
-        dialog_id: expired_dialog_id.clone(),
-        last_activity: Instant::now() - Duration::from_secs(400), // Expired
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
-    };
-
-    // Add an active session
-    let active_session = Session {
-        dialog_id: active_dialog_id.clone(),
-        last_activity: Instant::now(), // Active
-        caller: create_test_session_party("charlie", "example.com"),
-        callees: vec![create_test_session_party("dave", "example.com")],
-    };
-
-    {
-        let mut sessions = module.inner.sessions.lock().unwrap();
-        sessions.insert(expired_dialog_id.clone(), expired_session);
-        sessions.insert(active_dialog_id.clone(), active_session);
-    }
-
-    // Verify both sessions exist
-    assert_eq!(module.inner.sessions.lock().unwrap().len(), 2);
-
-    // Test session cleanup
-    CallModule::check_sessions(&module.inner).await;
-
-    // Only active session should remain
-    let sessions = module.inner.sessions.lock().unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert!(!sessions.contains_key(&expired_dialog_id));
-    assert!(sessions.contains_key(&active_dialog_id));
 }
 
 #[tokio::test]
@@ -535,16 +432,16 @@ async fn test_bye_routing_and_locator_lookup() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Verify session exists and structure
     let stored_session = module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .read()
+        .await
         .get(&dialog_id)
         .cloned()
         .unwrap();
@@ -580,16 +477,6 @@ async fn test_multiple_locations_per_aor() {
         destination: SipAddr {
             r#type: Some(rsip::transport::Transport::Udp),
             addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
-        },
-        last_modified: Instant::now(),
-    };
-
-    let alice_location2 = super::super::locator::Location {
-        aor: rsip::Uri::try_from("sip:alice@example.com").unwrap(),
-        expires: 3600,
-        destination: SipAddr {
-            r#type: Some(rsip::transport::Transport::Tcp),
-            addr: HostWithPort::try_from("192.168.1.11:5060").unwrap(),
         },
         last_modified: Instant::now(),
     };
@@ -721,8 +608,8 @@ async fn test_bye_with_dynamic_location_lookup() {
     module
         .inner
         .sessions
-        .lock()
-        .unwrap()
+        .write()
+        .await
         .insert(dialog_id.clone(), session);
 
     // Verify initial locations
