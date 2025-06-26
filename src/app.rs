@@ -7,7 +7,6 @@ use crate::{
         acl::AclModule,
         auth::AuthModule,
         call::CallModule,
-        mediaproxy::MediaProxyModule,
         registrar::RegistrarModule,
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
@@ -169,7 +168,6 @@ pub async fn build_sip_server(
         .register_module("acl", AclModule::create)
         .register_module("auth", AuthModule::create)
         .register_module("registrar", RegistrarModule::create)
-        .register_module("mediaproxy", MediaProxyModule::create)
         .register_module("call", CallModule::create);
 
     let proxy = match proxy_builder.build().await {

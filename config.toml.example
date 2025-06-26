@@ -15,7 +15,7 @@ udp_port=13050 # don't use 5060
 
 
 [proxy]
-modules = ["acl", "auth", "registrar", "cdr", "mediaproxy", "call"]
+modules = ["acl", "auth", "registrar", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60

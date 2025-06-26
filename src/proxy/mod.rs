@@ -11,7 +11,6 @@ pub mod auth;
 pub mod call;
 pub mod locator;
 pub mod locator_db;
-pub mod mediaproxy;
 pub mod presence;
 pub mod registrar;
 pub mod server;
