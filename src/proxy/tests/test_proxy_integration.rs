@@ -110,7 +110,7 @@ impl TestProxyServer {
                 Ok(Box::new(AuthModule::new(inner)))
             })
             .register_module("call", |inner, config| {
-                Ok(Box::new(CallModule::new(config, inner)))
+                Ok(Box::new(CallModule::new(config, inner, None)))
             });
 
         let server = builder.build().await?;
