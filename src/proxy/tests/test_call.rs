@@ -1,6 +1,8 @@
 use crate::config::MediaProxyMode;
 use crate::proxy::call::CallModule;
-use crate::proxy::session::{Session, SessionParty};
+use crate::proxy::session::{
+    MediaBridgeType, MediaSession, MediaStats, Session, SessionParty, SessionType,
+};
 use crate::proxy::tests::common::{create_test_request, create_test_server, create_transaction};
 use crate::proxy::ProxyModule;
 use rsip::headers::{ContentType, Header};
@@ -18,15 +20,32 @@ fn create_test_dialog_id(call_id: &str, from_tag: &str, to_tag: &str) -> DialogI
     }
 }
 
-fn create_test_session_party(username: &str, realm: &str) -> SessionParty {
-    let aor = rsip::Uri::try_from(format!("sip:{}@{}", username, realm).as_str()).unwrap();
-    SessionParty::new(aor)
+// Removed unused function - use create_test_uri directly
+
+fn create_test_uri(uri_str: &str) -> rsip::Uri {
+    rsip::Uri::try_from(uri_str).unwrap()
+}
+
+fn create_test_session(dialog_id: DialogId, caller_uri: &str, callee_uri: &str) -> Session {
+    Session {
+        dialog_id,
+        last_activity: Instant::now(),
+        caller: SessionParty::new(create_test_uri(caller_uri)),
+        callees: vec![SessionParty::new(create_test_uri(callee_uri))],
+        media_bridge_type: MediaBridgeType::None,
+        established_at: None,
+        media_stats: MediaStats::default(),
+        start_time: chrono::Utc::now(),
+        ring_time: None,
+        answer_time: None,
+        status_code: 200,
+    }
 }
 
 #[tokio::test]
 async fn test_call_module_basics() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone());
+    let _module = CallModule::new(config, server.clone(), None);
 
     assert_eq!(_module.name(), "call");
 }
@@ -34,7 +53,7 @@ async fn test_call_module_basics() {
 #[tokio::test]
 async fn test_call_module_creation() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone());
+    let _module = CallModule::new(config, server.clone(), None);
 
     assert_eq!(_module.name(), "call");
 }
@@ -42,7 +61,7 @@ async fn test_call_module_creation() {
 #[tokio::test]
 async fn test_locator_integration() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone());
+    let _module = CallModule::new(config, server.clone(), None);
 
     // Register a user in the locator
     let location = super::super::locator::Location {
@@ -79,7 +98,7 @@ async fn test_media_proxy_nat_only() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     // Create a request with SDP containing private IP
     let mut request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
@@ -104,7 +123,7 @@ async fn test_media_proxy_none_mode() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
@@ -121,7 +140,7 @@ async fn test_media_proxy_all_mode() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
@@ -134,7 +153,7 @@ async fn test_media_proxy_all_mode() {
 #[tokio::test]
 async fn test_options_handling() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     // Test that OPTIONS method is in allowed methods
     assert!(module.allow_methods().contains(&rsip::Method::Options));
@@ -143,11 +162,18 @@ async fn test_options_handling() {
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
     // Add a session
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now() - Duration::from_secs(10),
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
+    let session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     module
@@ -155,37 +181,39 @@ async fn test_options_handling() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Verify session exists with old timestamp
-    let old_time = module
+    let last_activity_before = module
         .inner
         .sessions
-        .write()
+        .read()
         .await
         .get(&dialog_id)
         .unwrap()
+        .session
         .last_activity;
 
     // Simulate dialog activity update (the core logic of handle_options)
     {
         let mut sessions = module.inner.sessions.write().await;
         if let Some(session) = sessions.get_mut(&dialog_id) {
-            session.last_activity = Instant::now();
+            session.session.last_activity = Instant::now();
         }
     }
 
     // Verify activity was updated
-    let new_time = module
+    let last_activity_after = module
         .inner
         .sessions
-        .write()
+        .read()
         .await
         .get(&dialog_id)
         .unwrap()
+        .session
         .last_activity;
 
-    assert!(new_time > old_time);
+    assert!(last_activity_after > last_activity_before);
 }
 
 #[tokio::test]
@@ -195,7 +223,7 @@ async fn test_external_realm_forwarding() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let _module = CallModule::new(config, server);
+    let _module = CallModule::new(config, server, None);
 
     // Test realm comparison logic
     let local_realm = "localhost";
@@ -215,7 +243,7 @@ async fn test_local_realm_invite() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let _module = CallModule::new(config, server.clone());
+    let _module = CallModule::new(config, server.clone(), None);
 
     // Register a user in the locator
     let location = super::super::locator::Location {
@@ -249,16 +277,23 @@ async fn test_local_realm_invite() {
 #[tokio::test]
 async fn test_session_management() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
     // Add a session
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now(),
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
+    let session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     module
@@ -266,7 +301,7 @@ async fn test_session_management() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Verify session exists
     assert!(module.inner.sessions.read().await.contains_key(&dialog_id));
@@ -278,7 +313,7 @@ async fn test_session_management() {
 #[tokio::test]
 async fn test_module_lifecycle() {
     let (server, config) = create_test_server().await;
-    let mut module = CallModule::new(config, server);
+    let mut module = CallModule::new(config, server, None);
 
     let start_result = module.on_start().await;
     assert!(start_result.is_ok());
@@ -290,17 +325,25 @@ async fn test_module_lifecycle() {
 #[tokio::test]
 async fn test_dialog_activity_update() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
     // Add a session
     let initial_time = Instant::now() - Duration::from_secs(10);
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: initial_time,
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
+    let mut session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+    session.last_activity = initial_time;
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     module
@@ -308,13 +351,13 @@ async fn test_dialog_activity_update() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Simulate activity update
     {
         let mut sessions = module.inner.sessions.write().await;
         if let Some(session) = sessions.get_mut(&dialog_id) {
-            session.last_activity = Instant::now();
+            session.session.last_activity = Instant::now();
         }
     }
 
@@ -323,22 +366,29 @@ async fn test_dialog_activity_update() {
 
     assert!(updated_session.is_some());
     let session = updated_session.unwrap();
-    assert!(session.last_activity > initial_time);
+    assert!(session.session.last_activity > initial_time);
 }
 
 #[tokio::test]
 async fn test_concurrent_session_access() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server);
+    let module = CallModule::new(config, server, None);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
     // Add a session
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now(),
-        caller: create_test_session_party("alice", "example.com"),
-        callees: vec![create_test_session_party("bob", "example.com")],
+    let session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     module
@@ -346,7 +396,7 @@ async fn test_concurrent_session_access() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Simulate concurrent access
     let module_clone = module.clone();
@@ -367,7 +417,7 @@ async fn test_concurrent_session_access() {
             {
                 let mut sessions = module.inner.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&dialog_id) {
-                    session.last_activity = Instant::now();
+                    session.session.last_activity = Instant::now();
                 }
             } // Drop guard before sleep
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -380,19 +430,26 @@ async fn test_concurrent_session_access() {
 #[tokio::test]
 async fn test_bye_routing_and_locator_lookup() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone());
+    let module = CallModule::new(config, server.clone(), None);
 
     // Create a test dialog and session
     let dialog_id = create_test_dialog_id("test-call-id", "caller-tag", "callee-tag");
 
-    let caller_party = create_test_session_party("alice", "example.com");
-    let callee_party = create_test_session_party("bob", "example.com");
+    let _caller_party = SessionParty::new(create_test_uri("sip:alice@example.com"));
+    let _callee_party = SessionParty::new(create_test_uri("sip:bob@example.com"));
 
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now(),
-        caller: caller_party.clone(),
-        callees: vec![callee_party.clone()],
+    let session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     // Register users in locator with multiple locations
@@ -434,7 +491,7 @@ async fn test_bye_routing_and_locator_lookup() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Verify session exists and structure
     let stored_session = module
@@ -446,8 +503,8 @@ async fn test_bye_routing_and_locator_lookup() {
         .cloned()
         .unwrap();
 
-    assert_eq!(stored_session.caller.aor.user().unwrap(), "alice");
-    assert_eq!(stored_session.callees[0].aor.user().unwrap(), "bob");
+    assert_eq!(stored_session.session.caller.aor.user().unwrap(), "alice");
+    assert_eq!(stored_session.session.callees[0].aor.user().unwrap(), "bob");
 
     // Verify that locator lookup works for both parties
     let alice_locations = server
@@ -468,7 +525,7 @@ async fn test_bye_routing_and_locator_lookup() {
 #[tokio::test]
 async fn test_multiple_locations_per_aor() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone());
+    let _module = CallModule::new(config, server.clone(), None);
 
     // Register the same user with multiple locations (simulating multiple devices)
     let alice_location1 = super::super::locator::Location {
@@ -507,7 +564,7 @@ async fn test_multiple_locations_per_aor() {
 
 #[tokio::test]
 async fn test_session_party_aor_methods() {
-    let party = create_test_session_party("alice", "example.com");
+    let party = SessionParty::new(create_test_uri("sip:alice@example.com"));
 
     assert_eq!(party.get_user(), "alice");
     assert_eq!(party.get_realm(), "example.com");
@@ -517,7 +574,7 @@ async fn test_session_party_aor_methods() {
 #[tokio::test]
 async fn test_location_selection_strategy() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone());
+    let module = CallModule::new(config, server.clone(), None);
 
     // Create multiple locations for the same user
     let location1 = super::super::locator::Location {
@@ -557,18 +614,25 @@ async fn test_location_selection_strategy() {
 #[tokio::test]
 async fn test_bye_with_dynamic_location_lookup() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone());
+    let module = CallModule::new(config, server.clone(), None);
 
     // Create a session
     let dialog_id = create_test_dialog_id("test-dynamic", "caller-tag", "callee-tag");
-    let caller_party = create_test_session_party("alice", "example.com");
-    let callee_party = create_test_session_party("bob", "example.com");
+    let _caller_party = SessionParty::new(create_test_uri("sip:alice@example.com"));
+    let _callee_party = SessionParty::new(create_test_uri("sip:bob@example.com"));
 
-    let session = Session {
-        dialog_id: dialog_id.clone(),
-        last_activity: Instant::now(),
-        caller: caller_party.clone(),
-        callees: vec![callee_party.clone()],
+    let session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+
+    let media_session = MediaSession {
+        session,
+        media_stream: None,
+        session_type: SessionType::SipToSip,
+        webrtc_sdp: None,
+        sip_sdp: None,
     };
 
     // Register users with initial locations
@@ -610,7 +674,7 @@ async fn test_bye_with_dynamic_location_lookup() {
         .sessions
         .write()
         .await
-        .insert(dialog_id.clone(), session);
+        .insert(dialog_id.clone(), media_session);
 
     // Verify initial locations
     let alice_locations = server
@@ -663,4 +727,65 @@ async fn test_bye_with_dynamic_location_lookup() {
 
     // This demonstrates that when we handle BYE, we'll get the current location
     // rather than the stale location that might have been stored in the session
+}
+
+#[tokio::test]
+async fn test_webrtc_sdp_detection() {
+    let (server, config) = create_test_server().await;
+    let module = CallModule::new(config, server.clone(), None);
+
+    // Test WebRTC SDP detection
+    let webrtc_sdp = "v=0\r\n\
+                      o=- 1234567890 1234567890 IN IP4 127.0.0.1\r\n\
+                      s=-\r\n\
+                      t=0 0\r\n\
+                      a=ice-ufrag:abcd\r\n\
+                      a=ice-pwd:1234567890abcdef\r\n\
+                      a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF\r\n\
+                      m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                      a=setup:actpass\r\n";
+
+    let sip_sdp = "v=0\r\n\
+                   o=- 1234567890 1234567890 IN IP4 127.0.0.1\r\n\
+                   s=-\r\n\
+                   t=0 0\r\n\
+                   m=audio 5004 RTP/AVP 0\r\n\
+                   a=rtpmap:0 PCMU/8000\r\n";
+
+    assert!(module.is_webrtc_sdp(webrtc_sdp));
+    assert!(!module.is_webrtc_sdp(sip_sdp));
+}
+
+#[tokio::test]
+async fn test_enhanced_session_structure() {
+    let (server, config) = create_test_server().await;
+    let _module = CallModule::new(config, server.clone(), None);
+
+    let dialog_id = create_test_dialog_id("test-session", "caller-tag", "callee-tag");
+
+    let mut session = create_test_session(
+        dialog_id.clone(),
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+    );
+    session.media_bridge_type = MediaBridgeType::WebRtcToSip;
+    session.established_at = Some(Instant::now());
+
+    let media_session = MediaSession {
+        session: session.clone(),
+        media_stream: None,
+        session_type: SessionType::WebRtcToSip,
+        webrtc_sdp: Some("v=0...".to_string()),
+        sip_sdp: Some("v=0...".to_string()),
+    };
+
+    // Test WebRTC to SIP session properties
+    assert_eq!(media_session.session_type, SessionType::WebRtcToSip);
+    assert_eq!(
+        media_session.session.media_bridge_type,
+        MediaBridgeType::WebRtcToSip
+    );
+    assert!(media_session.session.established_at.is_some());
+    assert!(media_session.webrtc_sdp.is_some());
+    assert!(media_session.sip_sdp.is_some());
 }

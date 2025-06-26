@@ -1,8 +1,18 @@
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
+use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyMode, ProxyConfig};
-use crate::proxy::session::{Session, SessionParty};
+use crate::handler::call::ActiveCallType;
+use crate::media::{
+    codecs::CodecType,
+    engine::StreamEngine,
+    negotiate::prefer_audio_codec,
+    stream::{MediaStream, MediaStreamBuilder},
+    track::{webrtc::WebrtcTrack, TrackConfig},
+};
+use crate::proxy::session::{MediaBridgeType, MediaSession, Session, SessionParty, SessionType};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use rsip::headers::UntypedHeader;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
@@ -11,18 +21,22 @@ use rsipstack::rsip_ext::RsipHeadersExt;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 use tokio::select;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use webrtc::sdp::SessionDescription;
 
 #[derive(Clone)]
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
     server: SipServerRef,
-    pub(crate) sessions: Arc<RwLock<HashMap<DialogId, Session>>>,
+    pub(crate) sessions: Arc<RwLock<HashMap<DialogId, MediaSession>>>,
+    pub(crate) stream_engine: Option<Arc<StreamEngine>>,
+    callrecord_sender: Option<CallRecordSender>,
 }
 
 #[derive(Clone)]
@@ -32,17 +46,128 @@ pub struct CallModule {
 
 impl CallModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = CallModule::new(config, server);
+        let module = CallModule::new(config, server, None);
         Ok(Box::new(module))
     }
 
-    pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
+    pub fn create_with_stream_engine(
+        server: SipServerRef,
+        config: Arc<ProxyConfig>,
+        stream_engine: Arc<StreamEngine>,
+    ) -> Result<Box<dyn ProxyModule>> {
+        let module = CallModule::new(config, server, Some(stream_engine));
+        Ok(Box::new(module))
+    }
+
+    pub fn new(
+        config: Arc<ProxyConfig>,
+        server: SipServerRef,
+        stream_engine: Option<Arc<StreamEngine>>,
+    ) -> Self {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+
         let inner = Arc::new(CallModuleInner {
             config,
             server: server.clone(),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions,
+            stream_engine,
+            callrecord_sender: server.callrecord_sender.clone(),
         });
         Self { inner }
+    }
+
+    /// Detect if SDP is WebRTC format
+    pub fn is_webrtc_sdp(&self, sdp: &str) -> bool {
+        sdp.contains("a=ice-ufrag:")
+            || sdp.contains("a=ice-pwd:")
+            || sdp.contains("a=fingerprint:")
+            || sdp.contains("a=setup:")
+    }
+
+    /// Create media stream for WebRTC to SIP conversion
+    async fn create_webrtc_to_sip_media_stream(
+        &self,
+        session_id: &str,
+        webrtc_sdp: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<Arc<MediaStream>> {
+        let (event_sender, _event_receiver) = tokio::sync::broadcast::channel(100);
+
+        // Create media stream
+        let media_stream = MediaStreamBuilder::new(event_sender.clone())
+            .with_id(session_id.to_string())
+            .with_cancel_token(cancel_token.clone())
+            .build();
+
+        let media_stream = Arc::new(media_stream);
+
+        // Parse WebRTC SDP
+        let mut reader = Cursor::new(webrtc_sdp.as_bytes());
+        let _webrtc_session_desc = SessionDescription::unmarshal(&mut reader)?;
+
+        // Create WebRTC track to receive audio
+        let track_config = TrackConfig {
+            codec: CodecType::PCMU,
+            ptime: Duration::from_millis(20),
+            samplerate: 16000,
+            channels: 1,
+            server_side_track_id: format!("{}_webrtc", session_id),
+        };
+
+        let webrtc_track = WebrtcTrack::new(
+            cancel_token.clone(),
+            session_id.to_string(),
+            track_config.clone(),
+        );
+
+        // Create RTP track to send to SIP
+        let rtp_track_builder = crate::media::track::rtp::RtpTrackBuilder::new(
+            format!("{}_rtp", session_id),
+            track_config,
+        )
+        .with_cancel_token(cancel_token);
+
+        let rtp_track = rtp_track_builder.build().await?;
+
+        // Set tracks in media stream
+        media_stream.update_track(Box::new(webrtc_track)).await;
+        media_stream.update_track(Box::new(rtp_track)).await;
+
+        Ok(media_stream)
+    }
+
+    /// Create SDP answer, converting WebRTC offer to SIP compatible answer
+    async fn create_sip_compatible_answer(&self, webrtc_offer: &str) -> Result<String> {
+        // Parse WebRTC offer
+        let mut reader = Cursor::new(webrtc_offer.as_bytes());
+        let offer_sdp = SessionDescription::unmarshal(&mut reader)?;
+
+        // Select appropriate audio codec
+        let preferred_codec = prefer_audio_codec(&offer_sdp).unwrap_or(CodecType::PCMU);
+
+        // Create simplified SIP SDP answer
+        let local_ip = crate::net_tool::get_first_non_loopback_interface()?;
+        let rtp_port = 20000; // Dynamic port allocation
+
+        let answer_sdp = format!(
+            "v=0\r\n\
+             o=rustpbx 0 0 IN IP4 {}\r\n\
+             s=rustpbx\r\n\
+             c=IN IP4 {}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP {}\r\n\
+             a=rtpmap:{} {}/{}\r\n\
+             a=sendrecv\r\n",
+            local_ip,
+            local_ip,
+            rtp_port,
+            preferred_codec.payload_type(),
+            preferred_codec.payload_type(),
+            preferred_codec.mime_type(),
+            preferred_codec.clock_rate()
+        );
+
+        Ok(answer_sdp)
     }
 
     /// Check if media proxy is needed based on nat_only configuration
@@ -91,6 +216,22 @@ impl CallModule {
             return self.forward_to_proxy(tx, &callee_realm).await;
         }
 
+        // Check if request body contains SDP
+        let sdp_offer = if !tx.original.body.is_empty() {
+            Some(String::from_utf8_lossy(&tx.original.body).to_string())
+        } else {
+            None
+        };
+
+        // Detect if this is WebRTC to SIP call
+        let session_type = match &sdp_offer {
+            Some(sdp) if self.is_webrtc_sdp(sdp) => SessionType::WebRtcToSip,
+            Some(_) => SessionType::SipToSip,
+            None => SessionType::SipToSip,
+        };
+
+        info!("Detected session type: {:?}", session_type);
+
         let target_locations = match self
             .inner
             .server
@@ -127,7 +268,46 @@ impl CallModule {
             info!("Media proxy required for NAT traversal");
         }
 
+        // Handle WebRTC to SIP conversion
+        let (processed_body, media_session) = if let SessionType::WebRtcToSip = session_type {
+            if let Some(ref webrtc_sdp) = sdp_offer {
+                info!("Processing WebRTC to SIP conversion");
+
+                // Create media stream for conversion
+                let cancel_token = CancellationToken::new();
+                let session_id = format!("{}_{}", caller, callee);
+
+                if let Some(ref _stream_engine) = self.inner.stream_engine {
+                    let media_stream = self
+                        .create_webrtc_to_sip_media_stream(
+                            &session_id,
+                            webrtc_sdp,
+                            cancel_token.clone(),
+                        )
+                        .await?;
+
+                    // Create SIP compatible SDP
+                    let sip_sdp = self.create_sip_compatible_answer(webrtc_sdp).await?;
+
+                    (Some(sip_sdp.as_bytes().to_vec()), Some(media_stream))
+                } else {
+                    warn!("StreamEngine not available for WebRTC to SIP conversion");
+                    (Some(tx.original.body.clone()), None)
+                }
+            } else {
+                (Some(tx.original.body.clone()), None)
+            }
+        } else {
+            (Some(tx.original.body.clone()), None)
+        };
+
         let mut inv_req = tx.original.clone();
+
+        // Update request body with processed SDP
+        if let Some(body) = processed_body {
+            inv_req.body = body;
+        }
+
         let via = tx
             .endpoint_inner
             .get_via(None, None)
@@ -141,8 +321,8 @@ impl CallModule {
         let key = TransactionKey::from_request(&inv_req, TransactionRole::Client)
             .map_err(|e| anyhow!(e))?;
         info!(
-            "Forwarding INVITE: {} -> {}",
-            caller, target_location.destination
+            "Forwarding INVITE: {} -> {} (type: {:?})",
+            caller, target_location.destination, session_type
         );
 
         let mut inv_tx = Transaction::new_client(key, inv_req, tx.endpoint_inner.clone(), None);
@@ -171,17 +351,23 @@ impl CallModule {
                                         }
                                     };
 
-                                    // Note: We no longer store the caller's destination in the session
-                                    // Each BYE request will query the locator for the current location
-
-                                    let session = Session {
-                                        dialog_id: dialog_id.clone(),
-                                        last_activity: Instant::now(),
-                                        caller: SessionParty::new(tx.original.from_header()?.uri()?.clone()),
-                                        callees: vec![SessionParty::new(callee_uri.clone())],
+                                    let caller_uri = tx.original.from_header()?.uri()?.clone();
+                                    let sip_answer = if resp.body.is_empty() {
+                                        None
+                                    } else {
+                                        Some(String::from_utf8_lossy(&resp.body).to_string())
                                     };
-                                    self.inner.sessions.write().await.insert(dialog_id.clone(), session);
-                                    info!("Session established: {}", dialog_id);
+
+                                    // Use session manager to handle the response
+                                    self.handle_invite_response(
+                                        dialog_id.clone(),
+                                        session_type.clone(),
+                                        caller_uri,
+                                        callee_uri.clone(),
+                                        sdp_offer.clone(),
+                                        sip_answer,
+                                        media_session.clone(),
+                                    ).await?;
                                 }
                                 header_pop!(resp.headers, rsip::Header::Via);
                                 tx.respond(resp).await.map_err(|e| anyhow!(e))?;
@@ -226,33 +412,46 @@ impl CallModule {
             }
         };
 
-        let session = {
+        let media_session = {
             let sessions = self.inner.sessions.read().await;
             sessions.get(&dialog_id).cloned()
         };
-        if let Some(ref s) = session {
-            info!(
-                "Session found for BYE caller: {} callees: {:?}",
-                s.caller.aor,
-                s.callees.iter().map(|p| p.aor.clone()).collect::<Vec<_>>()
-            );
-        }
-        // Determine who is sending the BYE and route to the other party
-        let target_aor = match session {
-            Some(s) => {
-                // Get the URI of the party sending the BYE
-                let bye_sender_uri = tx.original.from_header()?.uri()?;
 
-                // Check if the BYE is from caller or one of the callees
-                if s.caller.aor.user() == bye_sender_uri.user()
-                    && s.caller.aor.host() == bye_sender_uri.host()
+        if let Some(ref ms) = media_session {
+            info!(
+                "Media session found for BYE caller: {} callees: {:?} type: {:?}",
+                ms.session.caller.aor,
+                ms.session
+                    .callees
+                    .iter()
+                    .map(|p| p.aor.clone())
+                    .collect::<Vec<_>>(),
+                ms.session_type
+            );
+
+            // Stop media stream
+            if let Some(ref stream) = ms.media_stream {
+                stream.stop(Some("call_ended".to_string()), Some("sip_bye".to_string()));
+                if let Err(e) = stream.cleanup().await {
+                    error!("Failed to cleanup media stream: {}", e);
+                }
+            }
+
+            // Create and send call record
+            let hangup_reason = Some(CallRecordHangupReason::ByCaller);
+            let call_record = self.create_call_record(ms, hangup_reason);
+            self.send_call_record(call_record).await;
+        }
+
+        // Route BYE to the other party
+        let target_aor = match media_session {
+            Some(ref ms) => {
+                let bye_sender_uri = tx.original.from_header()?.uri()?;
+                if ms.session.caller.aor.user() == bye_sender_uri.user()
+                    && ms.session.caller.aor.host() == bye_sender_uri.host()
                 {
                     // BYE from caller, route to first callee
-                    if let Some(first_callee) = s.callees.first() {
-                        info!(
-                            "BYE from caller {} to callee {}",
-                            s.caller.aor, first_callee.aor
-                        );
+                    if let Some(first_callee) = ms.session.callees.first() {
                         first_callee.aor.clone()
                     } else {
                         return tx
@@ -261,16 +460,12 @@ impl CallModule {
                             .map_err(|e| anyhow!(e));
                     }
                 } else {
-                    // BYE from one of the callees, route to caller
-                    info!(
-                        "BYE from callee {} to caller {}",
-                        bye_sender_uri, s.caller.aor
-                    );
-                    s.caller.aor.clone()
+                    // BYE from callee, route to caller
+                    ms.session.caller.aor.clone()
                 }
             }
             None => {
-                info!("Session not found for BYE: {}", dialog_id);
+                info!("Media session not found for BYE: {}", dialog_id);
                 return tx
                     .reply(rsip::StatusCode::CallTransactionDoesNotExist)
                     .await
@@ -278,11 +473,10 @@ impl CallModule {
             }
         };
 
-        // Query locator to get current location for the target AOR
+        // Lookup target location
         let target_user = target_aor.user().unwrap_or_default();
         let target_realm = target_aor.host().to_string();
 
-        // Try to lookup with the original realm first
         let target_locations = match self
             .inner
             .server
@@ -292,82 +486,15 @@ impl CallModule {
         {
             Ok(locations) => locations,
             Err(_) => {
-                // If not found with original realm, try with configured realms and localhost variants
-                // This handles cases where session AOR contains IP address but user is registered with domain
-                let mut found_locations = None;
-
-                // Try with localhost/127.0.0.1 first (common case for internal users)
-                for local_realm in &["localhost", "127.0.0.1"] {
-                    if let Ok(locations) = self
-                        .inner
-                        .server
-                        .locator
-                        .lookup(&target_user, Some(local_realm))
-                        .await
-                    {
-                        info!(
-                            "Found user {} in realm {} instead of {}",
-                            target_user, local_realm, target_realm
-                        );
-                        found_locations = Some(locations);
-                        break;
-                    }
-                }
-
-                // If still not found, try configured realms
-                if found_locations.is_none() {
-                    if let Some(realms) = &self.inner.config.realms {
-                        for realm in realms {
-                            if let Ok(locations) = self
-                                .inner
-                                .server
-                                .locator
-                                .lookup(&target_user, Some(realm))
-                                .await
-                            {
-                                info!(
-                                    "Found user {} in configured realm {} instead of {}",
-                                    target_user, realm, target_realm
-                                );
-                                found_locations = Some(locations);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Finally try without realm (realm=None)
-                if found_locations.is_none() {
-                    if let Ok(locations) =
-                        self.inner.server.locator.lookup(&target_user, None).await
-                    {
-                        info!(
-                            "Found user {} without realm instead of {}@{}",
-                            target_user, target_user, target_realm
-                        );
-                        found_locations = Some(locations);
-                    }
-                }
-
-                match found_locations {
-                    Some(locations) => locations,
-                    None => {
-                        info!(
-                            "Target user not found for BYE: {}@{} (tried all known realms)",
-                            target_user, target_realm
-                        );
-                        return tx
-                            .reply(rsip::StatusCode::NotFound)
-                            .await
-                            .map_err(|e| anyhow!(e));
-                    }
-                }
+                return tx
+                    .reply(rsip::StatusCode::NotFound)
+                    .await
+                    .map_err(|e| anyhow!(e));
             }
         };
 
-        // Select a location using the load balancing strategy
+        // Forward BYE
         let selected_location = self.select_location_from_multiple(&target_locations, &target_aor);
-        let target_destination = &selected_location.destination;
         let mut bye_req = tx.original.clone();
         let via = tx
             .endpoint_inner
@@ -378,7 +505,7 @@ impl CallModule {
         let key = TransactionKey::from_request(&bye_req, TransactionRole::Client)
             .map_err(|e| anyhow!(e))?;
         let mut bye_tx = Transaction::new_client(key, bye_req, tx.endpoint_inner.clone(), None);
-        bye_tx.destination = Some(target_destination.clone());
+        bye_tx.destination = Some(selected_location.destination.clone());
         bye_tx.send().await.map_err(|e| anyhow!(e))?;
 
         while let Some(msg) = bye_tx.receive().await {
@@ -393,15 +520,13 @@ impl CallModule {
         }
 
         self.inner.sessions.write().await.remove(&dialog_id);
-        info!("Session terminated: {}", dialog_id);
+        info!("Media session terminated: {}", dialog_id);
         Ok(())
     }
 
     async fn handle_options(&self, tx: &mut Transaction) -> Result<()> {
         if let Ok(dialog_id) = DialogId::try_from(&tx.original) {
-            if let Some(session) = self.inner.sessions.write().await.get_mut(&dialog_id) {
-                session.last_activity = Instant::now();
-            }
+            self.update_session_activity(&dialog_id).await;
         }
         tx.reply(rsip::StatusCode::OK)
             .await
@@ -427,20 +552,141 @@ impl CallModule {
     }
 
     /// Select a location from multiple locations using a load balancing strategy
-    /// Currently implements simple round-robin by selecting the first location
-    /// Can be enhanced with more sophisticated strategies
     pub(crate) fn select_location_from_multiple<'a>(
         &self,
         locations: &'a [super::locator::Location],
         _aor: &rsip::Uri,
     ) -> &'a super::locator::Location {
         // For now, just select the first location
-        // TODO: Implement proper load balancing strategies:
-        // - Round-robin
-        // - Least connections
-        // - Random selection
-        // - Priority-based selection
         &locations[0]
+    }
+
+    async fn handle_invite_response(
+        &self,
+        dialog_id: DialogId,
+        session_type: SessionType,
+        caller_uri: rsip::Uri,
+        callee_uri: rsip::Uri,
+        sdp_offer: Option<String>,
+        sip_answer: Option<String>,
+        media_session: Option<Arc<MediaStream>>,
+    ) -> Result<()> {
+        // Create enhanced session
+        let caller_party = SessionParty::new(caller_uri);
+        let callee_party = SessionParty::new(callee_uri);
+        let mut session = Session::new(dialog_id.clone(), caller_party, vec![callee_party]);
+        session.set_established();
+
+        // Set media bridge type
+        match session_type {
+            SessionType::WebRtcToSip => {
+                session.set_media_bridge_type(MediaBridgeType::WebRtcToSip);
+            }
+            SessionType::SipToWebRtc => {
+                session.set_media_bridge_type(MediaBridgeType::SipToWebRtc);
+            }
+            _ => {
+                session.set_media_bridge_type(MediaBridgeType::None);
+            }
+        }
+
+        let enhanced_session = MediaSession {
+            session,
+            media_stream: media_session.clone(),
+            session_type: session_type.clone(),
+            webrtc_sdp: sdp_offer,
+            sip_sdp: sip_answer,
+        };
+
+        // Start media stream service
+        if let Some(ref stream) = enhanced_session.media_stream {
+            let stream_clone = stream.clone();
+            tokio::spawn(async move {
+                if let Err(e) = stream_clone.serve().await {
+                    error!("Media stream error: {}", e);
+                }
+            });
+        }
+
+        self.inner
+            .sessions
+            .write()
+            .await
+            .insert(dialog_id.clone(), enhanced_session);
+        info!(
+            "Enhanced session established: {} (type: {:?})",
+            dialog_id, session_type
+        );
+        Ok(())
+    }
+
+    /// Create a call record from a session
+    fn create_call_record(
+        &self,
+        media_session: &MediaSession,
+        hangup_reason: Option<CallRecordHangupReason>,
+    ) -> CallRecord {
+        let session = &media_session.session;
+
+        // Determine call type based on session type
+        let call_type = match media_session.session_type {
+            SessionType::WebRtcToSip | SessionType::WebRtcToWebRtc => ActiveCallType::Webrtc,
+            SessionType::SipToSip | SessionType::SipToWebRtc => ActiveCallType::Sip,
+        };
+
+        CallRecord {
+            call_type,
+            option: None, // Set by caller if needed
+            call_id: session.dialog_id.to_string(),
+            start_time: session.start_time,
+            ring_time: session.ring_time,
+            answer_time: session.answer_time,
+            end_time: Utc::now(),
+            caller: session.caller.get_user(),
+            callee: session
+                .callees
+                .first()
+                .map(|c| c.get_user())
+                .unwrap_or_default(),
+            status_code: session.status_code,
+            offer: media_session.webrtc_sdp.clone(),
+            answer: media_session.sip_sdp.clone(),
+            hangup_reason,
+            recorder: vec![], // No recorder for proxy sessions
+            extras: None,
+            dump_event_file: None,
+        }
+    }
+
+    /// Send call record if sender is available
+    async fn send_call_record(&self, call_record: CallRecord) {
+        if let Some(ref sender) = self.inner.callrecord_sender {
+            if let Err(e) = sender.send(call_record) {
+                error!("Failed to send call record: {}", e);
+            }
+        }
+    }
+
+    async fn update_session_activity(&self, dialog_id: &DialogId) {
+        if let Some(session) = self.inner.sessions.write().await.get_mut(dialog_id) {
+            session.session.last_activity = std::time::Instant::now();
+        }
+    }
+
+    async fn cleanup_all_sessions(&self) -> Result<()> {
+        let sessions = self.inner.sessions.read().await;
+        for (dialog_id, media_session) in sessions.iter() {
+            if let Some(ref stream) = media_session.media_stream {
+                stream.stop(
+                    Some("proxy_shutdown".to_string()),
+                    Some("system".to_string()),
+                );
+                if let Err(e) = stream.cleanup().await {
+                    error!("Failed to cleanup media stream for {}: {}", dialog_id, e);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -462,12 +708,13 @@ impl ProxyModule for CallModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
-        info!("Call module started");
+        info!("Enhanced call module with WebRTC-SIP bridge started");
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
-        info!("Call module stopped");
+        info!("Enhanced call module stopped, cleaning up media sessions");
+        self.cleanup_all_sessions().await?;
         Ok(())
     }
 
