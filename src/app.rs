@@ -7,7 +7,6 @@ use crate::{
         acl::AclModule,
         auth::AuthModule,
         call::CallModule,
-        cdr::CdrModule,
         mediaproxy::MediaProxyModule,
         registrar::RegistrarModule,
         server::{SipServer, SipServerBuilder},
@@ -170,7 +169,6 @@ pub async fn build_sip_server(
         .register_module("acl", AclModule::create)
         .register_module("auth", AuthModule::create)
         .register_module("registrar", RegistrarModule::create)
-        .register_module("cdr", CdrModule::create)
         .register_module("mediaproxy", MediaProxyModule::create)
         .register_module("call", CallModule::create);
 
