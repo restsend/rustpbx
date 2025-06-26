@@ -14,6 +14,7 @@ pub mod locator_db;
 pub mod presence;
 pub mod registrar;
 pub mod server;
+pub mod session;
 pub mod status;
 #[cfg(test)]
 pub mod tests;
@@ -22,7 +23,6 @@ pub mod user_db;
 pub mod user_http;
 pub mod user_plain;
 pub mod ws;
-
 pub enum ProxyAction {
     Continue,
     Abort,

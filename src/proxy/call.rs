@@ -1,5 +1,6 @@
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
 use crate::config::{MediaProxyMode, ProxyConfig};
+use crate::proxy::session::{Session, SessionParty};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use rsip::headers::UntypedHeader;
@@ -10,47 +11,18 @@ use rsipstack::rsip_ext::RsipHeadersExt;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::select;
-use tokio::time::interval;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-#[derive(Clone, Debug)]
-pub(crate) struct SessionParty {
-    pub aor: rsip::Uri, // Address of Record
-}
-
-impl SessionParty {
-    pub fn new(aor: rsip::Uri) -> Self {
-        Self { aor }
-    }
-
-    pub fn get_user(&self) -> String {
-        self.aor.user().unwrap_or_default().to_string()
-    }
-
-    pub fn get_realm(&self) -> String {
-        self.aor.host().to_string()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Session {
-    pub dialog_id: DialogId,
-    pub last_activity: Instant,
-    pub caller: SessionParty,
-    pub callees: Vec<SessionParty>,
-}
 
 #[derive(Clone)]
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
     server: SipServerRef,
-    pub(crate) sessions: Arc<Mutex<HashMap<DialogId, Session>>>,
-    session_timeout: Duration,
-    options_interval: Duration,
+    pub(crate) sessions: Arc<RwLock<HashMap<DialogId, Session>>>,
 }
 
 #[derive(Clone)]
@@ -65,59 +37,12 @@ impl CallModule {
     }
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
-        let session_timeout = Duration::from_secs(300);
-        let options_interval = Duration::from_secs(30);
-
         let inner = Arc::new(CallModuleInner {
             config,
             server: server.clone(),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            session_timeout,
-            options_interval,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         });
-
-        let module = Self { inner };
-        module.start_session_monitor(server);
-        module
-    }
-
-    fn start_session_monitor(&self, server: SipServerRef) {
-        let inner = self.inner.clone();
-        let endpoint = server.cancel_token.clone();
-
-        tokio::spawn(async move {
-            let mut interval = interval(inner.options_interval);
-            loop {
-                tokio::select! {
-                    _ = endpoint.cancelled() => {
-                        info!("Call module session monitor shutting down");
-                        break;
-                    },
-                    _ = interval.tick() => {
-                        Self::check_sessions(&inner).await;
-                    }
-                }
-            }
-        });
-    }
-
-    pub(crate) async fn check_sessions(inner: &CallModuleInner) {
-        let now = Instant::now();
-        let mut expired_sessions = Vec::new();
-
-        {
-            let sessions = inner.sessions.lock().unwrap();
-            for (dialog_id, session) in sessions.iter() {
-                if now.duration_since(session.last_activity) > inner.session_timeout {
-                    expired_sessions.push(dialog_id.clone());
-                }
-            }
-        }
-
-        for dialog_id in expired_sessions {
-            info!("Session timeout for dialog: {}", dialog_id);
-            inner.sessions.lock().unwrap().remove(&dialog_id);
-        }
+        Self { inner }
     }
 
     /// Check if media proxy is needed based on nat_only configuration
@@ -255,7 +180,7 @@ impl CallModule {
                                         caller: SessionParty::new(tx.original.from_header()?.uri()?.clone()),
                                         callees: vec![SessionParty::new(callee_uri.clone())],
                                     };
-                                    self.inner.sessions.lock().unwrap().insert(dialog_id.clone(), session);
+                                    self.inner.sessions.write().await.insert(dialog_id.clone(), session);
                                     info!("Session established: {}", dialog_id);
                                 }
                                 header_pop!(resp.headers, rsip::Header::Via);
@@ -302,7 +227,7 @@ impl CallModule {
         };
 
         let session = {
-            let sessions = self.inner.sessions.lock().unwrap();
+            let sessions = self.inner.sessions.read().await;
             sessions.get(&dialog_id).cloned()
         };
         if let Some(ref s) = session {
@@ -467,14 +392,14 @@ impl CallModule {
             }
         }
 
-        self.inner.sessions.lock().unwrap().remove(&dialog_id);
+        self.inner.sessions.write().await.remove(&dialog_id);
         info!("Session terminated: {}", dialog_id);
         Ok(())
     }
 
     async fn handle_options(&self, tx: &mut Transaction) -> Result<()> {
         if let Ok(dialog_id) = DialogId::try_from(&tx.original) {
-            if let Some(session) = self.inner.sessions.lock().unwrap().get_mut(&dialog_id) {
+            if let Some(session) = self.inner.sessions.write().await.get_mut(&dialog_id) {
                 session.last_activity = Instant::now();
             }
         }
@@ -486,7 +411,7 @@ impl CallModule {
 
     async fn handle_ack(&self, tx: &mut Transaction) -> Result<()> {
         if let Ok(dialog_id) = DialogId::try_from(&tx.original) {
-            let sessions = self.inner.sessions.lock().unwrap();
+            let sessions = self.inner.sessions.write().await;
             if sessions.contains_key(&dialog_id) {
                 info!("ACK received for dialog: {}", dialog_id);
             }
