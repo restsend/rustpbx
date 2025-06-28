@@ -47,8 +47,8 @@ impl InvitationHandler for WebhookInvitationHandler {
         let callee = invite_request.to_header()?.uri()?.to_string();
 
         let payload = json!({
-            "dialogId": dialog_id,
-            "createdAt": create_time,
+            "dialog_id": dialog_id,
+            "created_at": create_time,
             "caller": caller,
             "callee": callee,
             "event": "invite",

@@ -1,14 +1,8 @@
+use super::mediaproxy::{MediaProxy, MediaProxyConfig, SipNatBridge, WebRtcToRtpBridge};
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
 use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::handler::call::ActiveCallType;
-use crate::media::{
-    codecs::CodecType,
-    engine::StreamEngine,
-    negotiate::prefer_audio_codec,
-    stream::{MediaStream, MediaStreamBuilder},
-    track::{webrtc::WebrtcTrack, TrackConfig},
-};
 use crate::proxy::session::{MediaBridgeType, MediaSession, Session, SessionParty, SessionType};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -21,21 +15,25 @@ use rsipstack::rsip_ext::RsipHeadersExt;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::select;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use webrtc::sdp::SessionDescription;
+
+/// Information about active media bridges
+#[derive(Clone)]
+enum BridgeInfo {
+    WebRtcToRtp(WebRtcToRtpBridge),
+    SipNat(SipNatBridge),
+}
 
 #[derive(Clone)]
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
     server: SipServerRef,
     pub(crate) sessions: Arc<RwLock<HashMap<DialogId, MediaSession>>>,
-    pub(crate) stream_engine: Option<Arc<StreamEngine>>,
+    pub(crate) media_proxy: Option<MediaProxy>,
     callrecord_sender: Option<CallRecordSender>,
 }
 
@@ -46,31 +44,35 @@ pub struct CallModule {
 
 impl CallModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = CallModule::new(config, server, None);
+        let module = CallModule::new(config, server);
         Ok(Box::new(module))
     }
 
-    pub fn create_with_stream_engine(
-        server: SipServerRef,
-        config: Arc<ProxyConfig>,
-        stream_engine: Arc<StreamEngine>,
-    ) -> Result<Box<dyn ProxyModule>> {
-        let module = CallModule::new(config, server, Some(stream_engine));
-        Ok(Box::new(module))
-    }
-
-    pub fn new(
-        config: Arc<ProxyConfig>,
-        server: SipServerRef,
-        stream_engine: Option<Arc<StreamEngine>>,
-    ) -> Self {
+    pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
+
+        // Create MediaProxy if media proxy is enabled
+        let media_proxy = if config.media_proxy.mode != MediaProxyMode::None {
+            let local_ip = crate::net_tool::get_first_non_loopback_interface()
+                .unwrap_or_else(|_| "127.0.0.1".parse().unwrap());
+
+            let media_config = MediaProxyConfig {
+                local_ip,
+                external_ip: None, // Could be configured from config in the future
+                rtp_port_range: (20000, 30000), // Could be configured from config
+                rtcp_mux: true,
+                stun_server: None, // Could be configured from config
+            };
+            Some(MediaProxy::new(media_config))
+        } else {
+            None
+        };
 
         let inner = Arc::new(CallModuleInner {
             config,
             server: server.clone(),
             sessions,
-            stream_engine,
+            media_proxy,
             callrecord_sender: server.callrecord_sender.clone(),
         });
         Self { inner }
@@ -82,92 +84,6 @@ impl CallModule {
             || sdp.contains("a=ice-pwd:")
             || sdp.contains("a=fingerprint:")
             || sdp.contains("a=setup:")
-    }
-
-    /// Create media stream for WebRTC to SIP conversion
-    async fn create_webrtc_to_sip_media_stream(
-        &self,
-        session_id: &str,
-        webrtc_sdp: &str,
-        cancel_token: CancellationToken,
-    ) -> Result<Arc<MediaStream>> {
-        let (event_sender, _event_receiver) = tokio::sync::broadcast::channel(100);
-
-        // Create media stream
-        let media_stream = MediaStreamBuilder::new(event_sender.clone())
-            .with_id(session_id.to_string())
-            .with_cancel_token(cancel_token.clone())
-            .build();
-
-        let media_stream = Arc::new(media_stream);
-
-        // Parse WebRTC SDP
-        let mut reader = Cursor::new(webrtc_sdp.as_bytes());
-        let _webrtc_session_desc = SessionDescription::unmarshal(&mut reader)?;
-
-        // Create WebRTC track to receive audio
-        let track_config = TrackConfig {
-            codec: CodecType::PCMU,
-            ptime: Duration::from_millis(20),
-            samplerate: 16000,
-            channels: 1,
-            server_side_track_id: format!("{}_webrtc", session_id),
-        };
-
-        let webrtc_track = WebrtcTrack::new(
-            cancel_token.clone(),
-            session_id.to_string(),
-            track_config.clone(),
-        );
-
-        // Create RTP track to send to SIP
-        let rtp_track_builder = crate::media::track::rtp::RtpTrackBuilder::new(
-            format!("{}_rtp", session_id),
-            track_config,
-        )
-        .with_cancel_token(cancel_token);
-
-        let rtp_track = rtp_track_builder.build().await?;
-
-        // Set tracks in media stream
-        media_stream.update_track(Box::new(webrtc_track)).await;
-        media_stream.update_track(Box::new(rtp_track)).await;
-
-        Ok(media_stream)
-    }
-
-    /// Create SDP answer, converting WebRTC offer to SIP compatible answer
-    async fn create_sip_compatible_answer(&self, webrtc_offer: &str) -> Result<String> {
-        // Parse WebRTC offer
-        let mut reader = Cursor::new(webrtc_offer.as_bytes());
-        let offer_sdp = SessionDescription::unmarshal(&mut reader)?;
-
-        // Select appropriate audio codec
-        let preferred_codec = prefer_audio_codec(&offer_sdp).unwrap_or(CodecType::PCMU);
-
-        // Create simplified SIP SDP answer
-        let local_ip = crate::net_tool::get_first_non_loopback_interface()?;
-        let rtp_port = 20000; // Dynamic port allocation
-
-        let answer_sdp = format!(
-            "v=0\r\n\
-             o=rustpbx 0 0 IN IP4 {}\r\n\
-             s=rustpbx\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP {}\r\n\
-             a=rtpmap:{} {}/{}\r\n\
-             a=sendrecv\r\n",
-            local_ip,
-            local_ip,
-            rtp_port,
-            preferred_codec.payload_type(),
-            preferred_codec.payload_type(),
-            preferred_codec.mime_type(),
-            preferred_codec.clock_rate()
-        );
-
-        Ok(answer_sdp)
     }
 
     /// Check if media proxy is needed based on nat_only configuration
@@ -268,37 +184,84 @@ impl CallModule {
             info!("Media proxy required for NAT traversal");
         }
 
-        // Handle WebRTC to SIP conversion
-        let (processed_body, media_session) = if let SessionType::WebRtcToSip = session_type {
-            if let Some(ref webrtc_sdp) = sdp_offer {
-                info!("Processing WebRTC to SIP conversion");
+        // Handle media bridging based on session type and proxy requirements
+        let session_id = format!("{}_{}", caller, callee);
+        let cancel_token = CancellationToken::new();
 
-                // Create media stream for conversion
-                let cancel_token = CancellationToken::new();
-                let session_id = format!("{}_{}", caller, callee);
+        let (processed_body, bridge_info) = match (&session_type, should_proxy_media) {
+            (SessionType::WebRtcToSip, _) => {
+                if let Some(ref webrtc_sdp) = sdp_offer {
+                    info!("Processing WebRTC to SIP conversion using MediaProxy");
 
-                if let Some(ref _stream_engine) = self.inner.stream_engine {
-                    let media_stream = self
-                        .create_webrtc_to_sip_media_stream(
-                            &session_id,
-                            webrtc_sdp,
-                            cancel_token.clone(),
+                    if let Some(ref media_proxy) = self.inner.media_proxy {
+                        let bridge = media_proxy
+                            .create_webrtc_to_rtp_bridge(
+                                session_id.clone(),
+                                webrtc_sdp,
+                                cancel_token.clone(),
+                            )
+                            .await?;
+
+                        // Generate SIP compatible SDP
+                        let sip_sdp = bridge.generate_sip_sdp_answer(webrtc_sdp)?;
+
+                        // Start the bridge
+                        bridge.start().await?;
+
+                        (
+                            Some(sip_sdp.as_bytes().to_vec()),
+                            Some(BridgeInfo::WebRtcToRtp(bridge)),
                         )
-                        .await?;
-
-                    // Create SIP compatible SDP
-                    let sip_sdp = self.create_sip_compatible_answer(webrtc_sdp).await?;
-
-                    (Some(sip_sdp.as_bytes().to_vec()), Some(media_stream))
+                    } else {
+                        warn!("MediaProxy not available for WebRTC to SIP conversion");
+                        (Some(tx.original.body.clone()), None)
+                    }
                 } else {
-                    warn!("StreamEngine not available for WebRTC to SIP conversion");
                     (Some(tx.original.body.clone()), None)
                 }
-            } else {
+            }
+            (SessionType::SipToSip, true) => {
+                if let Some(ref offer_sdp) = sdp_offer {
+                    info!("Processing SIP to SIP NAT conversion using MediaProxy");
+
+                    if let Some(ref media_proxy) = self.inner.media_proxy {
+                        let bridge = media_proxy
+                            .create_sip_nat_bridge(
+                                session_id.clone(),
+                                offer_sdp,
+                                cancel_token.clone(),
+                            )
+                            .await?;
+
+                        // Set caller's remote SDP (original INVITE SDP)
+                        if let Err(e) = bridge.set_caller_remote_sdp(offer_sdp).await {
+                            error!("Failed to set caller remote SDP for SIP NAT bridge: {}", e);
+                        } else {
+                            info!("Successfully set caller remote SDP for SIP NAT bridge");
+                        }
+
+                        // Generate modified SDP for callee
+                        let callee_sdp = bridge.generate_callee_invite_sdp(offer_sdp)?;
+
+                        // Start the bridge
+                        bridge.start().await?;
+
+                        (
+                            Some(callee_sdp.as_bytes().to_vec()),
+                            Some(BridgeInfo::SipNat(bridge)),
+                        )
+                    } else {
+                        warn!("MediaProxy not available for SIP NAT conversion");
+                        (Some(tx.original.body.clone()), None)
+                    }
+                } else {
+                    (Some(tx.original.body.clone()), None)
+                }
+            }
+            _ => {
+                // No media proxy needed for this call
                 (Some(tx.original.body.clone()), None)
             }
-        } else {
-            (Some(tx.original.body.clone()), None)
         };
 
         let mut inv_req = tx.original.clone();
@@ -358,6 +321,27 @@ impl CallModule {
                                         Some(String::from_utf8_lossy(&resp.body).to_string())
                                     };
 
+                                    // Set remote SDP for bridge if we have bridge info and SIP answer
+                                    if let (Some(ref bridge), Some(ref answer)) = (&bridge_info, &sip_answer) {
+                                        match bridge {
+                                            BridgeInfo::WebRtcToRtp(webrtc_bridge) => {
+                                                if let Err(e) = webrtc_bridge.set_sip_answer_sdp(answer).await {
+                                                    error!("Failed to set SIP answer SDP for WebRTC bridge: {}", e);
+                                                } else {
+                                                    info!("Successfully set SIP answer SDP for WebRTC bridge");
+                                                }
+                                            }
+                                            BridgeInfo::SipNat(nat_bridge) => {
+                                                // Set callee's answer SDP for SIP NAT bridge
+                                                if let Err(e) = nat_bridge.set_callee_answer_sdp(answer).await {
+                                                    error!("Failed to set callee answer SDP for SIP NAT bridge: {}", e);
+                                                } else {
+                                                    info!("Successfully set callee answer SDP for SIP NAT bridge");
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Use session manager to handle the response
                                     self.handle_invite_response(
                                         dialog_id.clone(),
@@ -366,7 +350,7 @@ impl CallModule {
                                         callee_uri.clone(),
                                         sdp_offer.clone(),
                                         sip_answer,
-                                        media_session.clone(),
+                                        bridge_info.clone(),
                                     ).await?;
                                 }
                                 header_pop!(resp.headers, rsip::Header::Via);
@@ -569,7 +553,7 @@ impl CallModule {
         callee_uri: rsip::Uri,
         sdp_offer: Option<String>,
         sip_answer: Option<String>,
-        media_session: Option<Arc<MediaStream>>,
+        bridge_info: Option<BridgeInfo>,
     ) -> Result<()> {
         // Create enhanced session
         let caller_party = SessionParty::new(caller_uri);
@@ -590,15 +574,22 @@ impl CallModule {
             }
         }
 
+        // Extract media stream from bridge info
+        let media_stream = match &bridge_info {
+            Some(BridgeInfo::WebRtcToRtp(bridge)) => Some(bridge.media_stream.clone()),
+            Some(BridgeInfo::SipNat(bridge)) => Some(bridge.media_stream.clone()),
+            None => None,
+        };
+
         let enhanced_session = MediaSession {
             session,
-            media_stream: media_session.clone(),
+            media_stream: media_stream.clone(),
             session_type: session_type.clone(),
             webrtc_sdp: sdp_offer,
             sip_sdp: sip_answer,
         };
 
-        // Start media stream service
+        // Start media stream service (bridge should already be started)
         if let Some(ref stream) = enhanced_session.media_stream {
             let stream_clone = stream.clone();
             tokio::spawn(async move {

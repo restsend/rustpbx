@@ -43,25 +43,8 @@ fn create_test_session(dialog_id: DialogId, caller_uri: &str, callee_uri: &str) 
 }
 
 #[tokio::test]
-async fn test_call_module_basics() {
-    let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone(), None);
-
-    assert_eq!(_module.name(), "call");
-}
-
-#[tokio::test]
-async fn test_call_module_creation() {
-    let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone(), None);
-
-    assert_eq!(_module.name(), "call");
-}
-
-#[tokio::test]
 async fn test_locator_integration() {
-    let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone(), None);
+    let (server, _) = create_test_server().await;
 
     // Register a user in the locator
     let location = super::super::locator::Location {
@@ -98,7 +81,7 @@ async fn test_media_proxy_nat_only() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     // Create a request with SDP containing private IP
     let mut request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
@@ -123,7 +106,7 @@ async fn test_media_proxy_none_mode() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
@@ -140,7 +123,7 @@ async fn test_media_proxy_all_mode() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
 
@@ -153,7 +136,7 @@ async fn test_media_proxy_all_mode() {
 #[tokio::test]
 async fn test_options_handling() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     // Test that OPTIONS method is in allowed methods
     assert!(module.allow_methods().contains(&rsip::Method::Options));
@@ -223,7 +206,7 @@ async fn test_external_realm_forwarding() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let _module = CallModule::new(config, server, None);
+    let _module = CallModule::new(config, server);
 
     // Test realm comparison logic
     let local_realm = "localhost";
@@ -243,7 +226,7 @@ async fn test_local_realm_invite() {
     let (server, config) =
         crate::proxy::tests::common::create_test_server_with_config(config).await;
 
-    let _module = CallModule::new(config, server.clone(), None);
+    let _module = CallModule::new(config, server.clone());
 
     // Register a user in the locator
     let location = super::super::locator::Location {
@@ -277,7 +260,7 @@ async fn test_local_realm_invite() {
 #[tokio::test]
 async fn test_session_management() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
@@ -313,7 +296,7 @@ async fn test_session_management() {
 #[tokio::test]
 async fn test_module_lifecycle() {
     let (server, config) = create_test_server().await;
-    let mut module = CallModule::new(config, server, None);
+    let mut module = CallModule::new(config, server);
 
     let start_result = module.on_start().await;
     assert!(start_result.is_ok());
@@ -325,7 +308,7 @@ async fn test_module_lifecycle() {
 #[tokio::test]
 async fn test_dialog_activity_update() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
@@ -372,7 +355,7 @@ async fn test_dialog_activity_update() {
 #[tokio::test]
 async fn test_concurrent_session_access() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server, None);
+    let module = CallModule::new(config, server);
 
     let dialog_id = create_test_dialog_id("test-call-id", "from-tag", "to-tag");
 
@@ -430,7 +413,7 @@ async fn test_concurrent_session_access() {
 #[tokio::test]
 async fn test_bye_routing_and_locator_lookup() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone(), None);
+    let module = CallModule::new(config, server.clone());
 
     // Create a test dialog and session
     let dialog_id = create_test_dialog_id("test-call-id", "caller-tag", "callee-tag");
@@ -525,7 +508,7 @@ async fn test_bye_routing_and_locator_lookup() {
 #[tokio::test]
 async fn test_multiple_locations_per_aor() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone(), None);
+    let _module = CallModule::new(config, server.clone());
 
     // Register the same user with multiple locations (simulating multiple devices)
     let alice_location1 = super::super::locator::Location {
@@ -574,7 +557,7 @@ async fn test_session_party_aor_methods() {
 #[tokio::test]
 async fn test_location_selection_strategy() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone(), None);
+    let module = CallModule::new(config, server.clone());
 
     // Create multiple locations for the same user
     let location1 = super::super::locator::Location {
@@ -614,7 +597,7 @@ async fn test_location_selection_strategy() {
 #[tokio::test]
 async fn test_bye_with_dynamic_location_lookup() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone(), None);
+    let module = CallModule::new(config, server.clone());
 
     // Create a session
     let dialog_id = create_test_dialog_id("test-dynamic", "caller-tag", "callee-tag");
@@ -732,7 +715,7 @@ async fn test_bye_with_dynamic_location_lookup() {
 #[tokio::test]
 async fn test_webrtc_sdp_detection() {
     let (server, config) = create_test_server().await;
-    let module = CallModule::new(config, server.clone(), None);
+    let module = CallModule::new(config, server.clone());
 
     // Test WebRTC SDP detection
     let webrtc_sdp = "v=0\r\n\
@@ -759,7 +742,7 @@ async fn test_webrtc_sdp_detection() {
 #[tokio::test]
 async fn test_enhanced_session_structure() {
     let (server, config) = create_test_server().await;
-    let _module = CallModule::new(config, server.clone(), None);
+    let _module = CallModule::new(config, server.clone());
 
     let dialog_id = create_test_dialog_id("test-session", "caller-tag", "callee-tag");
 

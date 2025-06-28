@@ -264,9 +264,8 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
             test_result
         }
         // Timeout handling
-        _ = tokio::time::sleep(Duration::from_secs(30)) => {
-            warn!("Test timeout");
-            Ok(())
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            panic!("test timeout");
         }
     };
 
@@ -277,5 +276,6 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
     // Give some time for cleanup to complete
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    test_result
+    test_result.expect("test failed");
+    Ok(())
 }
