@@ -3,19 +3,55 @@ use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 
-pub struct VoiceActivityDetector {
+pub struct SileroVad {
+    config: VADOption,
+    buffer: PcmBuf,
+    last_timestamp: u64,
+    chunk_size: usize,
     session: Session,
-    sample_rate: u32,
     state: ndarray::Array3<f32>,
 }
 
-impl VoiceActivityDetector {
+const MODEL: &[u8] = include_bytes!("./silero_vad.onnx");
+
+impl SileroVad {
+    pub fn new(config: VADOption) -> Result<Self> {
+        // Create detector with default settings for 16kHz audio
+        // Using window size according to Python implementation: 512 samples for 16kHz, 256 for 8kHz
+        let chunk_size = match config.samplerate {
+            8000 => 256,
+            16000 => 512,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported sample rate: {}",
+                    config.samplerate
+                ))
+            }
+        };
+
+        // Create new session instance
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?
+            .commit_from_memory(MODEL)?;
+
+        Ok(Self {
+            session,
+            state: ndarray::Array3::<f32>::zeros((2, 1, 128)),
+            config,
+            buffer: Vec::new(),
+            chunk_size,
+            last_timestamp: 0,
+        })
+    }
+
     pub fn predict(&mut self, samples: &[i16]) -> Result<f32, ort::Error> {
         let mut input = ndarray::Array2::<f32>::zeros((1, samples.len()));
         for (i, sample) in samples.iter().enumerate() {
             input[[0, i]] = *sample as f32 / 32768.0;
         }
-        let sample_rate = ndarray::arr1::<i64>(&[self.sample_rate as i64]);
+        let sample_rate = ndarray::arr1::<i64>(&[self.config.samplerate as i64]);
 
         let input_value = ort::value::Value::from_array(input)?;
         let sr_value = ort::value::Value::from_array(sample_rate)?;
@@ -54,56 +90,6 @@ impl VoiceActivityDetector {
     }
 }
 
-pub struct SileroVad {
-    detector: VoiceActivityDetector,
-    config: VADOption,
-    buffer: PcmBuf,
-    last_timestamp: u64,
-    chunk_size: usize,
-}
-
-const MODEL: &[u8] = include_bytes!("./silero_vad.onnx");
-
-impl SileroVad {
-    pub fn new(config: VADOption) -> Result<Self> {
-        // Create detector with default settings for 16kHz audio
-        // Using window size according to Python implementation: 512 samples for 16kHz, 256 for 8kHz
-        let chunk_size = match config.samplerate {
-            8000 => 256,
-            16000 => 512,
-            32000 => 1024,
-            48000 => 1536,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unsupported sample rate: {}",
-                    config.samplerate
-                ))
-            }
-        };
-
-        // Create new session instance
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .with_inter_threads(1)?
-            .commit_from_memory(MODEL)?;
-
-        let detector = VoiceActivityDetector {
-            session,
-            sample_rate: config.samplerate,
-            state: ndarray::Array3::<f32>::zeros((2, 1, 128)),
-        };
-
-        Ok(Self {
-            detector,
-            config,
-            buffer: Vec::new(),
-            chunk_size,
-            last_timestamp: 0,
-        })
-    }
-}
-
 impl VadEngine for SileroVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
         let samples = match &frame.samples {
@@ -115,7 +101,7 @@ impl VadEngine for SileroVad {
 
         while self.buffer.len() >= self.chunk_size {
             let chunk: Vec<i16> = self.buffer.drain(..self.chunk_size).collect();
-            let score = match self.detector.predict(&chunk) {
+            let score = match self.predict(&chunk) {
                 Ok(score) => score,
                 Err(_) => return Some((false, frame.timestamp)), // Return non-voice on error
             };
