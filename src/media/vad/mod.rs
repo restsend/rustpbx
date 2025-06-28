@@ -8,6 +8,8 @@ use std::cell::RefCell;
 use tokio_util::sync::CancellationToken;
 #[cfg(feature = "vad_silero")]
 mod silero;
+#[cfg(feature = "vad_ten")]
+mod ten;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "vad_webrtc")]
@@ -63,6 +65,9 @@ pub enum VadType {
     #[serde(rename = "silero")]
     #[cfg(feature = "vad_silero")]
     Silero,
+    #[serde(rename = "ten")]
+    #[cfg(feature = "vad_ten")]
+    Ten,
     #[serde(rename = "other")]
     Other(String),
 }
@@ -78,6 +83,8 @@ impl<'de> Deserialize<'de> for VadType {
             "webrtc" => Ok(VadType::WebRTC),
             #[cfg(feature = "vad_silero")]
             "silero" => Ok(VadType::Silero),
+            #[cfg(feature = "vad_ten")]
+            "ten" => Ok(VadType::Ten),
             _ => Ok(VadType::Other(value)),
         }
     }
@@ -89,7 +96,9 @@ impl std::fmt::Display for VadType {
             #[cfg(feature = "vad_webrtc")]
             VadType::WebRTC => write!(f, "webrtc"),
             #[cfg(feature = "vad_silero")]
-            VadType::Silero => write!(f, "voiceapi"),
+            VadType::Silero => write!(f, "silero"),
+            #[cfg(feature = "vad_ten")]
+            VadType::Ten => write!(f, "ten"),
             VadType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -229,6 +238,18 @@ impl VadProcessor {
     ) -> Result<Box<dyn Processor>> {
         let vad: Box<dyn VadEngine> = match option.r#type {
             VadType::Silero => Box::new(silero::SileroVad::new(option.clone())?),
+            _ => Box::new(NopVad::new()?),
+        };
+        Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
+    }
+    #[cfg(feature = "vad_ten")]
+    pub fn create_ten(
+        _token: CancellationToken,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Box<dyn Processor>> {
+        let vad: Box<dyn VadEngine> = match option.r#type {
+            VadType::Ten => Box::new(ten::TenVad::new(option.clone())?),
             _ => Box::new(NopVad::new()?),
         };
         Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
