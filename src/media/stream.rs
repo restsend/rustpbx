@@ -178,6 +178,40 @@ impl MediaStream {
             }
         }
     }
+
+    /// Set remote SDP for a specific track by track ID
+    pub async fn set_track_remote_sdp(&self, track_id: &TrackId, sdp: &str) -> Result<()> {
+        let mut tracks = self.tracks.lock().await;
+        if let Some(track) = tracks.get_mut(track_id) {
+            track.set_remote_sdp(sdp)?;
+            info!("Successfully set remote SDP for track: {}", track_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Track not found: {}", track_id))
+        }
+    }
+
+    /// Set remote SDP for all RTP tracks in the stream
+    pub async fn set_rtp_tracks_remote_sdp(&self, sdp: &str) -> Result<()> {
+        let mut tracks = self.tracks.lock().await;
+        let mut updated_count = 0;
+
+        for (track_id, track) in tracks.iter_mut() {
+            // Try to set remote SDP for all tracks
+            // Only RTP tracks will actually process it, others will ignore
+            if track.set_remote_sdp(sdp).is_ok() {
+                updated_count += 1;
+                info!("Set remote SDP for track: {}", track_id);
+            }
+        }
+
+        if updated_count > 0 {
+            info!("Successfully set remote SDP for {} tracks", updated_count);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("No tracks were updated with remote SDP"))
+        }
+    }
 }
 
 #[derive(Clone)]

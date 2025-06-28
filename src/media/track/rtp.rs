@@ -941,6 +941,11 @@ impl Track for RtpTrack {
         }
         Ok(())
     }
+
+    /// Implementation of Track trait's set_remote_sdp method
+    fn set_remote_sdp(&mut self, sdp: &str) -> Result<()> {
+        self.set_remote_description(sdp)
+    }
 }
 
 #[cfg(test)]

@@ -162,6 +162,7 @@ pub enum CallRecordConfig {
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(PartialEq)]
 pub enum MediaProxyMode {
     /// Do not handle media proxy
     None,

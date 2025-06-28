@@ -1,6 +1,7 @@
 use super::codecs::{self, CodecType};
 use webrtc::sdp::SessionDescription;
 
+#[derive(Clone)]
 pub struct PeerMedia {
     pub rtp_addr: String,
     pub rtp_port: u16,
