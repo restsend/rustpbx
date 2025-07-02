@@ -161,17 +161,20 @@ impl ProxyModule for RegistrarModule {
         }
 
         let mut headers = vec![contact.into(), rsip::Header::Expires(expires.into())];
-
-        if !tx.endpoint_inner.allows.is_empty() {
-            headers.push(rsip::Header::Allow(
-                tx.endpoint_inner
-                    .allows
-                    .iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<String>>()
-                    .join(",")
-                    .into(),
-            ));
+        match tx.endpoint_inner.allows.lock().unwrap().as_ref() {
+            Some(allows) => {
+                if !allows.is_empty() {
+                    headers.push(rsip::Header::Allow(
+                        allows
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<String>>()
+                            .join(",")
+                            .into(),
+                    ));
+                }
+            }
+            None => {}
         }
         tx.reply_with(rsip::StatusCode::OK, headers, None)
             .await

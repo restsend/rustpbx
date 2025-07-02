@@ -227,7 +227,7 @@ pub async fn run(state: AppState) -> Result<()> {
                 "Registering WebSocket handler to sip server: {}",
                 ws_handler
             );
-            let endpoint_ref = sip_server.endpoint.inner.clone();
+            let endpoint_ref = sip_server.inner.endpoint.inner.clone();
             let token = sip_server.inner.cancel_token.clone();
             router = router.route(
                 ws_handler,

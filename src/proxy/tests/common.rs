@@ -11,6 +11,7 @@ use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::channel::ChannelConnection;
 use rsipstack::transport::{SipAddr, TransportLayer};
+use rsipstack::EndpointBuilder;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -38,7 +39,7 @@ pub async fn create_test_server_with_config(
     let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(config);
-
+    let endpoint = EndpointBuilder::new().build();
     // Create server inner directly
     let server_inner = Arc::new(SipServerInner {
         config: config.clone(),
@@ -46,6 +47,7 @@ pub async fn create_test_server_with_config(
         user_backend: Arc::new(user_backend),
         locator: Arc::new(locator),
         callrecord_sender: None,
+        endpoint,
     });
 
     // Add test users

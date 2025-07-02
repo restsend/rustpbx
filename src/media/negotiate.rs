@@ -1,6 +1,4 @@
 use super::codecs::{self, CodecType};
-use anyhow::Result;
-use tracing::{debug, warn};
 use webrtc::sdp::SessionDescription;
 
 #[derive(Clone)]
