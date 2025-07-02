@@ -54,14 +54,8 @@ pub async fn new_rtp_track_with_pending_call(
 
     let mut rtp_track = rtp_track.build().await?;
     let initial_request = pending_call.dialog.initial_request();
-
-    let offer = if !initial_request.body.is_empty() {
-        String::from_utf8(initial_request.body.clone())?
-    } else {
-        return Err(anyhow::anyhow!("no SDP offer in incoming INVITE"));
-    };
-
-    match rtp_track.set_remote_description(offer.as_str()) {
+    let offer = String::from_utf8_lossy(&initial_request.body);
+    match rtp_track.set_remote_description(&offer) {
         Ok(_) => (),
         Err(e) => {
             error!("failed to set remote description: {}", e);
@@ -182,8 +176,8 @@ pub async fn new_rtp_track_with_sip(
         Ok((dialog_id, answer)) => {
             match answer {
                 Some(answer) => {
-                    let answer = String::from_utf8(answer)?;
-                    match rtp_track.set_remote_description(answer.as_str()) {
+                    let answer = String::from_utf8_lossy(&answer);
+                    match rtp_track.set_remote_description(&answer) {
                         Ok(_) => (),
                         Err(e) => {
                             error!("sip_call:failed to set remote description: {}", e);

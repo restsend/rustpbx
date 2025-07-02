@@ -23,8 +23,18 @@ pub async fn create_test_server() -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
 
 /// Creates a test SIP server with custom config
 pub async fn create_test_server_with_config(
-    config: ProxyConfig,
+    mut config: ProxyConfig,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
+    // Add example.com to the allowed realms for testing
+    if config.realms.is_none() {
+        config.realms = Some(vec![]);
+    }
+    config
+        .realms
+        .as_mut()
+        .unwrap()
+        .push("example.com".to_string());
+
     let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(config);
@@ -233,9 +243,102 @@ pub fn create_proxy_auth_request_with_nonce(
     username: &str,
     realm: &str,
     password: Option<&str>,
-    _nonce: &str,
+    nonce: &str,
 ) -> rsip::Request {
-    create_auth_request(method, username, realm, password.unwrap_or(""))
+    let host_with_port = rsip::HostWithPort {
+        host: realm.parse().unwrap(),
+        port: Some(5060.into()),
+    };
+
+    let uri = rsip::Uri {
+        scheme: Some(rsip::Scheme::Sip),
+        auth: Some(rsip::Auth {
+            user: username.to_string(),
+            password: None,
+        }),
+        host_with_port: host_with_port.clone(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let from = rsip::typed::From {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+    };
+
+    let to = rsip::typed::To {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![],
+    };
+
+    let via = rsip::headers::Via::new(format!(
+        "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
+        realm,
+        random_text(8)
+    ));
+
+    let call_id = rsip::headers::CallId::new(random_text(16));
+    let cseq = rsip::headers::typed::CSeq {
+        seq: 1u32.into(),
+        method,
+    };
+
+    // Create contact with the same user and host
+    let contact_uri = rsip::Uri {
+        scheme: Some(rsip::Scheme::Sip),
+        auth: Some(rsip::Auth {
+            user: username.to_string(),
+            password: password.map(|p| p.to_string()),
+        }),
+        host_with_port: host_with_port.clone(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let contact = rsip::typed::Contact {
+        display_name: None,
+        uri: contact_uri,
+        params: vec![],
+    };
+
+    let mut headers = vec![
+        from.into(),
+        to.into(),
+        via.into(),
+        call_id.into(),
+        cseq.into(),
+        contact.into(),
+    ];
+
+    // Add Proxy-Authorization header if password is provided
+    if let Some(password) = password {
+        let digest = DigestGenerator {
+            username,
+            password,
+            algorithm: rsip::headers::auth::Algorithm::Md5,
+            nonce,
+            method: &method,
+            uri: &uri,
+            realm,
+            qop: None,
+        };
+
+        let proxy_auth_header = rsip::headers::ProxyAuthorization::new(format!(
+            "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            username, realm, nonce, uri.to_string(), digest.compute()
+        ));
+        headers.push(proxy_auth_header.into());
+    }
+
+    rsip::Request {
+        method,
+        uri: uri.clone(),
+        version: rsip::Version::V2,
+        headers: headers.into(),
+        body: vec![],
+    }
 }
 
 /// Extracts nonce from Proxy-Authenticate header

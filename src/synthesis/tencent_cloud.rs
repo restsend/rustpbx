@@ -99,19 +99,20 @@ impl TencentCloudTtsClient {
     }
 
     // Generate WebSocket URL for real-time TTS
-    fn generate_websocket_url(&self, text: &str) -> Result<String> {
-        let secret_id = self.option.secret_id.clone().unwrap_or_default();
-        let secret_key = self.option.secret_key.clone().unwrap_or_default();
-        let app_id = self.option.app_id.clone().unwrap_or_default();
+    fn generate_websocket_url(
+        &self,
+        text: &str,
+        option: Option<SynthesisOption>,
+    ) -> Result<String> {
+        let option = self.option.merge_with(option);
+        let secret_id = option.secret_id.clone().unwrap_or_default();
+        let secret_key = option.secret_key.clone().unwrap_or_default();
+        let app_id = option.app_id.clone().unwrap_or_default();
 
-        let volume = self.option.volume.unwrap_or(0);
-        let speed = self.option.speed.unwrap_or(0.0);
-        let codec = self
-            .option
-            .codec
-            .clone()
-            .unwrap_or_else(|| "pcm".to_string());
-        let sample_rate = self.option.samplerate;
+        let volume = option.volume.unwrap_or(0);
+        let speed = option.speed.unwrap_or(0.0);
+        let codec = option.codec.clone().unwrap_or_else(|| "pcm".to_string());
+        let sample_rate = option.samplerate.unwrap_or(16000);
         let session_id = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().timestamp() as u64;
         let expired = timestamp + 24 * 60 * 60; // 24 hours expiration
@@ -121,11 +122,10 @@ impl TencentCloudTtsClient {
         let speed_str = speed.to_string();
         let timestamp_str = timestamp.to_string();
         let volume_str = volume.to_string();
-        let voice_type = self
-            .option
+        let voice_type = option
             .speaker
             .clone()
-            .unwrap_or_else(|| "301030".to_string());
+            .unwrap_or_else(|| "601000".to_string());
         let mut query_params = vec![
             ("Action", "TextToStreamAudioWS"),
             ("AppId", app_id.as_str()),
@@ -181,8 +181,9 @@ impl TencentCloudTtsClient {
     async fn synthesize_text_stream(
         &self,
         text: &str,
+        option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
-        let url = self.generate_websocket_url(text)?;
+        let url = self.generate_websocket_url(text, option)?;
         debug!("connecting to WebSocket URL: {}", url);
 
         // Create a request with custom headers
@@ -278,8 +279,9 @@ impl SynthesisClient for TencentCloudTtsClient {
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
+        option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
         // Use the new WebSocket streaming implementation
-        self.synthesize_text_stream(text).await
+        self.synthesize_text_stream(text, option).await
     }
 }

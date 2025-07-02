@@ -221,6 +221,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
             auto_hangup: Some(true),
             streaming: None,
             end_of_stream: None,
+            option: None,
         };
 
         let tts_cmd_str = serde_json::to_string(&tts_command)?;

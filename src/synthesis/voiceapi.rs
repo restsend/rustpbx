@@ -47,9 +47,10 @@ impl VoiceApiTtsClient {
     async fn ws_synthesize<'a>(
         &'a self,
         text: &'a str,
+        option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
-        let endpoint = self
-            .option
+        let option = self.option.merge_with(option);
+        let endpoint = option
             .endpoint
             .clone()
             .unwrap_or("ws://localhost:8080".to_string());
@@ -159,7 +160,8 @@ impl SynthesisClient for VoiceApiTtsClient {
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
+        option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
-        self.ws_synthesize(text).await
+        self.ws_synthesize(text, option).await
     }
 }

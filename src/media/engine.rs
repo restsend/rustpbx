@@ -12,11 +12,12 @@ use crate::{
     event::EventSender,
     handler::{CallOption, EouOption},
     synthesis::{
-        SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
+        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient,
+        VoiceApiTtsClient,
     },
     transcription::{
-        TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionOption, TranscriptionType,
-        VoiceApiAsrClientBuilder,
+        AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
+        TranscriptionOption, TranscriptionType, VoiceApiAsrClientBuilder,
     },
     TrackId,
 };
@@ -78,6 +79,8 @@ impl Default for StreamEngine {
         engine.register_vad(VadType::Silero, VadProcessor::create_silero);
         #[cfg(feature = "vad_webrtc")]
         engine.register_vad(VadType::WebRTC, VadProcessor::create_webrtc);
+        #[cfg(feature = "vad_ten")]
+        engine.register_vad(VadType::Ten, VadProcessor::create_ten);
 
         engine.register_asr(
             TranscriptionType::TencentCloud,
@@ -87,6 +90,11 @@ impl Default for StreamEngine {
             TranscriptionType::VoiceApi,
             Box::new(VoiceApiAsrClientBuilder::create),
         );
+        engine.register_asr(
+            TranscriptionType::Aliyun,
+            Box::new(AliyunAsrClientBuilder::create),
+        );
+        engine.register_tts(SynthesisType::Aliyun, AliyunTtsClient::create);
         engine.register_tts(SynthesisType::TencentCloud, TencentCloudTtsClient::create);
         engine.register_tts(SynthesisType::VoiceApi, VoiceApiTtsClient::create);
         engine

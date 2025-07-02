@@ -16,6 +16,7 @@ use crate::{
             Track, TrackConfig,
         },
     },
+    synthesis::SynthesisOption,
     TrackId,
 };
 use anyhow::Result;
@@ -265,6 +266,7 @@ impl ActiveCall {
                 auto_hangup,
                 streaming,
                 end_of_stream,
+                option,
             } => {
                 self.do_tts(
                     text,
@@ -273,6 +275,7 @@ impl ActiveCall {
                     auto_hangup,
                     streaming,
                     end_of_stream,
+                    option,
                 )
                 .await
             }
@@ -303,6 +306,7 @@ impl ActiveCall {
         auto_hangup: Option<bool>,
         streaming: Option<bool>,
         end_of_stream: Option<bool>,
+        option: Option<SynthesisOption>,
     ) -> Result<()> {
         let tts_option = match self.option.tts {
             Some(ref option) => option,
@@ -318,6 +322,7 @@ impl ActiveCall {
             play_id: play_id.clone(),
             streaming,
             end_of_stream,
+            option,
         };
 
         info!(

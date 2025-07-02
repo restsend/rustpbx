@@ -126,9 +126,6 @@ unsafe impl Sync for VadProcessor {}
 
 pub trait VadEngine: Send + Sync + Any {
     fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)>;
-    fn get_last_score(&self) -> Option<f32> {
-        None
-    }
 }
 
 impl VadProcessorInner {
@@ -292,9 +289,5 @@ impl NopVad {
 impl VadEngine for NopVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
         Some((false, frame.timestamp))
-    }
-
-    fn get_last_score(&self) -> Option<f32> {
-        None
     }
 }

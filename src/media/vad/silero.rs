@@ -34,6 +34,7 @@ impl SileroVad {
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .with_inter_threads(1)?
+            .with_log_level(ort::logging::LogLevel::Warning)?
             .commit_from_memory(MODEL)?;
 
         Ok(Self {
@@ -98,7 +99,6 @@ impl VadEngine for SileroVad {
         };
 
         self.buffer.extend_from_slice(samples);
-
         while self.buffer.len() >= self.chunk_size {
             let chunk: Vec<i16> = self.buffer.drain(..self.chunk_size).collect();
             let score = match self.predict(&chunk) {

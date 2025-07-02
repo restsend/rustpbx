@@ -136,14 +136,22 @@ pub enum Command {
         speaker: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "playId")]
+        /// If the play_id is the same, it will not interrupt the previous playback
         play_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "autoHangup")]
+        /// If auto_hangup is true, it means the call will be hung up automatically after the TTS playback is finished
         auto_hangup: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        /// If streaming is true, it means the input text is streaming text,
+        /// and end_of_stream needs to be used to determine if it's finished,
+        /// equivalent to LLM's streaming output to TTS synthesis
         streaming: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        /// If end_of_stream is true, it means the input text is finished
         end_of_stream: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        option: Option<SynthesisOption>,
     },
     Play {
         url: String,

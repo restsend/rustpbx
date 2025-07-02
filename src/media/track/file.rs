@@ -548,7 +548,7 @@ impl Track for FileTrack {
         let packet_duration_ms = self.config.ptime.as_millis() as u32;
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
-
+        let start_time = crate::get_timestamp();
         // Spawn async task to handle file streaming
         tokio::spawn(async move {
             // Determine file extension
@@ -587,6 +587,7 @@ impl Track for FileTrack {
                         .send(SessionEvent::TrackEnd {
                             track_id: id,
                             timestamp: crate::get_timestamp(),
+                            duration: crate::get_timestamp() - start_time,
                         })
                         .ok();
                     return Err(e);
@@ -625,6 +626,7 @@ impl Track for FileTrack {
                 .send(SessionEvent::TrackEnd {
                     track_id: id,
                     timestamp: crate::get_timestamp(),
+                    duration: crate::get_timestamp() - start_time,
                 })
                 .ok();
             Ok::<(), anyhow::Error>(())

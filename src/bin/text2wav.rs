@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
 
-            match tts_client.synthesize(&segment.text).await {
+            match tts_client.synthesize(&segment.text, None).await {
                 Ok(mut audio_stream) => {
                     let mut total_bytes = 0;
                     while let Some(chunk_result) = audio_stream.next().await {

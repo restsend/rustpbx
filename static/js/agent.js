@@ -15,10 +15,10 @@ function mainApp() {
             vad: {
                 type: 'silero',
                 enabled: false,
-                voiceThreshold: 0.6,
-                ratio: 0.5,
-                speechPadding: 160,
-                silencePadding: 300,
+                voiceThreshold: 0.5,
+                ratio: 0.35,
+                speechPadding: 250,
+                silencePadding: 100,
             },
             recording: {
                 enabled: false,
@@ -787,6 +787,7 @@ function mainApp() {
                     voiceThreshold: this.config.vad.type == 'silero' ? parseFloat(this.config.vad.voiceThreshold) : undefined,
                     ratio: parseFloat(this.config.vad.ratio),
                     speechPadding: parseInt(this.config.vad.speechPadding),
+                    silencePadding: parseInt(this.config.vad.silencePadding),
                 } : undefined;
                 let denoise = this.config.denoise.enabled ? true : undefined;
 

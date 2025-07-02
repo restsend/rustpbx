@@ -156,6 +156,7 @@ impl WebrtcTrack {
     ) -> Result<RTCSessionDescription> {
         let media_engine = Self::get_media_engine()?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
+
         let config = RTCConfiguration {
             ice_servers: Self::get_ice_servers().await,
             ..Default::default()
@@ -272,7 +273,6 @@ impl WebrtcTrack {
         peer_connection.set_remote_description(remote_desc).await?;
 
         let answer = peer_connection.create_answer(None).await?;
-
         let mut gather_complete = peer_connection.gathering_complete_promise().await;
         peer_connection.set_local_description(answer).await?;
         select! {
@@ -288,6 +288,8 @@ impl WebrtcTrack {
             .local_description()
             .await
             .ok_or(anyhow::anyhow!("Failed to get local description"))?;
+
+        info!("Final WebRTC answer from PeerConnection: {}", answer.sdp);
         Ok(answer)
     }
 }
@@ -310,8 +312,9 @@ impl Track for WebrtcTrack {
     }
 
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String> {
-        let answer = self.setup_webrtc_track(offer, timeout).await?;
-        Ok(answer.sdp)
+        self.setup_webrtc_track(offer, timeout)
+            .await
+            .map(|answer| answer.sdp)
     }
 
     async fn start(
@@ -324,12 +327,13 @@ impl Track for WebrtcTrack {
         let token_clone = self.cancel_token.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
-
+        let start_time = crate::get_timestamp();
         tokio::spawn(async move {
             token_clone.cancelled().await;
             let _ = event_sender_clone.send(SessionEvent::TrackEnd {
                 track_id,
                 timestamp: crate::get_timestamp(),
+                duration: crate::get_timestamp() - start_time,
             });
         });
 

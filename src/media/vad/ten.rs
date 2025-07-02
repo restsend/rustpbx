@@ -2,6 +2,7 @@ use super::{VADOption, VadEngine};
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use tracing::debug;
 
 pub struct TenVad {
     config: VADOption,
@@ -138,6 +139,7 @@ impl TenVad {
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(1)?
             .with_inter_threads(1)?
+            .with_log_level(ort::logging::LogLevel::Warning)?
             .commit_from_memory(MODEL)?;
 
         // Model initialization successful
@@ -155,6 +157,7 @@ impl TenVad {
         // Generate Hann window
         let window = Self::generate_hann_window();
 
+        debug!("TenVad created with chunk size: {}", chunk_size);
         Ok(Self {
             session,
             hidden_states,
@@ -418,9 +421,5 @@ impl VadEngine for TenVad {
         }
 
         None
-    }
-
-    fn get_last_score(&self) -> Option<f32> {
-        self.last_score
     }
 }

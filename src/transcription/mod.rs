@@ -1,13 +1,17 @@
-use std::collections::HashMap;
-
 use crate::AudioFrame;
 use crate::Sample;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
+
+mod aliyun;
 mod tencent_cloud;
 mod voiceapi;
+
+pub use aliyun::AliyunAsrClient;
+pub use aliyun::AliyunAsrClientBuilder;
 pub use tencent_cloud::TencentCloudAsrClient;
 pub use tencent_cloud::TencentCloudAsrClientBuilder;
 pub use voiceapi::VoiceApiAsrClient;
@@ -19,6 +23,8 @@ pub enum TranscriptionType {
     TencentCloud,
     #[serde(rename = "voiceapi")]
     VoiceApi,
+    #[serde(rename = "aliyun")]
+    Aliyun,
     Other(String),
 }
 
@@ -44,6 +50,7 @@ impl std::fmt::Display for TranscriptionType {
         match self {
             TranscriptionType::TencentCloud => write!(f, "tencent"),
             TranscriptionType::VoiceApi => write!(f, "voiceapi"),
+            TranscriptionType::Aliyun => write!(f, "aliyun"),
             TranscriptionType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -58,6 +65,7 @@ impl<'de> Deserialize<'de> for TranscriptionType {
         match value.as_str() {
             "tencent" => Ok(TranscriptionType::TencentCloud),
             "voiceapi" => Ok(TranscriptionType::VoiceApi),
+            "aliyun" => Ok(TranscriptionType::Aliyun),
             _ => Ok(TranscriptionType::Other(value)),
         }
     }
@@ -100,6 +108,11 @@ impl TranscriptionOption {
                 // Set the host from environment variable if not already set
                 if self.endpoint.is_none() {
                     self.endpoint = std::env::var("VOICEAPI_ENDPOINT").ok();
+                }
+            }
+            Some(TranscriptionType::Aliyun) => {
+                if self.secret_key.is_none() {
+                    self.secret_key = std::env::var("DASHSCOPE_API_KEY").ok();
                 }
             }
             _ => {}

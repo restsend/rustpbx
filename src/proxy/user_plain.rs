@@ -77,10 +77,10 @@ impl UserBackend for PlainTextBackend {
 
         let mut user = match self.users.lock().unwrap().get(&key) {
             Some(user) => user.clone(),
-            None => return Err(anyhow::anyhow!("User not found")),
+            None => return Err(anyhow::anyhow!("missing user: {}", key)),
         };
         if !user.enabled {
-            return Err(anyhow::anyhow!("User is disabled"));
+            return Err(anyhow::anyhow!("User is disabled: {}", key));
         }
         user.realm = realm.map(|r| r.to_string());
         Ok(user)

@@ -164,13 +164,6 @@ impl TencentCloudAsrClientBuilder {
 }
 
 impl TencentCloudAsrClient {
-    pub fn new() -> Self {
-        Self {
-            option: TranscriptionOption::default(),
-            audio_tx: mpsc::unbounded_channel().0,
-        }
-    }
-
     fn generate_signature(
         &self,
         secret_key: &str,
@@ -300,6 +293,7 @@ impl TencentCloudAsrClient {
         token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let begin_time = crate::get_timestamp();
         let start_time = Arc::new(AtomicU64::new(0));
         let start_time_ref = start_time.clone();
         let recv_loop = async move {
@@ -327,8 +321,8 @@ impl TencentCloudAsrClient {
                                             index: result.index,
                                             text: result.voice_text_str,
                                             timestamp: crate::get_timestamp(),
-                                            start_time: Some(result.start_time),
-                                            end_time: Some(result.end_time),
+                                            start_time: Some(begin_time + result.start_time as u64),
+                                            end_time: Some(begin_time + result.end_time as u64),
                                         }
                                     } else {
                                         SessionEvent::AsrDelta {
@@ -336,8 +330,8 @@ impl TencentCloudAsrClient {
                                             index: result.index,
                                             text: result.voice_text_str,
                                             timestamp: crate::get_timestamp(),
-                                            start_time: Some(result.start_time),
-                                            end_time: Some(result.end_time),
+                                            start_time: Some(begin_time + result.start_time as u64),
+                                            end_time: Some(begin_time + result.end_time as u64),
                                         }
                                     };
                                     event_sender.send(event).ok();

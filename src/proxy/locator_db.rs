@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
 use sea_orm::{entity::prelude::*, ActiveModelTrait, Database, Set};
 pub use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{integer, pk_auto, string, timestamp};
+use sea_orm_migration::schema::{boolean, integer, pk_auto, string, timestamp};
 use std::time::{Instant, SystemTime};
 use tracing::{error, info};
 
@@ -22,6 +22,7 @@ pub struct Model {
     pub last_modified: i64,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+    pub supports_webrtc: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -55,6 +56,7 @@ impl MigrationTrait for Migration {
                     .col(integer(Column::LastModified).not_null())
                     .col(timestamp(Column::CreatedAt).not_null())
                     .col(timestamp(Column::UpdatedAt).not_null())
+                    .col(boolean(Column::SupportsWebrtc).not_null().default(false))
                     .to_owned(),
             )
             .await?;
@@ -172,6 +174,7 @@ impl Locator for DbLocator {
                 active_model.transport = Set(transport);
                 active_model.last_modified = Set(now);
                 active_model.updated_at = Set(chrono::Utc::now().naive_utc());
+                active_model.supports_webrtc = Set(location.supports_webrtc);
 
                 active_model
                     .update(&self.db)
@@ -193,6 +196,7 @@ impl Locator for DbLocator {
                 active_model.last_modified = Set(now);
                 active_model.created_at = Set(now_dt);
                 active_model.updated_at = Set(now_dt);
+                active_model.supports_webrtc = Set(location.supports_webrtc);
 
                 // Insert without specifying id
                 active_model
@@ -230,7 +234,7 @@ impl Locator for DbLocator {
             .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
         if models.is_empty() {
-            return Err(anyhow::anyhow!("User not found"));
+            return Err(anyhow::anyhow!("missing user: {}", username));
         }
 
         let mut locations = Vec::new();
@@ -244,6 +248,7 @@ impl Locator for DbLocator {
                 "UDP" => rsip::transport::Transport::Udp,
                 "TCP" => rsip::transport::Transport::Tcp,
                 "TLS" => rsip::transport::Transport::Tls,
+                "WS" => rsip::transport::Transport::Ws,
                 "WSS" => rsip::transport::Transport::Wss,
                 _ => rsip::transport::Transport::Udp, // Default to UDP
             };
@@ -262,6 +267,7 @@ impl Locator for DbLocator {
                 expires: model.expires as u32,
                 destination,
                 last_modified: Instant::now(), // We can't store Instant in DB, so create a new one
+                supports_webrtc: model.supports_webrtc,
             });
         }
 

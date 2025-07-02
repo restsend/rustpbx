@@ -825,7 +825,7 @@ impl Track for RtpTrack {
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
         let ssrc_cname = self.ssrc_cname.clone();
-
+        let start_time = crate::get_timestamp();
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
@@ -860,6 +860,7 @@ impl Track for RtpTrack {
                 .send(SessionEvent::TrackEnd {
                     track_id,
                     timestamp: crate::get_timestamp(),
+                    duration: crate::get_timestamp() - start_time,
                 })
                 .ok();
         });

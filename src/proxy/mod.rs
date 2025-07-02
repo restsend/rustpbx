@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 pub mod acl;
 pub mod auth;
+pub mod bridge;
 pub mod call;
 pub mod locator;
 pub mod locator_db;
-pub mod mediaproxy;
 pub mod presence;
 pub mod registrar;
 pub mod server;
@@ -24,6 +24,7 @@ pub mod user_db;
 pub mod user_http;
 pub mod user_plain;
 pub mod ws;
+#[derive(Debug)]
 pub enum ProxyAction {
     Continue,
     Abort,

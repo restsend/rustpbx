@@ -3,8 +3,11 @@ use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, pin::Pin};
+mod aliyun;
 mod tencent_cloud;
 mod voiceapi;
+
+pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
@@ -14,6 +17,8 @@ pub enum SynthesisType {
     TencentCloud,
     #[serde(rename = "voiceapi")]
     VoiceApi,
+    #[serde(rename = "aliyun")]
+    Aliyun,
     #[serde(rename = "other")]
     Other(String),
 }
@@ -23,6 +28,7 @@ impl std::fmt::Display for SynthesisType {
         match self {
             SynthesisType::TencentCloud => write!(f, "tencent"),
             SynthesisType::VoiceApi => write!(f, "voiceapi"),
+            SynthesisType::Aliyun => write!(f, "aliyun"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -37,6 +43,7 @@ impl<'de> Deserialize<'de> for SynthesisType {
         match value.as_str() {
             "tencent" => Ok(SynthesisType::TencentCloud),
             "voiceapi" => Ok(SynthesisType::VoiceApi),
+            "aliyun" => Ok(SynthesisType::Aliyun),
             _ => Ok(SynthesisType::Other(value)),
         }
     }
@@ -48,7 +55,7 @@ mod tests;
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct SynthesisOption {
-    pub samplerate: i32,
+    pub samplerate: Option<i32>,
     pub provider: Option<SynthesisType>,
     pub speed: Option<f32>,
     pub app_id: Option<String>,
@@ -65,6 +72,42 @@ pub struct SynthesisOption {
     pub extra: Option<HashMap<String, String>>,
 }
 
+impl SynthesisOption {
+    pub fn merge_with(&self, option: Option<SynthesisOption>) -> Self {
+        let mut merged = self.clone();
+        match option {
+            Some(option) => {
+                if option.samplerate.is_some() {
+                    merged.samplerate = option.samplerate;
+                }
+                if option.speed.is_some() {
+                    merged.speed = option.speed;
+                }
+                if option.volume.is_some() {
+                    merged.volume = option.volume;
+                }
+                if option.speaker.is_some() {
+                    merged.speaker = option.speaker;
+                }
+                if option.codec.is_some() {
+                    merged.codec = option.codec;
+                }
+                if option.subtitle.is_some() {
+                    merged.subtitle = option.subtitle;
+                }
+                if option.emotion.is_some() {
+                    merged.emotion = option.emotion;
+                }
+                if option.endpoint.is_some() {
+                    merged.endpoint = option.endpoint;
+                }
+            }
+            None => {}
+        }
+        merged
+    }
+}
+
 #[async_trait]
 pub trait SynthesisClient: Send + Sync {
     fn provider(&self) -> SynthesisType;
@@ -72,13 +115,14 @@ pub trait SynthesisClient: Send + Sync {
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
+        option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>>;
 }
 
 impl Default for SynthesisOption {
     fn default() -> Self {
         Self {
-            samplerate: 16000,
+            samplerate: Some(16000),
             provider: None,
             speed: Some(1.0),
             app_id: None,
@@ -123,6 +167,11 @@ impl SynthesisOption {
                         .or_else(|| Some("0".to_string()));
                 }
             }
+            Some(SynthesisType::Aliyun) => {
+                if self.secret_key.is_none() {
+                    self.secret_key = std::env::var("DASHSCOPE_API_KEY").ok();
+                }
+            }
             _ => {}
         }
         self
@@ -143,6 +192,10 @@ pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn Synthe
         }
         SynthesisType::VoiceApi => {
             let client = VoiceApiTtsClient::new(option);
+            Ok(Box::new(client))
+        }
+        SynthesisType::Aliyun => {
+            let client = AliyunTtsClient::new(option);
             Ok(Box::new(client))
         }
         SynthesisType::Other(provider) => {

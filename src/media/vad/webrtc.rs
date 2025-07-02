@@ -1,6 +1,7 @@
 use super::VadEngine;
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
+use tracing::debug;
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
 pub struct WebRtcVad {
@@ -15,6 +16,7 @@ impl WebRtcVad {
             _ => return Err(anyhow::anyhow!("Unsupported sample rate: {}", samplerate)),
         };
 
+        debug!("WebRtcVad created with sample rate: {}", samplerate);
         Ok(Self {
             vad: Vad::new_with_rate_and_mode(sample_rate, VadMode::VeryAggressive),
         })
@@ -34,9 +36,5 @@ impl VadEngine for WebRtcVad {
             self.vad.is_voice_segment(samples).unwrap_or(false),
             frame.timestamp,
         ))
-    }
-
-    fn get_last_score(&self) -> Option<f32> {
-        None // WebRTC VAD doesn't provide probability scores
     }
 }
