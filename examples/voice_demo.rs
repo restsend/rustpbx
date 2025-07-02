@@ -436,7 +436,8 @@ async fn main() -> Result<()> {
                                 if let Ok(LlmContent::Final(text)) = content {
                                     info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
                                     let st = Instant::now();
-                                    if let Ok(mut audio_stream) = tts_client.synthesize(&text).await
+                                    if let Ok(mut audio_stream) =
+                                        tts_client.synthesize(&text, None).await
                                     {
                                         let mut total_bytes = 0;
                                         while let Some(Ok(chunk)) = audio_stream.next().await {

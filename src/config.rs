@@ -228,6 +228,13 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
+    pub fn normalize_realm(realm: &str) -> &str {
+        if realm.is_empty() || realm == "*" || realm == "127.0.0.1" || realm == "::1" {
+            "localhost"
+        } else {
+            realm
+        }
+    }
     pub fn is_same_realm(&self, callee_realm: &str) -> bool {
         match callee_realm {
             "localhost" | "127.0.0.1" | "::1" => true,

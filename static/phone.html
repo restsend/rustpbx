@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIP Phone</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input,
+        button {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        button {
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .call-controls {
+            display: none;
+        }
+
+        .call-controls.active {
+            display: block;
+        }
+
+        .logs {
+            height: 300px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 10px;
+            border: 1px solid #ddd;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        .incoming-call {
+            display: none;
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 20px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+
+        .incoming-call.active {
+            display: block;
+        }
+
+        .call-info {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>SIP Phone</h1>
+
+        <div class="section">
+            <h3>Registration</h3>
+            <div class="form-group">
+                <label for="server">SIP Server (WebSocket URL):</label>
+                <input type="text" id="server" value="ws://localhost:8080/ws" placeholder="ws://localhost:8080/ws">
+            </div>
+            <div class="form-group">
+                <label for="username">Username:</label>
+                <input type="text" id="username" value="alice" placeholder="alice">
+            </div>
+            <div class="form-group">
+                <label for="password">Password:</label>
+                <input type="password" id="password" value="123456" placeholder="password">
+            </div>
+            <div class="form-group">
+                <label for="displayName">Display Name:</label>
+                <input type="text" id="displayName" value="Alice" placeholder="Alice">
+            </div>
+            <button id="registerBtn">Register</button>
+            <button id="unregisterBtn" disabled>Unregister</button>
+            <div id="registrationStatus"></div>
+        </div>
+
+        <div class="section">
+            <h3>Make Call</h3>
+            <div class="form-group">
+                <label for="callTarget">Call To:</label>
+                <input type="text" id="callTarget" value="bob" placeholder="bob">
+            </div>
+            <button id="callBtn" disabled>Call</button>
+
+            <div class="call-controls" id="callControls">
+                <div class="call-info" id="callInfo"></div>
+                <button id="hangupBtn">Hang Up</button>
+                <button id="muteBtn">Mute</button>
+                <button id="holdBtn">Hold</button>
+            </div>
+        </div>
+
+        <div class="incoming-call" id="incomingCall">
+            <h3>Incoming Call</h3>
+            <div id="callerInfo"></div>
+            <button id="answerBtn">Answer</button>
+            <button id="rejectBtn">Reject</button>
+        </div>
+
+        <div class="section">
+            <h3>Audio</h3>
+            <audio id="remoteAudio" autoplay></audio>
+            <audio id="localAudio" muted autoplay></audio>
+        </div>
+
+        <div class="section">
+            <h3>Logs</h3>
+            <div class="logs" id="logs"></div>
+            <button onclick="clearLogs()">Clear Logs</button>
+        </div>
+    </div>
+
+    <script src="//cdnjs.cloudflare.com/ajax/libs/sip.js/0.17.1/sip.min.js"></script>
+    <script>
+        let userAgent = null;
+        let registerer = null;
+        let currentSession = null;
+        let isMuted = false;
+        let isOnHold = false;
+
+        // DOM elements
+        const serverInput = document.getElementById('server');
+        const usernameInput = document.getElementById('username');
+        const passwordInput = document.getElementById('password');
+        const displayNameInput = document.getElementById('displayName');
+        const registerBtn = document.getElementById('registerBtn');
+        const unregisterBtn = document.getElementById('unregisterBtn');
+        const registrationStatus = document.getElementById('registrationStatus');
+        const callTargetInput = document.getElementById('callTarget');
+        const callBtn = document.getElementById('callBtn');
+        const callControls = document.getElementById('callControls');
+        const callInfo = document.getElementById('callInfo');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const muteBtn = document.getElementById('muteBtn');
+        const holdBtn = document.getElementById('holdBtn');
+        const incomingCallDiv = document.getElementById('incomingCall');
+        const callerInfo = document.getElementById('callerInfo');
+        const answerBtn = document.getElementById('answerBtn');
+        const rejectBtn = document.getElementById('rejectBtn');
+        const remoteAudio = document.getElementById('remoteAudio');
+        const localAudio = document.getElementById('localAudio');
+        const logs = document.getElementById('logs');
+
+        // Event listeners
+        registerBtn.addEventListener('click', register);
+        unregisterBtn.addEventListener('click', unregister);
+        callBtn.addEventListener('click', makeCall);
+        hangupBtn.addEventListener('click', hangup);
+        muteBtn.addEventListener('click', toggleMute);
+        holdBtn.addEventListener('click', toggleHold);
+        answerBtn.addEventListener('click', answerCall);
+        rejectBtn.addEventListener('click', rejectCall);
+
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logs.innerHTML += `[${timestamp}] ${message}\n`;
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLogs() {
+            logs.innerHTML = '';
+        }
+
+        function showStatus(message, type = 'info') {
+            registrationStatus.className = `status ${type}`;
+            registrationStatus.textContent = message;
+        }
+
+        function setupMediaElements(session) {
+            try {
+                if (!session.sessionDescriptionHandler || !session.sessionDescriptionHandler.peerConnection) {
+                    log('Session description handler not available yet');
+                    return;
+                }
+
+                const peerConnection = session.sessionDescriptionHandler.peerConnection;
+
+                const remoteStream = new MediaStream();
+                peerConnection.getReceivers().forEach(receiver => {
+                    if (receiver.track && receiver.track.kind === 'audio') {
+                        remoteStream.addTrack(receiver.track);
+                        log('Added remote audio track');
+                    }
+                });
+
+                if (remoteStream.getTracks().length > 0) {
+                    remoteAudio.srcObject = remoteStream;
+                    log('Remote audio stream set');
+                } else {
+                    log('No remote audio tracks found');
+                }
+
+                const senders = peerConnection.getSenders();
+                if (senders.length > 0) {
+                    const localStream = new MediaStream();
+                    senders.forEach(sender => {
+                        if (sender.track && sender.track.kind === 'audio') {
+                            localStream.addTrack(sender.track);
+                            log('Added local audio track');
+                        }
+                    });
+
+                    if (localStream.getTracks().length > 0) {
+                        localAudio.srcObject = localStream;
+                        log('Local audio stream set');
+                    }
+                }
+            } catch (error) {
+                log(`Error setting up media elements: ${error.message}`);
+            }
+        }
+
+        function register() {
+            const server = serverInput.value;
+            const username = usernameInput.value;
+            const password = passwordInput.value;
+            const displayName = displayNameInput.value;
+
+            if (!server || !username) {
+                showStatus('Please enter server and username', 'error');
+                return;
+            }
+
+            log('Attempting to register...');
+
+            const uri = SIP.UserAgent.makeURI(`sip:${username}@${server.replace('ws://', '').replace('wss://', '').split('/')[0]}`);
+
+            const userAgentOptions = {
+                uri: uri,
+                transportOptions: {
+                    server: server
+                },
+                authorizationPassword: password,
+                displayName: displayName,
+                delegate: {
+                    onConnect: () => {
+                        log('Connected to server');
+                        showStatus('Connected', 'success');
+                    },
+                    onDisconnect: (error) => {
+                        log(`Disconnected: ${error ? error.message : 'Unknown error'}`);
+                        showStatus('Disconnected', 'error');
+                        resetUI();
+                    },
+                    onInvite: (invitation) => {
+                        log(`Incoming call from ${invitation.remoteIdentity.displayName || invitation.remoteIdentity.uri.user}`);
+                        showIncomingCall(invitation);
+                    }
+                }
+            };
+
+            userAgent = new SIP.UserAgent(userAgentOptions);
+            const registererOptions = {};
+            registerer = new SIP.Registerer(userAgent, registererOptions);
+
+            registerer.stateChange.addListener((newState) => {
+                log(`Registration state: ${newState}`);
+                switch (newState) {
+                    case SIP.RegistererState.Registered:
+                        showStatus('Registered', 'success');
+                        registerBtn.disabled = true;
+                        unregisterBtn.disabled = false;
+                        callBtn.disabled = false;
+                        break;
+                    case SIP.RegistererState.Unregistered:
+                        showStatus('Unregistered', 'info');
+                        break;
+                    case SIP.RegistererState.Terminated:
+                        showStatus('Registration terminated', 'error');
+                        resetUI();
+                        break;
+                }
+            });
+
+            userAgent.start().then(() => {
+                log('UserAgent started, attempting registration...');
+                return registerer.register();
+            }).then(() => {
+                log('Registration request sent');
+            }).catch((error) => {
+                log(`Registration failed: ${error.message}`);
+                showStatus('Registration failed', 'error');
+                userAgent = null;
+            });
+        }
+
+        function unregister() {
+            if (userAgent) {
+                log('Unregistering...');
+                if (currentSession) {
+                    hangup();
+                }
+
+                userAgent.stop().then(() => {
+                    log('UserAgent stopped successfully');
+                    showStatus('Unregistered', 'info');
+                    resetUI();
+                }).catch((error) => {
+                    log(`Unregister failed: ${error.message}`);
+                    resetUI();
+                });
+            }
+        }
+
+        function resetUI() {
+            registerBtn.disabled = false;
+            unregisterBtn.disabled = true;
+            callBtn.disabled = true;
+            callControls.classList.remove('active');
+            incomingCallDiv.classList.remove('active');
+            currentSession = null;
+            registerer = null;
+            userAgent = null;
+        }
+
+        function makeCall() {
+            const target = callTargetInput.value;
+            if (!target || !userAgent) {
+                log('Please enter a call target and ensure you are registered');
+                return;
+            }
+
+            const targetURI = SIP.UserAgent.makeURI(`sip:${target}@${serverInput.value.replace('ws://', '').replace('wss://', '').split('/')[0]}`);
+
+            const inviteOptions = {
+                sessionDescriptionHandlerOptions: {
+                    constraints: {
+                        audio: true,
+                        video: false
+                    }
+                }
+            };
+
+            const inviter = new SIP.Inviter(userAgent, targetURI, inviteOptions);
+            log(`Making call to ${targetURI}...`);
+
+            inviter.delegate = {
+                onBye: (bye) => {
+                    log('Call ended by remote party');
+                    endCall();
+                },
+                onSessionDescriptionHandler: () => {
+                    setupMediaElements(inviter);
+                }
+            };
+
+            inviter.stateChange.addListener((newState) => {
+                log(`Call state: ${newState}`);
+
+                switch (newState) {
+                    case SIP.SessionState.Initial:
+                        log('Call initializing...');
+                        break;
+                    case SIP.SessionState.Establishing:
+                        callInfo.textContent = `Calling ${target}...`;
+                        callControls.classList.add('active');
+                        break;
+                    case SIP.SessionState.Established:
+                        callInfo.textContent = `Connected to ${target}`;
+                        setupMediaElements(inviter);
+                        break;
+                    case SIP.SessionState.Terminating:
+                        log('Call terminating...');
+                        break;
+                    case SIP.SessionState.Terminated:
+                        log('Call terminated');
+                        endCall();
+                        break;
+                }
+            });
+
+            inviter.invite().then(() => {
+                currentSession = inviter;
+                log('Invite sent successfully');
+            }).catch((error) => {
+                log(`Failed to send invite: ${error.message}`);
+                endCall();
+            });
+        }
+
+        function showIncomingCall(invitation) {
+            currentSession = invitation;
+            const caller = invitation.remoteIdentity.displayName || invitation.remoteIdentity.uri.user;
+            callerInfo.textContent = `Incoming call from: ${caller}`;
+            incomingCallDiv.classList.add('active');
+
+            invitation.delegate = {
+                onBye: (bye) => {
+                    log('Call ended by remote party');
+                    endCall();
+                },
+                onSessionDescriptionHandler: () => {
+                    setupMediaElements(invitation);
+                }
+            };
+
+            invitation.stateChange.addListener((newState) => {
+                log(`Incoming call state: ${newState}`);
+
+                switch (newState) {
+                    case SIP.SessionState.Established:
+                        incomingCallDiv.classList.remove('active');
+                        callInfo.textContent = `Connected to ${caller}`;
+                        callControls.classList.add('active');
+                        setupMediaElements(invitation);
+                        break;
+                    case SIP.SessionState.Terminated:
+                        endCall();
+                        break;
+                }
+            });
+        }
+
+        function answerCall() {
+            if (currentSession) {
+                log('Answering call...');
+                const options = {
+                    sessionDescriptionHandlerOptions: {
+                        constraints: {
+                            audio: true,
+                            video: false
+                        }
+                    }
+                };
+                currentSession.accept(options);
+            }
+        }
+
+        function rejectCall() {
+            if (currentSession) {
+                log('Rejecting call...');
+                currentSession.reject();
+                incomingCallDiv.classList.remove('active');
+                currentSession = null;
+            }
+        }
+
+        function hangup() {
+            if (currentSession) {
+                log('Hanging up...');
+                try {
+                    switch (currentSession.state) {
+                        case SIP.SessionState.Initial:
+                        case SIP.SessionState.Establishing:
+                            if (currentSession instanceof SIP.Inviter) {
+                                currentSession.cancel();
+                            } else {
+                                currentSession.reject();
+                            }
+                            break;
+                        case SIP.SessionState.Established:
+                            currentSession.bye();
+                            break;
+                        default:
+                            log(`Cannot hangup call in state: ${currentSession.state}`);
+                            break;
+                    }
+                } catch (error) {
+                    log(`Error hanging up: ${error.message}`);
+                    endCall();
+                }
+            }
+        }
+
+        function endCall() {
+            callControls.classList.remove('active');
+            incomingCallDiv.classList.remove('active');
+            currentSession = null;
+            isMuted = false;
+            isOnHold = false;
+            muteBtn.textContent = 'Mute';
+            holdBtn.textContent = 'Hold';
+
+            // Clean up audio streams
+            if (remoteAudio.srcObject) {
+                remoteAudio.srcObject.getTracks().forEach(track => track.stop());
+                remoteAudio.srcObject = null;
+            }
+            if (localAudio.srcObject) {
+                localAudio.srcObject.getTracks().forEach(track => track.stop());
+                localAudio.srcObject = null;
+            }
+        }
+
+        function toggleMute() {
+            if (currentSession && currentSession.sessionDescriptionHandler) {
+                try {
+                    const senders = currentSession.sessionDescriptionHandler.peerConnection.getSenders();
+                    senders.forEach(sender => {
+                        if (sender.track && sender.track.kind === 'audio') {
+                            sender.track.enabled = isMuted;
+                        }
+                    });
+                    isMuted = !isMuted;
+                    muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+                    log(isMuted ? 'Audio muted' : 'Audio unmuted');
+                } catch (error) {
+                    log(`Error toggling mute: ${error.message}`);
+                }
+            } else {
+                log('No active session for mute operation');
+            }
+        }
+
+        function toggleHold() {
+            if (currentSession) {
+                if (isOnHold) {
+                    log('Unholding call...');
+                    currentSession.unhold().then(() => {
+                        isOnHold = false;
+                        holdBtn.textContent = 'Hold';
+                        log('Call unholded');
+                    }).catch(error => {
+                        log(`Failed to unhold: ${error.message}`);
+                    });
+                } else {
+                    log('Holding call...');
+                    currentSession.hold().then(() => {
+                        isOnHold = true;
+                        holdBtn.textContent = 'Unhold';
+                        log('Call held');
+                    }).catch(error => {
+                        log(`Failed to hold: ${error.message}`);
+                    });
+                }
+            }
+        }
+
+        // Initialize
+        log('SIP Phone initialized');
+    </script>
+</body>
+
+</html>

@@ -1,5 +1,8 @@
 use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTextBackend};
-use crate::config::{ProxyConfig, UserBackendConfig};
+use crate::{
+    config::{ProxyConfig, UserBackendConfig},
+    proxy::auth::AuthModule,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::{
@@ -79,20 +82,26 @@ impl TryFrom<&rsip::Request> for SipUser {
     type Error = rsipstack::Error;
 
     fn try_from(req: &rsip::Request) -> Result<Self, Self::Error> {
-        let username = req
-            .from_header()?
-            .uri()?
-            .user()
-            .unwrap_or_default()
-            .to_string();
-        let realm = req.to_header()?.uri()?.host().to_string();
+        let (username, realm) = match AuthModule::check_authorization_headers(req) {
+            Ok(Some((user, _))) => (user.username, user.realm),
+            _ => {
+                let username = req
+                    .from_header()?
+                    .uri()?
+                    .user()
+                    .unwrap_or_default()
+                    .to_string();
+                let realm = req.to_header()?.uri()?.host().to_string();
+                (username, Some(realm))
+            }
+        };
         let origin_contact = req.contact_header()?.typed().ok();
         Ok(SipUser {
             id: 0,
             username,
             password: None,
             enabled: true,
-            realm: Some(realm),
+            realm,
             origin_contact,
         })
     }
@@ -131,7 +140,7 @@ impl MemoryUserBackend {
     }
     fn get_identifier(user: &str, realm: Option<&str>) -> String {
         if let Some(realm) = realm {
-            format!("{}@{}", user, realm)
+            format!("{}@{}", user, ProxyConfig::normalize_realm(realm))
         } else {
             user.to_string()
         }
@@ -218,7 +227,7 @@ impl UserBackend for MemoryUserBackend {
         let identifier = self.get_identifier(username, realm);
         let mut user = match users.get(&identifier) {
             Some(user) => user.clone(),
-            None => return Err(anyhow::anyhow!("User not found")),
+            None => return Err(anyhow::anyhow!("missing user: {}", identifier)),
         };
         user.realm = realm.map(|r| r.to_string());
         Ok(user)

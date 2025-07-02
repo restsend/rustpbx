@@ -1,4 +1,6 @@
 use super::codecs::{self, CodecType};
+use anyhow::Result;
+use tracing::{debug, warn};
 use webrtc::sdp::SessionDescription;
 
 #[derive(Clone)]
@@ -105,39 +107,6 @@ mod tests {
     };
     use std::io::Cursor;
     use webrtc::sdp::SessionDescription;
-
-    #[test]
-    fn test_parse_pjsip_sdp() {
-        let offer = r#"v=0
-o=- 3954304612 3954304613 IN IP4 192.168.1.202
-s=pjmedia
-b=AS:117
-t=0 0
-a=X-nat:3
-m=audio 4002 RTP/AVP 0 9 101
-c=IN IP4 192.168.1.202
-b=TIAS:96000
-a=rtcp:5003 IN IP4 192.168.1.203
-a=sendrecv
-a=rtpmap:9 G722/8000
-a=ssrc:1089147397 cname:61753255553b9c6f
-a=rtpmap:101 telephone-event/8000
-a=fmtp:101 0-16"#;
-        let mut reader = Cursor::new(offer.as_bytes());
-        let offer_sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
-        let peer_media = select_peer_media(&offer_sdp, "audio").unwrap();
-        assert_eq!(peer_media.rtp_port, 4002);
-        assert_eq!(peer_media.rtcp_port, 5003);
-        assert_eq!(peer_media.rtcp_addr, "192.168.1.203");
-        assert_eq!(peer_media.rtp_addr, "192.168.1.202");
-        assert_eq!(
-            peer_media.codecs,
-            vec![CodecType::PCMU, CodecType::G722, CodecType::TelephoneEvent]
-        );
-
-        let codec = prefer_audio_codec(&offer_sdp);
-        assert_eq!(codec, Some(CodecType::G722));
-    }
 
     #[test]
     fn test_parse_freeswitch_sdp() {

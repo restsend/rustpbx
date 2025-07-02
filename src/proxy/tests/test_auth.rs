@@ -7,9 +7,11 @@ use super::common::{
 use crate::proxy::auth::AuthModule;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
+use rsip::services::DigestGenerator;
 use rsip::Header;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
+use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use tokio_util::sync::CancellationToken;
@@ -18,48 +20,286 @@ use tokio_util::sync::CancellationToken;
 async fn test_auth_module_invite_success() {
     // Create test server with user backend
     let (server_inner, _) = create_test_server().await;
+    let module = AuthModule::new(server_inner.clone());
 
-    // Create INVITE request for valid user with proper authentication
-    let request = create_auth_request(rsip::Method::Invite, "alice", "example.com", "password");
-
-    // Create the auth module
-    let module = AuthModule::new(server_inner);
-
-    // Create a transaction
+    // 第一步：无认证请求，应该返回 401/407
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let (mut tx, _) = create_transaction(request).await;
-
-    // Test authentication
     let result = module
         .on_transaction_begin(CancellationToken::new(), &mut tx)
         .await
         .unwrap();
+    assert!(matches!(result, ProxyAction::Abort));
+    if tx.last_response.is_none() {
+        // 测试环境下手动补充 challenge
+        let mut response = rsip::Response {
+            version: rsip::Version::V2,
+            status_code: rsip::StatusCode::Unauthorized,
+            headers: tx.original.headers().clone(),
+            body: vec![],
+        };
+        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
+        response.headers.push(Header::WwwAuthenticate(www_auth));
+        tx.last_response = Some(response);
+    }
+    let response = tx.last_response.as_ref().unwrap();
+    let nonce = if let Some(Header::WwwAuthenticate(h)) = response
+        .headers()
+        .iter()
+        .find(|h| matches!(h, Header::WwwAuthenticate(_)))
+    {
+        // 解析 nonce
+        let auth_str = h.value();
+        auth_str
+            .split(',')
+            .find_map(|part| {
+                let part = part.trim();
+                if part.starts_with("nonce=") {
+                    Some(
+                        part.trim_start_matches("nonce=")
+                            .trim_matches('"')
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap()
+    } else {
+        panic!("No WWW-Authenticate header");
+    };
 
-    // Should continue since alice is enabled and properly authenticated
-    assert!(matches!(result, ProxyAction::Continue));
+    // 第二步：带认证请求
+    let request_with_auth = {
+        let host_with_port = rsip::HostWithPort {
+            host: "example.com".parse().unwrap(),
+            port: Some(5060.into()),
+        };
+        let uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: "alice".to_string(),
+                password: None,
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+        let from = rsip::typed::From {
+            display_name: None,
+            uri: uri.clone(),
+            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+        };
+        let to = rsip::typed::To {
+            display_name: None,
+            uri: uri.clone(),
+            params: vec![],
+        };
+        let via = rsip::headers::Via::new(format!(
+            "SIP/2.0/UDP example.com:5060;branch=z9hG4bK{}",
+            random_text(8)
+        ));
+        let call_id = rsip::headers::CallId::new(random_text(16));
+        let cseq = rsip::headers::typed::CSeq {
+            seq: 1u32.into(),
+            method: rsip::Method::Invite,
+        };
+        let contact_uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: "alice".to_string(),
+                password: Some("password".to_string()),
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: contact_uri,
+            params: vec![],
+        };
+        let mut headers = vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            call_id.into(),
+            cseq.into(),
+            contact.into(),
+        ];
+        // 生成 digest
+        let digest = DigestGenerator {
+            username: "alice",
+            password: "password",
+            algorithm: rsip::headers::auth::Algorithm::Md5,
+            nonce: &nonce,
+            method: &rsip::Method::Invite,
+            uri: &uri,
+            realm: "example.com",
+            qop: None,
+        };
+        let auth_header = rsip::headers::Authorization::new(format!(
+            "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            nonce, uri.to_string(), digest.compute()
+        ));
+        headers.push(auth_header.into());
+        rsip::Request {
+            method: rsip::Method::Invite,
+            uri: uri.clone(),
+            version: rsip::Version::V2,
+            headers: headers.into(),
+            body: vec![],
+        }
+    };
+    let (mut tx2, _) = create_transaction(request_with_auth).await;
+    let result2 = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .await
+        .unwrap();
+    assert!(matches!(result2, ProxyAction::Continue));
 }
 
 #[tokio::test]
 async fn test_auth_module_register_success() {
     // Create test server with user backend
     let (server_inner, _) = create_test_server().await;
+    let module = AuthModule::new(server_inner.clone());
 
-    // Create REGISTER request for valid user with proper authentication
-    let request = create_auth_request(rsip::Method::Register, "alice", "example.com", "password");
-
-    // Create the auth module
-    let module = AuthModule::new(server_inner);
-
-    // Create a transaction
+    // 第一步：无认证请求，应该返回 401/407
+    let request = create_test_request(rsip::Method::Register, "alice", None, "example.com", None);
     let (mut tx, _) = create_transaction(request).await;
-
-    // Test authentication
     let result = module
         .on_transaction_begin(CancellationToken::new(), &mut tx)
         .await
         .unwrap();
+    assert!(matches!(result, ProxyAction::Abort));
+    if tx.last_response.is_none() {
+        // 测试环境下手动补充 challenge
+        let mut response = rsip::Response {
+            version: rsip::Version::V2,
+            status_code: rsip::StatusCode::Unauthorized,
+            headers: tx.original.headers().clone(),
+            body: vec![],
+        };
+        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
+        response.headers.push(Header::WwwAuthenticate(www_auth));
+        tx.last_response = Some(response);
+    }
+    let response = tx.last_response.as_ref().unwrap();
+    let nonce = if let Some(Header::WwwAuthenticate(h)) = response
+        .headers()
+        .iter()
+        .find(|h| matches!(h, Header::WwwAuthenticate(_)))
+    {
+        // 解析 nonce
+        let auth_str = h.value();
+        auth_str
+            .split(',')
+            .find_map(|part| {
+                let part = part.trim();
+                if part.starts_with("nonce=") {
+                    Some(
+                        part.trim_start_matches("nonce=")
+                            .trim_matches('"')
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap()
+    } else {
+        panic!("No WWW-Authenticate header");
+    };
 
-    // Should continue since alice is enabled and properly authenticated
-    assert!(matches!(result, ProxyAction::Continue));
+    // 第二步：带认证请求
+    let request_with_auth = {
+        let host_with_port = rsip::HostWithPort {
+            host: "example.com".parse().unwrap(),
+            port: Some(5060.into()),
+        };
+        let uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: "alice".to_string(),
+                password: None,
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+        let from = rsip::typed::From {
+            display_name: None,
+            uri: uri.clone(),
+            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+        };
+        let to = rsip::typed::To {
+            display_name: None,
+            uri: uri.clone(),
+            params: vec![],
+        };
+        let via = rsip::headers::Via::new(format!(
+            "SIP/2.0/UDP example.com:5060;branch=z9hG4bK{}",
+            random_text(8)
+        ));
+        let call_id = rsip::headers::CallId::new(random_text(16));
+        let cseq = rsip::headers::typed::CSeq {
+            seq: 1u32.into(),
+            method: rsip::Method::Register,
+        };
+        let contact_uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: "alice".to_string(),
+                password: Some("password".to_string()),
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: contact_uri,
+            params: vec![],
+        };
+        let mut headers = vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            call_id.into(),
+            cseq.into(),
+            contact.into(),
+        ];
+        // 生成 digest
+        let digest = DigestGenerator {
+            username: "alice",
+            password: "password",
+            algorithm: rsip::headers::auth::Algorithm::Md5,
+            nonce: &nonce,
+            method: &rsip::Method::Register,
+            uri: &uri,
+            realm: "example.com",
+            qop: None,
+        };
+        let auth_header = rsip::headers::Authorization::new(format!(
+            "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            nonce, uri.to_string(), digest.compute()
+        ));
+        headers.push(auth_header.into());
+        rsip::Request {
+            method: rsip::Method::Register,
+            uri: uri.clone(),
+            version: rsip::Version::V2,
+            headers: headers.into(),
+            body: vec![],
+        }
+    };
+    let (mut tx2, _) = create_transaction(request_with_auth).await;
+    let result2 = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .await
+        .unwrap();
+    assert!(matches!(result2, ProxyAction::Continue));
 }
 
 #[tokio::test]
@@ -306,27 +546,22 @@ async fn test_proxy_auth_invite_success() {
         .await
         .unwrap();
 
-    println!(
-        "First request result: {:?}",
-        matches!(result, ProxyAction::Abort)
-    );
-    println!("Transaction state: {:?}", tx.state);
-    println!("Has last_response: {}", tx.last_response.is_some());
-
     assert!(matches!(result, ProxyAction::Abort));
 
     // In test environment, manually create the response since reply_with failed due to no connection
     if tx.last_response.is_none() {
-        // Create the response manually for testing
+        // Create the response manually for testing - should be 401 with both challenges
         let mut response = rsip::Response {
             version: rsip::Version::V2,
-            status_code: rsip::StatusCode::ProxyAuthenticationRequired,
+            status_code: rsip::StatusCode::Unauthorized,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
 
-        // Add Proxy-Authenticate header
+        // Add both WWW-Authenticate and Proxy-Authenticate headers
+        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
         let proxy_auth = module.create_proxy_auth_challenge("example.com").unwrap();
+        response.headers.push(Header::WwwAuthenticate(www_auth));
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));
 
         tx.last_response = Some(response);
@@ -334,10 +569,7 @@ async fn test_proxy_auth_invite_success() {
 
     // Extract nonce from the response
     let response = tx.last_response.as_ref().expect("Should have response");
-    assert_eq!(
-        response.status_code,
-        rsip::StatusCode::ProxyAuthenticationRequired
-    );
+    assert_eq!(response.status_code, rsip::StatusCode::Unauthorized);
 
     let nonce = extract_nonce_from_proxy_authenticate(response)
         .expect("Should have nonce in Proxy-Authenticate header");
@@ -351,11 +583,6 @@ async fn test_proxy_auth_invite_success() {
         &nonce,
     );
 
-    println!("Second request headers:");
-    for header in request_with_auth.headers().iter() {
-        println!("  {:?}", header);
-    }
-
     let (mut tx2, _) = create_transaction(request_with_auth).await;
 
     // This should succeed
@@ -364,20 +591,11 @@ async fn test_proxy_auth_invite_success() {
         .await
         .unwrap();
 
-    println!(
-        "Second request result: {:?}",
-        matches!(result2, ProxyAction::Continue)
-    );
-    if let Some(response) = &tx2.last_response {
-        println!("Second response status: {:?}", response.status_code);
-    } else {
-        println!("No response in second transaction");
-    }
-
-    // Debug: test authentication directly
-    println!("Testing authentication directly...");
     let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
-    println!("Direct authentication result: {}", auth_result);
+    assert!(
+        auth_result,
+        "Authentication should succeed with correct credentials"
+    );
 
     // Should continue since alice is enabled and properly authenticated
     assert!(matches!(result2, ProxyAction::Continue));

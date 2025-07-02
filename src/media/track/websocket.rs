@@ -92,7 +92,7 @@ impl Track for WebsocketTrack {
         };
         let sample_rate = self.config.samplerate;
         let payload_type = self.payload_type;
-
+        let start_time = crate::get_timestamp();
         tokio::spawn(async move {
             let track_id_clone = track_id.clone();
             let audio_from_ws_loop = async move {
@@ -140,6 +140,7 @@ impl Track for WebsocketTrack {
                 .send(SessionEvent::TrackEnd {
                     track_id,
                     timestamp: crate::get_timestamp(),
+                    duration: crate::get_timestamp() - start_time,
                 })
                 .ok();
         });

@@ -6,9 +6,7 @@ use crate::{
         processor::{Processor, ProcessorChain},
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
-    synthesis::{
-        SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
-    },
+    synthesis::{SynthesisClient, SynthesisOption},
     AudioFrame, Samples,
 };
 use anyhow::{anyhow, Result};
@@ -40,6 +38,7 @@ pub struct TtsCommand {
     pub play_id: Option<String>,
     pub streaming: Option<bool>,
     pub end_of_stream: Option<bool>,
+    pub option: Option<SynthesisOption>,
 }
 pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
 pub type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
@@ -76,29 +75,6 @@ impl TtsHandle {
             self.command_tx.send(cmd)
         } else {
             Err(mpsc::error::SendError(cmd))
-        }
-    }
-
-    pub fn create_tts_track(
-        &self,
-        token: CancellationToken,
-        track_id: TrackId,
-        option: SynthesisOption,
-        rx: TtsCommandReceiver,
-    ) -> Result<Box<dyn Track>> {
-        match option.provider {
-            Some(SynthesisType::VoiceApi) => {
-                let client = VoiceApiTtsClient::new(option);
-                let tts_track =
-                    TtsTrack::new(track_id, rx, Box::new(client)).with_cancel_token(token);
-                Ok(Box::new(tts_track))
-            }
-            _ => {
-                let client = TencentCloudTtsClient::new(option);
-                let tts_track =
-                    TtsTrack::new(track_id, rx, Box::new(client)).with_cancel_token(token);
-                Ok(Box::new(tts_track))
-            }
         }
     }
 }
@@ -197,6 +173,7 @@ impl Track for TtsTrack {
                 let text = command.text;
                 let speaker = command.speaker;
                 let play_id = command.play_id;
+                let option = command.option;
                 if play_id != last_play_id || play_id.is_none() {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
@@ -239,7 +216,7 @@ impl Track for TtsTrack {
                 }
 
                 let start_time = Instant::now();
-                match client.synthesize(&text.to_string()).await {
+                match client.synthesize(&text.to_string(), option).await {
                     Ok(mut stream) => {
                         let mut total_audio_len = 0;
                         let mut audio_chunks = Vec::new();
@@ -396,7 +373,7 @@ impl Track for TtsTrack {
         };
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
-
+        let start_time = crate::get_timestamp();
         tokio::spawn(async move {
             select! {
                 _ = command_loop => {
@@ -412,6 +389,7 @@ impl Track for TtsTrack {
                 .send(SessionEvent::TrackEnd {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
+                    duration: crate::get_timestamp() - start_time,
                 })
                 .ok();
         });

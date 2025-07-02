@@ -1,9 +1,9 @@
-use crate::media::stream::MediaStream;
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsipstack::dialog::DialogId;
-use std::sync::Arc;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
+
+use crate::media::stream::MediaStream;
 
 #[derive(Clone, Debug)]
 pub struct SessionParty {
@@ -40,30 +40,6 @@ impl SessionParty {
     pub fn update_sdp(&mut self, sdp: String) {
         self.last_sdp = Some(sdp);
     }
-
-    pub fn supports_webrtc(&self) -> bool {
-        if let Some(ref capabilities) = self.media_capabilities {
-            capabilities.contains(&"webrtc".to_string())
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum MediaBridgeType {
-    None,        // No conversion needed
-    WebRtcToSip, // WebRTC to SIP
-    SipToWebRtc, // SIP to WebRTC
-    Transcode,   // Codec conversion
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum SessionType {
-    SipToSip,
-    WebRtcToSip,
-    SipToWebRtc,
-    WebRtcToWebRtc,
 }
 
 #[derive(Clone, Debug)]
@@ -89,13 +65,13 @@ impl Default for MediaStats {
     }
 }
 
-#[derive(Clone)]
 pub struct Session {
+    pub cancel_token: CancellationToken,
     pub dialog_id: DialogId,
+    pub callee_dialog_id: DialogId,
     pub last_activity: Instant,
     pub caller: SessionParty,
     pub callees: Vec<SessionParty>,
-    pub media_bridge_type: MediaBridgeType,
     pub established_at: Option<Instant>,
     pub media_stats: MediaStats,
     pub start_time: DateTime<Utc>,
@@ -105,13 +81,20 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(dialog_id: DialogId, caller: SessionParty, callees: Vec<SessionParty>) -> Self {
+    pub fn new(
+        cancel_token: CancellationToken,
+        dialog_id: DialogId,
+        callee_dialog_id: DialogId,
+        caller: SessionParty,
+        callees: Vec<SessionParty>,
+    ) -> Self {
         Self {
+            cancel_token,
             dialog_id,
+            callee_dialog_id,
             last_activity: Instant::now(),
             caller,
             callees,
-            media_bridge_type: MediaBridgeType::None,
             established_at: None,
             media_stats: MediaStats::default(),
             start_time: Utc::now(),
@@ -138,10 +121,6 @@ impl Session {
         self.last_activity = Instant::now();
     }
 
-    pub fn set_media_bridge_type(&mut self, bridge_type: MediaBridgeType) {
-        self.media_bridge_type = bridge_type;
-    }
-
     pub fn update_media_stats(
         &mut self,
         bytes_sent: u64,
@@ -165,45 +144,8 @@ impl Session {
     }
 }
 
-// Enhanced Session structure with media stream support
-#[derive(Clone)]
-pub struct MediaSession {
-    pub session: Session,
-    pub media_stream: Option<Arc<MediaStream>>,
-    pub session_type: SessionType,
-    pub webrtc_sdp: Option<String>,
-    pub sip_sdp: Option<String>,
-}
-
-impl MediaSession {
-    pub fn new(
-        session: Session,
-        session_type: SessionType,
-        webrtc_sdp: Option<String>,
-        sip_sdp: Option<String>,
-    ) -> Self {
-        Self {
-            session,
-            media_stream: None,
-            session_type,
-            webrtc_sdp,
-            sip_sdp,
-        }
-    }
-
-    pub fn with_media_stream(mut self, media_stream: Option<Arc<MediaStream>>) -> Self {
-        self.media_stream = media_stream;
-        self
-    }
-
-    pub async fn cleanup_media_stream(&self) -> Result<()> {
-        if let Some(ref stream) = self.media_stream {
-            stream.stop(
-                Some("session_cleanup".to_string()),
-                Some("system".to_string()),
-            );
-            stream.cleanup().await?;
-        }
-        Ok(())
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }

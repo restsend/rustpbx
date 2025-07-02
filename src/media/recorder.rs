@@ -284,7 +284,17 @@ impl Recorder {
             }
         };
 
-        (mono_result, stereo_result)
+        // Ensure buffers have equal length when flushing
+        if chunk_size == usize::MAX {
+            let max_len = mono_result.len().max(stereo_result.len());
+            let mut mono_final = mono_result;
+            let mut stereo_final = stereo_result;
+            mono_final.resize(max_len, 0);
+            stereo_final.resize(max_len, 0);
+            (mono_final, stereo_final)
+        } else {
+            (mono_result, stereo_result)
+        }
     }
 
     pub fn stop_recording(&self) -> Result<()> {

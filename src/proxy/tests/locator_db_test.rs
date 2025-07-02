@@ -31,6 +31,7 @@ async fn test_db_locator() {
         expires: 3600,
         destination: destination.clone(),
         last_modified: Instant::now(),
+        supports_webrtc: false,
     };
 
     // Setup DB locator
@@ -101,6 +102,7 @@ async fn test_db_locator_with_custom_table() {
         expires: 1800,
         destination: destination.clone(),
         last_modified: Instant::now(),
+        supports_webrtc: false,
     };
 
     // Test register
@@ -168,6 +170,7 @@ async fn test_db_locator_multiple_lookups() {
         expires: 3600,
         destination: destination1.clone(),
         last_modified: Instant::now(),
+        supports_webrtc: false,
     };
 
     // Register the first one (this test will currently fail since our DB implementation
@@ -205,6 +208,7 @@ async fn test_db_locator_multiple_lookups() {
         expires: 1800,
         destination: destination2.clone(),
         last_modified: Instant::now(),
+        supports_webrtc: false,
     };
 
     // Register with a different realm

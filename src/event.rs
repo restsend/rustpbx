@@ -90,6 +90,7 @@ pub enum SessionEvent {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
+        duration: u64,
     },
     Interruption {
         #[serde(rename = "trackId")]
@@ -104,10 +105,10 @@ pub enum SessionEvent {
         index: u32,
         #[serde(rename = "startTime")]
         #[serde(skip_serializing_if = "Option::is_none")]
-        start_time: Option<u32>,
+        start_time: Option<u64>,
         #[serde(rename = "endTime")]
         #[serde(skip_serializing_if = "Option::is_none")]
-        end_time: Option<u32>,
+        end_time: Option<u64>,
         text: String,
     },
     AsrDelta {
@@ -117,10 +118,10 @@ pub enum SessionEvent {
         timestamp: u64,
         #[serde(rename = "startTime")]
         #[serde(skip_serializing_if = "Option::is_none")]
-        start_time: Option<u32>,
+        start_time: Option<u64>,
         #[serde(rename = "endTime")]
         #[serde(skip_serializing_if = "Option::is_none")]
-        end_time: Option<u32>,
+        end_time: Option<u64>,
         text: String,
     },
     Metrics {

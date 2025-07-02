@@ -13,6 +13,7 @@ pub struct Location {
     pub expires: u32,
     pub destination: SipAddr,
     pub last_modified: Instant,
+    pub supports_webrtc: bool,
 }
 
 #[async_trait]
@@ -75,7 +76,7 @@ impl Locator for MemoryLocator {
         if let Some(location) = locations.get(&identifier) {
             Ok(vec![location.clone()])
         } else {
-            Err(anyhow::anyhow!("User not found"))
+            Err(anyhow::anyhow!("missing user: {}", identifier))
         }
     }
 }

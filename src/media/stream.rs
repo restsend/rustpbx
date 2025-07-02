@@ -16,7 +16,7 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 use uuid;
 
 pub struct MediaStream {
@@ -90,7 +90,13 @@ impl MediaStreamBuilder {
 impl MediaStream {
     #[instrument(name = "MediaStream::serve", skip(self), fields(id = self.id))]
     pub async fn serve(&self) -> Result<()> {
-        let packet_receiver = self.packet_receiver.lock().await.take().unwrap();
+        let packet_receiver = match self.packet_receiver.lock().await.take() {
+            Some(receiver) => receiver,
+            None => {
+                warn!("MediaStream::serve() called multiple times, stream already serving");
+                return Ok(());
+            }
+        };
         self.start_recorder().await.ok();
         select! {
             _ = self.cancel_token.cancelled() => {}
@@ -135,15 +141,7 @@ impl MediaStream {
     pub async fn remove_track(&self, id: &TrackId) {
         if let Some(track) = self.tracks.lock().await.remove(id) {
             match track.stop().await {
-                Ok(_) => {
-                    let timestamp = crate::get_timestamp();
-                    self.event_sender
-                        .send(SessionEvent::TrackEnd {
-                            track_id: id.clone(),
-                            timestamp,
-                        })
-                        .ok();
-                }
+                Ok(_) => {}
                 Err(e) => {
                     error!("media_stream: Failed to stop track: {}", e);
                 }
@@ -236,7 +234,13 @@ impl Processor for RecorderProcessor {
 impl MediaStream {
     async fn start_recorder(&self) -> Result<()> {
         if let Some(ref recorder_config) = self.recorder_config {
-            let recorder_receiver = self.recorder_receiver.lock().await.take().unwrap();
+            let recorder_receiver = match self.recorder_receiver.lock().await.take() {
+                Some(receiver) => receiver,
+                None => {
+                    warn!("Recorder already started, skipping");
+                    return Ok(());
+                }
+            };
             let cancel_token = self.cancel_token.child_token();
             let recorder_config_clone = recorder_config.clone();
 

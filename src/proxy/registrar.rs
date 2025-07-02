@@ -107,6 +107,10 @@ impl ProxyModule for RegistrarModule {
             params: contact_params,
         };
 
+        let supports_webrtc = destination
+            .r#type
+            .is_some_and(|t| t == rsip::transport::Transport::Wss);
+
         if expires == 0 {
             // delete user
             info!(
@@ -130,6 +134,7 @@ impl ProxyModule for RegistrarModule {
             contact = contact.to_string(),
             destination = destination.to_string(),
             realm = user.realm,
+            supports_webrtc,
             "registered user"
         );
 
@@ -138,6 +143,7 @@ impl ProxyModule for RegistrarModule {
             expires,
             destination,
             last_modified: Instant::now(),
+            supports_webrtc,
         };
 
         match self

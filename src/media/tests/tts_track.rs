@@ -3,7 +3,7 @@ use crate::{
         tts::{TtsCommand, TtsTrack},
         Track,
     },
-    synthesis::{SynthesisClient, SynthesisType},
+    synthesis::{SynthesisClient, SynthesisOption, SynthesisType},
     Samples,
 };
 use anyhow::Result;
@@ -26,6 +26,7 @@ impl SynthesisClient for MockSynthesisClient {
     async fn synthesize<'a>(
         &'a self,
         _text: &'a str,
+        _option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
         // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks
         let sample_rate = 16000;

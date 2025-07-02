@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
             match event {
                 SessionEvent::AsrFinal { text, end_time, .. } => {
                     result.push_str(&text);
-                    if end_time.unwrap_or(0) > duration.as_millis() as u32 {
+                    if end_time.unwrap_or(0) > duration.as_millis() as u64 {
                         break;
                     }
                 }
