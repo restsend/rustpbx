@@ -116,7 +116,7 @@ impl UserAgent {
                 Some(_) => match dialog_layer.match_dialog(&tx.original) {
                     Some(mut d) => {
                         tokio::spawn(async move {
-                            match d.handle(tx).await {
+                            match d.handle(&mut tx).await {
                                 Ok(_) => (),
                                 Err(e) => {
                                     info!("error handling transaction: {:?}", e);
@@ -215,11 +215,11 @@ impl UserAgent {
                     });
                     let mut dialog_ref = dialog.clone();
                     let token_ref = token.clone();
-                    
+
                     tokio::spawn(async move {
                         select! {
                             _ = token_ref.cancelled() => {}
-                            _ = dialog_ref.handle(tx) => {
+                            _ = dialog_ref.handle(&mut tx) => {
                             }
                         }
                     });

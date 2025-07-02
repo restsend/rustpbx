@@ -31,13 +31,13 @@ pub struct SipServerInner {
     pub user_backend: Arc<Box<dyn UserBackend>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
+    pub endpoint: Endpoint,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
 
 pub struct SipServer {
     pub inner: SipServerRef,
-    pub endpoint: Endpoint,
     modules: Arc<Vec<Box<dyn ProxyModule>>>,
 }
 
@@ -111,12 +111,76 @@ impl SipServerBuilder {
                 }
             }
         };
+        let cancel_token = self.cancel_token.unwrap_or_default();
+        let config = self.config.clone();
+        let transport_layer = TransportLayer::new(cancel_token.clone());
+        let local_addr = config
+            .addr
+            .parse::<IpAddr>()
+            .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
+
+        let external_ip = match config.external_ip {
+            Some(ref s) => s
+                .parse::<SocketAddr>()
+                .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
+                .ok(),
+            None => None,
+        };
+
+        if config.udp_port.is_none()
+            && config.tcp_port.is_none()
+            && config.tls_port.is_none()
+            && config.ws_port.is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "No port specified, please specify at least one port: udp, tcp, tls, ws"
+            ));
+        }
+
+        if let Some(udp_port) = config.udp_port {
+            let local_addr = SocketAddr::new(local_addr, udp_port);
+            let udp_conn = UdpConnection::create_connection(local_addr, external_ip)
+                .await
+                .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
+            transport_layer.add_transport(udp_conn.into());
+            info!("start proxy, udp port: {}", local_addr);
+        }
+
+        if let Some(tcp_port) = config.tcp_port {
+            let local_addr = SocketAddr::new(local_addr, tcp_port);
+            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_ip)
+                .await
+                .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
+            transport_layer.add_transport(tcp_conn.into());
+            info!("start proxy, tcp port: {}", local_addr);
+        }
+
+        if let Some(ws_port) = config.ws_port {
+            let local_addr = SocketAddr::new(local_addr, ws_port);
+            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_ip, false)
+                .await
+                .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
+            transport_layer.add_transport(ws_conn.into());
+            info!("start proxy, ws port: {}", local_addr);
+        }
+
+        let mut endpoint_builder = EndpointBuilder::new();
+        if let Some(ref user_agent) = config.useragent {
+            endpoint_builder.with_user_agent(user_agent.as_str());
+        }
+        let endpoint_builder = endpoint_builder
+            .with_cancel_token(cancel_token.clone())
+            .with_transport_layer(transport_layer);
+
+        let endpoint = endpoint_builder.build();
+
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
-            cancel_token: self.cancel_token.unwrap_or_default(),
+            cancel_token,
             user_backend: Arc::new(user_backend),
             locator: Arc::new(locator),
             callrecord_sender: self.callrecord_sender,
+            endpoint,
         });
 
         let mut allow_methods = Vec::new();
@@ -177,87 +241,29 @@ impl SipServerBuilder {
                     .join(",")
             );
         }
-
-        let transport_layer = TransportLayer::new(inner.cancel_token.clone());
-        let local_addr = inner
-            .config
-            .addr
-            .parse::<IpAddr>()
-            .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
-
-        let external_ip = match inner.config.external_ip {
-            Some(ref s) => s
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
-                .ok(),
-            None => None,
-        };
-
-        if inner.config.udp_port.is_none()
-            && inner.config.tcp_port.is_none()
-            && inner.config.tls_port.is_none()
-            && inner.config.ws_port.is_none()
-        {
-            return Err(anyhow::anyhow!(
-                "No port specified, please specify at least one port: udp, tcp, tls, ws"
-            ));
-        }
-
-        if let Some(udp_port) = inner.config.udp_port {
-            let local_addr = SocketAddr::new(local_addr, udp_port);
-            let udp_conn = UdpConnection::create_connection(local_addr, external_ip)
-                .await
-                .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
-            transport_layer.add_transport(udp_conn.into());
-            info!("start proxy, udp port: {}", local_addr);
-        }
-
-        if let Some(tcp_port) = inner.config.tcp_port {
-            let local_addr = SocketAddr::new(local_addr, tcp_port);
-            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_ip)
-                .await
-                .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
-            transport_layer.add_transport(tcp_conn.into());
-            info!("start proxy, tcp port: {}", local_addr);
-        }
-
-        if let Some(ws_port) = inner.config.ws_port {
-            let local_addr = SocketAddr::new(local_addr, ws_port);
-            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_ip, false)
-                .await
-                .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
-            transport_layer.add_transport(ws_conn.into());
-            info!("start proxy, ws port: {}", local_addr);
-        }
-
-        let mut endpoint_builder = EndpointBuilder::new();
-        if let Some(ref user_agent) = inner.config.useragent {
-            endpoint_builder.with_user_agent(user_agent.as_str());
-        }
-        let endpoint_builder = endpoint_builder
-            .with_cancel_token(inner.cancel_token.clone())
-            .with_allows(allow_methods)
-            .with_transport_layer(transport_layer);
-
-        let endpoint = endpoint_builder.build();
-
+        inner
+            .endpoint
+            .inner
+            .allows
+            .lock()
+            .unwrap()
+            .replace(allow_methods);
         Ok(SipServer {
             inner,
             modules: Arc::new(modules),
-            endpoint,
         })
     }
 }
 
 impl SipServer {
     pub async fn serve(&self) -> Result<()> {
-        let incoming = self.endpoint.incoming_transactions();
+        let incoming = self.inner.endpoint.incoming_transactions();
         let cancel_token = self.inner.cancel_token.clone();
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!("cancelled");
             }
-            _ = self.endpoint.serve() => {
+            _ = self.inner.endpoint.serve() => {
                 info!("endpoint finished");
             }
             _ = self.handle_incoming(incoming) => {

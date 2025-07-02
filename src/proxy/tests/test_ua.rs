@@ -398,7 +398,7 @@ impl TestUa {
                             Some(_) => match dialog_layer.match_dialog(&tx.original) {
                                 Some(mut d) => {
                                     tokio::spawn(async move {
-                                        if let Err(e) = d.handle(tx).await {
+                                        if let Err(e) = d.handle(&mut tx).await {
                                             warn!("Error handling dialog transaction: {:?}", e);
                                         }
                                     });
@@ -434,7 +434,7 @@ impl TestUa {
                                     }
                                 };
                                 tokio::spawn(async move {
-                                    if let Err(e) = dialog.handle(tx).await {
+                                    if let Err(e) = dialog.handle(&mut tx).await {
                                         warn!("Error handling invite transaction: {:?}", e);
                                     }
                                 });
