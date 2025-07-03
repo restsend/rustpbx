@@ -75,9 +75,8 @@ impl AliyunTtsClient {
     }
 
     /// Build WebSocket connection URL
-    fn build_websocket_url(&self) -> String {
-        let endpoint = self
-            .option
+    fn build_websocket_url(&self, option: &SynthesisOption) -> String {
+        let endpoint = option
             .endpoint
             .as_ref()
             .map(|e| e.trim_end_matches('/').to_string())
@@ -87,10 +86,14 @@ impl AliyunTtsClient {
     }
 
     /// Get API Key from configuration or environment
-    fn get_api_key(&self) -> Result<String> {
-        self.option.secret_key.clone()
+    fn get_api_key(&self, option: &SynthesisOption) -> Result<String> {
+        option
+            .secret_key
+            .clone()
             .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
-            .ok_or_else(|| anyhow!("Aliyun API Key not configured, please set DASHSCOPE_API_KEY environment variable or specify secret_key in configuration"))
+            .ok_or_else(|| {
+                anyhow!("Aliyun API Key not configured, please set DASHSCOPE_API_KEY environment variable or specify secret_key in configuration")
+            })
     }
 
     /// Create run-task command
@@ -163,8 +166,8 @@ impl SynthesisClient for AliyunTtsClient {
         option: Option<SynthesisOption>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
         let option = self.option.merge_with(option);
-        let api_key = self.get_api_key()?;
-        let ws_url = self.build_websocket_url();
+        let api_key = self.get_api_key(&option)?;
+        let ws_url = self.build_websocket_url(&option);
         let task_id = Uuid::new_v4().to_string();
 
         debug!("Connecting to Aliyun WebSocket URL: {}", ws_url);
