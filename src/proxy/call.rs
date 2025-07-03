@@ -113,7 +113,7 @@ impl CallModule {
         let callee_uri = tx.original.to_header()?.uri()?;
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
-
+        let callee_realm = ProxyConfig::normalize_realm(&callee_realm);
         if !self.inner.config.is_same_realm(&callee_realm) {
             info!(callee_realm, "Forwarding INVITE to external realm");
             return self.forward_to_proxy(tx, &callee_realm).await;
@@ -124,7 +124,7 @@ impl CallModule {
             .inner
             .server
             .locator
-            .lookup(&callee, Some(&callee_realm))
+            .lookup(&callee, Some(callee_realm))
             .await
         {
             Ok(locations) => locations,
@@ -209,7 +209,7 @@ impl CallModule {
         };
         // Attempt outbound call
         info!(
-            "Creating outbound call: {} -> {} (should_bridge: {})",
+            "Creating outbound call: {} -> {} (should_bridge_media: {})",
             caller, target_location.destination, should_bridge_media
         );
 

@@ -3,8 +3,6 @@ use rsipstack::dialog::DialogId;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::media::stream::MediaStream;
-
 #[derive(Clone, Debug)]
 pub struct SessionParty {
     pub aor: rsip::Uri,                          // Address of Record

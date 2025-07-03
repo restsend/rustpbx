@@ -214,6 +214,12 @@ impl ProxyModule for AuthModule {
                     Ok(ProxyAction::Continue)
                 } else {
                     // Extract realm from request
+                    let from = if tx.original.method == rsip::Method::Register {
+                        tx.original.to_header()?.uri()?.to_string()
+                    } else {
+                        tx.original.uri.to_string()
+                    };
+
                     let realm = if tx.original.method == rsip::Method::Register {
                         tx.original.to_header()?.uri()?.host().to_string()
                     } else {
@@ -221,41 +227,30 @@ impl ProxyModule for AuthModule {
                     };
                     let realm = ProxyConfig::normalize_realm(&realm);
                     // Check which type of authentication was attempted or send both challenges
-                    let has_authorization_header =
-                        rsip::header_opt!(tx.original.headers.iter(), Header::Authorization)
-                            .is_some();
                     let has_proxy_auth_header =
                         rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
                             .is_some();
-
                     if has_proxy_auth_header {
                         // Send proxy challenge if proxy auth was attempted
                         let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
-                        let headers = vec![Header::ProxyAuthenticate(proxy_auth)];
                         info!(
-                            realm,
+                            from,
+                            ?proxy_auth,
                             "Proxy authentication failed, sending proxy challenge"
                         );
+                        let headers = vec![Header::ProxyAuthenticate(proxy_auth)];
                         tx.reply_with(rsip::StatusCode::ProxyAuthenticationRequired, headers, None)
                             .await
                             .ok();
-                    } else if has_authorization_header {
+                    } else {
                         // Send WWW challenge if WWW auth was attempted
                         let www_auth = self.create_www_auth_challenge(&realm)?;
+                        info!(
+                            from,
+                            ?www_auth,
+                            "WWW authentication failed, sending WWW challenge"
+                        );
                         let headers = vec![Header::WwwAuthenticate(www_auth)];
-                        info!(realm, "WWW authentication failed, sending WWW challenge");
-                        tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
-                            .await
-                            .ok();
-                    } else {
-                        // No auth headers present, send both challenges
-                        let www_auth = self.create_www_auth_challenge(&realm)?;
-                        let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
-                        let headers = vec![
-                            Header::WwwAuthenticate(www_auth),
-                            Header::ProxyAuthenticate(proxy_auth),
-                        ];
-                        info!(realm, "No authentication, sending both challenges");
                         tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
                             .await
                             .ok();
