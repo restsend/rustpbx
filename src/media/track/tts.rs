@@ -38,7 +38,7 @@ pub struct TtsCommand {
     pub play_id: Option<String>,
     pub streaming: Option<bool>,
     pub end_of_stream: Option<bool>,
-    pub option: Option<SynthesisOption>,
+    pub option: SynthesisOption,
 }
 pub type TtsCommandSender = mpsc::UnboundedSender<TtsCommand>;
 pub type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
@@ -174,6 +174,7 @@ impl Track for TtsTrack {
                 let speaker = command.speaker;
                 let play_id = command.play_id;
                 let option = command.option;
+
                 if play_id != last_play_id || play_id.is_none() {
                     last_play_id = play_id.clone();
                     buffer_clone.lock().await.clear();
@@ -182,6 +183,7 @@ impl Track for TtsTrack {
                     &format!("tts:{}{}", client.provider(), text),
                     sample_rate,
                     speaker.as_ref(),
+                    option.speed.clone(),
                 );
                 synthesize_done.store(false, Ordering::Relaxed);
 
@@ -216,7 +218,7 @@ impl Track for TtsTrack {
                 }
 
                 let start_time = Instant::now();
-                match client.synthesize(&text.to_string(), option).await {
+                match client.synthesize(&text.to_string(), Some(option)).await {
                     Ok(mut stream) => {
                         let mut total_audio_len = 0;
                         let mut audio_chunks = Vec::new();

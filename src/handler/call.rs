@@ -312,6 +312,7 @@ impl ActiveCall {
             Some(ref option) => option,
             None => return Ok(()),
         };
+        let option = tts_option.merge_with(option);
         let speaker = match speaker {
             Some(s) => Some(s),
             None => tts_option.speaker.clone(),
