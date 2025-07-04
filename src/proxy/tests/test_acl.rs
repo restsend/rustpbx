@@ -1,6 +1,7 @@
 use super::common::{create_acl_request, create_transaction};
 use crate::config::ProxyConfig;
 use crate::proxy::acl::AclModule;
+use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,11 @@ async fn test_acl_module_allow_normal_request() {
 
     // Test_acl module
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -47,7 +52,11 @@ async fn test_acl_module_block_denied_ip() {
 
     // Test_acl module
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -73,7 +82,11 @@ async fn test_acl_module_allow_specific_ip() {
 
     // Test_acl module
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -99,7 +112,11 @@ async fn test_acl_module_block_not_allowed_ip() {
 
     // Test_acl module
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -124,7 +141,11 @@ async fn test_acl_cidr_rules() {
     let (mut tx1, _) = create_transaction(request1).await;
     assert!(matches!(
         module
-            .on_transaction_begin(CancellationToken::new(), &mut tx1)
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx1,
+                TransactionCookie::default()
+            )
             .await
             .unwrap(),
         ProxyAction::Continue
@@ -135,7 +156,11 @@ async fn test_acl_cidr_rules() {
     let (mut tx2, _) = create_transaction(request2).await;
     assert!(matches!(
         module
-            .on_transaction_begin(CancellationToken::new(), &mut tx2)
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx2,
+                TransactionCookie::default()
+            )
             .await
             .unwrap(),
         ProxyAction::Abort
@@ -155,7 +180,11 @@ async fn test_acl_invalid_rules() {
     let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
         module
-            .on_transaction_begin(CancellationToken::new(), &mut tx)
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default()
+            )
             .await
             .unwrap(),
         ProxyAction::Continue
@@ -199,7 +228,11 @@ async fn test_acl_rule_order() {
     let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
         module
-            .on_transaction_begin(CancellationToken::new(), &mut tx)
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default()
+            )
             .await
             .unwrap(),
         ProxyAction::Abort

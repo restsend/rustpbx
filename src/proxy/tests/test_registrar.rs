@@ -4,6 +4,7 @@ use super::common::{
 };
 use crate::config::ProxyConfig;
 use crate::proxy::registrar::RegistrarModule;
+use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +24,11 @@ async fn test_registrar_register_success() {
 
     // Test registration
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -54,7 +59,11 @@ async fn test_registrar_unregister() {
 
     // Register the user
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -67,7 +76,11 @@ async fn test_registrar_unregister() {
 
     // Test unregistration
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -103,7 +116,11 @@ async fn test_registrar_with_custom_expires() {
 
     // Test registration
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -137,7 +154,11 @@ async fn test_registrar_non_register_method() {
 
     // Test the module with an INVITE request
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 

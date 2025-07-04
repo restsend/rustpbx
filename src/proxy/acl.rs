@@ -1,10 +1,10 @@
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
-use crate::config::ProxyConfig;
+use crate::{config::ProxyConfig, proxy::server::TransactionCookie};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use std::{net::IpAddr, str::FromStr, sync::Arc};
+use std::{marker::PhantomData, net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -121,10 +121,10 @@ impl AclModule {
             |rules| rules.clone(),
         );
 
-        let acl_rules: Vec<AclRule> = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
-
-        let inner = Arc::new(AclModuleInner { rules: acl_rules });
-        Self { inner }
+        let acl_rules = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
+        Self {
+            inner: Arc::new(AclModuleInner { rules: acl_rules }),
+        }
     }
 
     pub fn is_allowed(&self, addr: &IpAddr) -> bool {
@@ -220,6 +220,7 @@ impl ProxyModule for AclModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
+        _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         let via = tx.original.via_header()?;
         let target =

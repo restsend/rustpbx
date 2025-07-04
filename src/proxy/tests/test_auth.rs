@@ -5,6 +5,7 @@ use super::common::{
     create_test_server, create_transaction, extract_nonce_from_proxy_authenticate,
 };
 use crate::proxy::auth::AuthModule;
+use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
 use rsip::services::DigestGenerator;
@@ -22,16 +23,18 @@ async fn test_auth_module_invite_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    // 第一步：无认证请求，应该返回 401/407
     let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(result, ProxyAction::Abort));
     if tx.last_response.is_none() {
-        // 测试环境下手动补充 challenge
         let mut response = rsip::Response {
             version: rsip::Version::V2,
             status_code: rsip::StatusCode::Unauthorized,
@@ -153,7 +156,11 @@ async fn test_auth_module_invite_success() {
     };
     let (mut tx2, _) = create_transaction(request_with_auth).await;
     let result2 = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(result2, ProxyAction::Continue));
@@ -165,16 +172,18 @@ async fn test_auth_module_register_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    // 第一步：无认证请求，应该返回 401/407
     let request = create_test_request(rsip::Method::Register, "alice", None, "example.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(result, ProxyAction::Abort));
     if tx.last_response.is_none() {
-        // 测试环境下手动补充 challenge
         let mut response = rsip::Response {
             version: rsip::Version::V2,
             status_code: rsip::StatusCode::Unauthorized,
@@ -270,7 +279,6 @@ async fn test_auth_module_register_success() {
             cseq.into(),
             contact.into(),
         ];
-        // 生成 digest
         let digest = DigestGenerator {
             username: "alice",
             password: "password",
@@ -296,7 +304,11 @@ async fn test_auth_module_register_success() {
     };
     let (mut tx2, _) = create_transaction(request_with_auth).await;
     let result2 = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(result2, ProxyAction::Continue));
@@ -318,7 +330,11 @@ async fn test_auth_module_disabled_user() {
 
     // Test authentication
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -342,7 +358,11 @@ async fn test_auth_module_unknown_user() {
 
     // Test authentication
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -366,7 +386,11 @@ async fn test_auth_module_bypass_other_methods() {
 
     // Test authentication
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -461,7 +485,7 @@ async fn test_auth_no_credentials() {
 
     // Should return false because no credentials are provided
     let result = auth_module.authenticate_request(&mut tx).await.unwrap();
-    assert!(!result);
+    assert!(result.is_none());
 }
 
 #[tokio::test]
@@ -485,7 +509,11 @@ async fn test_auth_bypass_for_non_invite_register() {
 
     // Use the on_transaction_begin method to test the full flow
     let result = auth_module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -526,8 +554,8 @@ async fn test_auth_disabled_user() {
 
     // Should return false because user is disabled
     let result = auth_module.authenticate_request(&mut tx).await.unwrap();
-    println!("Authentication result: {}", result);
-    assert!(!result);
+    println!("Authentication result: {:?}", result);
+    assert!(result.is_none());
 }
 
 #[tokio::test]
@@ -542,7 +570,11 @@ async fn test_proxy_auth_invite_success() {
 
     // This should return 407 Proxy Authentication Required
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -587,13 +619,17 @@ async fn test_proxy_auth_invite_success() {
 
     // This should succeed
     let result2 = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
     let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
     assert!(
-        auth_result,
+        auth_result.is_some(),
         "Authentication should succeed with correct credentials"
     );
 
@@ -617,7 +653,11 @@ async fn test_proxy_auth_no_credentials() {
 
     // Test authentication
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -654,7 +694,11 @@ async fn test_proxy_auth_wrong_credentials() {
     let (mut tx, _) = create_transaction(request).await;
 
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 
@@ -694,7 +738,11 @@ async fn test_proxy_auth_wrong_credentials() {
 
     // Test authentication
     let result = module
-        .on_transaction_begin(CancellationToken::new(), &mut tx2)
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut tx2,
+            TransactionCookie::default(),
+        )
         .await
         .unwrap();
 

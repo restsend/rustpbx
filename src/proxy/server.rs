@@ -3,10 +3,10 @@ use super::{
     user::{create_user_backend, UserBackend},
     FnCreateProxyModule, ProxyAction, ProxyModule,
 };
-use crate::{callrecord::CallRecordSender, config::ProxyConfig};
+use crate::{callrecord::CallRecordSender, config::ProxyConfig, proxy::user::SipUser};
 use anyhow::{anyhow, Result};
 use rsipstack::{
-    transaction::{transaction::Transaction, Endpoint, TransactionReceiver},
+    transaction::{key::TransactionKey, transaction::Transaction, Endpoint, TransactionReceiver},
     transport::{
         udp::UdpConnection, TcpListenerConnection, TransportLayer, WebSocketListenerConnection,
     },
@@ -17,13 +17,64 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, RwLock,
     },
     time::Instant,
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
+#[derive(Clone, Default)]
+pub struct TransactionCookie {
+    user: Arc<RwLock<Option<SipUser>>>,
+    values: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl From<&TransactionKey> for TransactionCookie {
+    fn from(_key: &TransactionKey) -> Self {
+        Self {
+            user: Arc::new(RwLock::new(None)),
+            values: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl TransactionCookie {
+    pub fn set_user(&self, user: SipUser) {
+        self.user
+            .try_write()
+            .map(|mut u| {
+                *u = Some(user);
+            })
+            .ok();
+    }
+    pub fn get_user(&self) -> Option<SipUser> {
+        self.user.try_read().map(|user| user.clone()).ok().flatten()
+    }
+    pub fn set(&self, key: &str, value: &str) {
+        self.values
+            .try_write()
+            .map(|mut values| {
+                values.insert(key.to_string(), value.to_string());
+            })
+            .ok();
+    }
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.values
+            .try_read()
+            .map(|values| values.get(key).cloned())
+            .ok()
+            .flatten()
+    }
+    pub fn remove(&self, key: &str) {
+        self.values
+            .try_write()
+            .map(|mut values| {
+                values.remove(key);
+            })
+            .ok();
+    }
+}
 
 pub struct SipServerInner {
     pub cancel_token: CancellationToken,
@@ -349,8 +400,12 @@ impl SipServer {
         key: &String,
         tx: &mut Transaction,
     ) -> Result<()> {
+        let cookie = TransactionCookie::from(&tx.key);
         for module in modules.iter() {
-            match module.on_transaction_begin(token.clone(), tx).await {
+            match module
+                .on_transaction_begin(token.clone(), tx, cookie.clone())
+                .await
+            {
                 Ok(action) => match action {
                     ProxyAction::Continue => {}
                     ProxyAction::Abort => break,

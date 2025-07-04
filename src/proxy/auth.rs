@@ -1,12 +1,11 @@
 use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
 use crate::config::ProxyConfig;
+use crate::proxy::server::TransactionCookie;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::headers::auth::Algorithm;
 use rsip::headers::UntypedHeader;
-use rsip::headers::{
-    ProxyAuthenticate as ProxyAuthenticateHeader, WwwAuthenticate as WwwAuthenticateHeader,
-};
+use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsip::prelude::HeadersExt;
 use rsip::prelude::ToTypedHeader;
 use rsip::services::DigestGenerator;
@@ -14,6 +13,7 @@ use rsip::typed::Authorization;
 use rsip::Header;
 use rsip::Uri;
 use rsipstack::transaction::transaction::Transaction;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -33,10 +33,10 @@ impl AuthModule {
         Self { server }
     }
 
-    pub async fn authenticate_request(&self, tx: &mut Transaction) -> Result<bool> {
+    pub async fn authenticate_request(&self, tx: &mut Transaction) -> Result<Option<SipUser>> {
         // Check for both Authorization and Proxy-Authorization headers
         // Prioritize Authorization for backward compatibility
-        let auth_result = AuthModule::check_authorization_headers(&tx.original)?;
+        let auth_result = check_authorization_headers(&tx.original)?;
 
         if let Some((user, auth_inner)) = auth_result {
             // Check if user exists and is enabled
@@ -49,12 +49,12 @@ impl AuthModule {
                 Ok(stored_user) => {
                     if !stored_user.enabled {
                         info!(username = user.username, realm = ?user.realm, "User is disabled");
-                        return Ok(false);
+                        return Ok(None);
                     }
                     if let Some(realm) = user.realm.as_ref() {
                         if !self.server.config.is_same_realm(realm) {
                             info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
-                            return Ok(false);
+                            return Ok(None);
                         }
                     }
                     let result = self.verify_credentials(
@@ -64,48 +64,19 @@ impl AuthModule {
                         &auth_inner,
                     )?;
                     debug!("Credential verification result: {}", result);
-                    Ok(result)
+                    Ok(Some(stored_user))
                 }
                 Err(e) => {
                     info!(
                         username = user.username,
                         ?user.realm, "{}", e);
-                    Ok(false)
+                    Ok(None)
                 }
             }
         } else {
             debug!("No authorization headers found");
-            Ok(false)
+            Ok(None)
         }
-    }
-
-    pub fn check_authorization_headers(
-        req: &rsip::Request,
-    ) -> Result<Option<(SipUser, Authorization)>> {
-        // First try Authorization header (for backward compatibility with existing tests)
-        if let Some(auth_header) = rsip::header_opt!(req.headers.iter(), Header::Authorization) {
-            let challenge = auth_header.typed()?;
-            let user = SipUser {
-                username: challenge.username.to_string(),
-                realm: Some(challenge.realm.to_string()),
-                ..Default::default()
-            };
-            return Ok(Some((user, challenge)));
-        }
-        // Then try Proxy-Authorization header
-        if let Some(proxy_auth_header) =
-            rsip::header_opt!(req.headers.iter(), Header::ProxyAuthorization)
-        {
-            let challenge = proxy_auth_header.typed()?;
-            let user = SipUser {
-                username: challenge.0.username.to_string(),
-                realm: Some(challenge.0.realm.to_string()),
-                ..Default::default()
-            };
-            return Ok(Some((user, challenge.0)));
-        }
-
-        Ok(None)
     }
 
     fn verify_credentials(
@@ -145,18 +116,18 @@ impl AuthModule {
         Ok(result)
     }
 
-    pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticateHeader> {
+    pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
         let nonce = rsipstack::transaction::random_text(16);
-        let proxy_auth = ProxyAuthenticateHeader::new(format!(
+        let proxy_auth = ProxyAuthenticate::new(format!(
             r#"Digest realm="{}", nonce="{}", algorithm=MD5"#,
             realm, nonce
         ));
         Ok(proxy_auth)
     }
 
-    pub fn create_www_auth_challenge(&self, realm: &str) -> Result<WwwAuthenticateHeader> {
+    pub fn create_www_auth_challenge(&self, realm: &str) -> Result<WwwAuthenticate> {
         let nonce = rsipstack::transaction::random_text(16);
-        let www_auth = WwwAuthenticateHeader::new(format!(
+        let www_auth = WwwAuthenticate::new(format!(
             r#"Digest realm="{}", nonce="{}", algorithm=MD5"#,
             realm, nonce
         ));
@@ -193,6 +164,7 @@ impl ProxyModule for AuthModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
+        _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         // Only authenticate INVITE and REGISTER requests
         if tx.original.method != rsip::Method::Invite
@@ -209,8 +181,9 @@ impl ProxyModule for AuthModule {
         // Perform authentication
         match self.authenticate_request(tx).await {
             Ok(authenticated) => {
-                if authenticated {
+                if let Some(user) = authenticated {
                     debug!("Authentication successful, continuing");
+                    _cookie.set_user(user);
                     Ok(ProxyAction::Continue)
                 } else {
                     // Extract realm from request
@@ -264,4 +237,33 @@ impl ProxyModule for AuthModule {
             }
         }
     }
+}
+
+pub fn check_authorization_headers(
+    req: &rsip::Request,
+) -> Result<Option<(SipUser, Authorization)>> {
+    // First try Authorization header (for backward compatibility with existing tests)
+    if let Some(auth_header) = rsip::header_opt!(req.headers.iter(), Header::Authorization) {
+        let challenge = auth_header.typed()?;
+        let user = SipUser {
+            username: challenge.username.to_string(),
+            realm: Some(challenge.realm.to_string()),
+            ..Default::default()
+        };
+        return Ok(Some((user, challenge)));
+    }
+    // Then try Proxy-Authorization header
+    if let Some(proxy_auth_header) =
+        rsip::header_opt!(req.headers.iter(), Header::ProxyAuthorization)
+    {
+        let challenge = proxy_auth_header.typed()?;
+        let user = SipUser {
+            username: challenge.0.username.to_string(),
+            realm: Some(challenge.0.realm.to_string()),
+            ..Default::default()
+        };
+        return Ok(Some((user, challenge.0)));
+    }
+
+    Ok(None)
 }
