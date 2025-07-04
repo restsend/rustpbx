@@ -40,7 +40,6 @@ pub struct AliyunAsrResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct AliyunAsrHeader {
-    pub task_id: String,
     pub message: String,
     pub status: String,
 }

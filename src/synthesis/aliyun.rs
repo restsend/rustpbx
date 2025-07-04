@@ -6,7 +6,6 @@ use futures::{stream, SinkExt, Stream, StreamExt};
 use http::{Request, StatusCode, Uri};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::pin::Pin;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
@@ -58,10 +57,7 @@ struct FinishTaskCommand {
 #[derive(Debug, Deserialize)]
 struct WebSocketEvent {
     event: String,
-    task_id: Option<String>,
     message: Option<String>,
-    #[serde(flatten)]
-    extra: Value,
 }
 
 impl AliyunTtsClient {

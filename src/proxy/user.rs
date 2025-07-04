@@ -1,7 +1,7 @@
 use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTextBackend};
 use crate::{
     config::{ProxyConfig, UserBackendConfig},
-    proxy::auth::AuthModule,
+    proxy::auth::check_authorization_headers,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -82,7 +82,7 @@ impl TryFrom<&rsip::Request> for SipUser {
     type Error = rsipstack::Error;
 
     fn try_from(req: &rsip::Request) -> Result<Self, Self::Error> {
-        let (username, realm) = match AuthModule::check_authorization_headers(req) {
+        let (username, realm) = match check_authorization_headers(req) {
             Ok(Some((user, _))) => (user.username, user.realm),
             _ => {
                 let username = req

@@ -1,5 +1,8 @@
 use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
-use crate::{config::ProxyConfig, proxy::locator::Location};
+use crate::{
+    config::ProxyConfig,
+    proxy::{locator::Location, server::TransactionCookie},
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::{HeadersExt, UntypedHeader};
@@ -7,7 +10,7 @@ use rsipstack::{
     transaction::transaction::Transaction,
     transport::{SipAddr, SipConnection},
 };
-use std::{sync::Arc, time::Instant};
+use std::{marker::PhantomData, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -16,6 +19,7 @@ pub struct RegistrarModule {
     server: SipServerRef,
     config: Arc<ProxyConfig>,
 }
+
 impl RegistrarModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
         let module = RegistrarModule::new(server, config);
@@ -45,6 +49,7 @@ impl ProxyModule for RegistrarModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
+        _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         let method = tx.original.method();
         if !matches!(method, rsip::Method::Register) {

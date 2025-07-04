@@ -1,5 +1,6 @@
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::config::ProxyConfig;
+use crate::proxy::server::TransactionCookie;
 use crate::proxy::{
     auth::AuthModule,
     call::CallModule,

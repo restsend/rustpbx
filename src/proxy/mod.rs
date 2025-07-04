@@ -1,4 +1,4 @@
-use crate::config::ProxyConfig;
+use crate::{config::ProxyConfig, proxy::server::TransactionCookie};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transaction::transaction::Transaction;
@@ -42,6 +42,7 @@ pub trait ProxyModule: Send + Sync {
         &self,
         _token: CancellationToken,
         _tx: &mut Transaction,
+        _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         Ok(ProxyAction::Continue)
     }

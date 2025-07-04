@@ -3,6 +3,7 @@ use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig};
 use crate::handler::call::ActiveCallType;
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
+use crate::proxy::server::TransactionCookie;
 use crate::proxy::session::{Session, SessionParty};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -546,6 +547,7 @@ impl ProxyModule for CallModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
+        _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         match tx.original.method {
             rsip::Method::Invite => {
