@@ -77,10 +77,4 @@ pub trait Track: Send + Sync {
     ) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()>;
-
-    /// Set remote SDP description (default implementation does nothing)
-    /// RTP tracks should override this to set remote address
-    fn set_remote_sdp(&mut self, _sdp: &str) -> Result<()> {
-        Ok(())
-    }
 }

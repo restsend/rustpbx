@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use std::{marker::PhantomData, net::IpAddr, str::FromStr, sync::Arc};
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 

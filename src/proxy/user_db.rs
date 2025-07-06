@@ -120,6 +120,8 @@ impl UserBackend for DbBackend {
             enabled,
             realm: realm.map(|r| r.to_string()).or(db_realm),
             origin_contact: None,
+            destination: None,
+            is_support_webrtc: false,
         })
     }
 }

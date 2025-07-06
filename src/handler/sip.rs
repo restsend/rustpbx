@@ -158,6 +158,7 @@ pub async fn new_rtp_track_with_sip(
     let invite_option = InviteOption {
         caller: caller.clone().try_into()?,
         callee: callee.try_into()?,
+        destination: None,
         content_type: Some("application/sdp".to_string()),
         offer: offer.as_ref().map(|s| s.as_bytes().to_vec()),
         contact: caller.try_into()?,

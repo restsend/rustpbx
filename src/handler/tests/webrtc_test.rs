@@ -103,7 +103,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     });
 
     // Create WebRTC client
-    let media_engine = WebrtcTrack::get_media_engine()?;
+    let media_engine = WebrtcTrack::get_media_engine(None)?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
     let config = RTCConfiguration {
         ..Default::default()

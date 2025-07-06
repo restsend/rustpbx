@@ -240,6 +240,7 @@ impl TestUa {
             caller: contact.clone(),
             content_type,
             offer,
+            destination: None,
             contact: contact.clone(),
             credential: Some(credential),
             headers: Some(vec![route_header]),
@@ -762,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_rejection() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::NatOnly)
+        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Nat)
             .await
             .unwrap();
         let proxy_addr = proxy.get_addr();
@@ -829,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_media_proxy_nat_detection() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::NatOnly)
+        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Nat)
             .await
             .unwrap();
         let proxy_addr = proxy.get_addr();
@@ -844,7 +845,7 @@ mod tests {
         alice.register().await.unwrap();
 
         // Verify media proxy configuration
-        assert_eq!(config.media_proxy.mode, MediaProxyMode::NatOnly);
+        assert_eq!(config.media_proxy.mode, MediaProxyMode::Nat);
         assert!(config.media_proxy.rtp_start_port.is_some());
         assert!(config.media_proxy.rtp_end_port.is_some());
 

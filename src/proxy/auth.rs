@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
 use crate::config::ProxyConfig;
 use crate::proxy::server::TransactionCookie;
@@ -13,8 +15,6 @@ use rsip::typed::Authorization;
 use rsip::Header;
 use rsip::Uri;
 use rsipstack::transaction::transaction::Transaction;
-use std::marker::PhantomData;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -64,7 +64,11 @@ impl AuthModule {
                         &auth_inner,
                     )?;
                     debug!("Credential verification result: {}", result);
-                    Ok(Some(stored_user))
+                    if result {
+                        Ok(Some(stored_user))
+                    } else {
+                        Ok(None)
+                    }
                 }
                 Err(e) => {
                     info!(
@@ -112,7 +116,6 @@ impl AuthModule {
                 "Authentication failed: response mismatch"
             );
         }
-
         Ok(result)
     }
 

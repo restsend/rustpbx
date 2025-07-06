@@ -411,7 +411,12 @@ impl SipServer {
                     ProxyAction::Abort => break,
                 },
                 Err(e) => {
-                    error!(key, "failed to handle transaction: {}", e);
+                    error!(
+                        key,
+                        module = module.name(),
+                        "failed to handle transaction: {}",
+                        e
+                    );
                     if tx.last_response.is_none() {
                         tx.reply(rsip::StatusCode::ServerInternalError).await.ok();
                     }

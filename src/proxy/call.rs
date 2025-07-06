@@ -5,6 +5,7 @@ use crate::handler::call::ActiveCallType;
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
 use crate::proxy::server::TransactionCookie;
 use crate::proxy::session::{Session, SessionParty};
+use crate::proxy::user::SipUser;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -14,6 +15,7 @@ use rsipstack::dialog::dialog::DialogState;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
+use rsipstack::rsip_ext::RsipResponseExt;
 use rsipstack::transaction::transaction::Transaction;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -70,18 +72,27 @@ impl CallModule {
     }
 
     /// Check if media proxy is needed based on configuration
-    pub(crate) fn should_use_media_bridge(
+    pub(crate) fn shoud_nat_traversal(
         &self,
         tx: &Transaction,
-        _caller_iswebrtc: bool,
-        _target_iswebrtc: bool,
+        caller_iswebrtc: bool,
+        target_iswebrtc: bool,
     ) -> Result<bool> {
         let media_config = &self.inner.config.media_proxy;
-
         match media_config.mode {
             MediaProxyMode::None => Ok(false),
             MediaProxyMode::All => Ok(true),
-            MediaProxyMode::NatOnly => {
+            _ => {
+                // Auto mode
+                if matches!(media_config.mode, MediaProxyMode::Auto) {
+                    match (caller_iswebrtc, target_iswebrtc) {
+                        (true, true) => return Ok(false),
+                        (true, false) => return Ok(true),
+                        (false, true) => return Ok(true),
+                        _ => {}
+                    }
+                }
+                // NAT mode
                 if let Some(content_type) = tx.original.headers.iter().find_map(|h| match h {
                     rsip::Header::ContentType(ct) => Some(ct),
                     _ => None,
@@ -109,12 +120,16 @@ impl CallModule {
         return Err(anyhow!("External proxy forwarding not implemented"));
     }
 
-    pub(crate) async fn handle_invite(&self, tx: &mut Transaction) -> Result<()> {
-        let caller = tx.original.from_header()?.uri()?.to_string();
+    pub(crate) async fn handle_invite(
+        &self,
+        tx: &mut Transaction,
+        cookie: TransactionCookie,
+    ) -> Result<()> {
+        let caller = cookie.get_user().ok_or(anyhow!("No user in cookie"))?;
         let callee_uri = tx.original.to_header()?.uri()?;
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
-        let callee_realm = ProxyConfig::normalize_realm(&callee_realm);
+
         if !self.inner.config.is_same_realm(&callee_realm) {
             info!(callee_realm, "Forwarding INVITE to external realm");
             return self.forward_to_proxy(tx, &callee_realm).await;
@@ -125,7 +140,7 @@ impl CallModule {
             .inner
             .server
             .locator
-            .lookup(&callee, Some(callee_realm))
+            .lookup(&callee, Some(&callee_realm))
             .await
         {
             Ok(locations) => locations,
@@ -166,8 +181,7 @@ impl CallModule {
         // Determine if media bridge is needed
         let caller_iswebrtc = self.is_webrtc_sdp(&caller_offer);
         let should_bridge_media =
-            self.should_use_media_bridge(tx, caller_iswebrtc, target_location.supports_webrtc)?;
-
+            self.shoud_nat_traversal(tx, caller_iswebrtc, target_location.supports_webrtc)?;
         // Create session with cancellation token
         let session_token = self.inner.server.cancel_token.child_token();
         // Create media bridge if needed
@@ -197,52 +211,29 @@ impl CallModule {
         } else {
             caller_offer.clone()
         };
-
+        let caller_contact = caller
+            .build_contact(&*tx)
+            .ok_or(anyhow!("Failed to build caller contact"))?;
         // Create InviteOption for outbound call
         let invite_option = InviteOption {
-            caller: tx.original.from_header()?.uri()?.clone(),
-            callee: callee_uri.clone(),
+            caller: caller_contact.uri.clone(),
+            callee: target_location.aor.clone().into(),
+            destination: Some(target_location.destination.clone()),
             content_type: Some("application/sdp".to_string()),
             offer: Some(outbound_sdp.as_bytes().to_vec()),
-            contact: tx.original.from_header()?.uri()?.clone(),
+            contact: caller_contact.uri.clone(),
             credential: None,
             headers: None,
         };
         // Attempt outbound call
         info!(
-            "Creating outbound call: {} -> {} (should_bridge_media: {})",
-            caller, target_location.destination, should_bridge_media
+            "Creating outbound call: {} -> {} via {} (should_bridge_media: {}) sdp:\n {:?}",
+            invite_option.caller,
+            invite_option.callee,
+            target_location.destination,
+            should_bridge_media,
+            outbound_sdp
         );
-
-        match self
-            .make_session(session_token, tx, bridge_builder, invite_option)
-            .await
-        {
-            Ok(session) => {
-                self.inner
-                    .sessions
-                    .write()
-                    .await
-                    .insert(session.dialog_id.clone(), session);
-            }
-            Err(e) => {
-                error!("Failed to create session: {}", e);
-                tx.reply(rsip::StatusCode::ServerInternalError)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn make_session(
-        &self,
-        token: CancellationToken,
-        tx: &mut Transaction,
-        bridge_builder: Option<MediaBridgeBuilder>,
-        option: InviteOption,
-    ) -> Result<Session> {
         let (caller_dlg_state_sender, mut caller_dlg_state_receiver) = mpsc::unbounded_channel();
         let caller_dialog = self
             .inner
@@ -251,29 +242,29 @@ impl CallModule {
                 tx,
                 caller_dlg_state_sender,
                 None,
-                Some(option.contact.clone()),
+                Some(invite_option.contact.clone()),
             )
             .map_err(|e| anyhow!(e))?;
 
         let (callee_dlg_state_sender, mut callee_dlg_state_receiver) = mpsc::unbounded_channel();
-        let callees = vec![SessionParty::new(option.callee.clone())];
-        let caller = SessionParty::new(option.caller.clone());
+
+        let caller = SessionParty::new(invite_option.caller.clone());
+        let callees = vec![SessionParty::new(invite_option.callee.clone())];
 
         let (callee_dialog, callee_tx) = self
             .inner
             .dialog_layer
-            .create_client_invite_dialog(option, callee_dlg_state_sender)
+            .create_client_invite_dialog(invite_option, callee_dlg_state_sender)
             .map_err(|e| anyhow!(e))?;
 
         let session = Arc::new(Mutex::new(Some(Session::new(
-            token.clone(),
+            session_token.clone(),
             caller_dialog.id().clone(),
             callee_dialog.id().clone(),
             caller,
             callees,
         ))));
 
-        let caller_dialog_ref = caller_dialog.clone();
         let callee_dialog_ref = callee_dialog.clone();
 
         let caller_dlg_loop = async move {
@@ -292,6 +283,7 @@ impl CallModule {
             }
         };
         let session_ref = session.clone();
+        let caller_dialog_ref = caller_dialog.clone();
         let callee_dialog_loop = async move {
             while let Some(state) = callee_dlg_state_receiver.recv().await {
                 match state {
@@ -333,79 +325,126 @@ impl CallModule {
                 debug!("Media event: {:?}", event);
             }
         };
-        let token_ref = token.clone();
-        tokio::spawn(async move {
-            select! {
-                _ = token_ref.cancelled() => {
-                    info!("Session token cancelled");
-                }
-                _ = caller_dlg_loop => {
-                    info!("Caller dialog loop terminated");
-                }
-                _ = callee_dialog_loop => {
-                    info!("Callee dialog loop terminated");
-                }
-                _ = media_event_loop => {
-                    info!("Media event loop terminated");
-                }
-            }
-        });
+        let mut caller_dialog_ref = caller_dialog.clone();
+        let caller_offer = String::from_utf8_lossy(&tx.original.body).to_string();
+        let dialog_layer = self.inner.dialog_layer.clone();
+        let make_callee_dialog_loop = async move {
+            match callee_dialog.process_invite(callee_tx).await {
+                Ok((new_dlg_id, resp)) => match resp {
+                    Some(resp) => {
+                        info!(
+                            "Callee dialog confirmed: {} => {} status: {:?}",
+                            callee_dialog.id().to_string(),
+                            new_dlg_id.to_string(),
+                            resp.status_code
+                        );
 
-        match callee_dialog.process_invite(callee_tx).await {
-            Ok((new_dlg_id, resp)) => match resp {
-                Some(resp) => {
-                    info!(
-                        "Callee dialog confirmed: {:?} => {:?} status: {:?}",
-                        callee_dialog.id(),
-                        new_dlg_id,
-                        resp.status_code
-                    );
-                    match bridge_builder {
-                        Some(mut builder) => {
-                            let callee_answer = String::from_utf8_lossy(&resp.body).to_string();
-                            let caller_offer =
-                                String::from_utf8_lossy(&tx.original.body).to_string();
-                            match builder.handshake(caller_offer, callee_answer, None).await {
-                                Ok(answer) => {
-                                    caller_dialog
-                                        .accept(None, Some(answer.as_bytes().to_vec()))
-                                        .ok();
-                                    let stream = builder.build(event_sender).await;
-                                    tokio::spawn(async move {
-                                        stream.serve().await.ok();
-                                    });
-                                    let mut session = match session.lock().await.take() {
-                                        Some(session) => session,
-                                        None => {
-                                            error!("Session not found");
-                                            return Err(anyhow!("Session not found"));
+                        let answer_headers = resp
+                            .content_type()
+                            .map(|ct| vec![ct.into()])
+                            .unwrap_or_default();
+
+                        match bridge_builder {
+                            Some(mut builder) => {
+                                let callee_answer = String::from_utf8_lossy(&resp.body).to_string();
+                                match builder.handshake(caller_offer, callee_answer, None).await {
+                                    Ok(answer) => {
+                                        match caller_dialog.accept(
+                                            Some(answer_headers),
+                                            Some(answer.as_bytes().to_vec()),
+                                        ) {
+                                            Ok(_) => {
+                                                info!("Handshake successful");
+                                            }
+                                            Err(e) => {
+                                                error!("Error accepting callee dialog: {}", e);
+                                            }
                                         }
-                                    };
-                                    session.set_established();
-                                    return Ok(session);
-                                }
-                                Err(e) => {
-                                    error!("Error during handshake: {}", e);
+                                        let stream = builder.build(event_sender).await;
+                                        tokio::spawn(async move {
+                                            stream.serve().await.ok();
+                                        });
+                                        let mut session = match session.lock().await.take() {
+                                            Some(session) => session,
+                                            None => {
+                                                error!("Session not found");
+                                                return Err(anyhow!("Session not found"));
+                                            }
+                                        };
+                                        session.set_established();
+                                        return Ok(Some(session));
+                                    }
+                                    Err(e) => {
+                                        error!("Error during handshake: {}", e);
+                                    }
                                 }
                             }
+                            None => {
+                                caller_dialog.accept(None, Some(resp.body)).ok();
+                            }
                         }
-                        None => {
-                            caller_dialog.accept(None, Some(resp.body)).ok();
-                        }
+                        dialog_layer.confirm_client_dialog(callee_dialog);
                     }
-                    self.inner.dialog_layer.confirm_client_dialog(callee_dialog);
-                }
-                None => {
-                    info!("Callee dialog rejected");
+                    None => {
+                        info!("Callee dialog rejected");
+                        caller_dialog.reject().ok();
+                    }
+                },
+                Err(e) => {
+                    error!("Error handling callee dialog: {}", e);
                     caller_dialog.reject().ok();
                 }
-            },
-            Err(e) => {
-                error!("Error handling callee dialog: {}", e);
-                caller_dialog.reject().ok();
+            };
+            Ok(None)
+        };
+        let token_ref = session_token.clone();
+        let sessions_ref = self.inner.sessions.clone();
+        let callee_to_sessions_ref = self.inner.callee_to_sessions.clone();
+        tokio::spawn(async move {
+            select! {
+            _ = token_ref.cancelled() => {
+                info!("Session token cancelled");
             }
-        }
-        todo!()
+            _ = caller_dlg_loop => {
+                info!("Caller dialog loop terminated");
+            }
+            _ = callee_dialog_loop => {
+                info!("Callee dialog loop terminated");
+            }
+            _ = media_event_loop => {
+                info!("Media event loop terminated");
+            }
+            _ = async {
+                match make_callee_dialog_loop.await {
+                    Ok(Some(session)) => {
+                        info!("Session created: {:?}", session.dialog_id);
+                        callee_to_sessions_ref.write().await.insert(session.callee_dialog_id.clone(), session.dialog_id.clone());
+                        sessions_ref.write().await.insert(session.dialog_id.clone(), session);
+                        token_ref.cancelled().await;
+                    }
+                    Ok(None) => {
+                        token_ref.cancelled().await;
+                        info!("Callee dialog loop terminated");
+                    }
+                    Err(e) => {
+                        error!("Error making callee dialog: {}", e);
+                    }
+                }
+            } => {
+                info!("Callee dialog loop terminated");
+            }
+            }
+            info!("Session loop terminated");
+        });
+        select! {
+            _ = session_token.cancelled() => {
+                info!("Session token cancelled");
+            }
+            _ = caller_dialog_ref.handle(tx) => {
+                info!("Caller dialog loop terminated");
+            }
+        };
+        Ok(())
     }
 
     async fn pop_session(&self, dialog_id: &DialogId) -> Option<(Session, bool)> {
@@ -425,6 +464,7 @@ impl CallModule {
         None
     }
     pub(crate) async fn handle_bye(&self, tx: &mut Transaction) -> Result<()> {
+        debug!("handle_bye: {:?}", tx.original);
         let dialog_id = DialogId::try_from(&tx.original).unwrap();
         let (session, is_from_caller) = match self.pop_session(&dialog_id).await {
             Some((session, is_from_caller)) => (session, is_from_caller),
@@ -547,11 +587,18 @@ impl ProxyModule for CallModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
-        _cookie: TransactionCookie,
+        cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
+        match cookie.get_user() {
+            None => {
+                cookie.set_user(SipUser::try_from(&*tx)?);
+            }
+            _ => {}
+        }
+        debug!("on_transaction_begin: {:?}", tx.original);
         match tx.original.method {
             rsip::Method::Invite => {
-                if let Err(e) = self.handle_invite(tx).await {
+                if let Err(e) = self.handle_invite(tx, cookie).await {
                     error!("Error handling INVITE: {}", e);
                     if tx.last_response.is_none() {
                         tx.reply_with(
@@ -582,8 +629,25 @@ impl ProxyModule for CallModule {
                 }
                 Ok(ProxyAction::Abort)
             }
-            rsip::Method::Ack | rsip::Method::Cancel => {
-                warn!("Received ACK or CANCEL for non-INVITE transaction");
+            rsip::Method::Ack => {
+                let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
+                let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
+                    Some(dialog) => dialog,
+                    None => {
+                        warn!("Dialog not found for ACK or CANCEL: {}", dialog_id);
+                        return Ok(ProxyAction::Abort);
+                    }
+                };
+                match dialog.handle(tx).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Error handling ACK or CANCEL: {}", e);
+                    }
+                };
+                Ok(ProxyAction::Abort)
+            }
+            rsip::Method::Cancel => {
+                info!("Received CANCEL : {:?}", tx.original);
                 Ok(ProxyAction::Abort)
             }
             _ => Ok(ProxyAction::Continue),

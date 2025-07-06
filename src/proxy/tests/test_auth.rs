@@ -737,6 +737,9 @@ async fn test_proxy_auth_wrong_credentials() {
     let (mut tx2, _) = create_transaction(request_with_wrong_auth).await;
 
     // Test authentication
+    let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
+    println!("Direct authentication result: {:?}", auth_result);
+
     let result = module
         .on_transaction_begin(
             CancellationToken::new(),
@@ -745,6 +748,8 @@ async fn test_proxy_auth_wrong_credentials() {
         )
         .await
         .unwrap();
+
+    println!("Authentication result: {:?}", result);
 
     // Should abort due to wrong credentials
     assert!(matches!(result, ProxyAction::Abort));

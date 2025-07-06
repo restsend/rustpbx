@@ -9,6 +9,10 @@ use rsip::{
     headers::auth::Algorithm,
     prelude::{HeadersExt, ToTypedHeader},
 };
+use rsipstack::{
+    transaction::transaction::Transaction,
+    transport::{SipAddr, SipConnection},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
@@ -25,10 +29,20 @@ pub struct SipUser {
     pub realm: Option<String>,
     #[serde(skip)]
     pub origin_contact: Option<rsip::typed::Contact>,
+    #[serde(skip)]
+    pub destination: Option<SipAddr>,
+    #[serde(default = "default_is_support_webrtc")]
+    pub is_support_webrtc: bool,
 }
+
 fn default_enabled() -> bool {
     true
 }
+
+fn default_is_support_webrtc() -> bool {
+    false
+}
+
 impl Default for SipUser {
     fn default() -> Self {
         Self {
@@ -38,6 +52,8 @@ impl Default for SipUser {
             password: None,
             realm: None,
             origin_contact: None,
+            destination: None,
+            is_support_webrtc: false,
         }
     }
 }
@@ -49,6 +65,33 @@ impl SipUser {
             None => self.username.clone(),
         }
     }
+
+    pub fn build_contact(&self, tx: &Transaction) -> Option<rsip::typed::Contact> {
+        let addr = match tx.endpoint_inner.get_addrs().first() {
+            Some(addr) => addr.clone(),
+            None => return None,
+        };
+
+        let contact_params = addr
+            .r#type
+            .map(|t| vec![rsip::Param::Transport(t)])
+            .unwrap_or_default();
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: rsip::Uri {
+                scheme: addr.r#type.map(|t| t.sip_scheme()),
+                auth: Some(rsip::Auth {
+                    user: self.get_contact_username(),
+                    password: None,
+                }),
+                host_with_port: addr.addr.clone(),
+                ..Default::default()
+            },
+            params: contact_params,
+        };
+        Some(contact)
+    }
+
     pub fn auth_digest(&self, algorithm: Algorithm) -> String {
         use md5::{Digest, Md5};
         use sha2::{Sha256, Sha512};
@@ -78,24 +121,41 @@ impl SipUser {
     }
 }
 
-impl TryFrom<&rsip::Request> for SipUser {
-    type Error = rsipstack::Error;
+impl TryFrom<&Transaction> for SipUser {
+    type Error = anyhow::Error;
 
-    fn try_from(req: &rsip::Request) -> Result<Self, Self::Error> {
-        let (username, realm) = match check_authorization_headers(req) {
+    fn try_from(tx: &Transaction) -> Result<Self, Self::Error> {
+        let (username, realm) = match check_authorization_headers(&tx.original) {
             Ok(Some((user, _))) => (user.username, user.realm),
             _ => {
-                let username = req
+                let username = tx
+                    .original
                     .from_header()?
                     .uri()?
                     .user()
                     .unwrap_or_default()
                     .to_string();
-                let realm = req.to_header()?.uri()?.host().to_string();
+                let realm = tx.original.to_header()?.uri()?.host().to_string();
                 (username, Some(realm))
             }
         };
-        let origin_contact = req.contact_header()?.typed().ok();
+        let origin_contact = match tx.original.contact_header() {
+            Ok(contact) => contact.typed().ok(),
+            Err(_) => None,
+        };
+        // Use rsipstack's via_received functionality to get destination
+        let via_header = tx.original.via_header()?;
+        let destination_addr = SipConnection::parse_target_from_via(via_header)
+            .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
+
+        let destination = SipAddr {
+            r#type: via_header.trasnport().ok(),
+            addr: destination_addr,
+        };
+        let is_support_webrtc = destination
+            .r#type
+            .is_some_and(|t| t == rsip::transport::Transport::Wss);
+
         Ok(SipUser {
             id: 0,
             username,
@@ -103,6 +163,8 @@ impl TryFrom<&rsip::Request> for SipUser {
             enabled: true,
             realm,
             origin_contact,
+            destination: Some(destination),
+            is_support_webrtc,
         })
     }
 }

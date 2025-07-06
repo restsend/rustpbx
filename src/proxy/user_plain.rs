@@ -58,6 +58,8 @@ impl PlainTextBackend {
                 enabled: true,
                 realm: None,
                 origin_contact: None,
+                destination: None,
+                is_support_webrtc: false,
             };
             users.insert(username.to_string(), user);
         }
