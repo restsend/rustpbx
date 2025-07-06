@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rsipstack::dialog::DialogId;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 #[derive(Clone, Debug)]
 pub struct SessionParty {
@@ -144,6 +145,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        debug!("Session dropped: {:?}", self.dialog_id);
         self.cancel_token.cancel();
     }
 }

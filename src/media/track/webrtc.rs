@@ -53,6 +53,7 @@ pub struct WebrtcTrack {
     cancel_token: CancellationToken,
     local_track: Option<Arc<TrackLocalStaticSample>>,
     encoder: TrackCodec,
+    pub prefered_codec: Option<CodecType>,
 }
 
 impl WebrtcTrack {
@@ -72,7 +73,7 @@ impl WebrtcTrack {
             stream_id,
         ))
     }
-    pub fn get_media_engine() -> Result<MediaEngine> {
+    pub fn get_media_engine(prefered_codec: Option<CodecType>) -> Result<MediaEngine> {
         let mut media_engine = MediaEngine::default();
         for codec in vec![
             RTCRtpCodecParameters {
@@ -120,7 +121,13 @@ impl WebrtcTrack {
                 ..Default::default()
             },
         ] {
-            media_engine.register_codec(codec, RTPCodecType::Audio)?;
+            if let Some(prefered_codec) = prefered_codec {
+                if codec.capability.mime_type == prefered_codec.mime_type() {
+                    media_engine.register_codec(codec, RTPCodecType::Audio)?;
+                }
+            } else {
+                media_engine.register_codec(codec, RTPCodecType::Audio)?;
+            }
         }
         Ok(media_engine)
     }
@@ -146,6 +153,7 @@ impl WebrtcTrack {
             cancel_token,
             local_track: None,
             encoder: TrackCodec::new(),
+            prefered_codec: None,
         }
     }
 
@@ -154,7 +162,7 @@ impl WebrtcTrack {
         offer: String,
         timeout: Option<Duration>,
     ) -> Result<RTCSessionDescription> {
-        let media_engine = Self::get_media_engine()?;
+        let media_engine = Self::get_media_engine(self.prefered_codec)?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
 
         let config = RTCConfiguration {
@@ -250,11 +258,18 @@ impl WebrtcTrack {
                 })
             },
         ));
+
         let remote_desc = RTCSessionDescription::offer(offer)?;
-        let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
+        let codec = match self.prefered_codec {
             Some(codec) => codec,
             None => {
-                return Err(anyhow::anyhow!("No codec found"));
+                let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
+                    Some(codec) => codec,
+                    None => {
+                        return Err(anyhow::anyhow!("No codec found"));
+                    }
+                };
+                codec
             }
         };
 
@@ -268,7 +283,7 @@ impl WebrtcTrack {
         info!(
             "set remote description codec:{}\noffer:\n{}",
             codec.mime_type(),
-            remote_desc.sdp
+            remote_desc.sdp,
         );
         peer_connection.set_remote_description(remote_desc).await?;
 

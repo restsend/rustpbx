@@ -16,7 +16,7 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, warn};
 use uuid;
 
 pub struct MediaStream {
@@ -88,7 +88,6 @@ impl MediaStreamBuilder {
 }
 
 impl MediaStream {
-    #[instrument(name = "MediaStream::serve", skip(self), fields(id = self.id))]
     pub async fn serve(&self) -> Result<()> {
         let packet_receiver = match self.packet_receiver.lock().await.take() {
             Some(receiver) => receiver,
@@ -98,6 +97,11 @@ impl MediaStream {
             }
         };
         self.start_recorder().await.ok();
+        info!(
+            id = self.id,
+            "media_stream: Serving tracks {:?}",
+            self.tracks.lock().await.keys()
+        );
         select! {
             _ = self.cancel_token.cancelled() => {}
             r = self.handle_forward_track(packet_receiver) => {
@@ -176,40 +180,6 @@ impl MediaStream {
             }
         }
     }
-
-    /// Set remote SDP for a specific track by track ID
-    pub async fn set_track_remote_sdp(&self, track_id: &TrackId, sdp: &str) -> Result<()> {
-        let mut tracks = self.tracks.lock().await;
-        if let Some(track) = tracks.get_mut(track_id) {
-            track.set_remote_sdp(sdp)?;
-            info!("Successfully set remote SDP for track: {}", track_id);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Track not found: {}", track_id))
-        }
-    }
-
-    /// Set remote SDP for all RTP tracks in the stream
-    pub async fn set_rtp_tracks_remote_sdp(&self, sdp: &str) -> Result<()> {
-        let mut tracks = self.tracks.lock().await;
-        let mut updated_count = 0;
-
-        for (track_id, track) in tracks.iter_mut() {
-            // Try to set remote SDP for all tracks
-            // Only RTP tracks will actually process it, others will ignore
-            if track.set_remote_sdp(sdp).is_ok() {
-                updated_count += 1;
-                info!("Set remote SDP for track: {}", track_id);
-            }
-        }
-
-        if updated_count > 0 {
-            info!("Successfully set remote SDP for {} tracks", updated_count);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("No tracks were updated with remote SDP"))
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -272,7 +242,10 @@ impl MediaStream {
                     continue;
                 }
                 if let Err(e) = track.send_packet(&packet).await {
-                    error!("media_stream: Failed to send packet to track: {}", e);
+                    error!(
+                        id = track.id(),
+                        "media_stream: Failed to send packet to track: {}", e
+                    );
                 }
             }
         }

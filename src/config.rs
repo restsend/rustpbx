@@ -164,17 +164,19 @@ pub enum CallRecordConfig {
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
 pub enum MediaProxyMode {
-    /// Do not handle media proxy
-    None,
-    /// Only handle NAT (private IP addresses)
-    NatOnly,
     /// All media goes through proxy
     All,
+    /// Auto detect if media proxy is needed (webrtc to rtp)
+    Auto,
+    /// Only handle NAT (private IP addresses)
+    Nat,
+    /// Do not handle media proxy
+    None,
 }
 
 impl Default for MediaProxyMode {
     fn default() -> Self {
-        Self::None
+        Self::Auto
     }
 }
 

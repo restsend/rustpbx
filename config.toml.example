@@ -37,10 +37,10 @@ method = "POST"
 
 # MediaProxy configuration
 [proxy.media_proxy]
-mode = "nat_only"  # Options: "none", "nat_only", "all"
+mode = "auto"
 rtp_start_port = 20000
 rtp_end_port = 30000
-external_ip = "192.168.1.1"  # Set to your external IP
+# external_ip = "192.168.1.1"  # Set to your external IP
 # force_proxy = ["192.168.1.100"]  # Optional: IP addresses to always proxy
 
 [proxy.user_backend]

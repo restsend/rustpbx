@@ -6,11 +6,8 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::{HeadersExt, UntypedHeader};
-use rsipstack::{
-    transaction::transaction::Transaction,
-    transport::{SipAddr, SipConnection},
-};
-use std::{marker::PhantomData, sync::Arc, time::Instant};
+use rsipstack::transaction::transaction::Transaction;
+use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -56,27 +53,13 @@ impl ProxyModule for RegistrarModule {
             return Ok(ProxyAction::Continue);
         }
 
-        let user = match SipUser::try_from(&tx.original) {
+        let user = match SipUser::try_from(&*tx) {
             Ok(u) => u,
             Err(e) => {
                 info!("failed to parse user: {:?}", e);
                 tx.reply(rsip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
-        };
-
-        // Use rsipstack's via_received functionality to get destination
-        let via_header = tx.original.via_header()?;
-        let destination_addr = SipConnection::parse_target_from_via(via_header)
-            .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
-
-        let destination = SipAddr {
-            r#type: via_header.trasnport().ok(),
-            addr: destination_addr,
-        };
-        let addr = match tx.endpoint_inner.get_addrs().first() {
-            Some(addr) => addr.clone(),
-            None => return Err(anyhow::anyhow!("endpoint not available addr")),
         };
 
         let expires = match tx.original.expires_header() {
@@ -88,33 +71,24 @@ impl ProxyModule for RegistrarModule {
         }
         .unwrap_or(60);
 
-        let contact_params = destination
-            .r#type
-            .map(|t| {
-                vec![
-                    rsip::Param::Transport(t),
-                    rsip::Param::Expires(expires.to_string().into()),
-                ]
-            })
-            .unwrap_or_default();
-
-        let contact = rsip::typed::Contact {
-            display_name: None,
-            uri: rsip::Uri {
-                scheme: addr.r#type.map(|t| t.sip_scheme()),
-                auth: Some(rsip::Auth {
-                    user: user.get_contact_username(),
-                    password: None,
-                }),
-                host_with_port: addr.addr,
-                ..Default::default()
-            },
-            params: contact_params,
+        let destination = match user.destination.as_ref() {
+            Some(d) => d,
+            None => {
+                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                return Ok(ProxyAction::Abort);
+            }
         };
 
-        let supports_webrtc = destination
-            .r#type
-            .is_some_and(|t| t == rsip::transport::Transport::Wss);
+        let mut contact = match user.build_contact(&*tx) {
+            Some(c) => c,
+            None => {
+                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                return Ok(ProxyAction::Abort);
+            }
+        };
+        contact
+            .params
+            .extend(vec![rsip::Param::Expires(expires.to_string().into())]);
 
         if expires == 0 {
             // delete user
@@ -139,16 +113,16 @@ impl ProxyModule for RegistrarModule {
             contact = contact.to_string(),
             destination = destination.to_string(),
             realm = user.realm,
-            supports_webrtc,
+            supports_webrtc = user.is_support_webrtc,
             "registered user"
         );
 
         let location = Location {
             aor: contact.uri.clone(),
             expires,
-            destination,
+            destination: destination.clone(),
             last_modified: Instant::now(),
-            supports_webrtc,
+            supports_webrtc: user.is_support_webrtc,
         };
 
         match self

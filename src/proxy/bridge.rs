@@ -2,6 +2,7 @@ use crate::{
     config::MediaProxyConfig,
     event::EventSender,
     media::{
+        negotiate::prefer_audio_codec,
         recorder::RecorderOption,
         stream::{MediaStream, MediaStreamBuilder},
         track::{
@@ -15,6 +16,8 @@ use crate::{
 use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error};
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MediaBridgeType {
@@ -80,15 +83,15 @@ impl MediaBridgeBuilder {
 
         match self.bridge_type {
             MediaBridgeType::WebRtcToRtp => {
-                let track = Self::create_rtptrack(
+                let callee_track = Self::create_rtptrack(
                     self.cancel_token.clone(),
-                    TrackId::new(),
+                    format!("rtp-{}", rand::random::<u64>()),
                     TrackConfig::default(),
                     self.config.clone(),
                 )
                 .await?;
-                let offer = track.local_description()?;
-                self.callee_track = Some(Box::new(track));
+                let offer = callee_track.local_description()?;
+                self.callee_track = Some(Box::new(callee_track));
                 Ok(offer)
             }
             _ => todo!(),
@@ -104,15 +107,35 @@ impl MediaBridgeBuilder {
     ) -> Result<String> {
         match self.callee_track {
             Some(ref mut track) => {
-                let _callee_answer = track.handshake(callee_answer, timeout).await?;
+                let prefered_codec;
+                match track.handshake(callee_answer, timeout).await {
+                    Ok(answer) => {
+                        debug!(id = track.id(), "Callee track handshake: {:?}", answer);
+                        let remote_desc = RTCSessionDescription::answer(answer)?;
+                        match prefer_audio_codec(&remote_desc.unmarshal()?) {
+                            Some(codec) => prefered_codec = Some(codec),
+                            None => {
+                                return Err(anyhow::anyhow!("No codec found"));
+                            }
+                        };
+                    }
+                    Err(e) => {
+                        error!(
+                            id = track.id(),
+                            caller_offer, "Failed to handshake callee track: {:?}", e
+                        );
+                        return Err(e);
+                    }
+                };
                 match self.bridge_type {
                     MediaBridgeType::WebRtcToRtp => {
                         let track_config = track.config().clone();
                         let mut caller_track = WebrtcTrack::new(
                             self.cancel_token.clone(),
-                            TrackId::new(),
+                            format!("webrtc-{}", track.id().to_string()),
                             track_config,
                         );
+                        caller_track.prefered_codec = prefered_codec;
                         let answer = caller_track.handshake(caller_offer, timeout).await?;
                         self.caller_track = Some(Box::new(caller_track));
                         Ok(answer)

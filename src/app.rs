@@ -8,7 +8,7 @@ use crate::{
         auth::AuthModule,
         call::CallModule,
         registrar::RegistrarModule,
-        server::{DefaultTransactionCookie, SipServer, SipServerBuilder, TransactionCookie},
+        server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
     },
     useragent::{invitation::create_invite_handler, UserAgent},

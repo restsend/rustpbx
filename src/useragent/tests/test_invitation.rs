@@ -173,6 +173,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
                 contact: bob_uri.try_into()?,
                 credential: None,
                 headers: None,
+                destination: None,
             };
 
             info!("Bob initiating call to Alice...");
