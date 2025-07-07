@@ -66,16 +66,19 @@ impl SipUser {
         }
     }
 
-    pub fn build_contact(&self, tx: &Transaction) -> Option<rsip::typed::Contact> {
+    pub fn build_contact_from_invite(&self, tx: &Transaction) -> Option<rsip::typed::Contact> {
         let addr = match tx.endpoint_inner.get_addrs().first() {
             Some(addr) => addr.clone(),
             None => return None,
         };
 
-        let contact_params = addr
-            .r#type
-            .map(|t| vec![rsip::Param::Transport(t)])
-            .unwrap_or_default();
+        let mut contact_params = vec![];
+        match addr.r#type {
+            Some(rsip::Transport::Udp) | None => {}
+            Some(t) => {
+                contact_params.push(rsip::Param::Transport(t));
+            }
+        }
         let contact = rsip::typed::Contact {
             display_name: None,
             uri: rsip::Uri {

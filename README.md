@@ -69,6 +69,117 @@ cargo run --bin rustpbx -- --conf config.toml
 ### Web Interface
 Access the web interface at `http://localhost:8080` to test voice agent features and manage calls.
 
+## 🐳 Docker Deployment
+
+### Quick Start with Docker
+
+1. **Pull the Docker image:**
+```bash
+docker pull restsend/rustpbx:latest
+```
+
+2. **Create environment configuration:**
+```bash
+# Create .env file
+cat > .env << EOF
+# Tencent Cloud ASR/TTS Configuration
+TENCENT_APPID=your_tencent_app_id
+TENCENT_SECRET_ID=your_tencent_secret_id
+TENCENT_SECRET_KEY=your_tencent_secret_key
+EOF
+```
+
+3. **Create config.toml:**
+```bash
+# Create config.toml
+cat > config.toml << EOF
+http_addr = "0.0.0.0:8080"
+log_level = "info"
+stun_server = "stun.l.google.com:19302"
+recorder_path = "/tmp/recorders"
+media_cache_path = "/tmp/mediacache"
+
+[ua]
+addr="0.0.0.0"
+udp_port=13050
+
+[proxy]
+modules = ["acl", "auth", "registrar", "call"]
+addr = "0.0.0.0"
+udp_port = 15060
+registrar_expires = 60
+ws_handler= "/ws"
+
+# ACL rules
+acl_rules = [
+    "allow 10.0.0.0/8",
+    "allow all",
+]
+
+[proxy.media_proxy]
+mode = "auto"
+rtp_start_port = 20000
+rtp_end_port = 30000
+
+[proxy.user_backend]
+type = "memory"
+users = [
+    { username = "bob", password = "123456", realm = "127.0.0.1" },
+    { username = "alice", password = "123456", realm = "127.0.0.1" },
+]
+
+[callrecord]
+type = "local"
+root = "/tmp/cdr"
+EOF
+```
+
+4. **Run with Docker:**
+```bash
+docker run -d \
+  --name rustpbx \
+  -p 8080:8080 \
+  -p 15060:15060/udp \
+  -p 13050:13050/udp \
+  -p 20000-30000:20000-30000/udp \
+  --env-file .env \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/recordings:/tmp/recorders \
+  restsend/rustpbx:latest \
+  --conf /app/config.toml
+```
+
+5. **Access the service:**
+- Web Interface: http://localhost:8080
+- SIP Proxy: localhost:15060
+- User Agent: localhost:13050
+
+### Environment Variables
+
+The following environment variables are required for Tencent Cloud ASR/TTS services:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `TENCENT_APPID` | Your Tencent Cloud App ID | Yes |
+| `TENCENT_SECRET_ID` | Your Tencent Cloud Secret ID | Yes |
+| `TENCENT_SECRET_KEY` | Your Tencent Cloud Secret Key | Yes |
+
+### Configuration Options
+
+Key configuration options in `config.toml`:
+
+- **HTTP Server**: `http_addr` - Web interface and API endpoint
+- **SIP Proxy**: `proxy.udp_port` - SIP proxy server port
+- **User Agent**: `ua.udp_port` - Outbound call user agent port
+- **Media Proxy**: `proxy.media_proxy` - RTP port range for media proxying
+- **Call Recording**: `callrecord.root` - Directory for call recordings
+
+## 🧪 Go Client Integration
+
+### Using rustpbxgo Client Library
+
+See `https://github.com/restsend/rustpbxgo`
+
 ## 🎯 Use Cases
 
 ### AI Customer Service

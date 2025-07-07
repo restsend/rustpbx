@@ -78,17 +78,26 @@ impl ProxyModule for RegistrarModule {
                 return Ok(ProxyAction::Abort);
             }
         };
-
-        let mut contact = match user.build_contact(&*tx) {
-            Some(c) => c,
-            None => {
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
-                return Ok(ProxyAction::Abort);
+        let mut contact_params = vec![rsip::Param::Expires(expires.to_string().into())];
+        match destination.r#type {
+            Some(rsip::Transport::Udp) | None => {}
+            Some(t) => {
+                contact_params.push(rsip::Param::Transport(t));
             }
+        }
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: rsip::Uri {
+                scheme: destination.r#type.map(|t| t.sip_scheme()),
+                auth: Some(rsip::Auth {
+                    user: user.get_contact_username(),
+                    password: None,
+                }),
+                host_with_port: destination.addr.clone(),
+                ..Default::default()
+            },
+            params: contact_params,
         };
-        contact
-            .params
-            .extend(vec![rsip::Param::Expires(expires.to_string().into())]);
 
         if expires == 0 {
             // delete user

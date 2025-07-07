@@ -82,7 +82,19 @@ impl MediaBridgeBuilder {
         }
 
         match self.bridge_type {
-            MediaBridgeType::WebRtcToRtp => {
+            MediaBridgeType::WebRtcToRtp | MediaBridgeType::Webrtc2Webrtc => {
+                let callee_track = Self::create_rtptrack(
+                    self.cancel_token.clone(),
+                    format!("rtp-{}", rand::random::<u64>()),
+                    TrackConfig::default(),
+                    self.config.clone(),
+                )
+                .await?;
+                let offer = callee_track.local_description()?;
+                self.callee_track = Some(Box::new(callee_track));
+                Ok(offer)
+            }
+            MediaBridgeType::Rtp2Rtp | MediaBridgeType::RtpToWebRtc => {
                 let callee_track = Self::create_rtptrack(
                     self.cancel_token.clone(),
                     format!("rtp-{}", rand::random::<u64>()),
@@ -128,7 +140,7 @@ impl MediaBridgeBuilder {
                     }
                 };
                 match self.bridge_type {
-                    MediaBridgeType::WebRtcToRtp => {
+                    MediaBridgeType::WebRtcToRtp | MediaBridgeType::Webrtc2Webrtc => {
                         let track_config = track.config().clone();
                         let mut caller_track = WebrtcTrack::new(
                             self.cancel_token.clone(),
@@ -136,6 +148,19 @@ impl MediaBridgeBuilder {
                             track_config,
                         );
                         caller_track.prefered_codec = prefered_codec;
+                        let answer = caller_track.handshake(caller_offer, timeout).await?;
+                        self.caller_track = Some(Box::new(caller_track));
+                        Ok(answer)
+                    }
+                    MediaBridgeType::Rtp2Rtp | MediaBridgeType::RtpToWebRtc => {
+                        let track_config = track.config().clone();
+                        let mut caller_track = Self::create_rtptrack(
+                            self.cancel_token.clone(),
+                            format!("rtp-{}", track.id().to_string()),
+                            track_config,
+                            self.config.clone(),
+                        )
+                        .await?;
                         let answer = caller_track.handshake(caller_offer, timeout).await?;
                         self.caller_track = Some(Box::new(caller_track));
                         Ok(answer)

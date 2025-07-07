@@ -211,9 +211,13 @@ impl CallModule {
         } else {
             caller_offer.clone()
         };
-        let caller_contact = caller
-            .build_contact(&*tx)
-            .ok_or(anyhow!("Failed to build caller contact"))?;
+
+        let caller_contact = match caller.build_contact_from_invite(&*tx) {
+            Some(contact) => contact,
+            None => {
+                return Err(anyhow!("Failed to build caller contact"));
+            }
+        };
         // Create InviteOption for outbound call
         let invite_option = InviteOption {
             caller: caller_contact.uri.clone(),
@@ -275,7 +279,9 @@ impl CallModule {
                             "Caller dialog terminated: {:?} reason: {:?}",
                             dlg_id, reason
                         );
-                        callee_dialog_ref.hangup().await.ok();
+                        tokio::spawn(async move {
+                            callee_dialog_ref.hangup().await.ok();
+                        });
                         break;
                     }
                     _ => {}
@@ -292,18 +298,13 @@ impl CallModule {
                             "Callee dialog terminated: {:?} reason: {:?}",
                             dlg_id, reason
                         );
-                        caller_dialog_ref.bye().await.ok();
+                        tokio::spawn(async move {
+                            caller_dialog_ref.bye().await.ok();
+                        });
                         break;
                     }
                     DialogState::Confirmed(dlg_id) => {
                         info!("Callee dialog confirmed: {:?}", dlg_id);
-                        match session_ref.lock().await.as_mut() {
-                            Some(session) => {
-                                session.set_status_code(200);
-                                session.set_established();
-                            }
-                            None => {}
-                        }
                     }
                     DialogState::Early(dlg_id, resp) => {
                         info!("Callee dialog early: {:?} {:?}", dlg_id, resp);
@@ -333,11 +334,11 @@ impl CallModule {
                 Ok((new_dlg_id, resp)) => match resp {
                     Some(resp) => {
                         info!(
-                            "Callee dialog confirmed: {} => {} status: {:?}",
-                            callee_dialog.id().to_string(),
+                            "Callee dialog confirmed: {} status: {:?}",
                             new_dlg_id.to_string(),
                             resp.status_code
                         );
+                        dialog_layer.confirm_client_dialog(callee_dialog);
 
                         let answer_headers = resp
                             .content_type()
@@ -371,7 +372,8 @@ impl CallModule {
                                                 return Err(anyhow!("Session not found"));
                                             }
                                         };
-                                        session.set_established();
+                                        session.set_status_code(200);
+                                        session.set_established(new_dlg_id);
                                         return Ok(Some(session));
                                     }
                                     Err(e) => {
@@ -383,7 +385,6 @@ impl CallModule {
                                 caller_dialog.accept(None, Some(resp.body)).ok();
                             }
                         }
-                        dialog_layer.confirm_client_dialog(callee_dialog);
                     }
                     None => {
                         info!("Callee dialog rejected");
@@ -417,7 +418,7 @@ impl CallModule {
             _ = async {
                 match make_callee_dialog_loop.await {
                     Ok(Some(session)) => {
-                        info!("Session created: {:?}", session.dialog_id);
+                        info!("Session created caller:{:?} callee: {:?}", session.dialog_id, session.callee_dialog_id);
                         callee_to_sessions_ref.write().await.insert(session.callee_dialog_id.clone(), session.dialog_id.clone());
                         sessions_ref.write().await.insert(session.dialog_id.clone(), session);
                         token_ref.cancelled().await;
@@ -464,35 +465,79 @@ impl CallModule {
         None
     }
     pub(crate) async fn handle_bye(&self, tx: &mut Transaction) -> Result<()> {
-        debug!("handle_bye: {:?}", tx.original);
+        debug!("handle_bye: {}", tx.original.to_string());
         let dialog_id = DialogId::try_from(&tx.original).unwrap();
         let (session, is_from_caller) = match self.pop_session(&dialog_id).await {
             Some((session, is_from_caller)) => (session, is_from_caller),
             None => {
-                return Err(anyhow!("Session not found for BYE: {}", dialog_id));
+                // // Sesssion not found, but it may be a callee dialog
+                // // so we need to hang up the callee dialog
+                // match self.inner.dialog_layer.get_dialog(&dialog_id) {
+                //     Some(dialog) => {
+                //         let mut bye_req = tx.original.clone();
+                //         let via = tx
+                //             .endpoint_inner
+                //             .get_via(None, None)
+                //             .map_err(|e| anyhow!(e))?;
+                //         bye_req.headers.push_front(via.into());
+
+                //         let key = TransactionKey::from_request(&bye_req, TransactionRole::Client)
+                //             .expect("client_transaction");
+
+                //         let mut bye_tx =
+                //             Transaction::new_client(key, bye_req, tx.endpoint_inner.clone(), None);
+                //         match dialog.remote_contact() {
+                //             Some(ref contact) => {
+                //                 bye_tx.destination = contact.try_into().ok();
+                //             }
+                //             None => {
+                //                 warn!("No remote contact found for BYE: {}", dialog_id);
+                //                 return Err(anyhow!(
+                //                     "No remote contact found for BYE: {}",
+                //                     dialog_id
+                //                 ));
+                //             }
+                //         }
+                //         info!(
+                //             "UAC/BYE Forwarding \n{} \nto {:?}",
+                //             tx.original.to_string(),
+                //             bye_tx.destination
+                //         );
+                //         bye_tx.send().await.ok();
+                //         while let Some(msg) = bye_tx.receive().await {
+                //             match msg {
+                //                 rsip::message::SipMessage::Response(mut resp) => {
+                //                     header_pop!(resp.headers, rsip::Header::Via);
+                //                     info!("UAC/BYE Forwarding response: {}", resp.to_string());
+                //                     tx.respond(resp).await.ok();
+                //                     break;
+                //                 }
+                //                 _ => {
+                //                     error!("UAC/BYE Received request: {}", msg.to_string());
+                //                 }
+                //             }
+                //         }
+                //     }
+                //     None => {
+                //         warn!("Dialog not found for BYE: {}", dialog_id);
+                //         return Err(anyhow!("Dialog not found for BYE: {}", dialog_id));
+                //     }
+                // }
+                return Ok(());
             }
         };
         info!(?dialog_id, is_from_caller, "Session found for BYE");
         match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(mut dialog) => {
+                debug!("Hanging up caller dialog: {:?}", dialog.id());
                 dialog.handle(tx).await.ok();
             }
             None => {
                 warn!("Dialog not found for BYE: {}", dialog_id);
+                return Ok(());
             }
         }
-        match self
-            .inner
-            .dialog_layer
-            .get_dialog(&session.callee_dialog_id)
-        {
-            Some(dialog) => {
-                dialog.hangup().await.ok();
-            }
-            None => {
-                warn!("Dialog not found for BYE: {}", session.callee_dialog_id);
-            }
-        }
+
         let hangup_reason = if is_from_caller {
             Some(CallRecordHangupReason::ByCaller)
         } else {
@@ -595,7 +640,7 @@ impl ProxyModule for CallModule {
             }
             _ => {}
         }
-        debug!("on_transaction_begin: {:?}", tx.original);
+        debug!("on_transaction_begin: {}", tx.original.to_string());
         match tx.original.method {
             rsip::Method::Invite => {
                 if let Err(e) = self.handle_invite(tx, cookie).await {
