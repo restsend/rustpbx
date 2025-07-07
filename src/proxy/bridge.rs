@@ -106,7 +106,6 @@ impl MediaBridgeBuilder {
                 self.callee_track = Some(Box::new(callee_track));
                 Ok(offer)
             }
-            _ => todo!(),
         }
     }
 
@@ -165,7 +164,6 @@ impl MediaBridgeBuilder {
                         self.caller_track = Some(Box::new(caller_track));
                         Ok(answer)
                     }
-                    _ => todo!(),
                 }
             }
             None => Err(anyhow::anyhow!("Callee track not set")),
