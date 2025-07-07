@@ -373,20 +373,27 @@ impl SipServer {
             tokio::spawn(async move {
                 runnings_tx.fetch_add(1, Ordering::Relaxed);
                 let start_time = Instant::now();
+                let final_status;
                 select! {
                     r = Self::process_transaction(token.clone(), modules, &key,  &mut tx) => {
-                        let final_status = tx.last_response.as_ref().map(|r| r.status_code());
+                        final_status = tx.last_response.as_ref().map(|r| r.status_code());
                         info!(key, ?final_status, "Transaction processed in {:?} ", start_time.elapsed());
                         runnings_tx.fetch_sub(1, Ordering::Relaxed);
                         return r;
                     }
                     _ = token.cancelled() => {
                         info!(key, "Transaction cancelled");
-                        if tx.last_response.is_none() {
-                            tx.reply(rsip::StatusCode::RequestTerminated).await.ok();
-                        }
                     }
                 };
+
+                if !matches!(
+                    tx.original.method,
+                    rsip::Method::Bye | rsip::method::Method::Cancel
+                ) {
+                    if tx.last_response.is_none() {
+                        tx.reply(rsip::StatusCode::RequestTerminated).await.ok();
+                    }
+                }
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 return Ok::<(), anyhow::Error>(());
             });

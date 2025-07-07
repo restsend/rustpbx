@@ -103,9 +103,10 @@ impl Session {
         }
     }
 
-    pub fn set_established(&mut self) {
+    pub fn set_established(&mut self, callee_dialog_id: DialogId) {
         self.established_at = Some(Instant::now());
         self.answer_time = Some(Utc::now());
+        self.callee_dialog_id = callee_dialog_id;
     }
 
     pub fn set_ringing(&mut self) {
