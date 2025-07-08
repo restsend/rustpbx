@@ -30,18 +30,6 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Call Management**: List, monitor, and control active calls
 - **LLM Proxy**: Built-in proxy for AI language model services
 
-## 📊 Architecture
-
-### SIP Workflow
-![Sip](./docs/sip.png)
-
-The SIP workflow demonstrates how external applications can initiate calls through RustPBX, leveraging the full SIP protocol stack for reliable voice communications.
-
-### WebRTC Workflow
-![Webrtc](./docs/webrtc.png)
-
-The WebRTC workflow shows how web applications can establish direct peer-to-peer connections via RustPBX, enabling modern browser-based voice applications.
-
 ## 🛠 Quick Start
 
 ### Prerequisites
@@ -180,30 +168,19 @@ Key configuration options in `config.toml`:
 
 See `https://github.com/restsend/rustpbxgo`
 
-## 🎯 Use Cases
+### API Documentation
 
-### AI Customer Service
-Build intelligent customer service systems with automated speech recognition, natural language processing, and synthetic voice responses.
+#### SIP Workflow
+![Sip](./docs/sip.png)
 
-### Voice Assistant Applications
-Create voice-controlled applications with real-time speech processing and AI-powered conversation handling.
+The SIP workflow demonstrates how external applications can initiate calls through RustPBX, leveraging the full SIP protocol stack for reliable voice communications.
 
-### WebRTC Contact Centers
-Deploy browser-based contact center solutions with advanced call routing and AI assistance.
+#### WebRTC Workflow
+![Webrtc](./docs/webrtc.png)
 
-### Telephony Integration
-Integrate traditional SIP phones and systems with modern AI voice processing capabilities.
+The WebRTC workflow shows how web applications can establish direct peer-to-peer connections via RustPBX, enabling modern browser-based voice applications.
 
-## 📋 Core Components
-
-- **SIP Proxy Server** (`proxy/`): Full-featured SIP server with modular architecture
-- **User Agent** (`useragent/`): SIP user agent for outbound calls
-- **Media Engine** (`media/`): Audio processing pipeline with codec support
-- **Voice Synthesis** (`synthesis/`): TTS engines for multiple providers
-- **Speech Recognition** (`transcription/`): ASR engines with streaming support
-- **LLM Integration** (`llm/`): Language model proxy and integration
-- **Call Recording** (`callrecord/`): Call recording and storage management
-- **RESTful API** (`handler/`): HTTP API and WebSocket endpoints
+For detailed API documentation, see [API Documentation](./api.md).
 
 ## 🔧 Configuration Features
 
