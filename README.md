@@ -180,7 +180,7 @@ The SIP workflow demonstrates how external applications can initiate calls throu
 
 The WebRTC workflow shows how web applications can establish direct peer-to-peer connections via RustPBX, enabling modern browser-based voice applications.
 
-For detailed API documentation, see [API Documentation](./api.md).
+For detailed API documentation, see [API Documentation](./docs/api.md).
 
 ## 🔧 Configuration Features
 
@@ -205,7 +205,6 @@ For detailed API documentation, see [API Documentation](./api.md).
 ## 📚 Documentation
 
 - [API Reference](./docs/API.md) - Complete REST API documentation
-- [Media Proxy Guide](./docs/MEDIAPROXY_README.md) - Detailed media proxy configuration
 - [Architecture Diagrams](docs/) - System architecture and workflows
 
 ## 🤝 Contributing
