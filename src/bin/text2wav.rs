@@ -4,7 +4,7 @@ use dotenv::dotenv;
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
-use rustpbx::PcmBuf;
+use rustpbx::{version, PcmBuf};
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
@@ -21,7 +21,12 @@ struct TextSegment {
 
 /// Convert text to WAV audio files using text-to-speech
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version = version::get_short_version(),
+    about = "Convert text to WAV audio files using text-to-speech",
+    long_about = version::get_version_info()
+)]
 struct Args {
     /// Input text to convert to speech
     ///

@@ -204,7 +204,7 @@ For detailed API documentation, see [API Documentation](./docs/api.md).
 
 ## 📚 Documentation
 
-- [API Reference](./docs/API.md) - Complete REST API documentation
+- [API Reference](./docs/api.md) - Complete REST API documentation
 - [Architecture Diagrams](docs/) - System architecture and workflows
 
 ## 🤝 Contributing
