@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
-use rustpbx::{app::AppStateBuilder, config::Config};
+use rustpbx::{app::AppStateBuilder, config::Config, version};
 use std::fs::File;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
@@ -10,8 +10,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 #[derive(Parser, Debug)]
 #[command(
     author,
-    version,
-    about = "A versatile SIP PBX server implemented in Rust"
+    version = version::get_short_version(),
+    about = "A versatile SIP PBX server implemented in Rust",
+    long_about = version::get_version_info()
 )]
 struct Cli {
     /// Path to the configuration file
@@ -34,6 +35,7 @@ async fn main() -> Result<()> {
         .map(|conf| Config::load(&conf).expect("Failed to load config"))
         .unwrap_or_default();
 
+    println!("{}", version::get_version_info());
     let mut env_filter = EnvFilter::from_default_env();
     if let Some(Ok(level)) = config
         .log_level

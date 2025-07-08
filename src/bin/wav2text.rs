@@ -4,13 +4,19 @@ use rustpbx::{
     event::SessionEvent,
     media::track::file::read_wav_file,
     transcription::{TencentCloudAsrClientBuilder, TranscriptionClient, TranscriptionOption},
+    version,
 };
 use std::{path::PathBuf, time::Duration};
 use tracing::{debug, info};
 
 /// Convert WAV audio files to text using speech recognition
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version = version::get_short_version(),
+    about = "Convert WAV audio files to text using speech recognition",
+    long_about = version::get_version_info()
+)]
 struct Args {
     /// Path to input WAV file
     #[arg(value_name = "INPUT")]

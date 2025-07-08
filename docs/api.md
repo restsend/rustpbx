@@ -139,9 +139,9 @@ sequenceDiagram
     RustPBX->>Client: Send Answer Event with SDP
     Client->>RustPBX: Set Remote Description
     
-    Note over Client,RustPBX: SIP/RTP Media Flow
-    Client->>RustPBX: RTP Audio Packets (PCMA/PCMU/G722/Opus)
-    RustPBX->>Client: RTP Audio Response
+    Note over SIP UA,SIP Server: SIP/RTP Media Flow
+    SIP UA->>SIP Server: RTP Audio Packets (PCMA/PCMU/G722/Opus)
+    SIP Server->>SIP UA: RTP Audio Response
     
     Client->>RustPBX: Send TTS/Play Commands
     RustPBX->>Client: Send Audio Events
