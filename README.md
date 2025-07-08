@@ -1,5 +1,7 @@
 # RustPBX - AI-Powered Software-Defined PBX
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/restsend/rustpbx)
+
 RustPBX is a high-performance, secure software-defined PBX (Private Branch Exchange) system implemented in Rust, designed to support AI-powered communication pipelines and modern voice applications.
 
 ## 🚀 Key Features
