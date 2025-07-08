@@ -75,7 +75,7 @@ Access the web interface at `http://localhost:8080` to test voice agent features
 
 1. **Pull the Docker image:**
 ```bash
-docker pull docker.io/library/rustpbx:latest
+docker pull ghcr.io/restsend/rustpbx:latest
 ```
 
 2. **Create environment configuration:**

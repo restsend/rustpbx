@@ -7,12 +7,27 @@ on:
     branches: [ "main" ]
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag rustpbx:main
+    
+    - name: Log in to Container registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      run: |
+        tag=$(date +%Y%m%d)
+        if [[ "${{ github.event.head_commit.message }}" =~ \[latest\] ]]; then
+          tag=latest
+        fi
+        docker build . --tag ghcr.io/restsend/rustpbx:$tag
+        docker push ghcr.io/restsend/rustpbx:$tag
