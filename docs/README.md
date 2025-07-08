@@ -10,3 +10,7 @@ AppServer invite a call via RustPBX
 ![WebRTC](./webrtc.png)
 
 App make a webrtc connection via RustPBX
+
+# API Documentation
+
+For detailed API documentation, see [API Documentation](./api.md).

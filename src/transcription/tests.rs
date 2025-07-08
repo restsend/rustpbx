@@ -101,6 +101,10 @@ async fn test_tencent_cloud_asr() {
                 SessionEvent::AsrDelta { text, .. } => {
                     fulltext += &text;
                 }
+                SessionEvent::Error { error, .. } => {
+                    println!("Error: {:?}", error);
+                    break;
+                }
                 _ => {}
             }
             if fulltext.contains("你好") {

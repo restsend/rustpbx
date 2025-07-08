@@ -3,6 +3,7 @@ use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig};
 use crate::handler::call::ActiveCallType;
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
+use crate::proxy::locator::Location;
 use crate::proxy::server::TransactionCookie;
 use crate::proxy::session::{Session, SessionParty};
 use crate::proxy::user::SipUser;
@@ -17,8 +18,10 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
 use rsipstack::rsip_ext::RsipResponseExt;
 use rsipstack::transaction::transaction::Transaction;
+use rsipstack::transport::SipAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::select;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -107,19 +110,6 @@ impl CallModule {
         }
     }
 
-    /// Forward request to external proxy realm
-    async fn forward_to_proxy(&self, tx: &mut Transaction, target_realm: &str) -> Result<()> {
-        if !self.inner.config.enable_forwarding.unwrap_or(false) {
-            return Err(anyhow!("External proxy forwarding is disabled"));
-        }
-
-        warn!(
-            key = ?tx.key,
-            "External proxy forwarding not implemented for realm: {}", target_realm
-        );
-        return Err(anyhow!("External proxy forwarding not implemented"));
-    }
-
     pub(crate) async fn handle_invite(
         &self,
         tx: &mut Transaction,
@@ -130,47 +120,52 @@ impl CallModule {
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
 
-        if !self.inner.config.is_same_realm(&callee_realm) {
+        let target_locations = if !self.inner.config.is_same_realm(&callee_realm) {
             info!(callee_realm, "Forwarding INVITE to external realm");
-            return self.forward_to_proxy(tx, &callee_realm).await;
-        }
+            vec![Location {
+                aor: callee_uri.clone(),
+                destination: SipAddr::try_from(&callee_uri).map_err(|e| anyhow!(e))?,
+                supports_webrtc: false,
+                expires: 0,
+                last_modified: Instant::now(),
+            }]
+        } else {
+            // Check if callee exists in locator
+            match self
+                .inner
+                .server
+                .locator
+                .lookup(&callee, Some(&callee_realm))
+                .await
+            {
+                Ok(locations) => locations,
+                Err(_) => {
+                    info!("User not found in locator: {}@{}", callee, callee_realm);
+                    tx.reply(rsip::StatusCode::NotFound)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
 
-        // Check if callee exists in locator
-        let target_locations = match self
-            .inner
-            .server
-            .locator
-            .lookup(&callee, Some(&callee_realm))
-            .await
-        {
-            Ok(locations) => locations,
-            Err(_) => {
-                info!("User not found in locator: {}@{}", callee, callee_realm);
-                tx.reply(rsip::StatusCode::NotFound)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-
-                // Wait for ACK
-                while let Some(msg) = tx.receive().await {
-                    match msg {
-                        rsip::message::SipMessage::Request(req) => match req.method {
-                            rsip::Method::Ack => {
-                                debug!("Received ACK for 404 Not Found");
-                                break;
-                            }
+                    // Wait for ACK
+                    while let Some(msg) = tx.receive().await {
+                        match msg {
+                            rsip::message::SipMessage::Request(req) => match req.method {
+                                rsip::Method::Ack => {
+                                    debug!("Received ACK for 404 Not Found");
+                                    break;
+                                }
+                                _ => {}
+                            },
                             _ => {}
-                        },
-                        _ => {}
+                        }
                     }
+                    return Ok(());
                 }
-                return Ok(());
             }
         };
 
         let target_location = target_locations
             .first()
             .ok_or(anyhow!("No target location found"))?;
-
         // Check if request body contains SDP
         let caller_offer = if !tx.original.body.is_empty() {
             String::from_utf8_lossy(&tx.original.body).to_string()
