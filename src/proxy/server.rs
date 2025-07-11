@@ -83,6 +83,7 @@ pub struct SipServerInner {
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
+    pub routing_state: Arc<crate::proxy::routing::RoutingState>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -232,6 +233,7 @@ impl SipServerBuilder {
             locator: Arc::new(locator),
             callrecord_sender: self.callrecord_sender,
             endpoint,
+            routing_state: Arc::new(crate::proxy::routing::RoutingState::new()),
         });
 
         let mut allow_methods = Vec::new();

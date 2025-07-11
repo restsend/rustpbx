@@ -23,6 +23,15 @@ pub fn router() -> Router<AppState> {
         .route("/call/kill/{id}", post(kill_call))
         .nest("/llm/v1", super::llmproxy::router())
         .route("/iceservers", get(super::webrtc::get_iceservers))
+        .route("/health", get(health_handler))
+}
+
+async fn health_handler(State(state): State<AppState>) -> Response {
+    let health = serde_json::json!({
+        "status": "running",
+        "runnings": state.active_calls.lock().await.len(),
+    });
+    Json(health).into_response()
 }
 
 async fn list_calls(State(state): State<AppState>) -> Response {
@@ -32,7 +41,6 @@ async fn list_calls(State(state): State<AppState>) -> Response {
                 "id": id,
                 "call_type": call.call_type,
                 "created_at": call.call_state.read().unwrap().created_at.to_rfc3339(),
-                "option": call.option,
             })
         }).collect::<Vec<_>>(),
     });
