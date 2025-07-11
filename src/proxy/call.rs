@@ -1,6 +1,6 @@
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
 use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
-use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig};
+use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig, RouteResult};
 use crate::handler::call::ActiveCallType;
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
 use crate::proxy::locator::Location;
@@ -214,7 +214,7 @@ impl CallModule {
             }
         };
         // Create InviteOption for outbound call
-        let invite_option = InviteOption {
+        let mut invite_option = InviteOption {
             caller: caller_contact.uri.clone(),
             callee: target_location.aor.clone().into(),
             destination: Some(target_location.destination.clone()),
@@ -224,6 +224,28 @@ impl CallModule {
             credential: None,
             headers: None,
         };
+        let route_result = self
+            .inner
+            .config
+            .route_invite(
+                invite_option,
+                &tx.original,
+                &self.inner.server.routing_state,
+            )
+            .await?;
+        match route_result {
+            RouteResult::Forward(option) => {
+                invite_option = option;
+            }
+            RouteResult::Abort(code, reason) => {
+                info!("Route abort: {} {}", code, reason);
+                let headers = vec![];
+                tx.reply_with(code.into(), headers, None)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                return Ok(());
+            }
+        }
         // Attempt outbound call
         info!(
             "Creating outbound call: {} -> {} via {} (should_bridge_media: {}) sdp:\n {:?}",

@@ -48,6 +48,7 @@ pub async fn create_test_server_with_config(
         locator: Arc::new(locator),
         callrecord_sender: None,
         endpoint,
+        routing_state: Arc::new(crate::proxy::routing::RoutingState::new()),
     });
 
     // Add test users

@@ -1,6 +1,13 @@
-use crate::{proxy::user::SipUser, useragent::RegisterOption};
-use anyhow::Error;
+use crate::{
+    proxy::{
+        routing::{matcher::match_invite, RoutesConfig, TrunksConfig},
+        user::SipUser,
+    },
+    useragent::RegisterOption,
+};
+use anyhow::{Error, Result};
 use clap::Parser;
+use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -227,6 +234,15 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub enable_forwarding: Option<bool>,
     pub ws_handler: Option<String>,
+    #[serde(default)]
+    pub routes: Option<RoutesConfig>,
+    #[serde(default)]
+    pub trunks: Option<TrunksConfig>,
+}
+
+pub enum RouteResult {
+    Forward(InviteOption),
+    Abort(u16, String),
 }
 
 impl ProxyConfig {
@@ -254,6 +270,22 @@ impl ProxyConfig {
                 false
             }
         }
+    }
+
+    pub async fn route_invite(
+        &self,
+        option: InviteOption,
+        origin: &rsip::Request,
+        routing_state: &crate::proxy::routing::RoutingState,
+    ) -> Result<RouteResult> {
+        match_invite(
+            self.trunks.as_ref(),
+            self.routes.as_ref(),
+            option,
+            origin,
+            routing_state,
+        )
+        .await
     }
 }
 
@@ -284,6 +316,8 @@ impl Default for ProxyConfig {
             realms: Some(vec![]),
             enable_forwarding: Some(true),
             ws_handler: None,
+            routes: None,
+            trunks: None,
         }
     }
 }

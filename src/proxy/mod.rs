@@ -14,6 +14,8 @@ pub mod locator;
 pub mod locator_db;
 pub mod presence;
 pub mod registrar;
+pub mod routing;
+pub use routing::RoutingState;
 pub mod server;
 pub mod session;
 pub mod status;
@@ -24,6 +26,7 @@ pub mod user_db;
 pub mod user_http;
 pub mod user_plain;
 pub mod ws;
+
 #[derive(Debug)]
 pub enum ProxyAction {
     Continue,

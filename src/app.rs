@@ -8,6 +8,7 @@ use crate::{
         auth::AuthModule,
         call::CallModule,
         registrar::RegistrarModule,
+        routing::RoutingState,
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
     },
@@ -40,6 +41,7 @@ pub struct AppStateInner {
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
     pub callrecord_sender: tokio::sync::Mutex<Option<CallRecordSender>>,
+    pub routing_state: Arc<RoutingState>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -150,6 +152,7 @@ impl AppStateBuilder {
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             stream_engine,
             callrecord_sender: tokio::sync::Mutex::new(self.callrecord_sender),
+            routing_state: Arc::new(RoutingState::new()),
         }))
     }
 }
