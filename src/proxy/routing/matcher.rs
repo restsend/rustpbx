@@ -1,18 +1,18 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
-
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
 };
-use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+};
 use tracing::{debug, info, warn};
 
 use crate::{
     config::RouteResult,
-    proxy::routing::{
-        ActionType, RoutesConfig, RoutingConfig, RoutingState, TrunkConfig, TrunksConfig,
-    },
+    proxy::routing::{ActionType, DefaultRoute, RouteRule, RoutingState, TrunkConfig},
 };
 
 /// Main routing function
@@ -23,30 +23,16 @@ use crate::{
 /// 3. Select target trunk
 /// 4. Set destination, headers and credentials
 pub async fn match_invite(
-    trunks: Option<&TrunksConfig>,
-    routes: Option<&RoutesConfig>,
+    trunks: Option<&HashMap<String, TrunkConfig>>,
+    routes: Option<&Vec<RouteRule>>,
+    default: Option<&DefaultRoute>,
     mut option: InviteOption,
     origin: &rsip::Request,
     routing_state: &RoutingState,
 ) -> Result<RouteResult> {
-    // If no routing configured, forward directly
-    let routes_config = match routes.and_then(|r| r.routes.as_ref()) {
-        Some(rules) if !rules.is_empty() => {
-            // Build RoutingConfig for matching
-            RoutingConfig {
-                includes: vec![],
-                default: crate::proxy::routing::DefaultRoute {
-                    dest: crate::proxy::routing::DestConfig::Single("default".to_string()),
-                    select: "rr".to_string(),
-                    action: "forward".to_string(),
-                },
-                rules: rules.clone(),
-            }
-        }
-        _ => {
-            debug!("No routing rules configured, forwarding directly");
-            return Ok(RouteResult::Forward(option));
-        }
+    let routes = match routes {
+        Some(routes) => routes,
+        None => return Ok(RouteResult::Forward(option)),
     };
 
     // Extract URI information early to avoid borrowing conflicts
@@ -63,9 +49,10 @@ pub async fn match_invite(
     );
 
     // Traverse routing rules by priority
-    for rule in &routes_config.rules {
-        if !rule.enabled {
-            continue;
+    for rule in routes {
+        match rule.disabled {
+            Some(true) => continue,
+            _ => (),
         }
 
         debug!("Evaluating rule: {}", rule.name);
@@ -130,17 +117,18 @@ pub async fn match_invite(
                         routing_state,
                     )?;
 
-                    if let Some(trunks_config) = trunks {
-                        if let Some(trunk_config) = trunks_config.trunks.get(&selected_trunk) {
-                            apply_trunk_config(&mut option, trunk_config)?;
-                            info!(
-                                "Selected trunk: {} for destination: {}",
-                                selected_trunk, trunk_config.dest
-                            );
-                            return Ok(RouteResult::Forward(option));
-                        } else {
-                            warn!("Trunk '{}' not found in configuration", selected_trunk);
-                        }
+                    if let Some(trunk_config) = trunks
+                        .as_ref()
+                        .and_then(|trunks| trunks.get(&selected_trunk))
+                    {
+                        apply_trunk_config(&mut option, trunk_config)?;
+                        info!(
+                            "Selected trunk: {} for destination: {}",
+                            selected_trunk, trunk_config.dest
+                        );
+                        return Ok(RouteResult::Forward(option));
+                    } else {
+                        warn!("Trunk '{}' not found in configuration", selected_trunk);
                     }
                 }
             }
@@ -149,23 +137,30 @@ pub async fn match_invite(
 
     // If no rules matched, use default route
     debug!("No rules matched, using default route");
+
+    let default = match default {
+        Some(default) => default,
+        None => return Ok(RouteResult::Forward(option)),
+    };
+
     let selected_trunk = select_trunk(
-        &routes_config.default.dest,
-        &routes_config.default.select,
+        &default.dest,
+        &default.select,
         &None,
         &option,
         routing_state,
     )?;
 
-    if let Some(trunks_config) = trunks {
-        if let Some(trunk_config) = trunks_config.trunks.get(&selected_trunk) {
-            apply_trunk_config(&mut option, trunk_config)?;
-            info!(
-                "Using default trunk: {} for destination: {}",
-                selected_trunk, trunk_config.dest
-            );
-            return Ok(RouteResult::Forward(option));
-        }
+    if let Some(trunk_config) = trunks
+        .as_ref()
+        .and_then(|trunks| trunks.get(&selected_trunk))
+    {
+        apply_trunk_config(&mut option, trunk_config)?;
+        info!(
+            "Using default trunk: {} for destination: {}",
+            selected_trunk, trunk_config.dest
+        );
+        return Ok(RouteResult::Forward(option));
     }
 
     // If nothing found, forward directly
