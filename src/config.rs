@@ -1,6 +1,6 @@
 use crate::{
     proxy::{
-        routing::{matcher::match_invite, RoutesConfig, TrunksConfig},
+        routing::{matcher::match_invite, DefaultRoute, RouteRule, TrunkConfig},
         user::SipUser,
     },
     useragent::RegisterOption,
@@ -231,13 +231,12 @@ pub struct ProxyConfig {
     pub media_proxy: MediaProxyConfig,
     #[serde(default)]
     pub realms: Option<Vec<String>>,
-    #[serde(default)]
-    pub enable_forwarding: Option<bool>,
     pub ws_handler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<Vec<RouteRule>>,
+    pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default)]
-    pub routes: Option<RoutesConfig>,
-    #[serde(default)]
-    pub trunks: Option<TrunksConfig>,
+    pub default: Option<DefaultRoute>,
 }
 
 pub enum RouteResult {
@@ -279,8 +278,9 @@ impl ProxyConfig {
         routing_state: &crate::proxy::routing::RoutingState,
     ) -> Result<RouteResult> {
         match_invite(
-            self.trunks.as_ref(),
+            Some(&self.trunks),
             self.routes.as_ref(),
+            self.default.as_ref(),
             option,
             origin,
             routing_state,
@@ -314,10 +314,10 @@ impl Default for ProxyConfig {
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyConfig::default(),
             realms: Some(vec![]),
-            enable_forwarding: Some(true),
             ws_handler: None,
             routes: None,
-            trunks: None,
+            trunks: HashMap::new(),
+            default: None,
         }
     }
 }
@@ -401,14 +401,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_load() {
-        let config = Config::default();
-        let config_str = toml::to_string(&config).unwrap();
-        println!("{}", config_str);
-    }
-    #[test]
     fn test_config_dump() {
-        let config = Config::default();
+        let mut config = Config::default();
+        let mut prxconfig = ProxyConfig::default();
+        let mut trunks = HashMap::new();
+        let mut routes = Vec::new();
+        routes.push(crate::proxy::routing::RouteRule {
+            name: "default".to_string(),
+            description: None,
+            priority: 1,
+            match_conditions: crate::proxy::routing::MatchConditions {
+                to_user: Some("xx".to_string()),
+                ..Default::default()
+            },
+            rewrite: Some(crate::proxy::routing::RewriteRules {
+                to_user: Some("xx".to_string()),
+                ..Default::default()
+            }),
+            action: crate::proxy::routing::RouteAction::default(),
+            disabled: None,
+        });
+        routes.push(crate::proxy::routing::RouteRule {
+            name: "default3".to_string(),
+            description: None,
+            priority: 1,
+            match_conditions: crate::proxy::routing::MatchConditions {
+                to_user: Some("xx3".to_string()),
+                ..Default::default()
+            },
+            rewrite: Some(crate::proxy::routing::RewriteRules {
+                to_user: Some("xx3".to_string()),
+                ..Default::default()
+            }),
+            action: crate::proxy::routing::RouteAction::default(),
+            disabled: None,
+        });
+        prxconfig.routes = Some(routes);
+        trunks.insert(
+            "hello".to_string(),
+            crate::proxy::routing::TrunkConfig {
+                dest: "sip:127.0.0.1:5060".to_string(),
+                ..Default::default()
+            },
+        );
+        prxconfig.trunks = trunks;
+        config.proxy = Some(prxconfig);
         let config_str = toml::to_string(&config).unwrap();
         println!("{}", config_str);
     }

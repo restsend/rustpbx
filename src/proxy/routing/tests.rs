@@ -1,8 +1,8 @@
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::match_invite;
 use crate::proxy::routing::{
-    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteRule, RoutesConfig,
-    RoutingState, TrunkConfig, TrunksConfig,
+    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteRule, RoutingState,
+    TrunkConfig,
 };
 use rsipstack::dialog::invitation::InviteOption;
 use std::collections::HashMap;
@@ -15,9 +15,19 @@ async fn test_match_invite_no_routes() {
     let option = create_test_invite_option();
     let origin = create_test_request();
 
-    let result = match_invite(None, None, option, &origin, &routing_state)
-        .await
-        .unwrap();
+    let trunks = HashMap::new();
+    let routes = vec![];
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        &routing_state,
+    )
+    .await
+    .unwrap();
 
     match result {
         RouteResult::Forward(_) => {} // Expected
@@ -28,62 +38,56 @@ async fn test_match_invite_no_routes() {
 #[tokio::test]
 async fn test_match_invite_exact_match() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "test_trunk".to_string(),
         TrunkConfig {
-            name: "Test Trunk".to_string(),
             dest: "sip:gateway.example.com:5060".to_string(),
             backup_dest: None,
             username: Some("testuser".to_string()),
             password: Some("testpass".to_string()),
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: Some("udp".to_string()),
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "test_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                to_user: Some("1001".to_string()),
-                ..Default::default()
-            },
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("test_trunk".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "test_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("test_trunk".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option = create_test_invite_option();
     let origin = create_test_request();
 
     let result = match_invite(
-        Some(&trunks_config),
-        Some(&routes_config),
+        Some(&trunks),
+        Some(&routes),
+        None,
         option,
         &origin,
         &routing_state,
     )
     .await
-    .unwrap();
+    .expect("Failed to match invite");
 
     match result {
         RouteResult::Forward(option) => {
@@ -105,49 +109,42 @@ async fn test_match_invite_exact_match() {
 #[tokio::test]
 async fn test_match_invite_regex_match() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "mobile_trunk".to_string(),
         TrunkConfig {
-            name: "Mobile Trunk".to_string(),
             dest: "sip:mobile.gateway.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "mobile_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                to_user: Some("^1[3-9]\\d{9}$".to_string()), // Mobile number regex
-                ..Default::default()
-            },
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("mobile_trunk".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "mobile_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("^1[3-9]\\d{9}$".to_string()), // Mobile number regex
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("mobile_trunk".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option = create_invite_option(
         "sip:alice@example.com",
@@ -160,8 +157,9 @@ async fn test_match_invite_regex_match() {
 
     // Test matching mobile number
     let result = match_invite(
-        Some(&trunks_config),
-        Some(&routes_config),
+        Some(&trunks),
+        Some(&routes),
+        None,
         option,
         &origin,
         &routing_state,
@@ -180,31 +178,28 @@ async fn test_match_invite_regex_match() {
 #[tokio::test]
 async fn test_match_invite_reject_rule() {
     let routing_state = RoutingState::new();
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "emergency_reject".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                to_user: Some("^(110|120|119)$".to_string()),
-                ..Default::default()
-            },
-            rewrite: None,
-            action: RouteAction {
-                action: Some("reject".to_string()),
-                dest: None,
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: Some(RejectConfig {
-                    code: 403,
-                    reason: Some("Emergency calls not allowed".to_string()),
-                    headers: HashMap::new(),
-                }),
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "emergency_reject".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("^(110|120|119)$".to_string()),
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: Some("reject".to_string()),
+            dest: None,
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: Some(RejectConfig {
+                code: 403,
+                reason: Some("Emergency calls not allowed".to_string()),
+                headers: HashMap::new(),
+            }),
+        },
+        disabled: None,
+    }];
 
     let option = create_invite_option(
         "sip:alice@example.com",
@@ -214,10 +209,17 @@ async fn test_match_invite_reject_rule() {
         None,
     );
     let origin = create_test_request();
-
-    let result = match_invite(None, Some(&routes_config), option, &origin, &routing_state)
-        .await
-        .unwrap();
+    let trunks = HashMap::new();
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        &routing_state,
+    )
+    .await
+    .unwrap();
 
     match result {
         RouteResult::Abort(code, reason) => {
@@ -231,60 +233,54 @@ async fn test_match_invite_reject_rule() {
 #[tokio::test]
 async fn test_match_invite_rewrite_rules() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "trunk1".to_string(),
         TrunkConfig {
-            name: "Trunk 1".to_string(),
             dest: "sip:gateway.example.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "rewrite_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                from_user: Some("^\\+86(1\\d{10})$".to_string()),
-                ..Default::default()
-            },
-            rewrite: Some(RewriteRules {
-                from_user: Some("0{1}".to_string()), // Rewrite to 0+number
-                ..Default::default()
-            }),
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("trunk1".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "rewrite_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            from_user: Some("^\\+86(1\\d{10})$".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            from_user: Some("0{1}".to_string()), // Rewrite to 0+number
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("trunk1".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let mut option = create_test_invite_option();
     option.caller = "sip:+8613812345678@example.com".try_into().unwrap();
     let origin = create_test_request();
 
     let result = match_invite(
-        Some(&trunks_config),
-        Some(&routes_config),
+        Some(&trunks),
+        Some(&routes),
+        None,
         option,
         &origin,
         &routing_state,
@@ -305,87 +301,78 @@ async fn test_match_invite_rewrite_rules() {
 #[tokio::test]
 async fn test_match_invite_load_balancing() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "trunk1".to_string(),
         TrunkConfig {
-            name: "Trunk 1".to_string(),
             dest: "sip:gateway1.example.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "trunk2".to_string(),
         TrunkConfig {
-            name: "Trunk 2".to_string(),
             dest: "sip:gateway2.example.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "trunk3".to_string(),
         TrunkConfig {
-            name: "Trunk 3".to_string(),
             dest: "sip:gateway3.example.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "load_balance_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                to_user: Some("1001".to_string()),
-                ..Default::default()
-            },
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Multiple(vec![
-                    "trunk1".to_string(),
-                    "trunk2".to_string(),
-                    "trunk3".to_string(),
-                ])),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "load_balance_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Multiple(vec![
+                "trunk1".to_string(),
+                "trunk2".to_string(),
+                "trunk3".to_string(),
+            ])),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let _option = create_test_invite_option();
     let origin = create_test_request();
@@ -395,8 +382,9 @@ async fn test_match_invite_load_balancing() {
     for _ in 0..5 {
         let test_option = create_test_invite_option();
         let result = match_invite(
-            Some(&trunks_config),
-            Some(&routes_config),
+            Some(&trunks),
+            Some(&routes),
+            None,
             test_option,
             &origin,
             &routing_state,
@@ -422,53 +410,46 @@ async fn test_match_invite_load_balancing() {
 #[tokio::test]
 async fn test_match_invite_header_matching() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "vip_trunk".to_string(),
         TrunkConfig {
-            name: "VIP Trunk".to_string(),
             dest: "sip:vip.gateway.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "vip_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                headers: {
-                    let mut headers = HashMap::new();
-                    headers.insert("header.X-VIP".to_string(), "gold".to_string());
-                    headers
-                },
-                ..Default::default()
+    let routes = vec![RouteRule {
+        name: "vip_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            headers: {
+                let mut headers = HashMap::new();
+                headers.insert("header.X-VIP".to_string(), "gold".to_string());
+                headers
             },
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("vip_trunk".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("vip_trunk".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option = create_test_invite_option();
     let origin = create_sip_request(
@@ -485,8 +466,9 @@ async fn test_match_invite_header_matching() {
     );
 
     let result = match_invite(
-        Some(&trunks_config),
-        Some(&routes_config),
+        Some(&trunks),
+        Some(&routes),
+        None,
         option,
         &origin,
         &routing_state,
@@ -505,56 +487,50 @@ async fn test_match_invite_header_matching() {
 #[tokio::test]
 async fn test_match_invite_default_route() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "default".to_string(),
         TrunkConfig {
-            name: "Default Trunk".to_string(),
             dest: "sip:default.gateway.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
-    let routes_config = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "non_matching_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                to_user: Some("^999\\d+$".to_string()), // Will not match 1001
-                ..Default::default()
-            },
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("trunk1".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes = vec![RouteRule {
+        name: "non_matching_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("^999\\d+$".to_string()), // Will not match 1001
+            ..Default::default()
+        },
+        rewrite: None,
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("trunk1".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option = create_test_invite_option();
     let origin = create_test_request();
 
     let result = match_invite(
-        Some(&trunks_config),
-        Some(&routes_config),
+        Some(&trunks),
+        Some(&routes),
+        None,
         option,
         &origin,
         &routing_state,
@@ -574,53 +550,46 @@ async fn test_match_invite_default_route() {
 #[tokio::test]
 async fn test_match_invite_advanced_rewrite_patterns() {
     let routing_state = RoutingState::new();
-    let mut trunks_config = TrunksConfig {
-        includes: vec![],
-        trunks: HashMap::new(),
-    };
+    let mut trunks = HashMap::new();
 
-    trunks_config.trunks.insert(
+    trunks.insert(
         "test_trunk".to_string(),
         TrunkConfig {
-            name: "Test Trunk".to_string(),
             dest: "sip:gateway.example.com:5060".to_string(),
             backup_dest: None,
             username: None,
             password: None,
             codec: vec![],
-            enabled: true,
+            disabled: Some(false),
             max_calls: None,
             max_cps: None,
-            weight: 100,
+            weight: Some(100),
             transport: None,
         },
     );
 
     // Test case 1: US number format +1(5551234567) -> 001{1}
-    let routes_config_us = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "us_rewrite_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                from_user: Some("^\\+1(\\d{10})$".to_string()),
-                ..Default::default()
-            },
-            rewrite: Some(RewriteRules {
-                from_user: Some("001{1}".to_string()),
-                ..Default::default()
-            }),
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("test_trunk".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes_config_us = vec![RouteRule {
+        name: "us_rewrite_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            from_user: Some("^\\+1(\\d{10})$".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            from_user: Some("001{1}".to_string()),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("test_trunk".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option_us = create_invite_option(
         "sip:+15551234567@example.com",
@@ -632,8 +601,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let origin_us = create_test_request();
 
     let result_us = match_invite(
-        Some(&trunks_config),
+        Some(&trunks),
         Some(&routes_config_us),
+        None,
         option_us,
         &origin_us,
         &routing_state,
@@ -650,30 +620,27 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     }
 
     // Test case 2: Simple digit extraction 12345 -> prefix{1}suffix
-    let routes_config_digits = RoutesConfig {
-        routes: Some(vec![RouteRule {
-            name: "digit_rewrite_rule".to_string(),
-            description: None,
-            priority: 100,
-            match_conditions: MatchConditions {
-                from_user: Some("^(\\d+)$".to_string()),
-                ..Default::default()
-            },
-            rewrite: Some(RewriteRules {
-                from_user: Some("ext{1}".to_string()),
-                ..Default::default()
-            }),
-            action: RouteAction {
-                action: None,
-                dest: Some(DestConfig::Single("test_trunk".to_string())),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-            },
-            enabled: true,
-        }]),
-        includes: None,
-    };
+    let routes_config_digits = vec![RouteRule {
+        name: "digit_rewrite_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            from_user: Some("^(\\d+)$".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            from_user: Some("ext{1}".to_string()),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("test_trunk".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+    }];
 
     let option_digits = create_invite_option(
         "sip:12345@example.com",
@@ -685,8 +652,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let origin_digits = create_test_request();
 
     let result_digits = match_invite(
-        Some(&trunks_config),
+        Some(&trunks),
         Some(&routes_config_digits),
+        None,
         option_digits,
         &origin_digits,
         &routing_state,
