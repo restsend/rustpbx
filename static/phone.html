@@ -402,8 +402,12 @@
                 log('Please enter a call target and ensure you are registered');
                 return;
             }
-
-            const targetURI = SIP.UserAgent.makeURI(`sip:${target}@${serverInput.value.replace('ws://', '').replace('wss://', '').split('/')[0]}`);
+            let targetURI = undefined;
+            if (target.startsWith('sip:')) {
+                targetURI = SIP.UserAgent.makeURI(target);
+            } else {
+                targetURI = SIP.UserAgent.makeURI(`sip:${target}@${serverInput.value.replace('ws://', '').replace('wss://', '').split('/')[0]}`);
+            }
 
             const inviteOptions = {
                 sessionDescriptionHandlerOptions: {

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
 use crate::config::ProxyConfig;
 use crate::proxy::server::TransactionCookie;
@@ -15,6 +13,7 @@ use rsip::typed::Authorization;
 use rsip::Header;
 use rsip::Uri;
 use rsipstack::transaction::transaction::Transaction;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -189,18 +188,8 @@ impl ProxyModule for AuthModule {
                     _cookie.set_user(user);
                     Ok(ProxyAction::Continue)
                 } else {
-                    // Extract realm from request
-                    let from = if tx.original.method == rsip::Method::Register {
-                        tx.original.to_header()?.uri()?.to_string()
-                    } else {
-                        tx.original.uri.to_string()
-                    };
-
-                    let realm = if tx.original.method == rsip::Method::Register {
-                        tx.original.to_header()?.uri()?.host().to_string()
-                    } else {
-                        tx.original.uri.host().to_string()
-                    };
+                    let from_uri = tx.original.from_header()?.uri()?;
+                    let realm = from_uri.host().to_string();
                     let realm = ProxyConfig::normalize_realm(&realm);
                     // Check which type of authentication was attempted or send both challenges
                     let has_proxy_auth_header =
@@ -210,7 +199,8 @@ impl ProxyModule for AuthModule {
                         // Send proxy challenge if proxy auth was attempted
                         let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
                         info!(
-                            from,
+                            from = from_uri.to_string(),
+                            realm = realm,
                             ?proxy_auth,
                             "Proxy authentication failed, sending proxy challenge"
                         );
@@ -222,7 +212,8 @@ impl ProxyModule for AuthModule {
                         // Send WWW challenge if WWW auth was attempted
                         let www_auth = self.create_www_auth_challenge(&realm)?;
                         info!(
-                            from,
+                            from = from_uri.to_string(),
+                            realm = realm,
                             ?www_auth,
                             "WWW authentication failed, sending WWW challenge"
                         );
