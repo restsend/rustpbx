@@ -234,6 +234,7 @@ pub struct ProxyConfig {
     pub ws_handler: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<RouteRule>>,
+    #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default)]
     pub default: Option<DefaultRoute>,
