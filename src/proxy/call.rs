@@ -248,10 +248,10 @@ impl CallModule {
         }
         // Attempt outbound call
         info!(
-            "Creating outbound call: {} -> {} via {} (should_bridge_media: {}) sdp:\n {:?}",
+            "Creating outbound call: {} -> {} via {:?} (should_bridge_media: {}) sdp:\n {:?}",
             invite_option.caller,
             invite_option.callee,
-            target_location.destination,
+            invite_option.destination,
             should_bridge_media,
             outbound_sdp
         );

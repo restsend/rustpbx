@@ -53,3 +53,20 @@ users = [
 [callrecord]
 type = "local"
 root = "/tmp/cdr"
+
+[proxy.trunks.wuhoo]
+dest = "sip:123.456.789.00:1234"
+
+[[proxy.routes]]
+name = "default"
+priority = 1
+dest = "wuhoo"
+
+[proxy.routes.match]
+"to.user" = "^\\+.*"
+
+[proxy.routes.rewrite]
+"to.user" = "+{1}"
+"to.host" = "123.456.789.00:1234"
+"from.user" = "12345"
+"from.host" = "123.456.789.00:1234"
