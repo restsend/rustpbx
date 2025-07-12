@@ -42,6 +42,23 @@ impl DbBackend {
 
 #[async_trait]
 impl UserBackend for DbBackend {
+    async fn is_same_realm(&self, realm: &str) -> bool {
+        if let Some(ref realm_col) = self.realm_column {
+            let query = format!(
+                "SELECT COUNT(*) FROM {} WHERE  {} = ?",
+                self.table_name, realm_col
+            );
+            let count = sqlx::query(&query)
+                .bind(realm)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| anyhow!("Database query error: {}", e))
+                .map(|row| row.get(0))
+                .unwrap_or(0);
+            return count > 0;
+        }
+        false
+    }
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
         // Build SELECT clause with optional columns
         let mut select_columns = vec![self.username_column.clone(), self.password_column.clone()];

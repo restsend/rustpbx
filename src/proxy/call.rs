@@ -120,7 +120,7 @@ impl CallModule {
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
 
-        let target_locations = if !self.inner.config.is_same_realm(&callee_realm) {
+        let target_locations = if !self.inner.server.is_same_realm(&callee_realm).await {
             info!(callee_realm, "Forwarding INVITE to external realm");
             vec![Location {
                 aor: callee_uri.clone(),

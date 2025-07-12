@@ -452,3 +452,24 @@ impl Drop for SipServerInner {
         info!("SipServerInner dropped");
     }
 }
+
+impl SipServerInner {
+    pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
+        match callee_realm {
+            "localhost" | "127.0.0.1" | "::1" => true,
+            _ => {
+                if let Some(external_ip) = self.config.external_ip.as_ref() {
+                    return external_ip.starts_with(callee_realm);
+                }
+                if let Some(realms) = self.config.realms.as_ref() {
+                    for item in realms {
+                        if item == callee_realm {
+                            return true;
+                        }
+                    }
+                }
+                self.user_backend.is_same_realm(callee_realm).await
+            }
+        }
+    }
+}

@@ -70,19 +70,16 @@ impl PlainTextBackend {
 
 #[async_trait]
 impl UserBackend for PlainTextBackend {
+    async fn is_same_realm(&self, realm: &str) -> bool {
+        return realm.is_empty();
+    }
     async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
-        let key = if let Some(realm) = realm {
-            format!("{}@{}", username, realm)
-        } else {
-            username.to_string()
-        };
-
-        let mut user = match self.users.lock().unwrap().get(&key) {
+        let mut user = match self.users.lock().unwrap().get(username) {
             Some(user) => user.clone(),
-            None => return Err(anyhow::anyhow!("missing user: {}", key)),
+            None => return Err(anyhow::anyhow!("missing user: {}", username)),
         };
         if !user.enabled {
-            return Err(anyhow::anyhow!("User is disabled: {}", key));
+            return Err(anyhow::anyhow!("User is disabled: {}", username));
         }
         user.realm = realm.map(|r| r.to_string());
         Ok(user)

@@ -40,6 +40,7 @@ method = "POST"
 mode = "auto"
 rtp_start_port = 20000
 rtp_end_port = 30000
+
 # external_ip = "192.168.1.1"  # Set to your external IP
 # force_proxy = ["192.168.1.100"]  # Optional: IP addresses to always proxy
 
@@ -47,7 +48,7 @@ rtp_end_port = 30000
 type = "memory"
 users = [
     { username = "bob", password = "123456", realm = "127.0.0.1" },
-    { username = "alice", password = "123456", realm = "127.0.0.1" },
+    { username = "alice", password = "123456" },
 ]
 
 [callrecord]
