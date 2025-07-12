@@ -51,7 +51,7 @@ impl AuthModule {
                         return Ok(None);
                     }
                     if let Some(realm) = user.realm.as_ref() {
-                        if !self.server.config.is_same_realm(realm) {
+                        if !self.server.is_same_realm(realm).await {
                             info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
                             return Ok(None);
                         }
