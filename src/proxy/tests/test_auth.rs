@@ -51,7 +51,7 @@ async fn test_auth_module_invite_success() {
         .iter()
         .find(|h| matches!(h, Header::WwwAuthenticate(_)))
     {
-        // 解析 nonce
+        // Parse nonce
         let auth_str = h.value();
         auth_str
             .split(',')
@@ -72,7 +72,7 @@ async fn test_auth_module_invite_success() {
         panic!("No WWW-Authenticate header");
     };
 
-    // 第二步：带认证请求
+    // Step 2: Request with authentication
     let request_with_auth = {
         let host_with_port = rsip::HostWithPort {
             host: "example.com".parse().unwrap(),
@@ -130,7 +130,7 @@ async fn test_auth_module_invite_success() {
             cseq.into(),
             contact.into(),
         ];
-        // 生成 digest
+        // Generate digest
         let digest = DigestGenerator {
             username: "alice",
             password: "password",
@@ -200,7 +200,7 @@ async fn test_auth_module_register_success() {
         .iter()
         .find(|h| matches!(h, Header::WwwAuthenticate(_)))
     {
-        // 解析 nonce
+        // Parse nonce
         let auth_str = h.value();
         auth_str
             .split(',')
@@ -221,7 +221,7 @@ async fn test_auth_module_register_success() {
         panic!("No WWW-Authenticate header");
     };
 
-    // 第二步：带认证请求
+    // Step 2: Request with authentication
     let request_with_auth = {
         let host_with_port = rsip::HostWithPort {
             host: "example.com".parse().unwrap(),

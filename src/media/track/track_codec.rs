@@ -11,6 +11,9 @@ use crate::{
 };
 use std::cell::RefCell;
 
+#[cfg(feature = "opus")]
+use crate::media::codecs::opus::{OpusDecoder, OpusEncoder};
+
 pub struct TrackCodec {
     pub pcmu_encoder: RefCell<PcmuEncoder>,
     pub pcmu_decoder: RefCell<PcmuDecoder>,
@@ -19,6 +22,12 @@ pub struct TrackCodec {
 
     pub g722_encoder: RefCell<G722Encoder>,
     pub g722_decoder: RefCell<G722Decoder>,
+
+    #[cfg(feature = "opus")]
+    pub opus_encoder: RefCell<Option<OpusEncoder>>,
+    #[cfg(feature = "opus")]
+    pub opus_decoder: RefCell<Option<OpusDecoder>>,
+
     pub resampler: RefCell<Option<LinearResampler>>,
 }
 unsafe impl Send for TrackCodec {}
@@ -39,6 +48,10 @@ impl TrackCodec {
             pcma_decoder: RefCell::new(PcmaDecoder::new()),
             g722_encoder: RefCell::new(G722Encoder::new()),
             g722_decoder: RefCell::new(G722Decoder::new()),
+            #[cfg(feature = "opus")]
+            opus_encoder: RefCell::new(None),
+            #[cfg(feature = "opus")]
+            opus_decoder: RefCell::new(None),
             resampler: RefCell::new(None),
         }
     }
@@ -48,12 +61,25 @@ impl TrackCodec {
             0 => self.pcmu_decoder.borrow_mut().decode(payload),
             8 => self.pcma_decoder.borrow_mut().decode(payload),
             9 => self.g722_decoder.borrow_mut().decode(payload),
+            #[cfg(feature = "opus")]
+            111 => {
+                let mut opus_decoder = self.opus_decoder.borrow_mut();
+                if opus_decoder.is_none() {
+                    *opus_decoder = Some(OpusDecoder::new_default());
+                }
+                if let Some(ref mut decoder) = opus_decoder.as_mut() {
+                    decoder.decode(payload)
+                } else {
+                    bytes_to_samples(payload)
+                }
+            }
             _ => bytes_to_samples(payload),
         };
         let sample_rate = match payload_type {
             0 => 8000,
             8 => 8000,
             9 => 16000,
+            111 => 48000, // Opus sample rate
             _ => 8000,
         };
         if sample_rate != target_sample_rate {
@@ -80,6 +106,7 @@ impl TrackCodec {
                     0 => 8000,
                     8 => 8000,
                     9 => 16000,
+                    111 => 48000, // Opus sample rate
                     _ => 8000,
                 };
 
@@ -100,6 +127,18 @@ impl TrackCodec {
                     0 => self.pcmu_encoder.borrow_mut().encode(&pcm),
                     8 => self.pcma_encoder.borrow_mut().encode(&pcm),
                     9 => self.g722_encoder.borrow_mut().encode(&pcm),
+                    #[cfg(feature = "opus")]
+                    111 => {
+                        let mut opus_encoder = self.opus_encoder.borrow_mut();
+                        if opus_encoder.is_none() {
+                            *opus_encoder = Some(OpusEncoder::new_default());
+                        }
+                        if let Some(ref mut encoder) = opus_encoder.as_mut() {
+                            encoder.encode(&pcm)
+                        } else {
+                            samples_to_bytes(&pcm)
+                        }
+                    }
                     _ => samples_to_bytes(&pcm),
                 }
             }
