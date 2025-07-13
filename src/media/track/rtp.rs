@@ -135,6 +135,8 @@ impl RtpTrackBuilder {
                 CodecType::G722,
                 CodecType::PCMU,
                 CodecType::PCMA,
+                #[cfg(feature = "opus")]
+                CodecType::Opus,
                 CodecType::TelephoneEvent,
             ],
             ssrc_cname: format!("rustpbx-{}", rand::random::<u32>()),
@@ -691,7 +693,8 @@ impl RtpTrack {
             let payload_type = packet.header.payload_type;
             let payload = packet.payload.to_vec();
             let sample_rate = match payload_type {
-                9 => 16000, // G.722
+                9 => 16000,   // G.722
+                111 => 48000, // Opus
                 _ => 8000,
             };
 
@@ -879,6 +882,8 @@ impl Track for RtpTrack {
         };
 
         let clock_rate = match self.payload_type {
+            9 => 8000,    // G.722 (RTP clock rate is 8000 even though sample rate is 16000)
+            111 => 48000, // Opus
             _ => 8000,
         };
 

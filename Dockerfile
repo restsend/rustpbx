@@ -1,5 +1,5 @@
 FROM rust:bookworm AS rust-builder
-RUN apt-get update && apt-get install -y libasound2-dev
+RUN apt-get update && apt-get install -y libasound2-dev libopus-dev
 RUN mkdir /build
 ADD . /build/
 WORKDIR /build

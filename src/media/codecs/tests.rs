@@ -373,3 +373,89 @@ fn test_pcma_edge_cases() {
     println!("Original: {:?}", samples);
     println!("Decoded: {:?}", decoded);
 }
+
+#[cfg(feature = "opus")]
+#[test]
+fn test_opus_codec() {
+    use super::opus::{OpusDecoder, OpusEncoder};
+    use super::{Decoder, Encoder};
+
+    // Create encoder and decoder
+    let mut encoder = OpusEncoder::new_default();
+    let mut decoder = OpusDecoder::new_default();
+
+    // Create test audio data (48kHz mono, 20ms = 960 samples)
+    let samples_per_frame = 960;
+    let input_samples: Vec<i16> = (0..samples_per_frame)
+        .map(|i| (1000.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin()) as i16)
+        .collect();
+
+    // Encode
+    let encoded = encoder.encode(&input_samples);
+    assert!(!encoded.is_empty(), "Encoded data should not be empty");
+
+    // Decode
+    let decoded = decoder.decode(&encoded);
+    assert!(!decoded.is_empty(), "Decoded data should not be empty");
+
+    // Verify sample rate and channels
+    assert_eq!(encoder.sample_rate(), 48000);
+    assert_eq!(encoder.channels(), 1);
+    assert_eq!(decoder.sample_rate(), 48000);
+    assert_eq!(decoder.channels(), 1);
+}
+
+#[cfg(feature = "opus")]
+#[test]
+fn test_opus_encode_decode() {
+    use super::opus::{OpusDecoder, OpusEncoder};
+
+    // Test different configurations
+    let configs = vec![
+        (48000, 1), // 48kHz mono
+        (48000, 2), // 48kHz stereo
+        (16000, 1), // 16kHz mono
+        (8000, 1),  // 8kHz mono
+    ];
+
+    for (sample_rate, channels) in configs {
+        let mut encoder = OpusEncoder::new(sample_rate, channels);
+        let mut decoder = OpusDecoder::new(sample_rate, channels);
+
+        // Create test data
+        let frame_size = (sample_rate / 50) as usize * channels as usize; // 20ms frame
+        let input_samples: Vec<i16> = (0..frame_size)
+            .map(|i| {
+                (500.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sample_rate as f64).sin())
+                    as i16
+            })
+            .collect();
+
+        // Encode
+        let encoded = encoder.encode(&input_samples);
+        assert!(
+            !encoded.is_empty(),
+            "Encoded data should not be empty for {}Hz {}ch",
+            sample_rate,
+            channels
+        );
+
+        // Decode
+        let decoded = decoder.decode(&encoded);
+        assert!(
+            !decoded.is_empty(),
+            "Decoded data should not be empty for {}Hz {}ch",
+            sample_rate,
+            channels
+        );
+
+        println!(
+            "✓ Opus {}Hz {}ch: {} samples -> {} bytes -> {} samples",
+            sample_rate,
+            channels,
+            input_samples.len(),
+            encoded.len(),
+            decoded.len()
+        );
+    }
+}

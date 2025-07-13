@@ -37,6 +37,17 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 ### Prerequisites
 - Rust 1.75 or later
 - Cargo package manager
+- opus, alsa
+
+Linux: 
+```bash
+apt-get install -y libasound2-dev libopus-dev
+```
+
+Mac:
+```bash
+brew install opus
+```
 
 ### Installation
 ```bash

@@ -76,6 +76,18 @@ impl WebrtcTrack {
     pub fn get_media_engine(prefered_codec: Option<CodecType>) -> Result<MediaEngine> {
         let mut media_engine = MediaEngine::default();
         for codec in vec![
+            #[cfg(feature = "opus")]
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: "audio/opus".to_owned(),
+                    clock_rate: 48000,
+                    channels: 1,
+                    sdp_fmtp_line: "minptime=10".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 111,
+                ..Default::default()
+            },
             RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_G722.to_owned(),
@@ -210,8 +222,9 @@ impl WebrtcTrack {
                 let packet_sender_clone = packet_sender.clone();
                 let processor_chain = processor_chain.clone();
                 let track_samplerate = match track.codec().payload_type {
-                    9 => 16000, // G722
-                    _ => 8000,  // PCMU, PCMA, TELEPHONE_EVENT
+                    9 => 16000,   // G722
+                    111 => 48000, // Opus
+                    _ => 8000,    // PCMU, PCMA, TELEPHONE_EVENT
                 };
                 info!(
                     "on_track received: {} track_samplerate: {}",
