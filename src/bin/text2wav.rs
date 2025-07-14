@@ -110,8 +110,6 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    // Set up logging
-    tracing_subscriber::fmt::init();
     dotenv().ok();
     // Parse command line arguments
     let args = Args::parse();

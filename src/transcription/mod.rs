@@ -33,7 +33,6 @@ pub enum TranscriptionType {
 #[serde(default)]
 pub struct TranscriptionOption {
     pub provider: Option<TranscriptionType>,
-    pub model: Option<String>,
     pub language: Option<String>,
     pub app_id: Option<String>,
     pub secret_id: Option<String>,
@@ -76,7 +75,6 @@ impl Default for TranscriptionOption {
     fn default() -> Self {
         Self {
             provider: None,
-            model: None,
             language: None,
             app_id: None,
             secret_id: None,
