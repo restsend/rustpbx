@@ -76,6 +76,14 @@ struct Cli {
     /// Codec type
     #[clap(long, help = "Codec type", default_value = "g722")]
     codec: String,
+
+    /// VAD
+    #[clap(long, help = "VAD", default_value = "true")]
+    vad: Option<bool>,
+
+    /// Denoising
+    #[clap(long, help = "Denoising", default_value = "true")]
+    denoise: Option<bool>,
 }
 
 async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
@@ -88,7 +96,7 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
     // Create an audio track
-    let track = WebrtcTrack::create_audio_track(CodecType::G722, None);
+    let track = WebrtcTrack::create_audio_track(codec, None);
     // Add the track to the peer connection
     let _rtp_sender = peer_connection
         .add_track(Arc::clone(&track) as Arc<TrackLocalStaticSample>)
@@ -101,7 +109,6 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
     let ice_candidates_tx_clone = Arc::clone(&ice_candidates_tx);
     peer_connection.on_ice_candidate(Box::new(
         move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-            info!("ICE candidate received: {:?}", candidate);
             let ice_candidates_tx_clone = ice_candidates_tx_clone.clone();
             Box::pin(async move {
                 if candidate.is_none() {
@@ -182,7 +189,16 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
     // Create the invite command with proper options
     let option = CallOption {
         offer: Some(strip_ipv6_candidates(&offer.sdp)),
-        vad: Some(VADOption::default()),
+        vad: if cli.vad.unwrap_or(false) {
+            Some(VADOption::default())
+        } else {
+            None
+        },
+        denoise: if cli.denoise.unwrap_or(false) {
+            Some(true)
+        } else {
+            None
+        },
         ..Default::default()
     };
 
@@ -196,12 +212,20 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
     // Wait for transcription event
     let recv_event_loop = async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
+            let event: SessionEvent =
+                serde_json::from_str(&msg.to_string()).expect("Failed to parse event");
             match event {
                 SessionEvent::Answer { sdp, .. } => {
                     info!(id, "Received answer: {}", sdp);
                     let offer = RTCSessionDescription::answer(sdp)?;
-                    peer_connection.set_remote_description(offer).await?;
+                    match peer_connection.set_remote_description(offer).await {
+                        Ok(_) => {
+                            info!(id, "Set remote description ok");
+                        }
+                        Err(e) => {
+                            error!(id, "Set remote description failed: {}", e);
+                        }
+                    }
                     ws_sender
                         .send(tungstenite::Message::Text(
                             serde_json::to_string_pretty(&Command::Play {
@@ -281,8 +305,8 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
     state.alive.fetch_add(1, Ordering::Relaxed);
 
     select! {
-        _ = recv_event_loop => {
-            info!(id, "Transcription received");
+        r = recv_event_loop => {
+            info!(id, "recv_event_loop completed {:?}", r);
         }
         _ = send_audio_loop => {
         }
@@ -324,6 +348,7 @@ async fn main() -> Result<()> {
     let codec = match cli.codec.as_str() {
         "g722" => CodecType::G722,
         "opus" => CodecType::Opus,
+        "pcmu" => CodecType::PCMU,
         _ => return Err(anyhow::anyhow!("Invalid codec type")),
     };
     for id in 0..cli.clients {
@@ -344,7 +369,13 @@ async fn main() -> Result<()> {
         }));
     }
 
-    info!("Waiting for {} clients to connect...", cli.clients);
+    println!(
+        "perfcli started, clients: {}, codec: {:?}, vad: {}, denoise: {}",
+        cli.clients,
+        codec,
+        cli.vad.unwrap_or(false),
+        cli.denoise.unwrap_or(false)
+    );
     let dump_state_loop = async move {
         let mut last_rx_bytes = 0u64;
         let mut last_tx_bytes = 0u64;
@@ -356,7 +387,7 @@ async fn main() -> Result<()> {
             let rx_rate = current_rx.saturating_sub(last_rx_bytes);
             let tx_rate = current_tx.saturating_sub(last_tx_bytes);
 
-            info!(
+            println!(
                 "alive: {}, rx_bytes: {:.2} KB/s, tx_bytes: {:.2} KB/s",
                 state.alive.load(Ordering::Relaxed),
                 rx_rate as f64 / 1024.0,
