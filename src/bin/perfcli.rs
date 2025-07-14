@@ -72,11 +72,15 @@ struct Cli {
     /// Verbose
     #[clap(long, help = "Verbose")]
     verbose: bool,
+
+    /// Codec type
+    #[clap(long, help = "Codec type", default_value = "g722")]
+    codec: String,
 }
 
-async fn serve_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
+async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
     // Create WebRTC client
-    let media_engine = WebrtcTrack::get_media_engine(None)?;
+    let media_engine = WebrtcTrack::get_media_engine(Some(codec))?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
     let config = RTCConfiguration {
         ..Default::default()
@@ -301,7 +305,7 @@ async fn main() -> Result<()> {
         .with_max_level(if cli.verbose {
             LevelFilter::DEBUG
         } else {
-            LevelFilter::INFO
+            LevelFilter::ERROR
         })
         .with_file(true)
         .with_line_number(true)
@@ -317,13 +321,17 @@ async fn main() -> Result<()> {
         rx_bytes: AtomicU64::new(0),
         tx_bytes: AtomicU64::new(0),
     });
-
+    let codec = match cli.codec.as_str() {
+        "g722" => CodecType::G722,
+        "opus" => CodecType::Opus,
+        _ => return Err(anyhow::anyhow!("Invalid codec type")),
+    };
     for id in 0..cli.clients {
         let cli = cli.clone();
         let state = state.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                match serve_client(cli.clone(), id, state.clone()).await {
+                match serve_client(codec, cli.clone(), id, state.clone()).await {
                     Ok(_) => {
                         info!(id, "Client session completed normally");
                     }
