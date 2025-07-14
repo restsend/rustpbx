@@ -83,16 +83,6 @@ impl VoiceApiAsrClientBuilder {
         self
     }
 
-    pub fn with_host(mut self, host: String) -> Self {
-        self.option.model = Some(host);
-        self
-    }
-
-    pub fn with_port(mut self, port: String) -> Self {
-        self.option.language = Some(port);
-        self
-    }
-
     pub async fn build(self) -> Result<VoiceApiAsrClient> {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
 
