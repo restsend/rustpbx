@@ -35,16 +35,21 @@ async fn health_handler(State(state): State<AppState>) -> Response {
 }
 
 async fn list_calls(State(state): State<AppState>) -> Response {
-    let calls = serde_json::json!({
-        "calls": state.active_calls.lock().await.iter().map(|(id, call)| {
+    let active_calls = state.active_calls.lock().await;
+    let result = serde_json::json!({
+        "total": active_calls.len(),
+        "calls": active_calls.iter().map(|(id, call)| {
             serde_json::json!({
                 "id": id,
                 "call_type": call.call_type,
                 "created_at": call.call_state.read().unwrap().created_at.to_rfc3339(),
+                "ring_time": call.call_state.read().unwrap().ring_time.map(|t| t.to_rfc3339()),
+                "answer_time": call.call_state.read().unwrap().answer_time.map(|t| t.to_rfc3339()),
+                "duration": call.call_state.read().unwrap().created_at.signed_duration_since(Utc::now()).num_seconds(),
             })
         }).collect::<Vec<_>>(),
     });
-    Json(calls).into_response()
+    Json(result).into_response()
 }
 
 async fn kill_call(State(state): State<AppState>, Path(id): Path<String>) -> Response {
