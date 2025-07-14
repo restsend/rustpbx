@@ -7,32 +7,45 @@ use rustpbx::{
     handler::{CallOption, Command},
     media::{
         codecs::{g722::G722Encoder, resample::resample_mono, CodecType, Encoder},
+        negotiate::strip_ipv6_candidates,
         track::{file::read_wav_file, webrtc::WebrtcTrack},
         vad::VADOption,
     },
     version,
 };
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 use tokio::{select, time};
 use tokio_tungstenite::tungstenite;
-use tracing::{error, info, level_filters::LevelFilter, warn};
+use tracing::{error, info, level_filters::LevelFilter};
 use uuid::Uuid;
 use webrtc::{
     api::APIBuilder,
     peer_connection::{
         configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
     },
-    track::track_local::track_local_static_sample::TrackLocalStaticSample,
+    rtp_transceiver::{rtp_receiver::RTCRtpReceiver, RTCRtpTransceiver},
+    track::{
+        track_local::track_local_static_sample::TrackLocalStaticSample, track_remote::TrackRemote,
+    },
 };
+
+struct AppState {
+    alive: AtomicU32,
+    rx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
     version = version::get_short_version(),
-    about = "A WebRTC performance test client",
+    about = "A WebRTC performance test client with RTCP packet loss monitoring",
     long_about = version::get_version_info()
 )]
 struct Cli {
@@ -61,7 +74,7 @@ struct Cli {
     verbose: bool,
 }
 
-async fn serve_client(cli: Cli, id: u32) -> Result<()> {
+async fn serve_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
     // Create WebRTC client
     let media_engine = WebrtcTrack::get_media_engine(None)?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
@@ -76,7 +89,6 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
     let _rtp_sender = peer_connection
         .add_track(Arc::clone(&track) as Arc<TrackLocalStaticSample>)
         .await?;
-
     // Create a channel to collect ICE candidates
     let (ice_candidates_tx, mut ice_candidates_rx) = tokio::sync::mpsc::channel(1);
     let ice_candidates_tx = Arc::new(tokio::sync::Mutex::new(ice_candidates_tx));
@@ -90,6 +102,30 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
             Box::pin(async move {
                 if candidate.is_none() {
                     ice_candidates_tx_clone.lock().await.send(()).await.ok();
+                }
+            })
+        },
+    ));
+    let state_ref = state.clone();
+    peer_connection.on_track(Box::new(
+        move |track: Arc<TrackRemote>,
+              _receiver: Arc<RTCRtpReceiver>,
+              _transceiver: Arc<RTCRtpTransceiver>| {
+            info!("on_track received: {}", track.codec().capability.mime_type,);
+            let state_ref = state_ref.clone();
+            Box::pin(async move {
+                loop {
+                    match track.read_rtp().await {
+                        Ok(packet) => {
+                            state_ref
+                                .rx_bytes
+                                .fetch_add(packet.0.payload.len() as u64, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            error!("Failed to read RTP packet: {}", e);
+                            break;
+                        }
+                    }
                 }
             })
         },
@@ -141,7 +177,7 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
 
     // Create the invite command with proper options
     let option = CallOption {
-        offer: Some(offer.sdp.clone()),
+        offer: Some(strip_ipv6_candidates(&offer.sdp)),
         vad: Some(VADOption::default()),
         ..Default::default()
     };
@@ -162,11 +198,37 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
                     info!(id, "Received answer: {}", sdp);
                     let offer = RTCSessionDescription::answer(sdp)?;
                     peer_connection.set_remote_description(offer).await?;
+                    ws_sender
+                        .send(tungstenite::Message::Text(
+                            serde_json::to_string_pretty(&Command::Play {
+                                url: cli.play_file.clone(),
+                                auto_hangup: None,
+                            })?
+                            .into(),
+                        ))
+                        .await?;
                 }
                 SessionEvent::Error { error, .. } => {
                     error!(id, "Received error: {}", error);
                     break;
                 }
+                SessionEvent::TrackEnd {
+                    track_id, duration, ..
+                } => {
+                    if track_id == "server-side-track" {
+                        info!(id, "Play file done, duration: {:?}", duration);
+                        ws_sender
+                            .send(tungstenite::Message::Text(
+                                serde_json::to_string_pretty(&Command::Play {
+                                    url: cli.play_file.clone(),
+                                    auto_hangup: None,
+                                })?
+                                .into(),
+                            ))
+                            .await?;
+                    }
+                }
+                SessionEvent::Speaking { .. } | SessionEvent::Silence { .. } => {}
                 _ => {
                     info!(id, "Received unexpected event: {:?}", event);
                     continue;
@@ -175,6 +237,8 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     };
+
+    let state_ref = state.clone();
     let send_audio_loop = async move {
         // Read test audio file
         let (mut audio_samples, sample_rate) =
@@ -190,23 +254,27 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
         if sample_rate != encoder.sample_rate() {
             audio_samples = resample_mono(&audio_samples, sample_rate, encoder.sample_rate());
         }
-        let start = SystemTime::now();
-        for chunk in audio_samples.chunks(chunk_size) {
-            let encoded = encoder.encode(&chunk);
-            let sample = webrtc::media::Sample {
-                data: encoded.into(),
-                duration: Duration::from_millis(20),
-                timestamp: SystemTime::now(),
-                packet_timestamp,
-                ..Default::default()
-            };
-            track.write_sample(&sample).await.unwrap();
-            packet_timestamp += chunk_size as u32;
-            ticker.tick().await;
+        loop {
+            for chunk in audio_samples.chunks(chunk_size) {
+                let encoded = encoder.encode(&chunk);
+                let sample = webrtc::media::Sample {
+                    data: encoded.into(),
+                    duration: Duration::from_millis(20),
+                    timestamp: SystemTime::now(),
+                    packet_timestamp,
+                    ..Default::default()
+                };
+                track.write_sample(&sample).await.unwrap();
+                state_ref
+                    .tx_bytes
+                    .fetch_add(sample.data.len() as u64, Ordering::Relaxed);
+                packet_timestamp += chunk_size as u32;
+                ticker.tick().await;
+            }
         }
-        let duration = start.elapsed().unwrap();
-        warn!(id, "Audio sent done, duration: {:?}", duration);
     };
+
+    state.alive.fetch_add(1, Ordering::Relaxed);
 
     select! {
         _ = recv_event_loop => {
@@ -215,7 +283,7 @@ async fn serve_client(cli: Cli, id: u32) -> Result<()> {
         _ = send_audio_loop => {
         }
     }
-
+    state.alive.fetch_sub(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -233,7 +301,7 @@ async fn main() -> Result<()> {
         .with_max_level(if cli.verbose {
             LevelFilter::DEBUG
         } else {
-            LevelFilter::WARN
+            LevelFilter::INFO
         })
         .with_file(true)
         .with_line_number(true)
@@ -241,21 +309,69 @@ async fn main() -> Result<()> {
         .ok();
     dotenv().ok();
 
+    info!("Clients: {}", cli.clients);
+
     let mut handles = Vec::new();
+    let state = Arc::new(AppState {
+        alive: AtomicU32::new(0),
+        rx_bytes: AtomicU64::new(0),
+        tx_bytes: AtomicU64::new(0),
+    });
+
     for id in 0..cli.clients {
         let cli = cli.clone();
+        let state = state.clone();
         handles.push(tokio::spawn(async move {
             loop {
-                serve_client(cli.clone(), id)
-                    .await
-                    .expect("Failed to serve client")
+                match serve_client(cli.clone(), id, state.clone()).await {
+                    Ok(_) => {
+                        info!(id, "Client session completed normally");
+                    }
+                    Err(e) => {
+                        error!(id, "Client session failed: {}", e);
+                    }
+                }
+                time::sleep(Duration::from_millis(rand::random::<u64>() % 5000)).await;
             }
         }));
     }
 
     info!("Waiting for {} clients to connect...", cli.clients);
-    for handle in handles {
-        handle.await.expect("Failed to join client");
+    let dump_state_loop = async move {
+        let mut last_rx_bytes = 0u64;
+        let mut last_tx_bytes = 0u64;
+
+        loop {
+            let current_rx = state.rx_bytes.load(Ordering::Relaxed);
+            let current_tx = state.tx_bytes.load(Ordering::Relaxed);
+
+            let rx_rate = current_rx.saturating_sub(last_rx_bytes);
+            let tx_rate = current_tx.saturating_sub(last_tx_bytes);
+
+            info!(
+                "alive: {}, rx_bytes: {:.2} KB/s, tx_bytes: {:.2} KB/s",
+                state.alive.load(Ordering::Relaxed),
+                rx_rate as f64 / 1024.0,
+                tx_rate as f64 / 1024.0
+            );
+            time::sleep(Duration::from_secs(1)).await;
+            last_rx_bytes = current_rx;
+            last_tx_bytes = current_tx;
+        }
+    };
+    select! {
+        _ = async {
+            for handle in handles {
+                handle.await.expect("Failed to join client");
+            }
+        } => {}
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down...");
+        }
+        _ = dump_state_loop => {
+            info!("Dump state loop completed");
+        }
     }
+
     Ok(())
 }

@@ -362,6 +362,12 @@ impl ActiveCall {
 
     async fn do_play(&self, url: String, auto_hangup: Option<bool>) -> Result<()> {
         self.tts_handle.lock().await.take();
+
+        info!(
+            session_id = self.session_id,
+            url, auto_hangup, "play file track"
+        );
+
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
