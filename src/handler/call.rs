@@ -229,8 +229,8 @@ impl ActiveCall {
                     SessionEvent::TrackEnd { track_id, .. } => {
                         if let Some(true) = auto_hangup.lock().await.take() {
                             info!(
-                                "auto hangup when track end track_id:{} session_id:{}",
-                                track_id, self.session_id
+                                session_id = self.session_id,
+                                "auto hangup when track end track_id:{}", track_id
                             );
                             self.do_hangup(Some("autohangup".to_string()), Some(track_id))
                                 .await
@@ -244,13 +244,13 @@ impl ActiveCall {
 
         select! {
             _ = event_hook_loop => {
-                info!("Event loop done, id:{}", self.session_id);
+                info!(session_id = self.session_id, "Event loop done");
             }
             _ = self.media_stream.serve() => {
-                info!("Media stream serve done, id:{}", self.session_id);
+                info!(session_id = self.session_id, "Media stream serve done");
             }
             _ = self.cancel_token.cancelled() => {
-                info!("Event loop cancelled, id:{}", self.session_id);
+                info!(session_id = self.session_id, "Event loop cancelled");
             }
         }
         Ok(())
@@ -327,8 +327,11 @@ impl ActiveCall {
         };
 
         info!(
+            session_id = self.session_id,
             "new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
-            play_command.text, play_command.speaker, auto_hangup
+            play_command.text,
+            play_command.speaker,
+            auto_hangup
         );
 
         if let Some(auto_hangup) = auto_hangup {
@@ -339,7 +342,10 @@ impl ActiveCall {
             match tts_handle.try_send(play_command) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    warn!("error sending tts command: {}", e);
+                    warn!(
+                        session_id = self.session_id,
+                        "error sending tts command: {}", e
+                    );
                     play_command = e.0;
                 }
             }
@@ -348,6 +354,7 @@ impl ActiveCall {
         let (new_handle, tts_track) = StreamEngine::create_tts_track(
             self.app_state.stream_engine.clone(),
             self.cancel_token.child_token(),
+            self.session_id.clone(),
             self.track_config.server_side_track_id.clone(),
             play_id,
             &tts_option,
@@ -461,11 +468,6 @@ impl ActiveCall {
         }
 
         self.cancel_token.cancel();
-        // Set default hangup reason if not already set
-        // if self.call_state.hangup_reason.lock().await.is_none() {
-        //     *self.call_state.hangup_reason.lock().await = Some(CallRecordHangupReason::Autohangup);
-        // }
-
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
 

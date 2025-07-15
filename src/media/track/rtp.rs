@@ -383,6 +383,7 @@ impl RtpTrack {
         };
 
         info!(
+            track_id = self.track_id,
             "set remote description peer_addr: {} rtcp_addr: {} payload_type: {}",
             remote_addr,
             remote_rtcp_addr,
@@ -615,7 +616,7 @@ impl RtpTrack {
             let (n, _) = match rtp_socket.recv_raw(&mut buf).await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("Error receiving RTP packet: {}", e);
+                    warn!(track_id, "Error receiving RTP packet: {}", e);
                     return Err(anyhow::anyhow!("Error receiving RTP packet: {}", e));
                 }
             };
@@ -639,7 +640,7 @@ impl RtpTrack {
                     if magic_cookie == 0x2112A442
                         || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
                     {
-                        debug!(
+                        debug!(track_id,
                             "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
                             msg_type, n
                         );
@@ -653,8 +654,10 @@ impl RtpTrack {
                 let rtcp_pt = buf[1]; // Full second byte for RTCP
                 if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
                     info!(
+                        track_id,
                         "Received RTCP packet with PT: {}, length: {}, skipping RTP processing",
-                        rtcp_pt, n
+                        rtcp_pt,
+                        n
                     );
                     continue;
                 }
@@ -666,15 +669,15 @@ impl RtpTrack {
                 // Additional validation for RTP packets
                 if version != 2 {
                     info!(
-                        "Received packet with invalid RTP version: {}, skipping",
-                        version
+                        track_id,
+                        "Received packet with invalid RTP version: {}, skipping", version
                     );
                     continue;
                 }
 
                 // RTP payload types should be < 128 (7 bits)
                 if rtp_pt >= 128 {
-                    debug!(
+                    debug!(track_id,
                         "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
                         rtp_pt
                     );
@@ -685,7 +688,7 @@ impl RtpTrack {
             let packet = match Packet::unmarshal(&mut &buf[0..n]) {
                 Ok(packet) => packet,
                 Err(e) => {
-                    debug!("Error creating RTP reader: {:?}", e);
+                    info!(track_id, "Error creating RTP reader: {:?}", e);
                     continue;
                 }
             };
@@ -710,13 +713,13 @@ impl RtpTrack {
             };
 
             if let Err(e) = processor_chain.process_frame(&frame) {
-                error!("Failed to process frame: {}", e);
+                error!(track_id, "Failed to process frame: {}", e);
                 break;
             }
             match packet_sender.send(frame) {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("Error sending audio frame: {}", e);
+                    error!(track_id, "Error sending audio frame: {}", e);
                     break;
                 }
             }
@@ -726,6 +729,7 @@ impl RtpTrack {
 
     // Send RTCP sender reports periodically
     async fn send_rtcp_reports(
+        track_id: TrackId,
         token: CancellationToken,
         state: Arc<RtpTrackState>,
         rtcp_socket: &UdpConnection,
@@ -773,9 +777,9 @@ impl RtpTrack {
             match remote_rtcp_addr {
                 Some(ref addr) => {
                     if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
-                        error!("Failed to send RTCP report: {}", e);
+                        error!(track_id, "Failed to send RTCP report: {}", e);
                     } else {
-                        debug!("Sent RTCP Sender Report -> {}", addr);
+                        debug!(track_id, "Sent RTCP Sender Report -> {}", addr);
                     }
                 }
                 None => {}
@@ -802,10 +806,9 @@ impl Track for RtpTrack {
         self.processor_chain.append_processor(processor);
     }
 
-    async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
-        self.set_remote_description(&_offer)?;
-        let answer = self.remote_description.clone().unwrap_or("".to_string());
-        Ok(answer)
+    async fn handshake(&mut self, offer: String, _timeout: Option<Duration>) -> Result<String> {
+        self.set_remote_description(&offer)?;
+        self.local_description()
     }
 
     async fn start(
@@ -826,13 +829,13 @@ impl Track for RtpTrack {
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
-                    info!("RTC process cancelled");
+                    info!(track_id, "RTC process cancelled");
                 },
-                r = Self::send_rtcp_reports(token.clone(), state, &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
-                    info!("RTCP sender process completed {:?}", r);
+                r = Self::send_rtcp_reports(track_id.clone(), token.clone(), state, &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
+                    info!(track_id, "RTCP sender process completed {:?}", r);
                 }
                 r = Self::recv_rtp_packets(token.clone(), rtp_socket, track_id.clone(), processor_chain, packet_sender) => {
-                    info!("RTP processor completed {:?}", r);
+                    info!(track_id, "RTP processor completed {:?}", r);
                 }
             };
 
@@ -846,7 +849,7 @@ impl Track for RtpTrack {
                         as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>];
                     if let Ok(data) = webrtc::rtcp::packet::marshal(&pkts) {
                         if let Err(e) = rtcp_socket.send_raw(&data, addr).await {
-                            error!("Failed to send RTCP goodbye packet: {}", e);
+                            error!(track_id, "Failed to send RTCP goodbye packet: {}", e);
                         }
                     }
                 }
