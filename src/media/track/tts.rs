@@ -45,6 +45,7 @@ pub type TtsCommandReceiver = mpsc::UnboundedReceiver<TtsCommand>;
 
 pub struct TtsTrack {
     track_id: TrackId,
+    session_id: String,
     processor_chain: ProcessorChain,
     config: TrackConfig,
     cancel_token: CancellationToken,
@@ -82,12 +83,14 @@ impl TtsHandle {
 impl TtsTrack {
     pub fn new(
         track_id: TrackId,
+        session_id: String,
         command_rx: TtsCommandReceiver,
         client: Box<dyn SynthesisClient>,
     ) -> Self {
         let config = TrackConfig::default();
         Self {
             track_id,
+            session_id,
             processor_chain: ProcessorChain::new(config.samplerate),
             config,
             cancel_token: CancellationToken::new(),
@@ -166,7 +169,7 @@ impl Track for TtsTrack {
         let event_sender_clone = event_sender.clone();
         let synthesize_done = Arc::new(AtomicBool::new(false));
         let synthesize_done_clone = synthesize_done.clone();
-
+        let session_id = self.session_id.clone();
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -191,7 +194,7 @@ impl Track for TtsTrack {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
-                                info!(" using cached audio for {}", cache_key);
+                                info!(session_id, "using cached audio for {}", cache_key);
                                 buffer_clone.lock().await.extend(bytes_to_samples(&audio));
                                 synthesize_done.store(true, Ordering::Relaxed);
                                 event_sender
@@ -210,7 +213,7 @@ impl Track for TtsTrack {
                                 continue;
                             }
                             Err(e) => {
-                                warn!(" error retrieving cached audio: {}", e);
+                                warn!(session_id, "error retrieving cached audio: {}", e);
                             }
                         },
                         _ => {}
@@ -267,7 +270,7 @@ impl Track for TtsTrack {
                                         .extend(bytes_to_samples(&processed_chunk));
                                 }
                                 Err(e) => {
-                                    warn!(" Error in audio stream chunk: {:?}", e);
+                                    warn!(session_id, "Error in audio stream chunk: {:?}", e);
                                     event_sender
                                         .send(SessionEvent::Error {
                                             timestamp: crate::get_timestamp(),
@@ -296,6 +299,7 @@ impl Track for TtsTrack {
                             .ok();
 
                         info!(
+                            session_id,
                             "synthesize audio {} bytes -> {}ms {} with {}",
                             total_audio_len,
                             start_time.elapsed().as_millis(),
@@ -314,7 +318,7 @@ impl Track for TtsTrack {
                         }
                     }
                     Err(e) => {
-                        warn!("error synthesizing text: {}", e);
+                        warn!(session_id, "error synthesizing text: {}", e);
                         event_sender
                             .send(SessionEvent::Error {
                                 timestamp: crate::get_timestamp(),
@@ -334,11 +338,15 @@ impl Track for TtsTrack {
         let packet_duration_ms = self.config.ptime.as_millis() as u32;
         let max_pcm_chunk_size = sample_rate as usize * packet_duration_ms as usize / 1000;
         info!(
-            "track started  {} with sample_rate: {} packet_duration_ms: {} max_pcm_chunk_size: {}",
-            track_id, sample_rate, packet_duration_ms, max_pcm_chunk_size
+            session_id = self.session_id,
+            "track started with sample_rate: {} packet_duration_ms: {} max_pcm_chunk_size: {}",
+            sample_rate,
+            packet_duration_ms,
+            max_pcm_chunk_size
         );
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let processor_chain = self.processor_chain.clone();
+        let session_id = self.session_id.clone();
         let emit_loop = async move {
             let start_time = Instant::now();
             loop {
@@ -364,32 +372,37 @@ impl Track for TtsTrack {
                     };
                     // Process the frame with processor chain
                     if let Err(e) = processor_chain.process_frame(&packet) {
-                        warn!("error processing frame: {}", e);
+                        warn!(track_id, "error processing frame: {}", e);
                     }
                     // Send the packet
                     packet_sender.send(packet).ok();
                 }
                 ptimer.tick().await;
             }
-            info!("emit done {} ms", start_time.elapsed().as_millis());
+            info!(
+                session_id,
+                "emit done {} ms",
+                start_time.elapsed().as_millis()
+            );
         };
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
         let start_time = crate::get_timestamp();
+        let session_id = self.session_id.clone();
         tokio::spawn(async move {
             select! {
                 _ = command_loop => {
-                    info!("command loop done");
+                    info!(session_id,"command loop done");
                 }
                 _ = emit_loop => {
-                    info!("emit loop done");
+                    info!(session_id, "emit loop done");
                 }
                 _ = token.cancelled() => {
                 }
             }
             event_sender_clone
                 .send(SessionEvent::TrackEnd {
-                    track_id: track_id.clone(),
+                    track_id,
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
                 })

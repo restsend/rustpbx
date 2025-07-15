@@ -72,7 +72,12 @@ async fn test_tts_track_basic() -> Result<()> {
     // Create a TtsTrack with our mock client
     let track_id = "test-track".to_string();
     let client = MockSynthesisClient;
-    let tts_track = TtsTrack::new(track_id.clone(), command_rx, Box::new(client));
+    let tts_track = TtsTrack::new(
+        track_id.clone(),
+        "test_session".to_string(),
+        command_rx,
+        Box::new(client),
+    );
 
     // Create channels for the test
     let (event_tx, _event_rx) = broadcast::channel(16);
@@ -125,8 +130,13 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
     // Create a TtsTrack with our mock client
     let track_id = "test-track-multiple".to_string();
     let client = MockSynthesisClient;
-    let tts_track =
-        TtsTrack::new(track_id.clone(), command_rx, Box::new(client)).with_cache_enabled(false); // Disable caching for this test
+    let tts_track = TtsTrack::new(
+        track_id.clone(),
+        "test_session".to_string(),
+        command_rx,
+        Box::new(client),
+    )
+    .with_cache_enabled(false); // Disable caching for this test
 
     // Create channels for the test
     let (event_tx, _event_rx) = broadcast::channel(16);
@@ -193,9 +203,14 @@ async fn test_tts_track_configuration() -> Result<()> {
     let custom_sample_rate = 8000; // Use 8kHz instead of default 16kHz
     let custom_ptime = Duration::from_millis(10); // Use 10ms packet time
 
-    let tts_track = TtsTrack::new(track_id.clone(), command_rx, Box::new(client))
-        .with_sample_rate(custom_sample_rate)
-        .with_ptime(custom_ptime);
+    let tts_track = TtsTrack::new(
+        track_id.clone(),
+        "test_session".to_string(),
+        command_rx,
+        Box::new(client),
+    )
+    .with_sample_rate(custom_sample_rate)
+    .with_ptime(custom_ptime);
 
     // Create channels for the test
     let (event_tx, _event_rx) = broadcast::channel(16);
