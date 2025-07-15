@@ -170,8 +170,11 @@ pub async fn new_rtp_track_with_sip(
         headers,
     };
     info!(
-        "invite {} -> {} offer: \n{:?}",
-        invite_option.caller, invite_option.callee, offer
+        track_id,
+        "invite {} -> {} offer: \n{}",
+        invite_option.caller,
+        invite_option.callee,
+        offer.as_ref().map(|s| s.as_str()).unwrap_or("<NO OFFER>")
     );
     match ua.invite(invite_option, dlg_state_sender).await {
         Ok((dialog_id, answer)) => {

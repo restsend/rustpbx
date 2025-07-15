@@ -349,7 +349,15 @@ impl RtpTrackBuilder {
 }
 
 impl RtpTrack {
+    pub fn remote_description(&self) -> Option<String> {
+        self.remote_description.clone()
+    }
+
     pub fn set_remote_description(&mut self, answer: &str) -> Result<()> {
+        if self.remote_description.is_some() {
+            // if remote description is already set, don't set it again
+            return Ok(());
+        }
         let mut reader = Cursor::new(answer);
         let sdp = SessionDescription::unmarshal(&mut reader)?;
         let peer_media = match select_peer_media(&sdp, "audio") {
@@ -391,6 +399,8 @@ impl RtpTrack {
         );
 
         self.payload_type = peer_media.codecs[0].payload_type();
+        self.enabled_codecs = vec![CodecType::try_from(&self.payload_type.to_string())?];
+
         self.remote_addr.replace(remote_addr);
         self.remote_rtcp_addr.replace(remote_rtcp_addr);
         self.rtcp_mux = peer_media.rtcp_mux;

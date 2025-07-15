@@ -168,16 +168,16 @@ impl ActiveCall {
 
         match caller_track.handshake(offer, timeout).await {
             Ok(answer) => {
-                let sdp = match option.enable_ipv6 {
+                let answer = match option.enable_ipv6 {
                     Some(false) | None => strip_ipv6_candidates(&answer),
                     Some(true) => answer,
                 };
-                info!("track setup complete answer: {}", sdp);
+                info!(track_id, "track setup complete answer: {}", answer);
                 event_sender
                     .send(SessionEvent::Answer {
                         track_id,
                         timestamp: crate::get_timestamp(),
-                        sdp,
+                        sdp: answer,
                     })
                     .ok();
                 media_stream.update_track(caller_track).await;
@@ -790,7 +790,7 @@ async fn process_call(
         }
     };
     option.check_default(); // check default
-    info!(session_id, ?call_type, "prepare  call option: {:?}", option);
+    info!(session_id, ?call_type, "prepare call option: {:?}", option);
     let track_config = TrackConfig::default();
     let mut dialog_id = None;
     let caller_track: Box<dyn Track> = match call_type {
@@ -813,6 +813,7 @@ async fn process_call(
             Box::new(webrtc_track)
         }
         ActiveCallType::Sip => {
+            let is_answer_mode = state.useragent.is_pending_call(&session_id).await;
             let r = if let Some(pending_call) = state.useragent.get_pending_call(&session_id).await
             {
                 super::sip::new_rtp_track_with_pending_call(
@@ -844,7 +845,27 @@ async fn process_call(
                 }
             };
             dialog_id.replace(dlg_id);
-            option.offer = rtp_track.local_description().ok();
+
+            let answer;
+            if is_answer_mode {
+                option.offer = rtp_track.remote_description();
+                answer = rtp_track.local_description().ok();
+            } else {
+                option.offer = rtp_track.local_description().ok();
+                answer = rtp_track.remote_description();
+            }
+            match call_state.write() {
+                Ok(mut call_state) => {
+                    call_state.answer.replace(answer.unwrap_or("".to_string()));
+                    call_state
+                        .option
+                        .as_mut()
+                        .map(|opt| opt.offer = option.offer.clone());
+                }
+                Err(e) => {
+                    warn!(session_id, "error writing call state: {}", e);
+                }
+            }
             Box::new(rtp_track)
         }
     };
