@@ -257,6 +257,11 @@ impl UserAgent {
         pending_dialogs.remove(session_id)
     }
 
+    pub async fn is_pending_call(&self, session_id: &String) -> bool {
+        let pending_dialogs = self.pending_dialogs.lock().await;
+        pending_dialogs.contains_key(session_id)
+    }
+
     pub async fn serve(&self) -> Result<()> {
         let incoming_txs = self.endpoint.incoming_transactions();
         let token = self.token.child_token();
