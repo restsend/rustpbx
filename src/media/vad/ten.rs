@@ -399,9 +399,9 @@ impl VadEngine for TenVad {
             let chunk: Vec<i16> = self.buffer.drain(..self.chunk_size).collect();
             let score = match self.predict(&chunk) {
                 Ok(score) => score,
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(debug_assertions)]
-                    println!("TenVad prediction failed: {}", e);
+                    println!("TenVad prediction failed: {}", _e);
                     0.0 // Return neutral score on error
                 }
             };
