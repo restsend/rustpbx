@@ -521,6 +521,11 @@ m=audio 12345 RTP/AVP 0
 a=rtpmap:0 PCMU/8000
 a=sendrecv"#;
 
+    // Test with invalid SDP
+    let invalid_sdp = "invalid sdp data";
+    let result = track.set_remote_description(invalid_sdp);
+    assert!(result.is_err(), "Should fail with invalid SDP");
+
     // Set the remote description
     let result = track.set_remote_description(test_sdp);
     assert!(
@@ -551,11 +556,6 @@ a=sendrecv"#;
             e
         );
     }
-
-    // Test with invalid SDP
-    let invalid_sdp = "invalid sdp data";
-    let result = track.set_remote_description(invalid_sdp);
-    assert!(result.is_err(), "Should fail with invalid SDP");
 
     // Cleanup
     cancel_token.cancel();
