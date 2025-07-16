@@ -6,23 +6,18 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD, Engine};
 use futures::{SinkExt, StreamExt};
-use http::{Request, StatusCode, Uri};
+use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    pin::Pin
 };
 use tokio::{net::TcpStream, sync::mpsc};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use urlencoding;
 use uuid::Uuid;
 
 /// Aliyun DashScope Paraformer real-time speech recognition API
@@ -32,48 +27,132 @@ pub struct AliyunAsrClient {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AliyunAsrResponse {
-    pub header: AliyunAsrHeader,
-    pub payload: Option<AliyunAsrPayload>,
+#[derive(Debug, Serialize)]
+pub struct RunTaskCommand {
+    pub header: CommandHeader,
+    pub payload: RunTaskPayload,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AliyunAsrHeader {
-    pub message: String,
-    pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AliyunAsrPayload {
-    pub result: String,
-    pub sentence_id: u32,
-    pub is_sentence_end: bool,
-    pub begin_time: u64,
-    pub end_time: u64,
+impl RunTaskCommand {
+    pub fn new(task_id: String, model: String, sample_rate: u32) -> Self {
+        Self {
+            header: CommandHeader {
+                action: "run-task".to_string(),
+                task_id,
+                streaming: "duplex".to_string(),
+            },
+            payload: RunTaskPayload {
+                task_group: "audio".to_string(),
+                task: "asr".to_string(),
+                function: "recognition".to_string(),
+                model,
+                input: CommandInput {},
+                parameters: RunTaskCommandParameters {
+                    format: "pcm".to_string(),
+                    sample_rate,
+                },
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
-pub struct AliyunAsrRequest {
-    pub header: AliyunAsrRequestHeader,
-    pub payload: AliyunAsrRequestPayload,
+pub struct FinishTaskCommand {
+    pub header: CommandHeader,
+    pub payload: FinishTaskPayload,
+}
+
+impl FinishTaskCommand {
+    fn new(task_id: String) -> Self {
+        Self {
+            header: CommandHeader {
+                action: "finish-task".to_string(),
+                task_id,
+                streaming: "duplex".to_string(),
+            },
+            payload: FinishTaskPayload {
+                input: CommandInput {},
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
-pub struct AliyunAsrRequestHeader {
-    pub name: String,
-    pub namespace: String,
+pub struct CommandHeader {
+    pub action: String,
     pub task_id: String,
+    pub streaming: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct AliyunAsrRequestPayload {
-    pub model: String,
+pub struct RunTaskPayload {
+    pub task_group: String,
     pub task: String,
-    pub audio: String, // base64 encoded
-    pub audio_format: String,
+    pub function: String,
+    pub model: String,
+    pub input: CommandInput,
+    pub parameters: RunTaskCommandParameters,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunTaskCommandParameters {
+    pub format: String,
     pub sample_rate: u32,
 }
+
+#[derive(Debug, Serialize)]
+pub struct CommandInput {}
+
+#[derive(Debug, Serialize)]
+pub struct FinishTaskPayload {
+    pub input: CommandInput,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AsrEvent {
+    pub header: EventHeader,
+    pub payload: Option<EventPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventHeader {
+    pub task_id: String,
+    pub event: String,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventPayload {
+    pub output: Option<EventOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventOutput {
+    pub sentence: OutputSentence,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OutputSentence {
+    pub begin_time: u32,
+    pub _end_time: Option<u32>,
+    pub text: String,
+    pub words: Vec<OutputWord>,
+    pub heartbeat: Option<bool>,
+    pub sentence_end: bool,
+    pub _emo_tag: Option<String>,
+    pub _emo_confidence: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OutputWord {
+    pub _begin_time: u32,
+    pub end_time: u32,
+    pub _text: String,
+    pub _punctuation: String,
+}
+
+const WS_URL: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
 
 impl AliyunAsrClient {
     // Establish WebSocket connection to Aliyun DashScope ASR service
@@ -86,25 +165,12 @@ impl AliyunAsrClient {
             .secret_key
             .as_deref()
             .ok_or_else(|| anyhow!("No DASHSCOPE_API_KEY provided"))?;
-        let endpoint = self
-            .option
-            .endpoint
-            .as_deref()
-            .unwrap_or("dashscope.aliyuncs.com");
         // Aliyun DashScope WebSocket endpoint
-        let ws_url = format!(
-            "wss://{}/api/v1/services/audio/asr/ws?apikey={}",
-            endpoint,
-            urlencoding::encode(api_key)
-        );
 
-        info!("Connecting to Aliyun DashScope WebSocket URL: {}", ws_url);
-
-        let request = Request::builder()
-            .uri(ws_url.parse::<Uri>()?)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .body(())?;
+        let mut request = WS_URL.into_client_request()?;
+        let headers = request.headers_mut();
+        headers.insert("Authorization", format!("Bearer {}", api_key).parse()?);
+        headers.insert("X-DashScope-DataInspection", "enable".parse()?);
 
         debug!("Connecting with request: {:?}", request);
 
@@ -123,28 +189,12 @@ impl AliyunAsrClient {
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         event_sender: EventSender,
         token: CancellationToken,
+        model: String,
+        sample_rate: u32,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::get_timestamp();
-        let start_time = Arc::new(AtomicU64::new(0));
-        let start_time_ref = start_time.clone();
-        let task_id = Uuid::new_v4().to_string();
-
-        // Send start message
-        let start_msg = AliyunAsrRequest {
-            header: AliyunAsrRequestHeader {
-                name: "StartRecognition".to_string(),
-                namespace: "SpeechRecognizer".to_string(),
-                task_id: task_id.clone(),
-            },
-            payload: AliyunAsrRequestPayload {
-                model: "paraformer-realtime".to_string(),
-                task: "asr".to_string(),
-                audio: "".to_string(),
-                audio_format: "pcm".to_string(),
-                sample_rate: 16000,
-            },
-        };
+        let start_msg = RunTaskCommand::new(track_id.clone(), model, sample_rate);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -153,79 +203,97 @@ impl AliyunAsrClient {
             }
         }
 
+        let mut index = 0;
         let recv_loop = async move {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
                         debug!("ASR response: {}", text);
-                        match serde_json::from_str::<AliyunAsrResponse>(&text) {
+                        match serde_json::from_str::<AsrEvent>(&text) {
                             Ok(response) => {
-                                if response.header.status != "success" {
-                                    warn!(
-                                        "Error from ASR service: {} ({})",
-                                        response.header.message, response.header.status
-                                    );
-                                    return Err(anyhow!(
-                                        "Error from ASR service: {} ({})",
-                                        response.header.message,
-                                        response.header.status
-                                    ));
+                                let task_id = response.header.task_id.clone();
+                                debug!("Task: {} event: {}", task_id, response.header.event);
+
+                                if response.header.event == "task-failed" {
+                                    let code = response.header.error_code.expect("mising_code");
+                                    let message = response
+                                        .header
+                                        .error_message
+                                        .expect("mising error message");
+                                    let error = format!("Error from ASR service: {} ({})", code, message);
+                                    warn!("{}", error);
+                                    return Err(anyhow!(error));
                                 }
 
-                                if let Some(payload) = response.payload {
-                                    if !payload.result.is_empty() {
-                                        let event = if payload.is_sentence_end {
-                                            start_time.store(0, Ordering::Relaxed);
-                                            SessionEvent::AsrFinal {
-                                                track_id: track_id.clone(),
-                                                index: payload.sentence_id,
-                                                text: payload.result,
-                                                timestamp: crate::get_timestamp(),
-                                                start_time: Some(begin_time + payload.begin_time),
-                                                end_time: Some(begin_time + payload.end_time),
-                                            }
-                                        } else {
-                                            if start_time.load(Ordering::Relaxed) == 0 {
-                                                start_time.store(
-                                                    crate::get_timestamp(),
-                                                    Ordering::Relaxed,
-                                                );
-                                            }
-                                            SessionEvent::AsrDelta {
-                                                track_id: track_id.clone(),
-                                                index: payload.sentence_id,
-                                                text: payload.result,
-                                                timestamp: crate::get_timestamp(),
-                                                start_time: Some(begin_time + payload.begin_time),
-                                                end_time: Some(begin_time + payload.end_time),
-                                            }
-                                        };
-                                        event_sender.send(event).ok();
+                                if response.header.event == "task-finished" {
+                                    debug!("Task: {} finished", task_id);
+                                    break;
+                                }
 
-                                        let diff_time = crate::get_timestamp()
-                                            - start_time_ref.load(Ordering::Relaxed);
-                                        let metrics_event = if payload.is_sentence_end {
-                                            SessionEvent::Metrics {
-                                                timestamp: crate::get_timestamp(),
-                                                key: "completed.asr.aliyun".to_string(),
-                                                data: serde_json::json!({
-                                                    "sentence_id": payload.sentence_id,
-                                                }),
-                                                duration: diff_time as u32,
-                                            }
-                                        } else {
-                                            SessionEvent::Metrics {
-                                                timestamp: crate::get_timestamp(),
-                                                key: "ttfb.asr.aliyun".to_string(),
-                                                data: serde_json::json!({
-                                                    "sentence_id": payload.sentence_id,
-                                                }),
-                                                duration: diff_time as u32,
-                                            }
-                                        };
-                                        event_sender.send(metrics_event).ok();
+                                if response.header.event == "task-started" {
+                                    debug!("Task: {} started", task_id);
+                                    continue;
+                                }
+
+                                assert!(response.header.event == "result-generated");
+
+                                let payload = response.payload.ok_or(anyhow!("missing payload"))?;
+                                let output = payload.output.ok_or(anyhow!("missing output"))?;
+
+                                if let Some(true) = output.sentence.heartbeat {
+                                    continue;
+                                }
+
+                                let sentence = output.sentence;
+                                let words = sentence.words;
+                                let sentence_start_time = begin_time + sentence.begin_time as u64;
+                                let sentence_end_time = begin_time
+                                    + words.last().map(|w| w.end_time as u64).unwrap_or(0);
+                                let text = sentence.text;
+
+                                let event = if sentence.sentence_end {
+                                    SessionEvent::AsrFinal {
+                                        track_id: task_id.clone(),
+                                        index,
+                                        text,
+                                        timestamp: crate::get_timestamp(),
+                                        start_time: Some(sentence_start_time),
+                                        end_time: Some(sentence_end_time),
                                     }
-                                }
+                                } else {
+                                    SessionEvent::AsrDelta {
+                                        track_id: task_id.clone(),
+                                        index,
+                                        text,
+                                        timestamp: crate::get_timestamp(),
+                                        start_time: Some(sentence_start_time),
+                                        end_time: Some(sentence_end_time),
+                                    }
+                                };
+                                event_sender.send(event).ok();
+
+                                let diff_time = (crate::get_timestamp() - begin_time) as u32;
+                                let metrics_event = if sentence.sentence_end {
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: "completed.asr.aliyun".to_string(),
+                                        data: serde_json::json!({
+                                            "sentence_id": index,
+                                        }),
+                                        duration: diff_time,
+                                    }
+                                } else {
+                                    SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: "ttfb.asr.aliyun".to_string(),
+                                        data: serde_json::json!({
+                                            "sentence_id": index,
+                                        }),
+                                        duration: diff_time,
+                                    }
+                                };
+                                event_sender.send(metrics_event).ok();
+                                index += 1;
                             }
                             Err(e) => {
                                 warn!("Failed to parse ASR response: {}", e);
@@ -255,49 +323,13 @@ impl AliyunAsrClient {
                     break;
                 }
 
-                // Convert audio data to base64
-                let audio_base64 = STANDARD.encode(&audio_data);
-
-                let audio_msg = AliyunAsrRequest {
-                    header: AliyunAsrRequestHeader {
-                        name: "RecognitionAudio".to_string(),
-                        namespace: "SpeechRecognizer".to_string(),
-                        task_id: task_id.clone(),
-                    },
-                    payload: AliyunAsrRequestPayload {
-                        model: "paraformer-realtime".to_string(),
-                        task: "asr".to_string(),
-                        audio: audio_base64,
-                        audio_format: "pcm".to_string(),
-                        sample_rate: 16000,
-                    },
-                };
-
-                if let Ok(msg_json) = serde_json::to_string(&audio_msg) {
-                    if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
-                        warn!("Failed to send audio data: {}", e);
-                        break;
-                    }
-                } else {
-                    warn!("Failed to serialize audio message");
+                if let Err(e) = ws_sender.send(Message::Binary(audio_data.into())).await {
+                    warn!("Failed to send audio data: {}", e);
+                    break;
                 }
             }
 
-            // Send end message
-            let end_msg = AliyunAsrRequest {
-                header: AliyunAsrRequestHeader {
-                    name: "StopRecognition".to_string(),
-                    namespace: "SpeechRecognizer".to_string(),
-                    task_id: task_id.clone(),
-                },
-                payload: AliyunAsrRequestPayload {
-                    model: "paraformer-realtime".to_string(),
-                    task: "asr".to_string(),
-                    audio: "".to_string(),
-                    audio_format: "pcm".to_string(),
-                    sample_rate: 16000,
-                },
-            };
+            let end_msg = FinishTaskCommand::new(track_id.clone());
 
             if let Ok(msg_json) = serde_json::to_string(&end_msg) {
                 if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -375,7 +407,12 @@ impl AliyunAsrClientBuilder {
 
     pub async fn build(self) -> Result<AliyunAsrClient> {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
-
+        let model_type = self
+            .option
+            .model_type
+            .clone()
+            .unwrap_or("paraformer-realtime-v2".to_string());
+        let sample_rate = self.option.samplerate.unwrap_or(16000);
         let client = AliyunAsrClient {
             option: self.option,
             audio_tx,
@@ -399,6 +436,8 @@ impl AliyunAsrClientBuilder {
                 audio_rx,
                 event_sender.clone(),
                 token,
+                model_type,
+                sample_rate,
             )
             .await
             {

@@ -144,12 +144,23 @@ async fn test_aliyun_asr() {
     };
 
     println!("Using Aliyun API key: {}", &api_key[..8]); // Only show first 8 chars for security
+    // Read the test audio file
+    let audio_path = "fixtures/hello_book_course_zh_16k.wav";
+    let (samples, sample_rate) = read_wav_file(audio_path).expect("Failed to read WAV file");
+    println!(
+        "Read {} samples {}HZ from WAV file ({} seconds of audio)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f32 / sample_rate as f32
+    );
 
     // Configure the client
     let config = TranscriptionOption {
         secret_key: Some(api_key),
+        samplerate: Some(sample_rate),
         ..Default::default()
     };
+    
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
 
     // Create client builder and connect
@@ -161,16 +172,6 @@ async fn test_aliyun_asr() {
             return;
         }
     };
-
-    // Read the test audio file
-    let audio_path = "fixtures/hello_book_course_zh_16k.wav";
-    let (samples, sample_rate) = read_wav_file(audio_path).expect("Failed to read WAV file");
-    println!(
-        "Read {} samples {}HZ from WAV file ({} seconds of audio)",
-        samples.len(),
-        sample_rate,
-        samples.len() as f32 / sample_rate as f32
-    );
 
     // Send audio data in chunks
     let chunk_size = 3200; // 100ms of audio at 16kHz
