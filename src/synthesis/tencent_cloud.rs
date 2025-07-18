@@ -280,7 +280,7 @@ impl SynthesisClient for TencentCloudTtsClient {
         &'a self,
         text: &'a str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         // Use the new WebSocket streaming implementation
         self.synthesize_text_stream(text, option).await
     }
