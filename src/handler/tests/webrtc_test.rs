@@ -50,7 +50,6 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .install_default()
         .ok();
     dotenv().ok();
-
     // Create a custom config with different ports to avoid conflicts
     let mut config = Config::default();
     // Use different static ports for this test to avoid conflicts
@@ -214,19 +213,34 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     ws_sender
         .send(tungstenite::Message::Text(command_str.into()))
         .await?;
-
+    let has_answer = Arc::new(tokio::sync::Mutex::new(false));
+    let has_answer_clone = Arc::clone(&has_answer);
     // Wait for transcription event
     let recv_event_loop = async move {
-        while let Some(Ok(msg)) = ws_receiver.next().await {
+        loop {
+            let msg = match ws_receiver.next().await {
+                Some(Ok(msg)) => msg,
+                Some(Err(e)) => {
+                    error!("WebSocket error: {:?}", e);
+                    assert!(false, "WebSocket error: {:?}", e);
+                    break;
+                }
+                None => {
+                    info!("WebSocket connection closed");
+                    break;
+                }
+            };
             let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
             match event {
                 SessionEvent::Answer { sdp, .. } => {
                     info!("Received answer: {}", sdp);
+                    *has_answer_clone.lock().await = true;
                     let offer = RTCSessionDescription::answer(sdp)?;
                     peer_connection.set_remote_description(offer).await?;
                 }
                 SessionEvent::Error { error, .. } => {
                     error!("Received error: {}", error);
+                    assert!(false, "Received error: {}", error);
                     break;
                 }
                 _ => {
@@ -235,6 +249,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
                 }
             }
         }
+        info!("Event loop finished");
         Ok::<(), anyhow::Error>(())
     };
     let send_audio_loop = async move {
@@ -252,7 +267,8 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         if sample_rate != encoder.sample_rate() {
             audio_samples = resample_mono(&audio_samples, sample_rate, encoder.sample_rate());
         }
-
+        info!("Audio samples length: {} duration: {}", audio_samples.len(), audio_samples.len() as f64 / sample_rate as f64);
+        let start_time = SystemTime::now();
         for chunk in audio_samples.chunks(chunk_size) {
             let encoded = encoder.encode(&chunk);
             let sample = webrtc::media::Sample {
@@ -266,7 +282,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             packet_timestamp += chunk_size as u32;
             ticker.tick().await;
         }
-        info!("Audio sent done");
+        info!("Audio sent done, duration: {:?}", start_time.elapsed().unwrap());
     };
 
     select! {
@@ -274,11 +290,13 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             info!("Transcription received");
         }
         _ = send_audio_loop => {
+            info!("Audio sent successfully");
         }
         _ = time::sleep(std::time::Duration::from_secs(30)) => {
             error!("Transcription timeout");
         }
     }
+    assert!(*has_answer.lock().await, "No answer received");
 
     Ok(())
 }

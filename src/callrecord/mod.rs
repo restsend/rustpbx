@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, future::Future, path::Path, pin::Pin, sync::Arc, time::Instant};
 use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(test)]
 mod tests;
@@ -464,7 +464,7 @@ impl CallRecordManager {
                 info!("Upload call record: {:?}", r);
             }
             Err(e) => {
-                error!("Failed to upload call record: {}", e);
+                warn!("Failed to upload call record: {}", e);
             }
         }
         let mut uploaded_files = vec![(json_path.to_string(), json_path.clone())];
@@ -489,7 +489,7 @@ impl CallRecordManager {
                 let file_content = match tokio::fs::read(path).await {
                     Ok(file_content) => file_content,
                     Err(e) => {
-                        error!("Failed to read media file {}: {}", path, e);
+                        warn!("Failed to read media file {}: {}", path, e);
                         continue;
                     }
                 };
@@ -498,7 +498,7 @@ impl CallRecordManager {
                         info!("Upload media file: {:?}", r);
                     }
                     Err(e) => {
-                        error!("Failed to upload media file: {}", e);
+                        warn!("Failed to upload media file: {}", e);
                     }
                 }
             }
