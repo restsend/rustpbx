@@ -783,7 +783,9 @@ pub async fn handle_call(
         }
         r = sip_event_loop(session_id.clone(),  event_sender.clone(), dlg_state_receiver, call_state.clone()) => {
             match r {
-                Ok(_) => {}
+                Ok(_) => {
+                    info!(session_id, "sip event loop completed");
+                }
                 Err(e) => {
                     info!(session_id, "sip event loop error: {}", e);
                 }
@@ -791,7 +793,9 @@ pub async fn handle_call(
         }
         r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state, dump_command_file) => {
             match r {
-                Ok(_) => {}
+                Ok(_) => {
+                    info!(session_id, "process call completed");
+                }
                 Err(e) => {
                     info!(session_id,"call error: {}", e);
                     let error_event = SessionEvent::Error {
@@ -894,7 +898,7 @@ async fn process_call(
         &mut option,
         audio_from_ws.clone(),
         state.clone(),
-        dlg_state_sender,
+        dlg_state_sender.clone(),
         call_state.clone(),
         &mut dialog_id,
     )
@@ -927,7 +931,7 @@ async fn process_call(
         call_state,
         call_type,
         cancel_token,
-        event_sender,
+        event_sender.clone(),
         session_id.clone(),
         media_stream,
         option,
@@ -948,13 +952,26 @@ async fn process_call(
         active_calls.insert(session_id, active_call.clone());
         active_calls.len()
     };
-
+    
+    let answer = match active_call.call_state.try_read() {
+        Ok(call_state) => call_state.answer.clone().unwrap_or_default(),
+        Err(_) => {
+            String::new()
+        }
+    };
+    event_sender
+                    .send(SessionEvent::Answer {
+                        track_id:active_call.session_id.clone(),
+                        timestamp: crate::get_timestamp(),
+                        sdp: answer,
+                    })
+                    .ok();
     info!(
         session_id = active_call.session_id,
         call_type = ?active_call.call_type,
         "new call: {} active calls", active_calls_len
     );
-
+    //SessionEvent::Answer
     let audio_from_ws = audio_from_ws.lock().await.take();
     let active_call_clone = active_call.clone();
     let recv_from_ws = async move {

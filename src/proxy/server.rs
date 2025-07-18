@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{callrecord::CallRecordSender, config::ProxyConfig, proxy::user::SipUser};
 use anyhow::{anyhow, Result};
+use rsip::prelude::HeadersExt;
 use rsipstack::{
     transaction::{key::TransactionKey, transaction::Transaction, Endpoint, TransactionReceiver},
     transport::{
@@ -23,7 +24,7 @@ use std::{
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 #[derive(Clone, Default)]
 pub struct TransactionCookie {
     user: Arc<RwLock<Option<SipUser>>>,
@@ -372,22 +373,37 @@ impl SipServer {
                     continue;
                 }
             }
+            // Spam protection for OPTIONS requests
+            // If the OPTIONS request is out-of-dialog and the tag is not present, ignore it
+            if matches!(tx.original.method, rsip::Method::Options) {
+                if tx.endpoint_inner.option.ignore_out_of_dialog_option{
+                    let to_tag = tx.original.to_header().and_then(|to| to.tag()).ok().flatten();
+                    if to_tag.is_none() {
+                        info!(key, "Ignoring out-of-dialog OPTIONS request");
+                        continue;
+                    }
+                }
+            }
             tokio::spawn(async move {
                 runnings_tx.fetch_add(1, Ordering::Relaxed);
                 let start_time = Instant::now();
-                let final_status;
                 select! {
                     r = Self::process_transaction(token.clone(), modules, &key,  &mut tx) => {
-                        final_status = tx.last_response.as_ref().map(|r| r.status_code());
-                        info!(key, ?final_status, "Transaction processed in {:?} ", start_time.elapsed());
-                        runnings_tx.fetch_sub(1, Ordering::Relaxed);
-                        return r;
+                        let final_status = tx.last_response.as_ref().map(|r| r.status_code());
+                        match r {
+                            Ok(_) => {
+                                info!(key, ?final_status, "Transaction processed in {:?} ", start_time.elapsed());
+                            },
+                            Err(e) => {
+                                warn!(key, ?final_status, "Failed to process transaction: {} in {:?}", e, start_time.elapsed());
+                            }
+                        }
                     }
                     _ = token.cancelled() => {
                         info!(key, "Transaction cancelled");
                     }
                 };
-
+                runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 if !matches!(
                     tx.original.method,
                     rsip::Method::Bye | rsip::method::Method::Cancel
@@ -396,7 +412,6 @@ impl SipServer {
                         tx.reply(rsip::StatusCode::RequestTerminated).await.ok();
                     }
                 }
-                runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 return Ok::<(), anyhow::Error>(());
             });
         }
