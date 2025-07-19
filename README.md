@@ -220,6 +220,9 @@ For detailed API documentation, see [API Documentation](./docs/api.md).
 
 - [API Reference](./docs/api.md) - Complete REST API documentation
 - [Architecture Diagrams](docs/) - System architecture and workflows
+- [VoiceAgent Integration with Telephony Networks](./docs/how%20webrtc%20work%20with%20sip(en).md)
+- [VoiceAgent 与电话网络互通的技术实现](./docs/how%20webrtc%20work%20with%20sip(zh).md)
+
 
 ## 🤝 Contributing
 
