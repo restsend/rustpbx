@@ -109,14 +109,14 @@ impl SynthesisOption {
 }
 
 #[async_trait]
-pub trait SynthesisClient: Send + Sync {
+pub trait SynthesisClient: Send {
     fn provider(&self) -> SynthesisType;
     /// Synthesize text to audio and return a stream of audio chunks
     async fn synthesize<'a>(
         &'a self,
         text: &'a str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>>;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>>;
 }
 
 impl Default for SynthesisOption {
