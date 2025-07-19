@@ -48,7 +48,7 @@ impl VoiceApiTtsClient {
         &'a self,
         text: &'a str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         let option = self.option.merge_with(option);
         let endpoint = option
             .endpoint
@@ -161,7 +161,7 @@ impl SynthesisClient for VoiceApiTtsClient {
         &'a self,
         text: &'a str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         self.ws_synthesize(text, option).await
     }
 }

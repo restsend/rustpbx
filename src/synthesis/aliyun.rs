@@ -199,7 +199,7 @@ impl SynthesisClient for AliyunTtsClient {
         &'a self,
         text: &'a str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         let option = self.option.merge_with(option);
         let api_key = self.get_api_key(&option)?;
         let task_id = Uuid::new_v4().to_string();

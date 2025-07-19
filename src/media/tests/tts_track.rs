@@ -27,7 +27,7 @@ impl SynthesisClient for MockSynthesisClient {
         &'a self,
         _text: &'a str,
         _option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
         // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
