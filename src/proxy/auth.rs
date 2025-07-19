@@ -153,12 +153,12 @@ impl ProxyModule for AuthModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
-        info!("Auth module started");
+        debug!("Auth module started");
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
-        info!("Auth module stopped");
+        debug!("Auth module stopped");
         Ok(())
     }
 

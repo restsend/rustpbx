@@ -6,7 +6,7 @@ use rsip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
 struct IpNetwork {
@@ -209,10 +209,12 @@ impl ProxyModule for AclModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
+        debug!("ACL module started with {} rules", self.inner.rules.len());
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
+        debug!("ACL module stopped");
         Ok(())
     }
 
