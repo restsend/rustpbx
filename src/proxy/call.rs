@@ -635,12 +635,12 @@ impl ProxyModule for CallModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
-        info!("Call module with Dialog-based B2BUA started");
+        debug!("Call module with Dialog-based B2BUA started");
         Ok(())
     }
 
     async fn on_stop(&self) -> Result<()> {
-        info!("Call module stopped, cleaning up sessions");
+        debug!("Call module stopped, cleaning up sessions");
         self.cleanup_all_sessions().await?;
         Ok(())
     }

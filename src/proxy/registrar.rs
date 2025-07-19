@@ -9,7 +9,7 @@ use rsip::prelude::{HeadersExt, UntypedHeader};
 use rsipstack::transaction::transaction::Transaction;
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct RegistrarModule {
@@ -36,9 +36,11 @@ impl ProxyModule for RegistrarModule {
         vec![rsip::Method::Register]
     }
     async fn on_start(&mut self) -> Result<()> {
+        debug!("Registrar module started");
         Ok(())
     }
     async fn on_stop(&self) -> Result<()> {
+        debug!("Registrar module stopped");
         Ok(())
     }
 

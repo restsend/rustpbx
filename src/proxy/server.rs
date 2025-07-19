@@ -24,7 +24,7 @@ use std::{
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 #[derive(Clone, Default)]
 pub struct TransactionCookie {
     user: Arc<RwLock<Option<SipUser>>>,
@@ -89,6 +89,7 @@ pub struct SipServerInner {
 
 pub type SipServerRef = Arc<SipServerInner>;
 
+#[derive(Clone)]
 pub struct SipServer {
     pub inner: SipServerRef,
     modules: Arc<Vec<Box<dyn ProxyModule>>>,
@@ -261,7 +262,7 @@ impl SipServerBuilder {
                     allow_methods.extend(module.allow_methods());
                     modules.push(module);
 
-                    info!(
+                    debug!(
                         "module {} loaded in {:?}",
                         name,
                         module_start_time.elapsed()

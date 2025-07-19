@@ -37,7 +37,6 @@ pub struct MemoryLocator {
 
 impl MemoryLocator {
     pub fn new() -> Self {
-        info!("Creating MemoryLocator");
         Self {
             locations: Mutex::new(HashMap::new()),
         }

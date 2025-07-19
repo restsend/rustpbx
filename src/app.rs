@@ -1,16 +1,9 @@
 use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
-    config::{Config, ProxyConfig},
+    config::{Config},
     handler::{call::ActiveCallRef, middleware::clientaddr::ClientAddr},
     media::engine::StreamEngine,
-    proxy::{
-        acl::AclModule,
-        auth::AuthModule,
-        call::CallModule,
-        registrar::RegistrarModule,
-        routing::RoutingState,
-        server::{SipServer, SipServerBuilder},
-        ws::sip_ws_handler,
+    proxy::{acl::AclModule, auth::AuthModule, call::CallModule, registrar::RegistrarModule, routing::RoutingState, server::{SipServer, SipServerBuilder}, ws::sip_ws_handler
     },
     useragent::{invitation::create_invite_handler, UserAgent},
 };
@@ -21,11 +14,10 @@ use axum::{
     routing::get,
     Router,
 };
-use futures::lock::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
@@ -42,6 +34,7 @@ pub struct AppStateInner {
     pub stream_engine: Arc<StreamEngine>,
     pub callrecord_sender: tokio::sync::Mutex<Option<CallRecordSender>>,
     pub routing_state: Arc<RoutingState>,
+    pub sip_server: Option<SipServer>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -52,6 +45,7 @@ pub struct AppStateBuilder {
     pub stream_engine: Option<Arc<StreamEngine>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub cancel_token: Option<CancellationToken>,
+    pub proxy_builder: Option<SipServerBuilder>,
 }
 
 impl AppStateInner {
@@ -93,6 +87,7 @@ impl AppStateBuilder {
             stream_engine: None,
             callrecord_sender: None,
             cancel_token: None,
+            proxy_builder: None,
         }
     }
 
@@ -113,6 +108,11 @@ impl AppStateBuilder {
 
     pub fn with_callrecord_sender(mut self, sender: CallRecordSender) -> Self {
         self.callrecord_sender = Some(sender);
+        self
+    }
+
+    pub fn with_proxy_builder(mut self, builder: SipServerBuilder) -> Self {
+        self.proxy_builder = Some(builder);
         self
     }
 
@@ -145,42 +145,48 @@ impl AppStateBuilder {
         };
         let stream_engine = self.stream_engine.unwrap_or_default();
 
+        let proxy_builder = match self.proxy_builder {
+            Some(builder) => Some(builder),
+            None => {
+                if let Some( proxy_config) = config.proxy.clone() {
+                    let proxy_config = Arc::new(proxy_config);
+                    let builder = SipServerBuilder::new(proxy_config)
+                        .with_cancel_token(token.child_token())
+                        .with_callrecord_sender(self.callrecord_sender.clone())
+                        .register_module("acl", AclModule::create)
+                        .register_module("auth", AuthModule::create)
+                        .register_module("registrar", RegistrarModule::create)
+                        .register_module("call", CallModule::create);
+                    Some(builder)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let sip_server = if let Some(proxy_builder) = proxy_builder {
+            match proxy_builder.build().await {
+                Ok(server) => Some(server),
+                Err(e) => {
+                    warn!("Failed to build proxy server: {}", e);
+                    return Err(anyhow::anyhow!("Failed to build proxy server: {}", e));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Arc::new(AppStateInner {
             config,
             useragent,
             token,
             active_calls: Arc::new(Mutex::new(HashMap::new())),
             stream_engine,
-            callrecord_sender: tokio::sync::Mutex::new(self.callrecord_sender),
+            callrecord_sender: Mutex::new(self.callrecord_sender),
             routing_state: Arc::new(RoutingState::new()),
+            sip_server,
         }))
     }
-}
-
-pub async fn build_sip_server(
-    token: CancellationToken,
-    config: ProxyConfig,
-    callrecord_sender: Option<CallRecordSender>,
-) -> Result<SipServer> {
-    let proxy_config = Arc::new(config);
-    let mut proxy_builder = SipServerBuilder::new(proxy_config)
-        .with_cancel_token(token.child_token())
-        .with_callrecord_sender(callrecord_sender);
-
-    proxy_builder = proxy_builder
-        .register_module("acl", AclModule::create)
-        .register_module("auth", AuthModule::create)
-        .register_module("registrar", RegistrarModule::create)
-        .register_module("call", CallModule::create);
-
-    let proxy = match proxy_builder.build().await {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Failed to build proxy: {}", e);
-            return Err(anyhow::anyhow!("Failed to build proxy: {}", e));
-        }
-    };
-    Ok(proxy)
 }
 
 pub async fn run(state: AppState) -> Result<()> {
@@ -212,20 +218,8 @@ pub async fn run(state: AppState) -> Result<()> {
         }
     }
 
-    if let Some(ref proxy) = state.config.proxy {
-        let token_proxy = token.clone();
-        let proxy_config = proxy.clone();
-        let callrecord_sender = state.callrecord_sender.lock().await.clone();
-        let sip_server = match build_sip_server(token_proxy, proxy_config, callrecord_sender).await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("Proxy server error: {}", e);
-                return Err(anyhow::anyhow!("Proxy server error: {}", e));
-            }
-        };
-
-        if let Some(ref ws_handler) = proxy.ws_handler {
+    if let Some(sip_server) = state.sip_server.clone() {
+        if let Some(ref ws_handler) = sip_server.inner.config.ws_handler {
             info!(
                 "Registering WebSocket handler to sip server: {}",
                 ws_handler
@@ -244,7 +238,6 @@ pub async fn run(state: AppState) -> Result<()> {
                 ),
             );
         }
-
         tokio::spawn(async move {
             info!("Proxy server started");
             match sip_server.serve().await {
