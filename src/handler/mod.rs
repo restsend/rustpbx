@@ -127,9 +127,6 @@ pub enum Command {
         reason: String,
         code: Option<u32>,
     },
-    Candidate {
-        candidates: Vec<String>,
-    },
     Tts {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]

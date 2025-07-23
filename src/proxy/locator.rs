@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
-use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct Location {

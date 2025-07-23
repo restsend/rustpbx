@@ -28,6 +28,9 @@ pub struct VADOption {
     pub ratio: f32,
     pub voice_threshold: f32,
     pub max_buffer_duration_secs: u64,
+    /// Timeout duration for silence (in ms), None means disable this feature
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silence_timeout: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +53,7 @@ impl Default for VADOption {
             ratio: 0.5,
             voice_threshold: 0.5,
             max_buffer_duration_secs: 50,
+            silence_timeout: None,
             endpoint: None,
             secret_key: None,
             secret_id: None,
@@ -138,15 +142,21 @@ impl VadProcessorInner {
         let samples = samples.to_owned();
         let result = self.vad.process(frame);
         if let Some((is_speaking, timestamp)) = result {
+            if is_speaking || self.triggered {
+                // 只在语音活动期间和语音刚结束时保留样本
+                let current_buf = SpeechBuf { samples, timestamp };
+                self.window_bufs.push(current_buf);
+            }
             self.process_vad_logic(is_speaking, timestamp, &frame.track_id)?;
 
-            let current_buf = SpeechBuf { samples, timestamp };
-
-            self.window_bufs.push(current_buf);
-
             // Clean up old buffers periodically
-            if self.window_bufs.len() > 1000 {
-                let cutoff = timestamp.saturating_sub(5000);
+            if self.window_bufs.len() > 1000 || !self.triggered {
+                // 当不再处于语音状态时，清除旧的缓冲区
+                let cutoff = if self.triggered {
+                    timestamp.saturating_sub(5000)
+                } else {
+                    timestamp.saturating_sub(self.option.silence_padding)
+                };
                 self.window_bufs.retain(|buf| buf.timestamp > cutoff);
             }
         }
@@ -165,21 +175,34 @@ impl VadProcessorInner {
             self.current_speech_start = Some(timestamp);
             let event = SessionEvent::Speaking {
                 track_id: track_id.to_string(),
-                timestamp: crate::get_timestamp(),
+                timestamp,
                 start_time: timestamp,
             };
             self.event_sender.send(event).ok();
-        } else if !is_speaking && self.triggered {
+        } else if !is_speaking {
             if self.temp_end.is_none() {
                 self.temp_end = Some(timestamp);
             }
 
             if let Some(temp_end) = self.temp_end {
-                let silence_duration = timestamp - temp_end;
-                if silence_duration >= self.option.silence_padding {
+                // Use saturating_sub to handle timestamp wrapping or out-of-order frames
+                let silence_duration = if timestamp >= temp_end {
+                    timestamp - temp_end
+                } else {
+                    0 // If timestamps are out of order, assume no silence
+                };
+
+                // Process regular silence detection for speech segments
+                if self.triggered && silence_duration >= self.option.silence_padding {
                     if let Some(start_time) = self.current_speech_start {
-                        let duration = temp_end - start_time;
+                        // Use safe duration calculation
+                        let duration = if temp_end >= start_time {
+                            temp_end - start_time
+                        } else {
+                            0 // If timestamps are out of order, assume no duration
+                        };
                         if duration >= self.option.speech_padding {
+                            // 当语音结束时，收集所有保存的样本
                             let samples_vec = self
                                 .window_bufs
                                 .iter()
@@ -189,10 +212,12 @@ impl VadProcessorInner {
                                 .flat_map(|buf| buf.samples.iter())
                                 .cloned()
                                 .collect();
+                            // 在收集完样本后清除缓冲区
+                            self.window_bufs.clear();
 
                             let event = SessionEvent::Silence {
                                 track_id: track_id.to_string(),
-                                timestamp: crate::get_timestamp(),
+                                timestamp,
                                 start_time,
                                 duration,
                                 samples: Some(samples_vec),
@@ -200,10 +225,31 @@ impl VadProcessorInner {
                             self.event_sender.send(event).ok();
                         }
                     }
-
                     self.triggered = false;
                     self.current_speech_start = None;
-                    self.temp_end = None;
+                    self.temp_end = Some(timestamp); // Update temp_end for silence timeout tracking
+                }
+
+                // Process silence timeout if configured
+                if let Some(timeout) = self.option.silence_timeout {
+                    // Use same safe calculation for silence timeout
+                    let timeout_duration = if timestamp >= temp_end {
+                        timestamp - temp_end
+                    } else {
+                        0
+                    };
+
+                    if timeout_duration >= timeout {
+                        let event = SessionEvent::Silence {
+                            track_id: track_id.to_string(),
+                            timestamp: crate::get_timestamp(),
+                            start_time: temp_end,
+                            duration: timeout_duration,
+                            samples: None,
+                        };
+                        self.event_sender.send(event).ok();
+                        self.temp_end = Some(timestamp);
+                    }
                 }
             }
         } else if is_speaking && self.temp_end.is_some() {
@@ -288,6 +334,12 @@ impl NopVad {
 
 impl VadEngine for NopVad {
     fn process(&mut self, frame: &mut AudioFrame) -> Option<(bool, u64)> {
-        Some((false, frame.timestamp))
+        let samples = match &frame.samples {
+            Samples::PCM { samples } => samples,
+            _ => return Some((false, frame.timestamp)),
+        };
+        // Check if there are any non-zero samples
+        let has_speech = samples.iter().any(|&x| x != 0);
+        Some((has_speech, frame.timestamp))
     }
 }
