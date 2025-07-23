@@ -19,6 +19,7 @@ function mainApp() {
                 ratio: 0.35,
                 speechPadding: 250,
                 silencePadding: 100,
+                silenceTimeout: 5000 // 5 seconds timeout for silence
             },
             recording: {
                 enabled: false,
@@ -788,6 +789,7 @@ function mainApp() {
                     ratio: parseFloat(this.config.vad.ratio),
                     speechPadding: parseInt(this.config.vad.speechPadding),
                     silencePadding: parseInt(this.config.vad.silencePadding),
+                    silenceTimeout: parseInt(this.config.vad.silenceTimeout),
                 } : undefined;
                 let denoise = this.config.denoise.enabled ? true : undefined;
 

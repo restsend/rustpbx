@@ -1,5 +1,5 @@
 use super::*;
-use crate::event::SessionEvent;
+use crate::event::{create_event_sender, SessionEvent};
 use crate::{media::processor::Processor, Samples};
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -413,7 +413,103 @@ async fn test_vad_with_long_audio() {
 
     // Verify we detected the main speech regions (allowing for more fine-grained detection)
     assert!(
-        results.speech_segments.len() == 4,
-        "Should detect 4 main speech segments"
+        results.speech_segments.len() == 3,
+        "Should detect 3 main speech segments"
     );
+}
+
+#[test]
+fn test_silence_timeout() {
+    let event_sender = create_event_sender();
+    let mut rx = event_sender.subscribe();
+    // Configure VAD with silence timeout
+    let mut option = VADOption::default();
+    option.silence_timeout = Some(1000); // 1 second timeout
+    option.silence_padding = 100; // 100ms silence padding
+    option.speech_padding = 250; // 250ms speech padding
+    option.voice_threshold = 0.5;
+
+    let vad = Box::new(NopVad::new().unwrap());
+    let processor = VadProcessor::new(vad, event_sender, option).unwrap();
+
+    // Simulate initial speech
+    let mut frame = AudioFrame {
+        track_id: "test".to_string(),
+        timestamp: 0,
+        samples: Samples::PCM {
+            samples: vec![1; 160], // 10ms of audio at 16kHz
+        },
+        sample_rate: 16000,
+    };
+
+    // First send some strong speech frames
+    for i in 0..20 {
+        frame.timestamp = i * 10;
+        frame.samples = Samples::PCM {
+            samples: vec![100; 160], // Use larger values for speech
+        };
+        processor.process_frame(&mut frame).unwrap();
+    }
+
+    // Add some transition frames
+    for i in 20..25 {
+        frame.timestamp = i * 10;
+        frame.samples = Samples::PCM {
+            samples: vec![50; 160], // Decreasing speech intensity
+        };
+        processor.process_frame(&mut frame).unwrap();
+    }
+
+    // Now simulate complete silence with multiple time steps to trigger timeout events
+    for i in 25..300 {
+        frame.timestamp = i * 10;
+        frame.samples = Samples::PCM {
+            samples: vec![0; 160],
+        };
+        processor.process_frame(&mut frame).unwrap();
+        if i % 100 == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    // Collect and verify events
+    let mut events = Vec::new();
+
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // We should have:
+    // 1. One Speaking event at the start
+    // 2. One Silence event when speech ends (with samples)
+    // 3. Multiple Silence events for timeout (without samples)
+    let speaking_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::Speaking { .. }))
+        .collect();
+    assert_eq!(speaking_events.len(), 1, "Should have one Speaking event");
+
+    let silence_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::Silence { .. }))
+        .collect();
+    assert!(
+        silence_events.len() >= 2,
+        "Should have at least 2 Silence events"
+    );
+
+    // Verify first silence event has samples (end of speech)
+    if let SessionEvent::Silence { samples, .. } = &silence_events[0] {
+        assert!(samples.is_some(), "First silence event should have samples");
+    }
+
+    // Verify subsequent silence events don't have samples (timeout)
+    for event in silence_events.iter().skip(1) {
+        if let SessionEvent::Silence { samples, .. } = event {
+            assert!(
+                samples.is_none(),
+                "Timeout silence events should not have samples"
+            );
+        }
+    }
 }

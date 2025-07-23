@@ -111,13 +111,15 @@ document.addEventListener('DOMContentLoaded', () => {
     async function handshake() {
         // Send the offer to the server
         addStatusMessage('Sending SDP offer to server');
+        const mediaPath = document.getElementById('audio-file').value;
         const response = await fetch('/webrtc/offer', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                sdp: peerConnection.localDescription
+                sdp: peerConnection.localDescription,
+                mediaPath
             })
         });
         if (!response.ok) {

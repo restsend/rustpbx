@@ -350,7 +350,6 @@ impl ActiveCall {
     #[instrument(skip(self, command), fields(session_id = self.session_id))]
     pub async fn dispatch(&self, command: Command) -> Result<()> {
         match command {
-            Command::Candidate { candidates } => self.do_candidate(candidates).await,
             Command::Tts {
                 text,
                 speaker,
@@ -385,9 +384,6 @@ impl ActiveCall {
                 Ok(())
             }
         }
-    }
-    async fn do_candidate(&self, _candidates: Vec<String>) -> Result<()> {
-        Ok(())
     }
 
     async fn do_tts(
