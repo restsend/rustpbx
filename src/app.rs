@@ -1,9 +1,16 @@
 use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
-    config::{Config},
+    config::Config,
     handler::{call::ActiveCallRef, middleware::clientaddr::ClientAddr},
     media::engine::StreamEngine,
-    proxy::{acl::AclModule, auth::AuthModule, call::CallModule, registrar::RegistrarModule, routing::RoutingState, server::{SipServer, SipServerBuilder}, ws::sip_ws_handler
+    proxy::{
+        acl::AclModule,
+        auth::AuthModule,
+        call::CallModule,
+        registrar::RegistrarModule,
+        routing::RoutingState,
+        server::{SipServer, SipServerBuilder},
+        ws::sip_ws_handler,
     },
     useragent::{invitation::create_invite_handler, UserAgent},
 };
@@ -17,8 +24,8 @@ use axum::{
 use std::path::Path;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::{net::TcpListener, sync::Mutex};
 use tokio::select;
+use tokio::{net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -148,7 +155,7 @@ impl AppStateBuilder {
         let proxy_builder = match self.proxy_builder {
             Some(builder) => Some(builder),
             None => {
-                if let Some( proxy_config) = config.proxy.clone() {
+                if let Some(proxy_config) = config.proxy.clone() {
                     let proxy_config = Arc::new(proxy_config);
                     let builder = SipServerBuilder::new(proxy_config)
                         .with_cancel_token(token.child_token())
@@ -279,11 +286,14 @@ pub async fn run(state: AppState) -> Result<()> {
 }
 
 // Index page handler
-async fn index_handler() -> impl IntoResponse {
+async fn index_handler(client_ip: ClientAddr) -> impl IntoResponse {
     match std::fs::read_to_string("static/index.html") {
         Ok(content) => Html(content).into_response(),
         Err(e) => {
-            tracing::error!("Failed to read index.html: {}", e);
+            info!(
+                client_ip = format!("{}", client_ip),
+                "Failed to read index.html: {}", e
+            );
             Html("<html><body><h1>Error loading page</h1></body></html>").into_response()
         }
     }
