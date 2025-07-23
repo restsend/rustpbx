@@ -41,7 +41,7 @@ function mainApp() {
                 secretId: '',
                 secretKey: '',
                 endpoint: '',
-                speaker: '301030', // '301030'
+                speaker: '601003', // '301030'
                 speed: 1.0,
                 volume: 5,
                 greeting: "Hello, how can I help you today?"
@@ -814,7 +814,7 @@ function mainApp() {
                 // Build TTS configuration
                 let ttsConfig = {
                     provider: this.config.tts.provider,
-                    speaker: this.config.tts.speaker || '301030'
+                    speaker: this.config.tts.speaker || '601003'
                 };
 
                 // Add provider-specific TTS configuration
