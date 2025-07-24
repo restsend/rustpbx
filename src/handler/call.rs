@@ -319,21 +319,23 @@ impl ActiveCall {
     pub async fn serve(&self) -> Result<()> {
         let mut event_receiver = self.media_stream.subscribe();
         let auto_hangup = self.auto_hangup.clone();
-        let next_input_timeout = Arc::new(Mutex::new(0));
-        let next_input_timeout_ref = next_input_timeout.clone();
+        let wait_input_timeout = self.wait_input_timeout.clone();
+
+        let input_timeout_expire = Arc::new(Mutex::new((0u64, 0u32)));
+        let input_timeout_expire_ref = input_timeout_expire.clone();
         let event_sender = self.media_stream.get_event_sender();
         let wait_input_timeout_loop = async {
             loop {
-                let expire = { *next_input_timeout.lock().await };
-                if expire > 0 && get_timestamp() >= expire {
+                let (start_time, expire) = { *input_timeout_expire.lock().await };
+                if expire > 0 && get_timestamp() >= start_time + expire as u64 {
                     info!(session_id = self.session_id, "wait input timeout reached");
-                    *next_input_timeout.lock().await = 0;
+                    *input_timeout_expire.lock().await = (0, 0);
                     event_sender
                         .send(SessionEvent::Silence {
                             track_id: self.track_config.server_side_track_id.clone(),
                             timestamp: crate::get_timestamp(),
-                            start_time: crate::get_timestamp(),
-                            duration: 0,
+                            start_time,
+                            duration: expire as u64,
                             samples: None,
                         })
                         .ok();
@@ -341,17 +343,21 @@ impl ActiveCall {
                 sleep(Duration::from_millis(100)).await;
             }
         };
-
+        let server_side_track_id = self.track_config.server_side_track_id.clone();
         let event_hook_loop = async move {
             while let Ok(event) = event_receiver.recv().await {
                 match event {
                     SessionEvent::Speaking { .. }
                     | SessionEvent::Dtmf { .. }
                     | SessionEvent::AsrDelta { .. }
-                    | SessionEvent::AsrFinal { .. } => {
-                        *next_input_timeout_ref.lock().await = 0;
+                    | SessionEvent::AsrFinal { .. }
+                    | SessionEvent::TrackStart { .. } => {
+                        *input_timeout_expire_ref.lock().await = (0, 0);
                     }
                     SessionEvent::TrackEnd { track_id, .. } => {
+                        if track_id != server_side_track_id {
+                            continue;
+                        }
                         if let Some(true) = auto_hangup.lock().await.take() {
                             info!(
                                 session_id = self.session_id,
@@ -361,15 +367,13 @@ impl ActiveCall {
                                 .await
                                 .ok();
                         }
-                        if let Some(wait_input_timeout) =
-                            self.wait_input_timeout.lock().await.take()
-                        {
-                            let expire = if wait_input_timeout > 0 {
-                                get_timestamp() + wait_input_timeout as u64
+                        if let Some(timeout) = wait_input_timeout.lock().await.take() {
+                            let expire = if timeout > 0 {
+                                (get_timestamp(), timeout)
                             } else {
-                                0
+                                (0, 0)
                             };
-                            *next_input_timeout_ref.lock().await = expire;
+                            *input_timeout_expire_ref.lock().await = expire;
                         }
                     }
                     _ => {}
