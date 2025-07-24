@@ -3,6 +3,7 @@ use crate::{
     app::AppState,
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
+    get_timestamp,
     media::{
         engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
@@ -40,6 +41,7 @@ use tokio::{
     fs::File,
     select,
     sync::{mpsc, Mutex},
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -80,6 +82,7 @@ pub struct ActiveCall {
     pub track_config: TrackConfig,
     pub tts_handle: Mutex<Option<TtsHandle>>,
     pub auto_hangup: Arc<Mutex<Option<bool>>>,
+    pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
     pub event_sender: EventSender,
     pub dialog_id: Mutex<Option<DialogId>>,
     pub app_state: AppState,
@@ -303,6 +306,7 @@ impl ActiveCall {
             media_stream,
             track_config: TrackConfig::default(),
             auto_hangup: Arc::new(Mutex::new(None)),
+            wait_input_timeout: Arc::new(Mutex::new(None)),
             event_sender,
             option,
             tts_handle: Mutex::new(None),
@@ -315,9 +319,38 @@ impl ActiveCall {
     pub async fn serve(&self) -> Result<()> {
         let mut event_receiver = self.media_stream.subscribe();
         let auto_hangup = self.auto_hangup.clone();
+        let next_input_timeout = Arc::new(Mutex::new(0));
+        let next_input_timeout_ref = next_input_timeout.clone();
+        let event_sender = self.media_stream.get_event_sender();
+        let wait_input_timeout_loop = async {
+            loop {
+                let expire = { *next_input_timeout.lock().await };
+                if expire > 0 && get_timestamp() >= expire {
+                    info!(session_id = self.session_id, "wait input timeout reached");
+                    *next_input_timeout.lock().await = 0;
+                    event_sender
+                        .send(SessionEvent::Silence {
+                            track_id: self.track_config.server_side_track_id.clone(),
+                            timestamp: crate::get_timestamp(),
+                            start_time: crate::get_timestamp(),
+                            duration: 0,
+                            samples: None,
+                        })
+                        .ok();
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        };
+
         let event_hook_loop = async move {
             while let Ok(event) = event_receiver.recv().await {
                 match event {
+                    SessionEvent::Speaking { .. }
+                    | SessionEvent::Dtmf { .. }
+                    | SessionEvent::AsrDelta { .. }
+                    | SessionEvent::AsrFinal { .. } => {
+                        *next_input_timeout_ref.lock().await = 0;
+                    }
                     SessionEvent::TrackEnd { track_id, .. } => {
                         if let Some(true) = auto_hangup.lock().await.take() {
                             info!(
@@ -328,6 +361,16 @@ impl ActiveCall {
                                 .await
                                 .ok();
                         }
+                        if let Some(wait_input_timeout) =
+                            self.wait_input_timeout.lock().await.take()
+                        {
+                            let expire = if wait_input_timeout > 0 {
+                                get_timestamp() + wait_input_timeout as u64
+                            } else {
+                                0
+                            };
+                            *next_input_timeout_ref.lock().await = expire;
+                        }
                     }
                     _ => {}
                 }
@@ -335,6 +378,9 @@ impl ActiveCall {
         };
 
         select! {
+            _ = wait_input_timeout_loop=>{
+                info!(session_id = self.session_id, "Wait input timeout loop done");
+            }
             _ = event_hook_loop => {
                 info!(session_id = self.session_id, "Event loop done");
             }
@@ -358,6 +404,7 @@ impl ActiveCall {
                 streaming,
                 end_of_stream,
                 option,
+                wait_input_timeout,
             } => {
                 self.do_tts(
                     text,
@@ -367,10 +414,15 @@ impl ActiveCall {
                     streaming,
                     end_of_stream,
                     option,
+                    wait_input_timeout,
                 )
                 .await
             }
-            Command::Play { url, auto_hangup } => self.do_play(url, auto_hangup).await,
+            Command::Play {
+                url,
+                auto_hangup,
+                wait_input_timeout,
+            } => self.do_play(url, auto_hangup, wait_input_timeout).await,
             Command::Hangup { reason, initiator } => self.do_hangup(reason, initiator).await,
             Command::Refer { target, options } => self.do_refer(target, options).await,
             Command::Mute { track_id } => self.do_mute(track_id).await,
@@ -395,6 +447,7 @@ impl ActiveCall {
         streaming: Option<bool>,
         end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
+        wait_input_timeout: Option<u32>,
     ) -> Result<()> {
         let tts_option = match self.option.tts {
             Some(ref option) => option,
@@ -422,9 +475,8 @@ impl ActiveCall {
             auto_hangup
         );
 
-        if let Some(auto_hangup) = auto_hangup {
-            *self.auto_hangup.lock().await = Some(auto_hangup);
-        }
+        *self.auto_hangup.lock().await = auto_hangup;
+        *self.wait_input_timeout.lock().await = wait_input_timeout;
 
         if let Some(tts_handle) = self.tts_handle.lock().await.as_ref() {
             match tts_handle.try_send(play_command) {
@@ -455,7 +507,12 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn do_play(&self, url: String, auto_hangup: Option<bool>) -> Result<()> {
+    async fn do_play(
+        &self,
+        url: String,
+        auto_hangup: Option<bool>,
+        wait_input_timeout: Option<u32>,
+    ) -> Result<()> {
         self.tts_handle.lock().await.take();
 
         info!(
@@ -467,9 +524,8 @@ impl ActiveCall {
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
 
-        if let Some(auto_hangup) = auto_hangup {
-            *self.auto_hangup.lock().await = Some(auto_hangup);
-        }
+        *self.auto_hangup.lock().await = auto_hangup;
+        *self.wait_input_timeout.lock().await = wait_input_timeout;
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
     }
@@ -948,20 +1004,18 @@ async fn process_call(
         active_calls.insert(session_id, active_call.clone());
         active_calls.len()
     };
-    
+
     let answer = match active_call.call_state.try_read() {
         Ok(call_state) => call_state.answer.clone().unwrap_or_default(),
-        Err(_) => {
-            String::new()
-        }
+        Err(_) => String::new(),
     };
     event_sender
-                    .send(SessionEvent::Answer {
-                        track_id:active_call.session_id.clone(),
-                        timestamp: crate::get_timestamp(),
-                        sdp: answer,
-                    })
-                    .ok();
+        .send(SessionEvent::Answer {
+            track_id: active_call.session_id.clone(),
+            timestamp: crate::get_timestamp(),
+            sdp: answer,
+        })
+        .ok();
     info!(
         session_id = active_call.session_id,
         call_type = ?active_call.call_type,

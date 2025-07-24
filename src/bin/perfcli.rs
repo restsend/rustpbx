@@ -231,6 +231,7 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
                             serde_json::to_string_pretty(&Command::Play {
                                 url: cli.play_file.clone(),
                                 auto_hangup: None,
+                                wait_input_timeout: None,
                             })?
                             .into(),
                         ))
@@ -250,6 +251,7 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
                                 serde_json::to_string_pretty(&Command::Play {
                                     url: cli.play_file.clone(),
                                     auto_hangup: None,
+                                    wait_input_timeout: None,
                                 })?
                                 .into(),
                             ))

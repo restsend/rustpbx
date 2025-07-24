@@ -149,12 +149,18 @@ pub enum Command {
         end_of_stream: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         option: Option<SynthesisOption>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "waitInputTimeout")]
+        wait_input_timeout: Option<u32>,
     },
     Play {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "autoHangup")]
         auto_hangup: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "waitInputTimeout")]
+        wait_input_timeout: Option<u32>,
     },
     Interrupt {},
     Pause {},
