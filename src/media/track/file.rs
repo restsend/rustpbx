@@ -22,8 +22,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use url::Url;
 
-const BUFFER_SIZE: usize = 65536;
-
 // AudioReader trait to unify WAV and MP3 handling
 trait AudioReader: Send {
     fn fill_buffer(&mut self) -> Result<usize>;
@@ -83,96 +81,63 @@ trait AudioReader: Send {
 }
 
 struct WavAudioReader {
-    reader: WavReader<BufReader<File>>,
     buffer: Vec<i16>,
-    buffer_size: usize,
     sample_rate: u32,
     position: usize,
     target_sample_rate: u32,
-    is_stereo: bool,
-    bits_per_sample: u16,
-    sample_format: hound::SampleFormat,
     resampler: Option<LinearResampler>,
 }
 
 impl WavAudioReader {
     fn from_file(file: File, target_sample_rate: u32) -> Result<Self> {
         let reader = BufReader::new(file);
-        let wav_reader = WavReader::new(reader)?;
+        let mut wav_reader = WavReader::new(reader)?;
         let spec = wav_reader.spec();
+        let sample_rate = spec.sample_rate;
+        let is_stereo = spec.channels == 2;
 
-        Ok(Self {
-            reader: wav_reader,
-            buffer: Vec::with_capacity(BUFFER_SIZE), // Initial buffer capacity
-            buffer_size: 0,
-            sample_rate: spec.sample_rate,
-            position: 0,
-            target_sample_rate,
-            is_stereo: spec.channels == 2,
-            bits_per_sample: spec.bits_per_sample,
-            sample_format: spec.sample_format,
-            resampler: None,
-        })
-    }
+        info!(
+            "WAV file detected with sample rate: {} Hz, channels: {}, bits: {}",
+            sample_rate, spec.channels, spec.bits_per_sample
+        );
 
-    // Read some samples into the buffer
-    fn fill_buffer(&mut self) -> Result<usize> {
-        self.buffer.clear();
-        self.position = 0;
+        let mut all_samples = Vec::new();
 
-        let mut samples_read = 0;
-        let mut temp_buffer = Vec::with_capacity(BUFFER_SIZE * 2);
-
-        // Read samples based on format and bit depth
-        while samples_read < BUFFER_SIZE * 4 {
-            // Allow for more samples to be read
-            let sample_result = match (self.sample_format, self.bits_per_sample) {
-                (hound::SampleFormat::Int, 16) => {
-                    self.reader.samples::<i16>().next().map(|r| r.map(|s| s))
+        // Read all samples based on format and bit depth
+        match spec.sample_format {
+            hound::SampleFormat::Int => match spec.bits_per_sample {
+                16 => {
+                    for sample in wav_reader.samples::<i16>() {
+                        all_samples.push(sample.unwrap_or(0));
+                    }
                 }
-                (hound::SampleFormat::Int, 8) => self
-                    .reader
-                    .samples::<i8>()
-                    .next()
-                    .map(|r| r.map(|s| s as i16)),
-                (hound::SampleFormat::Int, 24) | (hound::SampleFormat::Int, 32) => self
-                    .reader
-                    .samples::<i32>()
-                    .next()
-                    .map(|r| r.map(|s| (s >> 16) as i16)),
-                (hound::SampleFormat::Float, _) => self
-                    .reader
-                    .samples::<f32>()
-                    .next()
-                    .map(|r| r.map(|s| (s * 32767.0) as i16)),
+                8 => {
+                    for sample in wav_reader.samples::<i8>() {
+                        all_samples.push(sample.unwrap_or(0) as i16);
+                    }
+                }
+                24 | 32 => {
+                    for sample in wav_reader.samples::<i32>() {
+                        all_samples.push((sample.unwrap_or(0) >> 16) as i16);
+                    }
+                }
                 _ => {
                     return Err(anyhow!(
                         "Unsupported bits per sample: {}",
-                        self.bits_per_sample
-                    ))
+                        spec.bits_per_sample
+                    ));
                 }
-            };
-
-            match sample_result {
-                Some(Ok(sample)) => {
-                    temp_buffer.push(sample);
-                    samples_read += 1;
-                }
-                Some(Err(e)) => {
-                    if samples_read == 0 {
-                        return Err(anyhow!("Error reading WAV sample: {}", e));
-                    }
-                    break;
-                }
-                None => {
-                    break;
+            },
+            hound::SampleFormat::Float => {
+                for sample in wav_reader.samples::<f32>() {
+                    all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
                 }
             }
         }
 
         // Convert stereo to mono if needed
-        if self.is_stereo {
-            let mono_samples = temp_buffer
+        if is_stereo {
+            let mono_samples = all_samples
                 .chunks(2)
                 .map(|chunk| {
                     if chunk.len() == 2 {
@@ -182,16 +147,29 @@ impl WavAudioReader {
                     }
                 })
                 .collect();
-            temp_buffer = mono_samples;
-            samples_read /= 2;
+            all_samples = mono_samples;
         }
 
-        // Move samples to the main buffer
-        self.buffer = temp_buffer;
-        self.buffer_size = self.buffer.len();
+        info!("Decoded {} samples from WAV file", all_samples.len());
 
-        info!("Read {} samples from WAV file", samples_read);
-        Ok(samples_read)
+        Ok(Self {
+            buffer: all_samples,
+            sample_rate,
+            position: 0,
+            target_sample_rate,
+            resampler: None,
+        })
+    }
+
+    fn fill_buffer(&mut self) -> Result<usize> {
+        // All data is already decoded and stored in buffer
+        // Return the remaining samples from current position
+        if self.position >= self.buffer.len() {
+            return Ok(0); // End of file
+        }
+
+        let remaining = self.buffer.len() - self.position;
+        Ok(remaining)
     }
 }
 
@@ -203,7 +181,7 @@ impl AudioReader for WavAudioReader {
     }
 
     fn buffer_size(&self) -> usize {
-        self.buffer_size
+        self.buffer.len()
     }
 
     fn position(&self) -> usize {
@@ -249,193 +227,55 @@ impl AudioReader for WavAudioReader {
 
 struct Mp3AudioReader {
     buffer: Vec<i16>,
-    decode_buffer: Vec<i16>, // Additional buffer for decoded samples
     sample_rate: u32,
     position: usize,
     target_sample_rate: u32,
-    reached_eof: bool,
-    file_reader: BufReader<File>,
-    input_buffer: Vec<u8>,
-    decoder: rmp3::RawDecoder,
     resampler: Option<LinearResampler>,
-    bitrate: u32,            // Used for dynamic buffer size adjustment
-    min_decode_ahead: usize, // Minimum number of samples to decode ahead
 }
 
 impl Mp3AudioReader {
     fn from_file(file: File, target_sample_rate: u32) -> Result<Self> {
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
+        let mut file_data = Vec::new();
+        reader.read_to_end(&mut file_data)?;
+
+        let mut decoder = rmp3::Decoder::new(&file_data);
+        let mut all_samples = Vec::new();
+        let mut sample_rate = 0;
+
+        while let Some(frame) = decoder.next() {
+            match frame {
+                rmp3::Frame::Audio(audio) => {
+                    if sample_rate == 0 {
+                        sample_rate = audio.sample_rate();
+                        info!("MP3 file detected with sample rate: {} Hz", sample_rate);
+                    }
+                    all_samples.extend_from_slice(audio.samples());
+                }
+                rmp3::Frame::Other(_) => {}
+            }
+        }
+
+        info!("Decoded {} samples from MP3 file", all_samples.len());
 
         Ok(Self {
-            buffer: Vec::with_capacity(BUFFER_SIZE),
-            decode_buffer: Vec::with_capacity(BUFFER_SIZE), // Smaller initial decode buffer
-            sample_rate: 0, // Will be set when first frame is decoded
+            buffer: all_samples,
+            sample_rate,
             position: 0,
             target_sample_rate,
-            reached_eof: false,
-            file_reader: reader,
-            input_buffer: Vec::with_capacity(BUFFER_SIZE / 2), // Smaller input buffer for faster processing
-            decoder: rmp3::RawDecoder::new(),
             resampler: None,
-            bitrate: 0, // Initial bitrate, will be set when first frame is decoded
-            min_decode_ahead: BUFFER_SIZE / 2, // Smaller pre-decode buffer for low latency
         })
     }
 
     fn fill_buffer(&mut self) -> Result<usize> {
-        self.buffer.clear();
-        self.position = 0;
-
-        // If there's enough data in decode buffer, use it directly
-        if !self.decode_buffer.is_empty() {
-            let chunk_size = std::cmp::min(self.decode_buffer.len(), BUFFER_SIZE);
-            self.buffer
-                .extend_from_slice(&self.decode_buffer[..chunk_size]);
-            self.decode_buffer.drain(..chunk_size);
-            return Ok(chunk_size);
+        // All data is already decoded and stored in buffer
+        // Return the remaining samples from current position
+        if self.position >= self.buffer.len() {
+            return Ok(0); // End of file
         }
 
-        if self.reached_eof && self.input_buffer.is_empty() {
-            return Ok(0);
-        }
-
-        let mut samples_read = 0;
-        // For lower bitrates, we need smaller read sizes to avoid buffering too much
-        let read_size = if self.bitrate > 0 {
-            let base_size = if self.bitrate <= 64000 {
-                // For low bitrate files, use smaller chunks
-                BUFFER_SIZE / 4
-            } else {
-                BUFFER_SIZE
-            };
-            std::cmp::max(base_size, self.bitrate as usize / 8)
-        } else {
-            BUFFER_SIZE
-        };
-        let mut read_chunk = vec![0u8; read_size];
-        let mut read_error = false;
-
-        // Continue decoding until we have enough samples or reach EOF
-        while self.decode_buffer.len() < self.min_decode_ahead {
-            // Refill input buffer when it's running low
-            if self.input_buffer.len() < read_size && !read_error && !self.reached_eof {
-                match self.file_reader.read(&mut read_chunk) {
-                    Ok(0) => {
-                        self.reached_eof = true;
-                    }
-                    Ok(bytes_read) => {
-                        self.input_buffer
-                            .extend_from_slice(&read_chunk[..bytes_read]);
-                        info!(
-                            "Read {} bytes into input buffer, size now {}",
-                            bytes_read,
-                            self.input_buffer.len()
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Error reading MP3 file: {}", e);
-                        read_error = true;
-                    }
-                }
-            }
-
-            // Try to decode more frames
-            if !self.input_buffer.is_empty() {
-                let mut pcm = [0i16; rmp3::MAX_SAMPLES_PER_FRAME];
-                let input_buffer_clone = self.input_buffer.clone();
-
-                match self.decoder.next(&input_buffer_clone, &mut pcm) {
-                    Some((frame, consumed)) => {
-                        // Successfully decoded one frame
-                        if consumed > 0 {
-                            if consumed <= self.input_buffer.len() {
-                                self.input_buffer.drain(0..consumed);
-                            } else {
-                                self.input_buffer.clear();
-                            }
-                        }
-
-                        match frame {
-                            rmp3::Frame::Audio(audio) => {
-                                let samples = audio.samples();
-                                let sample_count = samples.len();
-
-                                if self.sample_rate == 0 {
-                                    self.sample_rate = audio.sample_rate();
-                                    // Set bitrate for buffer size optimization
-                                    self.bitrate = audio.bitrate();
-                                    info!(
-                                        "MP3 file detected with sample rate: {} Hz, bitrate: {} bps, frame size: {} samples",
-                                        self.sample_rate, self.bitrate, sample_count
-                                    );
-                                }
-
-                                // For low bitrate files, we need to process frames faster
-                                if self.bitrate <= 64000 {
-                                    // Directly move samples to main buffer if it's empty
-                                    if self.buffer.is_empty() {
-                                        self.buffer.extend_from_slice(samples);
-                                    } else {
-                                        self.decode_buffer.extend_from_slice(samples);
-                                    }
-                                } else {
-                                    self.decode_buffer.extend_from_slice(samples);
-                                }
-                                samples_read += sample_count;
-
-                                // Log decoding performance
-                                if sample_count > 0 {
-                                    info!(
-                                        "Decoded frame: {} samples, buffer: {} samples",
-                                        sample_count,
-                                        self.decode_buffer.len()
-                                    );
-                                }
-                            }
-                            rmp3::Frame::Other(_) => {}
-                        }
-                    }
-                    None => {
-                        // Failed to decode frame
-                        if self.input_buffer.len() >= 4 {
-                            // Skip a small amount of data to try to find next valid frame
-                            self.input_buffer.drain(0..4);
-                        } else if self.reached_eof || read_error {
-                            // At EOF with not enough data to decode
-                            break;
-                        }
-                        // else continue to read more data
-                    }
-                }
-            } else if self.reached_eof || read_error {
-                // No more data to process
-                break;
-            }
-
-            // Break if we've collected enough samples, unless we're at EOF
-            if self.decode_buffer.len() >= BUFFER_SIZE && !self.reached_eof {
-                break;
-            }
-        }
-
-        // Move enough samples to the main buffer
-        if !self.decode_buffer.is_empty() {
-            let available = self.decode_buffer.len();
-            let transfer_size = std::cmp::min(available, BUFFER_SIZE);
-            self.buffer.clear(); // Ensure buffer is empty before adding new samples
-            self.buffer
-                .extend_from_slice(&self.decode_buffer[..transfer_size]);
-            self.decode_buffer.drain(..transfer_size);
-            samples_read = transfer_size; // Update samples_read to reflect what we actually moved
-        }
-
-        if samples_read > 0 {
-            info!("Filled buffer with {} samples", samples_read);
-        } else if self.reached_eof {
-            info!("Reached end of file with empty buffer");
-        }
-
-        Ok(samples_read)
+        let remaining = self.buffer.len() - self.position;
+        Ok(remaining)
     }
 }
 
@@ -447,7 +287,6 @@ impl AudioReader for Mp3AudioReader {
     }
 
     fn buffer_size(&self) -> usize {
-        // Only return the size of the main buffer to avoid confusion
         self.buffer.len()
     }
 
@@ -794,18 +633,32 @@ async fn stream_audio_file(
     token: CancellationToken,
     packet_sender: TrackPacketSender,
 ) -> Result<()> {
+    let start_time = Instant::now();
     let audio_reader = match extension {
         "wav" => {
-            let reader = WavAudioReader::from_file(file, target_sample_rate)?;
+            // Use spawn_blocking for CPU-intensive WAV decoding
+            let reader = tokio::task::spawn_blocking(move || {
+                WavAudioReader::from_file(file, target_sample_rate)
+            })
+            .await??;
             Box::new(reader) as Box<dyn AudioReader>
         }
         "mp3" => {
-            let reader = Mp3AudioReader::from_file(file, target_sample_rate)?;
+            // Use spawn_blocking for CPU-intensive MP3 decoding
+            let reader = tokio::task::spawn_blocking(move || {
+                Mp3AudioReader::from_file(file, target_sample_rate)
+            })
+            .await??;
             Box::new(reader) as Box<dyn AudioReader>
         }
         _ => return Err(anyhow!("Unsupported audio format: {}", extension)),
     };
-
+    info!(
+        "filetrack: Load file duration: {:.2} seconds, sample rate: {} Hz, extension: {}",
+        start_time.elapsed().as_secs_f64(),
+        audio_reader.sample_rate(),
+        extension
+    );
     process_audio_reader(
         processor_chain,
         audio_reader,
@@ -1066,28 +919,13 @@ mod tests {
         println!("Total samples: {}", total_samples);
         println!("Duration: {:.2} seconds", duration_seconds);
 
-        // Allow for 2% tolerance in duration and sample count due to MP3 decoding variations
-        const EXPECTED_DURATION: f64 = 14.22;
-        const TOLERANCE: f64 = 0.02; // 2% tolerance
-
+        const EXPECTED_SAMPLES: usize = 228096;
         assert!(
-            (duration_seconds - EXPECTED_DURATION).abs() < EXPECTED_DURATION * TOLERANCE,
-            "Duration {:.2} differs from expected {:.2} by more than {}%",
-            duration_seconds,
-            EXPECTED_DURATION,
-            TOLERANCE * 100.0
-        );
-
-        const EXPECTED_SAMPLES: usize = 226310;
-        assert!(
-            (total_samples as f64 - EXPECTED_SAMPLES as f64).abs()
-                < EXPECTED_SAMPLES as f64 * TOLERANCE,
-            "Sample count {} differs from expected {} by more than {}%",
+            total_samples == EXPECTED_SAMPLES,
+            "Sample count {} does not match expected {}",
             total_samples,
-            EXPECTED_SAMPLES,
-            TOLERANCE * 100.0
+            EXPECTED_SAMPLES
         );
-
         Ok(())
     }
 }
