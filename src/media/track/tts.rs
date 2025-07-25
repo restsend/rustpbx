@@ -174,9 +174,12 @@ impl Track for TtsTrack {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
                 let text = command.text;
-                let speaker = command.speaker;
                 let play_id = command.play_id;
-                let option = command.option;
+                let mut option = command.option;
+                if option.speaker.is_none() {
+                    option.speaker = command.speaker;
+                }
+                let speaker = option.speaker.clone();
 
                 if play_id != last_play_id || play_id.is_none() {
                     last_play_id = play_id.clone();
@@ -185,7 +188,7 @@ impl Track for TtsTrack {
                 let cache_key = cache::generate_cache_key(
                     &format!("tts:{}{}", client.provider(), text),
                     sample_rate,
-                    speaker.as_ref(),
+                    option.speaker.as_ref(),
                     option.speed.clone(),
                 );
                 synthesize_done.store(false, Ordering::Relaxed);
