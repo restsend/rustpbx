@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
@@ -46,12 +46,12 @@ webrtc = "0.13.0"
 webrtc-vad = { version = "0.4.0", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 toml = "0.9.2"
-rand = "0.9.1"
+rand = "0.9.2"
 hound = "3.5.1"
 ort = { version = "2.0.0-rc.10", features = ["ndarray"], optional = true }
 ort-sys = { version = "2.0.0-rc.10", optional = true }
 chrono = "0.4.41"
-rsipstack = "0.2.23"
+rsipstack = "0.2.25"
 #rsipstack = { path = "../rsipstack" }
 rsip = "0.4.0"
 reqwest = { version = "0.12.15", features = [
@@ -86,11 +86,11 @@ sqlx = { version = "0.8.6", features = [
     "any",
 ] }
 sha1 = "0.10.6"
-sea-orm = { version = "1.1.11", features = [
+sea-orm = { version = "1.1.14", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
 ] }
-sea-orm-migration = "1.1.11"
+sea-orm-migration = "1.1.14"
 object_store = { version = "0.12.1", features = ["aws", "azure", "gcp"] }
 humantime = "2"
 ndarray = "0.16.1"

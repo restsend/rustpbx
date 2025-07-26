@@ -44,7 +44,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{info, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
 #[derive(Deserialize)]
@@ -397,7 +397,6 @@ impl ActiveCall {
         }
         Ok(())
     }
-    #[instrument(skip(self, command), fields(session_id = self.session_id))]
     pub async fn dispatch(&self, command: Command) -> Result<()> {
         match command {
             Command::Tts {

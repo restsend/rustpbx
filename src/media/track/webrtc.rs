@@ -236,7 +236,7 @@ impl WebrtcTrack {
                     loop {
                         select! {
                             _ = cancel_token_clone.cancelled() => {
-                                info!("track cancelled");
+                                info!(track_id=track_id_clone,"track cancelled");
                                 break;
                             }
                             Ok((packet, _)) = track.read_rtp() => {
@@ -254,13 +254,13 @@ impl WebrtcTrack {
                                     ..Default::default()
                                 };
                                 if let Err(e) = processor_chain.process_frame(&frame) {
-                                    error!("Failed to process frame: {}", e);
+                                    error!(track_id=track_id_clone,"Failed to process frame: {}", e);
                                     break;
                                 }
                                 match sender.send(frame) {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        error!("Failed to send packet: {}", e);
+                                        error!(track_id=track_id_clone,"Failed to send packet: {}", e);
                                         break;
                                         }
                                     }
@@ -294,6 +294,7 @@ impl WebrtcTrack {
         self.track_config.codec = codec;
 
         info!(
+            track_id = self.track_id,
             "set remote description codec:{}\noffer:\n{}",
             codec.mime_type(),
             remote_desc.sdp,
@@ -305,10 +306,10 @@ impl WebrtcTrack {
         peer_connection.set_local_description(answer).await?;
         select! {
             _ = gather_complete.recv() => {
-                info!("ICE candidate received");
+                info!(track_id = self.track_id,"ICE candidate received");
             }
             _ = sleep(timeout.unwrap_or(HANDSHAKE_TIMEOUT)) => {
-                warn!("wait candidate timeout");
+                warn!(track_id = self.track_id,"wait candidate timeout");
             }
         }
 
@@ -317,7 +318,10 @@ impl WebrtcTrack {
             .await
             .ok_or(anyhow::anyhow!("Failed to get local description"))?;
 
-        info!("Final WebRTC answer from PeerConnection: {}", answer.sdp);
+        info!(
+            track_id = self.track_id,
+            "Final WebRTC answer from PeerConnection: {}", answer.sdp
+        );
         Ok(answer)
     }
 }

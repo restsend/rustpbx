@@ -145,16 +145,18 @@ pub async fn new_rtp_track_with_sip(
     let mut rtp_track = rtp_track.build().await?;
     let offer = rtp_track.local_description().ok();
 
-    let headers = if let Some(ref headers) = option.sip.as_ref().unwrap().headers {
-        Some(
-            headers
-                .iter()
-                .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
-                .collect(),
-        )
-    } else {
-        None
-    };
+    let headers = option
+        .sip
+        .as_ref()
+        .map(|sip_opt| {
+            sip_opt.headers.as_ref().map(|h| {
+                h.iter()
+                    .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .flatten();
+
     let invite_option = InviteOption {
         caller: caller.clone().try_into()?,
         callee: callee.try_into()?,
