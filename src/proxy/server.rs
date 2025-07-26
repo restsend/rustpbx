@@ -357,7 +357,7 @@ impl SipServer {
         let runnings_tx = Arc::new(AtomicUsize::new(0));
         while let Some(mut tx) = incoming.recv().await {
             let key = tx.key.to_string();
-            info!(key, "Received transaction");
+            debug!(key, "Received transaction");
             let modules = self.modules.clone();
 
             let token = self.inner.cancel_token.child_token();
@@ -377,8 +377,13 @@ impl SipServer {
             // Spam protection for OPTIONS requests
             // If the OPTIONS request is out-of-dialog and the tag is not present, ignore it
             if matches!(tx.original.method, rsip::Method::Options) {
-                if tx.endpoint_inner.option.ignore_out_of_dialog_option{
-                    let to_tag = tx.original.to_header().and_then(|to| to.tag()).ok().flatten();
+                if tx.endpoint_inner.option.ignore_out_of_dialog_option {
+                    let to_tag = tx
+                        .original
+                        .to_header()
+                        .and_then(|to| to.tag())
+                        .ok()
+                        .flatten();
                     if to_tag.is_none() {
                         info!(key, "Ignoring out-of-dialog OPTIONS request");
                         continue;
@@ -407,7 +412,7 @@ impl SipServer {
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
                 if !matches!(
                     tx.original.method,
-                    rsip::Method::Bye | rsip::method::Method::Cancel
+                    rsip::Method::Bye | rsip::method::Method::Cancel | rsip::Method::Ack
                 ) {
                     if tx.last_response.is_none() {
                         tx.reply(rsip::StatusCode::RequestTerminated).await.ok();

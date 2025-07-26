@@ -24,7 +24,7 @@ async fn test_proxy_full_flow() {
     // 1. Set up proxy server configuration
     let mut config = ProxyConfig::default();
     config.addr = "127.0.0.1".to_string();
-    config.udp_port = Some(5061);
+    config.udp_port = Some(6061);
 
     // Add the required modules
     config.modules = Some(vec![

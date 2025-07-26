@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use rsipstack::dialog::DialogId;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 #[derive(Clone, Debug)]
 pub struct SessionParty {
@@ -65,7 +63,6 @@ impl Default for MediaStats {
 }
 
 pub struct Session {
-    pub cancel_token: CancellationToken,
     pub dialog_id: DialogId,
     pub callee_dialog_id: DialogId,
     pub last_activity: Instant,
@@ -81,14 +78,12 @@ pub struct Session {
 
 impl Session {
     pub fn new(
-        cancel_token: CancellationToken,
         dialog_id: DialogId,
         callee_dialog_id: DialogId,
         caller: SessionParty,
         callees: Vec<SessionParty>,
     ) -> Self {
         Self {
-            cancel_token,
             dialog_id,
             callee_dialog_id,
             last_activity: Instant::now(),
@@ -141,12 +136,5 @@ impl Session {
 
     pub fn duration(&self) -> Option<std::time::Duration> {
         self.established_at.map(|established| established.elapsed())
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        debug!("Session dropped: {:?}", self.dialog_id);
-        self.cancel_token.cancel();
     }
 }
