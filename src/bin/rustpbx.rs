@@ -48,7 +48,11 @@ async fn main() -> Result<()> {
     }
 
     if let Some(ref log_file) = config.log_file {
-        let file = File::create(log_file).expect("Failed to create log file");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .expect("Failed to open log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         std::mem::forget(guard);
 
