@@ -44,7 +44,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
 #[derive(Deserialize)]
@@ -852,7 +852,7 @@ pub async fn handle_call(
                     info!(session_id, "process call completed");
                 }
                 Err(e) => {
-                    info!(session_id,"call error: {}", e);
+                    error!(session_id,"call error: {}", e);
                     let error_event = SessionEvent::Error {
                         track_id:session_id.clone(),
                         timestamp:crate::get_timestamp(),

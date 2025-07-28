@@ -58,7 +58,7 @@ pub async fn new_rtp_track_with_pending_call(
     match rtp_track.set_remote_description(&offer) {
         Ok(_) => (),
         Err(e) => {
-            error!("failed to set remote description: {}", e);
+            error!(track_id, "failed to set remote description: {}", e);
             return Err(anyhow::anyhow!("failed to set remote description"));
         }
     }
@@ -66,7 +66,7 @@ pub async fn new_rtp_track_with_pending_call(
     let answer = match rtp_track.local_description() {
         Ok(answer) => answer,
         Err(e) => {
-            error!("failed to get local description: {}", e);
+            error!(track_id, "failed to get local description: {}", e);
             return Err(anyhow::anyhow!("failed to get local description"));
         }
     };
@@ -80,7 +80,7 @@ pub async fn new_rtp_track_with_pending_call(
     {
         Ok(_) => (),
         Err(e) => {
-            error!("failed to accept call: {}", e);
+            error!(track_id, "failed to accept call: {}", e);
             return Err(anyhow::anyhow!("failed to accept call"));
         }
     }
@@ -186,7 +186,7 @@ pub async fn new_rtp_track_with_sip(
                     match rtp_track.set_remote_description(&answer) {
                         Ok(_) => (),
                         Err(e) => {
-                            error!("sip_call:failed to set remote description: {}", e);
+                            error!(track_id, "sip_call:failed to set remote description: {}", e);
                             return Err(anyhow::anyhow!("failed to set remote description"));
                         }
                     }

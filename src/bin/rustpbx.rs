@@ -5,7 +5,9 @@ use rustpbx::{app::AppStateBuilder, config::Config, version};
 use std::fs::File;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,6 +53,7 @@ async fn main() -> Result<()> {
         std::mem::forget(guard);
 
         let file_layer = tracing_subscriber::fmt::layer()
+            .with_timer(LocalTime::rfc_3339())
             .with_file(true)
             .with_line_number(true)
             .with_target(true)
@@ -63,6 +66,7 @@ async fn main() -> Result<()> {
             .init();
     } else {
         let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_timer(LocalTime::rfc_3339())
             .with_file(true)
             .with_line_number(true)
             .with_target(true);
