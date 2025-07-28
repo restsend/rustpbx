@@ -7,7 +7,10 @@ use crate::{callrecord::CallRecordSender, config::ProxyConfig, proxy::user::SipU
 use anyhow::{anyhow, Result};
 use rsip::prelude::HeadersExt;
 use rsipstack::{
-    transaction::{key::TransactionKey, transaction::Transaction, Endpoint, TransactionReceiver},
+    transaction::{
+        endpoint::EndpointOption, key::TransactionKey, transaction::Transaction, Endpoint,
+        TransactionReceiver,
+    },
     transport::{
         udp::UdpConnection, TcpListenerConnection, TransportLayer, WebSocketListenerConnection,
     },
@@ -222,8 +225,15 @@ impl SipServerBuilder {
         if let Some(ref user_agent) = config.useragent {
             endpoint_builder.with_user_agent(user_agent.as_str());
         }
+
+        let endpoint_option = EndpointOption {
+            callid_suffix: config.callid_suffix.clone(),
+            ..Default::default()
+        };
+
         let endpoint_builder = endpoint_builder
             .with_cancel_token(cancel_token.clone())
+            .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
         let endpoint = endpoint_builder.build();

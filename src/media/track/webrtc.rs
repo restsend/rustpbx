@@ -15,7 +15,7 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::time::sleep;
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::{
     api::{
@@ -185,16 +185,18 @@ impl WebrtcTrack {
         let cancel_token = self.cancel_token.clone();
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
         let peer_connection_clone = peer_connection.clone();
+        let track_id = self.track_id.clone();
         peer_connection.on_ice_candidate(Box::new(
             move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-                info!("ICE candidate received: {:?}", candidate);
+                debug!(track_id, "ICE candidate received: {:?}", candidate);
                 Box::pin(async move {})
             },
         ));
         let cancel_token_clone = cancel_token.clone();
+        let track_id = self.track_id.clone();
         peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                info!("peer connection state changed: {}", s);
+                info!(track_id, "peer connection state changed: {}", s);
                 let cancel_token = cancel_token.clone();
                 let peer_connection_clone = peer_connection_clone.clone();
                 Box::pin(async move {
@@ -227,7 +229,8 @@ impl WebrtcTrack {
                     _ => 8000,    // PCMU, PCMA, TELEPHONE_EVENT
                 };
                 info!(
-                    "on_track received: {} track_samplerate: {}",
+                    track_id=track_id_clone,
+                    "on_track received: {} samplerate: {}",
                     track.codec().capability.mime_type,
                     track_samplerate,
                 );
@@ -236,7 +239,7 @@ impl WebrtcTrack {
                     loop {
                         select! {
                             _ = cancel_token_clone.cancelled() => {
-                                info!(track_id=track_id_clone,"track cancelled");
+                                info!(track_id=track_id_clone, "track cancelled");
                                 break;
                             }
                             Ok((packet, _)) = track.read_rtp() => {
@@ -254,13 +257,13 @@ impl WebrtcTrack {
                                     ..Default::default()
                                 };
                                 if let Err(e) = processor_chain.process_frame(&frame) {
-                                    error!(track_id=track_id_clone,"Failed to process frame: {}", e);
+                                    warn!(track_id=track_id_clone,"Failed to process frame: {}", e);
                                     break;
                                 }
                                 match sender.send(frame) {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        error!(track_id=track_id_clone,"Failed to send packet: {}", e);
+                                        warn!(track_id=track_id_clone,"Failed to send packet: {}", e);
                                         break;
                                         }
                                     }

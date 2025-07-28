@@ -327,7 +327,7 @@ impl CallModule {
                         info!(id=%dlg_id,"Callee dialog confirmed");
                     }
                     DialogState::Early(dlg_id, resp) => {
-                        info!(id=%dlg_id,"Callee dialog early: {:?}",  resp);
+                        info!(id=%dlg_id,"Callee dialog early: \n{}",  resp);
                         match session_ref.lock().await.as_mut() {
                             Some(session) => {
                                 session.set_ringing();
@@ -652,7 +652,7 @@ impl ProxyModule for CallModule {
                 let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
                     Some(dialog) => dialog,
                     None => {
-                        warn!(id = %dialog_id, "Dialog not found for ACK or CANCEL: \n{}",tx.original);
+                        warn!(id = %dialog_id, "Dialog not found for ACK: \n{}",tx.original);
                         return Ok(ProxyAction::Abort);
                     }
                 };
