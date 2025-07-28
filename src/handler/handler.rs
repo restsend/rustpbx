@@ -39,13 +39,17 @@ async fn list_calls(State(state): State<AppState>) -> Response {
     let result = serde_json::json!({
         "total": active_calls.len(),
         "calls": active_calls.iter().map(|(id, call)| {
+            let call_state = match call.call_state.read() {
+                Ok(call_state) => call_state,
+                Err(_) => return serde_json::json!({"id": id, "error": "Failed to read call state"}),
+            };
             serde_json::json!({
                 "id": id,
                 "call_type": call.call_type,
-                "created_at": call.call_state.read().unwrap().created_at.to_rfc3339(),
-                "ring_time": call.call_state.read().unwrap().ring_time.map(|t| t.to_rfc3339()),
-                "answer_time": call.call_state.read().unwrap().answer_time.map(|t| t.to_rfc3339()),
-                "duration": call.call_state.read().unwrap().created_at.signed_duration_since(Utc::now()).num_seconds(),
+                "created_at": call_state.created_at.to_rfc3339(),
+                "ring_time": call_state.ring_time.map(|t| t.to_rfc3339()),
+                "answer_time": call_state.answer_time.map(|t| t.to_rfc3339()),
+                "duration": call_state.created_at.signed_duration_since(Utc::now()).num_seconds(),
             })
         }).collect::<Vec<_>>(),
     });
@@ -55,7 +59,7 @@ async fn list_calls(State(state): State<AppState>) -> Response {
 async fn kill_call(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if let Some(call) = state.active_calls.lock().await.remove(&id) {
         call.cancel_token.cancel();
-        info!("Call {} killed", id);
+        info!(id, "Call killed");
     }
     Json(true).into_response()
 }

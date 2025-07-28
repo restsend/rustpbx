@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use humantime::parse_duration;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::dialog_layer::DialogLayer;
+use rsipstack::transaction::endpoint::EndpointOption;
 use rsipstack::transaction::{Endpoint, TransactionReceiver};
 use rsipstack::transport::{udp::UdpConnection, TransportLayer};
 use rsipstack::EndpointBuilder;
@@ -82,9 +83,15 @@ impl UserAgentBuilder {
         transport_layer.add_transport(udp_conn.into());
         info!("start useragent, addr: {}", local_addr);
 
+        let endpoint_option = EndpointOption {
+            callid_suffix: config.callid_suffix.clone(),
+            ..Default::default()
+        };
+
         let endpoint = EndpointBuilder::new()
             .with_cancel_token(token.child_token())
             .with_transport_layer(transport_layer)
+            .with_option(endpoint_option)
             .build();
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
@@ -240,8 +247,13 @@ impl UserAgent {
                     }
                 }
                 rsip::Method::Options => {
-                    if tx.endpoint_inner.option.ignore_out_of_dialog_option{
-                        let to_tag = tx.original.to_header().and_then(|to| to.tag()).ok().flatten();
+                    if tx.endpoint_inner.option.ignore_out_of_dialog_option {
+                        let to_tag = tx
+                            .original
+                            .to_header()
+                            .and_then(|to| to.tag())
+                            .ok()
+                            .flatten();
                         if to_tag.is_none() {
                             info!(?key, "ignoring out-of-dialog OPTIONS request");
                             continue;
