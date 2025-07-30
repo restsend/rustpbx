@@ -232,14 +232,16 @@ impl StreamEngine {
         cancel_token: CancellationToken,
         session_id: String,
         track_id: TrackId,
+        ssrc: u32,
         play_id: Option<String>,
         tts_option: &SynthesisOption,
     ) -> Result<(TtsHandle, Box<dyn Track>)> {
         let (tx, rx) = mpsc::unbounded_channel();
         let new_handle = TtsHandle::new(tx, play_id);
         let tts_client = engine.create_tts_client(tts_option).await?;
-        let tts_track =
-            TtsTrack::new(track_id, session_id, rx, tts_client).with_cancel_token(cancel_token);
+        let tts_track = TtsTrack::new(track_id, session_id, rx, tts_client)
+            .with_ssrc(ssrc)
+            .with_cancel_token(cancel_token);
         Ok((new_handle, Box::new(tts_track) as Box<dyn Track>))
     }
 

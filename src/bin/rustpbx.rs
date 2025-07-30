@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
 use rustpbx::{app::AppStateBuilder, config::Config, version};
-use std::fs::File;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{

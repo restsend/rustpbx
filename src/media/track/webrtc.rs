@@ -54,6 +54,7 @@ pub struct WebrtcTrack {
     local_track: Option<Arc<TrackLocalStaticSample>>,
     encoder: TrackCodec,
     pub prefered_codec: Option<CodecType>,
+    ssrc: u32,
 }
 
 impl WebrtcTrack {
@@ -166,9 +167,17 @@ impl WebrtcTrack {
             local_track: None,
             encoder: TrackCodec::new(),
             prefered_codec: None,
+            ssrc: 0,
         }
     }
-
+    pub fn with_ssrc(mut self, ssrc: u32) -> Self {
+        self.ssrc = ssrc;
+        self
+    }
+    pub fn with_prefered_codec(mut self, codec: Option<CodecType>) -> Self {
+        self.prefered_codec = codec;
+        self
+    }
     pub async fn setup_webrtc_track(
         &mut self,
         offer: String,
@@ -245,7 +254,7 @@ impl WebrtcTrack {
                             Ok((packet, _)) = track.read_rtp() => {
                                 let packet_sender = packet_sender_clone.lock().await;
                             if let Some(sender) = packet_sender.as_ref() {
-                                let frame = AudioFrame {
+                                let mut frame = AudioFrame {
                                     track_id: track_id_clone.clone(),
                                     samples: crate::Samples::RTP {
                                         payload_type: packet.header.payload_type,
@@ -256,7 +265,7 @@ impl WebrtcTrack {
                                     sample_rate: track_samplerate,
                                     ..Default::default()
                                 };
-                                if let Err(e) = processor_chain.process_frame(&frame) {
+                                if let Err(e) = processor_chain.process_frame(&mut frame) {
                                     warn!(track_id=track_id_clone,"Failed to process frame: {}", e);
                                     break;
                                 }
@@ -331,6 +340,9 @@ impl WebrtcTrack {
 
 #[async_trait]
 impl Track for WebrtcTrack {
+    fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -363,12 +375,14 @@ impl Track for WebrtcTrack {
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
         let start_time = crate::get_timestamp();
+        let ssrc = self.ssrc;
         tokio::spawn(async move {
             token_clone.cancelled().await;
             let _ = event_sender_clone.send(SessionEvent::TrackEnd {
                 track_id,
                 timestamp: crate::get_timestamp(),
                 duration: crate::get_timestamp() - start_time,
+                ssrc,
             });
         });
 

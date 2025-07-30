@@ -33,6 +33,7 @@ pub(crate) struct ProcessorChain {
     processors: Arc<Mutex<Vec<Box<dyn Processor>>>>,
     codec: Arc<Mutex<TrackCodec>>,
     sample_rate: u32,
+    pub force_decode: bool,
 }
 
 impl ProcessorChain {
@@ -41,6 +42,7 @@ impl ProcessorChain {
             processors: Arc::new(Mutex::new(Vec::new())),
             codec: Arc::new(Mutex::new(TrackCodec::new())),
             sample_rate,
+            force_decode: true,
         }
     }
     pub fn insert_processor(&mut self, processor: Box<dyn Processor>) {
@@ -50,13 +52,12 @@ impl ProcessorChain {
         self.processors.lock().unwrap().push(processor);
     }
 
-    pub fn process_frame(&self, frame: &AudioFrame) -> Result<()> {
+    pub fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         let processors = self.processors.lock().unwrap();
-        if processors.is_empty() {
+        if !self.force_decode && processors.is_empty() {
             return Ok(());
         }
 
-        let mut frame = frame.clone();
         if let Samples::RTP {
             payload_type,
             payload,
@@ -72,7 +73,7 @@ impl ProcessorChain {
         }
         // Process the frame with all processors
         for processor in processors.iter() {
-            processor.process_frame(&mut frame)?;
+            processor.process_frame(frame)?;
         }
         Ok(())
     }

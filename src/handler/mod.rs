@@ -87,13 +87,17 @@ impl CallOption {
 #[serde(rename_all = "camelCase")]
 pub struct ReferOption {
     #[serde(skip_serializing_if = "Option::is_none")]
-    bypass: Option<bool>,
+    pub denoise: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    timeout: Option<u32>,
+    pub timeout: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    moh: Option<String>,
+    pub moh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    auto_hangup: Option<bool>,
+    pub asr: Option<TranscriptionOption>,
+    /// hangup after the call is ended
+    pub auto_hangup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip: Option<SipOption>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -171,7 +175,9 @@ pub enum Command {
         initiator: Option<String>,
     },
     Refer {
-        target: String,
+        caller: String,
+        /// aor of the calee, e.g., sip:bob@restsend.com
+        callee: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<ReferOption>,
     },

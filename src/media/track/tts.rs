@@ -52,6 +52,7 @@ pub struct TtsTrack {
     use_cache: bool,
     command_rx: Mutex<Option<TtsCommandReceiver>>,
     client: Mutex<Option<Box<dyn SynthesisClient>>>,
+    ssrc: u32,
 }
 
 impl TtsHandle {
@@ -97,9 +98,13 @@ impl TtsTrack {
             command_rx: Mutex::new(Some(command_rx)),
             use_cache: true,
             client: Mutex::new(Some(client)),
+            ssrc: 0,
         }
     }
-
+    pub fn with_ssrc(mut self, ssrc: u32) -> Self {
+        self.ssrc = ssrc;
+        self
+    }
     pub fn with_config(mut self, config: TrackConfig) -> Self {
         self.config = config;
         self
@@ -129,6 +134,9 @@ impl TtsTrack {
 
 #[async_trait]
 impl Track for TtsTrack {
+    fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -367,14 +375,14 @@ impl Track for TtsTrack {
                     }
                 };
                 if let Some(packet) = packet {
-                    let packet = AudioFrame {
+                    let mut packet = AudioFrame {
                         track_id: track_id.clone(),
                         samples: Samples::PCM { samples: packet },
                         timestamp: crate::get_timestamp(),
                         sample_rate,
                     };
                     // Process the frame with processor chain
-                    if let Err(e) = processor_chain.process_frame(&packet) {
+                    if let Err(e) = processor_chain.process_frame(&mut packet) {
                         warn!(track_id, "error processing frame: {}", e);
                     }
                     // Send the packet
@@ -392,6 +400,7 @@ impl Track for TtsTrack {
         let token = self.cancel_token.clone();
         let start_time = crate::get_timestamp();
         let session_id = self.session_id.clone();
+        let ssrc = self.ssrc;
         tokio::spawn(async move {
             select! {
                 _ = command_loop => {
@@ -408,6 +417,7 @@ impl Track for TtsTrack {
                     track_id,
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
+                    ssrc,
                 })
                 .ok();
         });

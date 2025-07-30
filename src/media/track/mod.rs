@@ -65,6 +65,7 @@ pub mod webrtc;
 pub mod websocket;
 #[async_trait]
 pub trait Track: Send + Sync {
+    fn ssrc(&self) -> u32;
     fn id(&self) -> &TrackId;
     fn config(&self) -> &TrackConfig;
     fn insert_processor(&mut self, processor: Box<dyn Processor>);

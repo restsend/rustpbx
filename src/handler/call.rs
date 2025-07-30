@@ -4,6 +4,7 @@ use crate::{
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
     get_timestamp,
+    handler::sip::{make_sip_invite_with_stream, sip_event_loop},
     media::{
         engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
@@ -28,10 +29,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use rsipstack::dialog::{
-    dialog::{DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason},
-    DialogId,
-};
+use rsipstack::dialog::{dialog::DialogStateSender, DialogId};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, RwLock},
@@ -78,10 +76,10 @@ pub struct ActiveCall {
     pub cancel_token: CancellationToken,
     pub call_type: ActiveCallType,
     pub session_id: String,
-    pub media_stream: MediaStream,
+    pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
     pub tts_handle: Mutex<Option<TtsHandle>>,
-    pub auto_hangup: Arc<Mutex<Option<bool>>>,
+    pub auto_hangup: Arc<Mutex<Option<u32>>>,
     pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
     pub event_sender: EventSender,
     pub dialog_id: Mutex<Option<DialogId>>,
@@ -103,6 +101,7 @@ impl ActiveCall {
         dialog_id: &mut Option<DialogId>,
     ) -> Result<Box<dyn Track>> {
         let answer;
+        let ssrc = rand::random::<u32>();
         let caller_track: Box<dyn Track> = match call_type {
             ActiveCallType::WebSocket => {
                 let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
@@ -114,13 +113,15 @@ impl ActiveCall {
                     event_sender,
                     rx,
                     option.codec.clone(),
+                    ssrc,
                 );
                 answer = None;
                 Box::new(ws_track)
             }
             ActiveCallType::Webrtc => {
                 let mut webrtc_track =
-                    WebrtcTrack::new(cancel_token.child_token(), session_id.clone(), track_config);
+                    WebrtcTrack::new(cancel_token.child_token(), session_id.clone(), track_config)
+                        .with_ssrc(ssrc);
 
                 let timeout = option
                     .handshake_timeout
@@ -159,6 +160,7 @@ impl ActiveCall {
                         state.clone(),
                         cancel_token.child_token(),
                         session_id.clone(),
+                        ssrc,
                         track_config,
                         &option,
                         dlg_state_sender,
@@ -170,6 +172,7 @@ impl ActiveCall {
                         state.clone(),
                         cancel_token.child_token(),
                         session_id.clone(),
+                        ssrc,
                         track_config,
                         &option,
                         dlg_state_sender,
@@ -294,16 +297,15 @@ impl ActiveCall {
         media_stream: MediaStream,
         option: CallOption,
         dialog_id: Option<DialogId>,
-        state: AppState,
+        app_state: AppState,
     ) -> Result<Self> {
         call_state.write().unwrap().option.replace(option.clone());
-
         let active_call = ActiveCall {
             cancel_token,
             call_type,
             session_id,
             call_state,
-            media_stream,
+            media_stream: Arc::new(media_stream),
             track_config: TrackConfig::default(),
             auto_hangup: Arc::new(Mutex::new(None)),
             wait_input_timeout: Arc::new(Mutex::new(None)),
@@ -311,7 +313,7 @@ impl ActiveCall {
             option,
             tts_handle: Mutex::new(None),
             dialog_id: Mutex::new(dialog_id),
-            app_state: state,
+            app_state,
         };
         Ok(active_call)
     }
@@ -354,18 +356,22 @@ impl ActiveCall {
                     | SessionEvent::TrackStart { .. } => {
                         *input_timeout_expire_ref.lock().await = (0, 0);
                     }
-                    SessionEvent::TrackEnd { track_id, .. } => {
+                    SessionEvent::TrackEnd { track_id, ssrc, .. } => {
                         if track_id != server_side_track_id {
                             continue;
                         }
-                        if let Some(true) = auto_hangup.lock().await.take() {
-                            info!(
-                                session_id = self.session_id,
-                                "auto hangup when track end track_id:{}", track_id
-                            );
-                            self.do_hangup(Some("autohangup".to_string()), Some(track_id))
-                                .await
-                                .ok();
+                        let mut auto_hangup_ref = auto_hangup.lock().await;
+                        if let Some(ref auto_hangup_ssrc) = *auto_hangup_ref {
+                            if *auto_hangup_ssrc == ssrc {
+                                auto_hangup_ref.take();
+                                info!(
+                                    session_id = self.session_id,
+                                    ssrc, "auto hangup when track end track_id:{}", track_id
+                                );
+                                self.do_hangup(Some("autohangup".to_string()), None)
+                                    .await
+                                    .ok();
+                            }
                         }
                         if let Some(timeout) = wait_input_timeout.lock().await.take() {
                             let expire = if timeout > 0 {
@@ -427,7 +433,11 @@ impl ActiveCall {
                 wait_input_timeout,
             } => self.do_play(url, auto_hangup, wait_input_timeout).await,
             Command::Hangup { reason, initiator } => self.do_hangup(reason, initiator).await,
-            Command::Refer { target, options } => self.do_refer(target, options).await,
+            Command::Refer {
+                caller,
+                callee,
+                options,
+            } => self.do_refer(caller, callee, options).await,
             Command::Mute { track_id } => self.do_mute(track_id).await,
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
             Command::Pause {} => self.do_pause().await,
@@ -477,8 +487,11 @@ impl ActiveCall {
             play_command.speaker,
             auto_hangup
         );
-
-        *self.auto_hangup.lock().await = auto_hangup;
+        let ssrc = rand::random::<u32>();
+        match auto_hangup {
+            Some(true) => *self.auto_hangup.lock().await = Some(ssrc),
+            _ => *self.auto_hangup.lock().await = None,
+        }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
 
         if let Some(tts_handle) = self.tts_handle.lock().await.as_ref() {
@@ -499,6 +512,7 @@ impl ActiveCall {
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.track_config.server_side_track_id.clone(),
+            ssrc,
             play_id,
             &tts_option,
         )
@@ -517,17 +531,20 @@ impl ActiveCall {
         wait_input_timeout: Option<u32>,
     ) -> Result<()> {
         self.tts_handle.lock().await.take();
-
+        let ssrc = rand::random::<u32>();
         info!(
             session_id = self.session_id,
-            url, auto_hangup, "play file track"
+            ssrc, url, auto_hangup, "play file track"
         );
 
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
+            .with_ssrc(ssrc)
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
-
-        *self.auto_hangup.lock().await = auto_hangup;
+        match auto_hangup {
+            Some(true) => *self.auto_hangup.lock().await = Some(ssrc),
+            _ => *self.auto_hangup.lock().await = None,
+        }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
         self.media_stream.update_track(Box::new(file_track)).await;
         Ok(())
@@ -596,7 +613,48 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn do_refer(&self, _target: String, _options: Option<ReferOption>) -> Result<()> {
+    async fn do_refer(
+        &self,
+        caller: String,
+        callee: String,
+        options: Option<ReferOption>,
+    ) -> Result<()> {
+        if let Some(moh) = options.as_ref().and_then(|o| o.moh.clone()) {
+            self.do_play(moh, None, None).await?;
+        }
+        let token = self.cancel_token.child_token();
+        let session_id = self.session_id.clone();
+        let app_state = self.app_state.clone();
+        let event_sender = self.media_stream.get_event_sender();
+        let track_id = self.track_config.server_side_track_id.clone();
+        let stream = self.media_stream.clone();
+        let track_config = self.track_config.clone();
+        let auto_hangup = self.auto_hangup.clone();
+
+        tokio::spawn(async move {
+            match make_sip_invite_with_stream(
+                token,
+                app_state,
+                session_id.clone(),
+                track_id,
+                track_config,
+                event_sender,
+                stream,
+                auto_hangup,
+                caller,
+                callee.clone(),
+                options,
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(session_id, callee, "Refer call started successfully");
+                }
+                Err(e) => {
+                    error!(session_id, callee, "Failed to start refer call: {}", e);
+                }
+            }
+        });
         Ok(())
     }
 
@@ -683,85 +741,6 @@ impl ActiveCall {
     }
 }
 
-async fn sip_event_loop(
-    track_id: TrackId,
-    event_sender: EventSender,
-    mut dlg_state_receiver: DialogStateReceiver,
-    call_state: ActiveCallStateRef,
-) -> Result<()> {
-    while let Some(event) = dlg_state_receiver.recv().await {
-        let mut call_state_ref = call_state.write().unwrap();
-
-        match event {
-            DialogState::Trying(dialog_id) => {
-                info!(session_id = track_id, "dialog trying: {}", dialog_id);
-            }
-            DialogState::Early(dialog_id, _) => {
-                info!(session_id = track_id, "dialog early: {}", dialog_id);
-                call_state_ref.ring_time.replace(Utc::now());
-                event_sender.send(crate::event::SessionEvent::Ringing {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                    early_media: true,
-                })?;
-            }
-            DialogState::Calling(dialog_id) => {
-                info!(session_id = track_id, "dialog calling: {}", dialog_id);
-                call_state_ref.ring_time.replace(Utc::now());
-                event_sender.send(crate::event::SessionEvent::Ringing {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                    early_media: false,
-                })?;
-            }
-            DialogState::Confirmed(dialog_id) => {
-                call_state_ref.answer_time.replace(Utc::now());
-                call_state_ref.last_status_code = 200;
-                info!(session_id = track_id, "dialog confirmed: {}", dialog_id);
-            }
-            DialogState::Terminated(dialog_id, reason) => {
-                info!(
-                    session_id = track_id,
-                    "dialog terminated: {} {:?}", dialog_id, reason
-                );
-                if call_state_ref.hangup_reason.is_none() {
-                    call_state_ref.hangup_reason.replace(match reason {
-                        TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
-                        TerminatedReason::UacBye | TerminatedReason::UacBusy => {
-                            CallRecordHangupReason::ByCaller
-                        }
-                        TerminatedReason::UasBye | TerminatedReason::UasBusy => {
-                            CallRecordHangupReason::ByCallee
-                        }
-                        TerminatedReason::UasDecline => CallRecordHangupReason::ByCallee,
-                        TerminatedReason::UacOther(_) => CallRecordHangupReason::ByCaller,
-                        TerminatedReason::UasOther(_) => CallRecordHangupReason::ByCallee,
-                        _ => CallRecordHangupReason::BySystem,
-                    });
-                };
-                let initiator = match reason {
-                    TerminatedReason::UacCancel => "caller".to_string(),
-                    TerminatedReason::UacBye | TerminatedReason::UacBusy => "caller".to_string(),
-                    TerminatedReason::UasBye
-                    | TerminatedReason::UasBusy
-                    | TerminatedReason::UasDecline => "callee".to_string(),
-                    _ => "system".to_string(),
-                };
-                event_sender
-                    .send(crate::event::SessionEvent::Hangup {
-                        timestamp: crate::get_timestamp(),
-                        reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
-                        initiator: Some(initiator),
-                    })
-                    .ok();
-                break;
-            }
-            _ => (),
-        }
-    }
-    Ok(())
-}
-
 async fn send_to_ws_loop(
     ws_sender: &mut SplitSink<WebSocket, Message>,
     event_receiver: &mut EventReceiver,
@@ -836,7 +815,7 @@ pub async fn handle_call(
             info!(session_id, "prepare call send to ws");
             return Err(anyhow::anyhow!("WebSocket closed"));
         }
-        r = sip_event_loop(session_id.clone(),  event_sender.clone(), dlg_state_receiver, call_state.clone()) => {
+        r = sip_event_loop(session_id.clone(), session_id.clone(), event_sender.clone(), dlg_state_receiver, call_state.clone()) => {
             match r {
                 Ok(_) => {
                     info!(session_id, "sip event loop completed");
@@ -1024,7 +1003,7 @@ async fn process_call(
         call_type = ?active_call.call_type,
         "new call: {} active calls", active_calls_len
     );
-    //SessionEvent::Answer
+
     let audio_from_ws = audio_from_ws.lock().await.take();
     let active_call_clone = active_call.clone();
     let recv_from_ws = async move {
