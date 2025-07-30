@@ -350,14 +350,14 @@ async fn process_audio_reader(
         let start_time = Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         while let Some((chunk, chunk_sample_rate)) = audio_reader.read_chunk(packet_duration_ms)? {
-            let packet = AudioFrame {
+            let mut packet = AudioFrame {
                 track_id: track_id.to_string(),
                 timestamp: crate::get_timestamp(),
                 samples: Samples::PCM { samples: chunk },
                 sample_rate: chunk_sample_rate,
             };
 
-            match processor_chain.process_frame(&packet) {
+            match processor_chain.process_frame(&mut packet) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!("failed to process audio packet: {}", e);
@@ -395,6 +395,7 @@ pub struct FileTrack {
     processor_chain: ProcessorChain,
     path: Option<String>,
     use_cache: bool,
+    ssrc: u32,
 }
 
 impl FileTrack {
@@ -407,9 +408,13 @@ impl FileTrack {
             cancel_token: CancellationToken::new(),
             path: None,
             use_cache: true,
+            ssrc: 0,
         }
     }
-
+    pub fn with_ssrc(mut self, ssrc: u32) -> Self {
+        self.ssrc = ssrc;
+        self
+    }
     pub fn with_config(mut self, config: TrackConfig) -> Self {
         self.config = config;
         self
@@ -443,6 +448,9 @@ impl FileTrack {
 
 #[async_trait]
 impl Track for FileTrack {
+    fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -477,6 +485,7 @@ impl Track for FileTrack {
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
         let start_time = crate::get_timestamp();
+        let ssrc = self.ssrc;
         // Spawn async task to handle file streaming
         tokio::spawn(async move {
             // Determine file extension
@@ -516,6 +525,7 @@ impl Track for FileTrack {
                             track_id: id,
                             timestamp: crate::get_timestamp(),
                             duration: crate::get_timestamp() - start_time,
+                            ssrc,
                         })
                         .ok();
                     return Err(e);
@@ -555,6 +565,7 @@ impl Track for FileTrack {
                     track_id: id,
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
+                    ssrc,
                 })
                 .ok();
             Ok::<(), anyhow::Error>(())

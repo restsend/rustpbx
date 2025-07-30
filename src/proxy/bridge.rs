@@ -138,6 +138,7 @@ impl MediaBridgeBuilder {
                         return Err(e);
                     }
                 };
+                let ssrc = rand::random::<u32>();
                 match self.bridge_type {
                     MediaBridgeType::WebRtcToRtp | MediaBridgeType::Webrtc2Webrtc => {
                         let track_config = track.config().clone();
@@ -145,8 +146,9 @@ impl MediaBridgeBuilder {
                             self.cancel_token.clone(),
                             format!("webrtc-{}", track.id().to_string()),
                             track_config,
-                        );
-                        caller_track.prefered_codec = prefered_codec;
+                        )
+                        .with_ssrc(ssrc)
+                        .with_prefered_codec(prefered_codec);
                         let answer = caller_track.handshake(caller_offer, timeout).await?;
                         self.caller_track = Some(Box::new(caller_track));
                         Ok(answer)

@@ -92,6 +92,7 @@ pub struct RtpTrackBuilder {
     rtp_alloc_count: u32,
     enabled_codecs: Vec<CodecType>,
     ssrc_cname: String,
+    ssrc: u32,
 }
 
 pub struct RtpTrack {
@@ -118,6 +119,7 @@ pub struct RtpTrack {
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
+        let ssrc = rand::random::<u32>();
         Self {
             track_id,
             config,
@@ -139,8 +141,15 @@ impl RtpTrackBuilder {
                 CodecType::Opus,
                 CodecType::TelephoneEvent,
             ],
-            ssrc_cname: format!("rustpbx-{}", rand::random::<u32>()),
+            ssrc_cname: format!("rustpbx-{}", ssrc),
+            ssrc,
         }
+    }
+
+    pub fn with_ssrc(mut self, ssrc: u32) -> Self {
+        self.ssrc = ssrc;
+        self.ssrc_cname = format!("rustpbx-{}", ssrc);
+        self
     }
 
     pub fn with_rtp_start_port(mut self, rtp_start_port: u16) -> Self {
@@ -711,7 +720,7 @@ impl RtpTrack {
                 _ => 8000,
             };
 
-            let frame = AudioFrame {
+            let mut frame = AudioFrame {
                 track_id: track_id.clone(),
                 samples: Samples::RTP {
                     payload_type,
@@ -722,7 +731,7 @@ impl RtpTrack {
                 sample_rate,
             };
 
-            if let Err(e) = processor_chain.process_frame(&frame) {
+            if let Err(e) = processor_chain.process_frame(&mut frame) {
                 error!(track_id, "Failed to process frame: {}", e);
                 break;
             }
@@ -801,6 +810,9 @@ impl RtpTrack {
 
 #[async_trait]
 impl Track for RtpTrack {
+    fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -836,6 +848,7 @@ impl Track for RtpTrack {
         let token = self.cancel_token.clone();
         let ssrc_cname = self.ssrc_cname.clone();
         let start_time = crate::get_timestamp();
+
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
@@ -871,6 +884,7 @@ impl Track for RtpTrack {
                     track_id,
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
+                    ssrc,
                 })
                 .ok();
         });

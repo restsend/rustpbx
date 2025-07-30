@@ -91,6 +91,7 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
         duration: u64,
+        ssrc: u32,
     },
     Interruption {
         #[serde(rename = "trackId")]

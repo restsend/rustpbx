@@ -127,6 +127,7 @@ mod wait_input_timeout_tests {
                 track_id: active_call.track_config.server_side_track_id.clone(),
                 timestamp: crate::get_timestamp(),
                 duration: 1000,
+                ssrc: 0,
             })?;
 
         // Wait for the Silence event with more generous timeout
@@ -179,6 +180,7 @@ mod wait_input_timeout_tests {
             track_id: active_call.track_config.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
+            ssrc: 0,
         })?;
 
         let serve_handle = {
@@ -237,6 +239,7 @@ mod wait_input_timeout_tests {
             track_id: active_call.track_config.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
+            ssrc: 0,
         })?;
 
         let serve_handle = {
@@ -296,6 +299,7 @@ mod wait_input_timeout_tests {
             track_id: active_call.track_config.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
+            ssrc: 0,
         })?;
 
         let serve_handle = {

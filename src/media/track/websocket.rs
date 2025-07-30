@@ -24,6 +24,7 @@ pub struct WebsocketTrack {
     encoder: TrackCodec,
     payload_type: u8,
     event_sender: EventSender,
+    ssrc: u32,
 }
 
 impl WebsocketTrack {
@@ -34,6 +35,7 @@ impl WebsocketTrack {
         event_sender: EventSender,
         rx: UnboundedReceiver<Bytes>,
         codec: Option<String>,
+        ssrc: u32,
     ) -> Self {
         let processor_chain = ProcessorChain::new(config.samplerate);
         let payload_type = match codec.unwrap_or("pcm".to_string()).to_lowercase().as_str() {
@@ -51,12 +53,16 @@ impl WebsocketTrack {
             encoder: TrackCodec::new(),
             payload_type,
             event_sender,
+            ssrc,
         }
     }
 }
 
 #[async_trait]
 impl Track for WebsocketTrack {
+    fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
     fn id(&self) -> &TrackId {
         &self.track_id
     }
@@ -93,6 +99,7 @@ impl Track for WebsocketTrack {
         let sample_rate = self.config.samplerate;
         let payload_type = self.payload_type;
         let start_time = crate::get_timestamp();
+        let ssrc = self.ssrc;
         tokio::spawn(async move {
             let track_id_clone = track_id.clone();
             let audio_from_ws_loop = async move {
@@ -141,6 +148,7 @@ impl Track for WebsocketTrack {
                     track_id,
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
+                    ssrc,
                 })
                 .ok();
         });

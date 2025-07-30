@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+use tracing::warn;
 
 pub struct TestTrack {
     id: TrackId,
@@ -39,6 +40,9 @@ impl TestTrack {
 
 #[async_trait]
 impl Track for TestTrack {
+    fn ssrc(&self) -> u32 {
+        0 // Placeholder, as TestTrack does not use SSRC
+    }
     fn id(&self) -> &TrackId {
         &self.id
     }
@@ -79,11 +83,11 @@ impl Track for TestTrack {
         }
 
         // Clone and process the packet
-        let packet_clone = packet.clone();
+        let mut packet_clone = packet.clone();
 
         // Apply processors to the packet
-        if let Err(e) = self.processor_chain.process_frame(&packet_clone) {
-            tracing::error!("Error processing packet: {}", e);
+        if let Err(e) = self.processor_chain.process_frame(&mut packet_clone) {
+            warn!("Error processing packet: {}", e);
         }
 
         if let Some(sender) = &self.sender {

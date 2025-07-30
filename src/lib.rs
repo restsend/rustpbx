@@ -40,6 +40,14 @@ pub struct AudioFrame {
     pub sample_rate: u32,
 }
 
+impl Samples {
+    pub fn payload_type(&self) -> Option<u8> {
+        match self {
+            Samples::RTP { payload_type, .. } => Some(*payload_type),
+            _ => None,
+        }
+    }
+}
 // get timestamp in milliseconds
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();

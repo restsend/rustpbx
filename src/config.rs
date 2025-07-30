@@ -286,7 +286,7 @@ impl Default for ProxyConfig {
             ]),
             external_ip: None,
             useragent: None,
-            callid_suffix: Some("rustpbx.com".to_string()),
+            callid_suffix: Some("restsend.com".to_string()),
             ssl_private_key: None,
             ssl_certificate: None,
             udp_port: Some(5060),
@@ -329,7 +329,7 @@ impl Default for UseragentConfig {
             rtp_end_port: Some(42000),
             stun_server: None,
             useragent: Some(USER_AGENT.to_string()),
-            callid_suffix: Some("rustpbx.com".to_string()),
+            callid_suffix: Some("restsend.com".to_string()),
             register_users: None,
             graceful_shutdown: Some(true),
             handler: None,
@@ -353,7 +353,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             http_addr: "0.0.0.0:8080".to_string(),
-            log_level: Some("info".to_string()),
+            log_level: None,
             log_file: None,
             console: Some(ConsoleConfig::default()),
             ua: Some(UseragentConfig::default()),

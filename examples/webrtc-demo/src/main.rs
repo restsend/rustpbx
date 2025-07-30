@@ -28,8 +28,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use clap::Parser;
 
 #[derive(Parser)]
-struct Args {
-}
+struct Args {}
 // Application state
 struct AppState {
     connections: Mutex<HashMap<String, ConnectionState>>,
@@ -125,7 +124,10 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
         info!("Using media file at path: {}", sample_path_str);
     } else {
         warn!("Media file does not exist at path: {}", sample_path_str);
-        return Err(anyhow::anyhow!("Media file does not exist at path: {}", sample_path_str));
+        return Err(anyhow::anyhow!(
+            "Media file does not exist at path: {}",
+            sample_path_str
+        ));
     }
     // Create connection state
     let connection_state = ConnectionState {
@@ -203,7 +205,6 @@ async fn main() -> Result<()> {
     .find(|p| p.join("assets").exists())
     .unwrap()
     .to_path_buf();
-
 
     // Create app state
     let state = Arc::new(AppState {
