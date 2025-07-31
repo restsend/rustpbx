@@ -25,11 +25,12 @@ pub async fn sip_ws_handler(
         r#type: Some(transport_type),
         addr: client_addr.addr.clone().into(),
     };
-
+    let ws_token = token.child_token();
     let connection = match ChannelConnection::create_connection(
         from_ws_rx,
         to_ws_tx,
         local_addr.clone(),
+        Some(ws_token.clone()),
     )
     .await
     {
@@ -53,7 +54,7 @@ pub async fn sip_ws_handler(
     // Use select! instead of spawning multiple tasks
     let local_addr_clone = local_addr.clone();
     let sip_connection_clone = sip_connection.clone();
-    let read_from_websocket_look = async move {
+    let read_from_websocket_loop = async move {
         while let Some(Ok(message)) = ws_read.next().await {
             match message {
                 Message::Text(text) => match SipMessage::try_from(text.as_str()) {
@@ -116,7 +117,7 @@ pub async fn sip_ws_handler(
         }
     };
     let local_addr_clone = local_addr.clone();
-    let write_to_websocket_look = async move {
+    let write_to_websocket_loop = async move {
         while let Some(event) = to_ws_rx.recv().await {
             match event {
                 TransportEvent::Incoming(sip_msg, _, _) => {
@@ -144,17 +145,18 @@ pub async fn sip_ws_handler(
         _ = token.cancelled() => {
             info!("WebSocket connection cancelled");
         }
-        _ = read_from_websocket_look => {
+        _ = read_from_websocket_loop => {
             info!(
                 addr = ?local_addr,
                 "WebSocket connection read task finished");
         }
-        _ = write_to_websocket_look => {
+        _ = write_to_websocket_loop => {
             info!(
                 addr = ?local_addr,
                 "WebSocket connection write task finished");
         }
     }
+    ws_token.cancel();
     endpoint_ref.transport_layer.del_connection(&local_addr);
     info!("WebSocket connection handler exiting");
 }

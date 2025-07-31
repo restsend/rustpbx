@@ -75,7 +75,7 @@ impl TestUa {
         // Bind to local port
         let local_addr = format!("127.0.0.1:{}", self.config.local_port).parse::<SocketAddr>()?;
 
-        let connection = UdpConnection::create_connection(local_addr, None)
+        let connection = UdpConnection::create_connection(local_addr, None, None)
             .await
             .map_err(|e| e.into_anyhow())?;
         transport_layer.add_transport(connection.into());

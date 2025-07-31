@@ -66,9 +66,7 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
                         peer_media.rtcp_addr = address.address.clone();
                     });
                 }
-                None => {
-                    continue;
-                }
+                None => {}
             }
             for attribute in media.attributes.iter() {
                 if attribute.key == "rtcp" {

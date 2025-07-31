@@ -159,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn test_external_by_stun() -> Result<()> {
         tracing_subscriber::fmt::try_init().ok();
-        let mut conn = UdpConnection::create_connection("0.0.0.0:0".parse()?, None)
+        let mut conn = UdpConnection::create_connection("0.0.0.0:0".parse()?, None, None)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 

@@ -218,15 +218,19 @@ impl RtpTrackBuilder {
             if port % 2 != 0 {
                 continue;
             }
-            if let Ok(c) =
-                UdpConnection::create_connection(format!("{:?}:{}", addr, port).parse()?, None)
-                    .await
+            if let Ok(c) = UdpConnection::create_connection(
+                format!("{:?}:{}", addr, port).parse()?,
+                None,
+                self.cancel_token.clone(),
+            )
+            .await
             {
                 if !self.rtcp_mux {
                     // if rtcp mux is not enabled, we need to create a separate RTCP socket
                     rtcp_conn = match UdpConnection::create_connection(
                         format!("{:?}:{}", addr, port + 1).parse()?,
                         None,
+                        self.cancel_token.clone(),
                     )
                     .await
                     {
@@ -401,10 +405,11 @@ impl RtpTrack {
 
         info!(
             track_id = self.track_id,
-            "set remote description peer_addr: {} rtcp_addr: {} payload_type: {}",
-            remote_addr,
-            remote_rtcp_addr,
-            peer_media.codecs[0].payload_type()
+            rtcp_mux = peer_media.rtcp_mux,
+            %remote_addr,
+            %remote_rtcp_addr,
+            payload_type = peer_media.codecs[0].payload_type(),
+            "set remote description"
         );
 
         self.payload_type = peer_media.codecs[0].payload_type();
@@ -975,7 +980,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_pjsip_sdp() {
-        let sdk = r#"v=0
+        let sdp = r#"v=0
 o=- 3954304612 3954304613 IN IP4 192.168.1.202
 s=pjmedia
 b=AS:117
@@ -995,8 +1000,28 @@ a=fmtp:101 0-16"#;
             .await
             .expect("Failed to build rtp track");
         rtp_track
-            .set_remote_description(sdk)
+            .set_remote_description(sdp)
             .expect("Failed to set remote description");
         assert_eq!(rtp_track.payload_type, 9);
+    }
+
+    #[tokio::test]
+    async fn test_parse_rtcp_mux() {
+        let answer = r#"v=0
+o=- 723884243 723884244 IN IP4 11.22.33.44
+s=-
+c=IN IP4 11.22.33.44
+t=0 0
+m=audio 10638 RTP/AVP 8 101
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=sendrecv
+a=rtcp-mux"#;
+        let mut reader = Cursor::new(answer);
+        let sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
+        let peer_media = select_peer_media(&sdp, "audio").expect("Failed to select_peer_media");
+        assert!(peer_media.rtcp_mux);
+        assert_eq!(peer_media.rtcp_port, 10638)
     }
 }

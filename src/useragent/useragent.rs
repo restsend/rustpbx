@@ -62,7 +62,7 @@ impl UserAgentBuilder {
     }
 
     pub async fn build(mut self) -> Result<UserAgent> {
-        let token = self
+        let cancel_token = self
             .cancel_token
             .take()
             .unwrap_or_else(|| CancellationToken::new());
@@ -73,12 +73,13 @@ impl UserAgentBuilder {
         } else {
             crate::net_tool::get_first_non_loopback_interface()?
         };
-        let transport_layer = TransportLayer::new(token.clone());
+        let transport_layer = TransportLayer::new(cancel_token.clone());
         let local_addr: SocketAddr = format!("{}:{}", local_ip, config.udp_port).parse()?;
 
-        let udp_conn = UdpConnection::create_connection(local_addr, None)
-            .await
-            .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
+        let udp_conn =
+            UdpConnection::create_connection(local_addr, None, Some(cancel_token.child_token()))
+                .await
+                .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
 
         transport_layer.add_transport(udp_conn.into());
         info!("start useragent, addr: {}", local_addr);
@@ -89,14 +90,14 @@ impl UserAgentBuilder {
         };
 
         let endpoint = EndpointBuilder::new()
-            .with_cancel_token(token.child_token())
+            .with_cancel_token(cancel_token.child_token())
             .with_transport_layer(transport_layer)
             .with_option(endpoint_option)
             .build();
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
         Ok(UserAgent {
-            token,
+            token: cancel_token,
             config,
             endpoint,
             registration_handles: Mutex::new(HashMap::new()),

@@ -196,9 +196,13 @@ impl SipServerBuilder {
 
         if let Some(udp_port) = config.udp_port {
             let local_addr = SocketAddr::new(local_addr, udp_port);
-            let udp_conn = UdpConnection::create_connection(local_addr, external_ip)
-                .await
-                .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
+            let udp_conn = UdpConnection::create_connection(
+                local_addr,
+                external_ip,
+                Some(cancel_token.child_token()),
+            )
+            .await
+            .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
             transport_layer.add_transport(udp_conn.into());
             info!("start proxy, udp port: {}", local_addr);
         }
