@@ -177,8 +177,13 @@ impl CallModule {
         let caller_iswebrtc = self.is_webrtc_sdp(&caller_offer);
         let should_bridge_media =
             self.shoud_nat_traversal(tx, caller_iswebrtc, target_location.supports_webrtc)?;
-        // Create session with cancellation token
-        let session_token = self.inner.server.cancel_token.child_token();
+
+        let session_token = tx
+            .connection
+            .as_ref()
+            .and_then(|conn| conn.cancel_token())
+            .unwrap_or_else(|| self.inner.server.cancel_token.child_token());
+
         // Create media bridge if needed
         let mut bridge_builder = if should_bridge_media {
             let bridge_type = match (caller_iswebrtc, target_location.supports_webrtc) {

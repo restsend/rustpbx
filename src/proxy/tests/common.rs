@@ -94,7 +94,7 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
         },
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let connection = ChannelConnection::create_connection(rx, tx, mock_addr)
+    let connection = ChannelConnection::create_connection(rx, tx, mock_addr, None)
         .await
         .expect("failed to create channel connection");
     let transport_layer = TransportLayer::new(CancellationToken::new());
