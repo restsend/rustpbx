@@ -21,9 +21,10 @@ use axum::{
     routing::get,
     Router,
 };
-use std::path::Path;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
+use std::{path::Path, sync::atomic::AtomicU64};
 use tokio::select;
 use tokio::{net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -31,7 +32,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct AppStateInner {
     pub config: Arc<Config>,
@@ -42,6 +43,9 @@ pub struct AppStateInner {
     pub callrecord_sender: tokio::sync::Mutex<Option<CallRecordSender>>,
     pub routing_state: Arc<RoutingState>,
     pub sip_server: Option<SipServer>,
+    pub total_calls: AtomicU64,
+    pub total_failed_calls: AtomicU64,
+    pub uptime: DateTime<Utc>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -192,6 +196,9 @@ impl AppStateBuilder {
             callrecord_sender: Mutex::new(self.callrecord_sender),
             routing_state: Arc::new(RoutingState::new()),
             sip_server,
+            total_calls: AtomicU64::new(0),
+            total_failed_calls: AtomicU64::new(0),
+            uptime: chrono::Utc::now(),
         }))
     }
 }
@@ -290,7 +297,7 @@ async fn index_handler(client_ip: ClientAddr) -> impl IntoResponse {
     match std::fs::read_to_string("static/index.html") {
         Ok(content) => Html(content).into_response(),
         Err(e) => {
-            info!(
+            debug!(
                 client_ip = format!("{}", client_ip),
                 "Failed to read index.html: {}", e
             );

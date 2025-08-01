@@ -32,7 +32,7 @@ use futures::{
 use rsipstack::dialog::{dialog::DialogStateSender, DialogId};
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
     time::Duration,
 };
 use tokio::{
@@ -825,13 +825,14 @@ pub async fn handle_call(
                 }
             }
         }
-        r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state, dump_command_file) => {
+        r = process_call(cancel_token.clone(), call_type, call_state, session_id.clone(), ws_receiver, event_sender, dlg_state_sender, state.clone(), dump_command_file) => {
             match r {
                 Ok(_) => {
                     info!(session_id, "process call completed");
                 }
                 Err(e) => {
                     error!(session_id,"call error: {}", e);
+                    state.total_failed_calls.fetch_add(1, Ordering::Relaxed);
                     let error_event = SessionEvent::Error {
                         track_id:session_id.clone(),
                         timestamp:crate::get_timestamp(),
@@ -983,6 +984,7 @@ async fn process_call(
 
     let active_calls_len = {
         let mut active_calls = state.active_calls.lock().await;
+        state.total_calls.fetch_add(1, Ordering::Relaxed);
         active_calls.insert(session_id, active_call.clone());
         active_calls.len()
     };
