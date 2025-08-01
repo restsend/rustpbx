@@ -1,4 +1,4 @@
-use crate::media::track::{rtp::*, Track, TrackConfig};
+use crate::media::track::{rtp::*, TrackConfig};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 

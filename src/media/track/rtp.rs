@@ -497,18 +497,18 @@ impl RtpTrack {
             },
             r#type: Some(rsip::transport::Transport::Udp),
         };
-
+        let codec_type = peer_media.codecs[0];
         info!(
             track_id = self.track_id,
             rtcp_mux = peer_media.rtcp_mux,
             %remote_addr,
             %remote_rtcp_addr,
-            payload_type = peer_media.codecs[0].payload_type(),
+            ?codec_type,
             "set remote description"
         );
 
-        self.payload_type = peer_media.codecs[0].payload_type();
-        self.enabled_codecs = vec![CodecType::try_from(&self.payload_type.to_string())?];
+        self.payload_type = codec_type.payload_type();
+        self.enabled_codecs = vec![codec_type];
 
         self.remote_addr.replace(remote_addr);
         self.remote_rtcp_addr.replace(remote_rtcp_addr);
@@ -520,11 +520,11 @@ impl RtpTrack {
             .unwrap()
             .replace(Box::new(new_packetizer(
                 RTP_OUTBOUND_MTU,
-                peer_media.codecs[0].payload_type(),
+                self.payload_type,
                 self.ssrc,
                 payloader,
                 self.sequencer.clone(),
-                peer_media.codecs[0].clock_rate(),
+                codec_type.clock_rate(),
             )));
         Ok(())
     }

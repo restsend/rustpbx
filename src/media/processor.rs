@@ -70,6 +70,7 @@ impl ProcessorChain {
                     .unwrap()
                     .decode(*payload_type, &payload, self.sample_rate);
             frame.samples = Samples::PCM { samples };
+            frame.sample_rate = self.sample_rate;
         }
         // Process the frame with all processors
         for processor in processors.iter() {

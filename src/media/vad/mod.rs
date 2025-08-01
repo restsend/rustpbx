@@ -143,7 +143,6 @@ impl VadProcessorInner {
         let result = self.vad.process(frame);
         if let Some((is_speaking, timestamp)) = result {
             if is_speaking || self.triggered {
-                // 只在语音活动期间和语音刚结束时保留样本
                 let current_buf = SpeechBuf { samples, timestamp };
                 self.window_bufs.push(current_buf);
             }
@@ -151,7 +150,6 @@ impl VadProcessorInner {
 
             // Clean up old buffers periodically
             if self.window_bufs.len() > 1000 || !self.triggered {
-                // 当不再处于语音状态时，清除旧的缓冲区
                 let cutoff = if self.triggered {
                     timestamp.saturating_sub(5000)
                 } else {
@@ -175,7 +173,7 @@ impl VadProcessorInner {
             self.current_speech_start = Some(timestamp);
             let event = SessionEvent::Speaking {
                 track_id: track_id.to_string(),
-                timestamp,
+                timestamp: crate::get_timestamp(),
                 start_time: timestamp,
             };
             self.event_sender.send(event).ok();
@@ -202,7 +200,6 @@ impl VadProcessorInner {
                             0 // If timestamps are out of order, assume no duration
                         };
                         if duration >= self.option.speech_padding {
-                            // 当语音结束时，收集所有保存的样本
                             let samples_vec = self
                                 .window_bufs
                                 .iter()
@@ -212,12 +209,11 @@ impl VadProcessorInner {
                                 .flat_map(|buf| buf.samples.iter())
                                 .cloned()
                                 .collect();
-                            // 在收集完样本后清除缓冲区
                             self.window_bufs.clear();
 
                             let event = SessionEvent::Silence {
                                 track_id: track_id.to_string(),
-                                timestamp,
+                                timestamp: crate::get_timestamp(),
                                 start_time,
                                 duration,
                                 samples: Some(samples_vec),
