@@ -61,6 +61,11 @@ const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
 const DTMF_EVENT_DURATION_MS: u64 = 160; // Default DTMF event duration (in ms)
 const DTMF_EVENT_VOLUME: u8 = 10; // Default volume for DTMF events (0-63)
 
+// STUN constants for ICE connectivity check
+const STUN_BINDING_REQUEST: u16 = 0x0001;
+const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
+const STUN_TRANSACTION_ID_SIZE: usize = 12;
+
 struct RtpTrackStats {
     timestamp: Arc<AtomicU32>,
     packet_count: Arc<AtomicU32>,
@@ -162,6 +167,7 @@ pub struct RtpTrackBuilder {
     enabled_codecs: Vec<CodecType>,
     ssrc_cname: String,
     ssrc: u32,
+    ice_connectivity_check: bool,
 }
 
 pub struct RtpTrack {
@@ -185,6 +191,7 @@ pub struct RtpTrack {
     packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
     enabled_codecs: Vec<CodecType>,
     sendrecv: AtomicBool,
+    ice_connectivity_check: bool,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -212,6 +219,7 @@ impl RtpTrackBuilder {
             ],
             ssrc_cname: format!("rustpbx-{}", ssrc),
             ssrc,
+            ice_connectivity_check: true, // Default enabled
         }
     }
 
@@ -272,6 +280,11 @@ impl RtpTrackBuilder {
     }
     pub fn with_session_name(mut self, session_name: String) -> Self {
         self.ssrc_cname = session_name;
+        self
+    }
+
+    pub fn with_ice_connectivity_check(mut self, enabled: bool) -> Self {
+        self.ice_connectivity_check = enabled;
         self
     }
     pub async fn build_rtp_rtcp_conn(&self) -> Result<(UdpConnection, UdpConnection)> {
@@ -429,6 +442,7 @@ impl RtpTrackBuilder {
             enabled_codecs: self.enabled_codecs,
             sendrecv: AtomicBool::new(true),
             ssrc_cname: self.ssrc_cname,
+            ice_connectivity_check: self.ice_connectivity_check,
         };
         Ok(track)
     }
@@ -707,6 +721,22 @@ impl RtpTrack {
         Ok(())
     }
 
+    // Send STUN Binding Request for ICE connectivity check
+    async fn send_ice_connectivity_check(
+        socket: &UdpConnection,
+        remote_addr: &SipAddr,
+    ) -> Result<()> {
+        let mut stun_packet = vec![0u8; 20]; // STUN header is 20 bytes
+        stun_packet[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
+        stun_packet[2..4].copy_from_slice(&0u16.to_be_bytes());
+        stun_packet[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        let transaction_id: [u8; STUN_TRANSACTION_ID_SIZE] = rand::random();
+        stun_packet[8..20].copy_from_slice(&transaction_id);
+
+        socket.send_raw(&stun_packet, remote_addr).await.ok();
+        Ok(())
+    }
+
     async fn handle_rtcp_packet(
         track_id: &TrackId,
         buf: &[u8],
@@ -810,7 +840,7 @@ impl RtpTrack {
 
                     // STUN magic cookie is 0x2112A442
                     // STUN message types are in specific ranges (0x0001, 0x0101, etc.)
-                    if magic_cookie == 0x2112A442
+                    if magic_cookie == STUN_MAGIC_COOKIE
                         || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
                     {
                         debug!(track_id,
@@ -1046,8 +1076,28 @@ impl Track for RtpTrack {
         let token = self.cancel_token.clone();
         let ssrc_cname = self.ssrc_cname.clone();
         let start_time = crate::get_timestamp();
+        let ice_connectivity_check = self.ice_connectivity_check;
+        let remote_addr = self.remote_addr.clone();
 
         tokio::spawn(async move {
+            // Send ICE connectivity check if enabled and remote address is available
+            if ice_connectivity_check {
+                if let Some(ref addr) = remote_addr {
+                    Self::send_ice_connectivity_check(&rtp_socket, addr)
+                        .await
+                        .ok();
+
+                    // Also send to RTCP address if different (non-mux scenario)
+                    if let Some(ref rtcp_addr) = rtcp_addr {
+                        if rtcp_addr != addr {
+                            Self::send_ice_connectivity_check(&rtcp_socket, rtcp_addr)
+                                .await
+                                .ok();
+                        }
+                    }
+                }
+            }
+
             select! {
                 _ = token.cancelled() => {
                     info!(track_id, "RTC process cancelled");
@@ -1423,7 +1473,7 @@ t=0 0"#;
 
     #[test]
     fn test_stun_magic_cookie_detection() {
-        let stun_magic_cookie = 0x2112A442u32;
+        let stun_magic_cookie = STUN_MAGIC_COOKIE;
         let bytes = stun_magic_cookie.to_be_bytes();
         let reconstructed = u32::from_be_bytes(bytes);
 
@@ -1532,5 +1582,74 @@ t=0 0"#;
         assert_eq!(builder.rtp_alloc_count, 100);
         assert!(!builder.rtcp_mux);
         assert_eq!(builder.ssrc_cname, "custom_session");
+    }
+
+    #[tokio::test]
+    async fn test_ice_connectivity_check_enabled_by_default() {
+        let track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .build()
+            .await
+            .expect("Failed to build track");
+
+        assert!(track.ice_connectivity_check); // Should be enabled by default
+    }
+
+    #[tokio::test]
+    async fn test_ice_connectivity_check_can_be_disabled() {
+        let track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .with_ice_connectivity_check(false)
+            .build()
+            .await
+            .expect("Failed to build track");
+
+        assert!(!track.ice_connectivity_check);
+    }
+
+    #[test]
+    fn test_stun_packet_structure() {
+        // Test STUN constants
+        assert_eq!(STUN_BINDING_REQUEST, 0x0001);
+        assert_eq!(STUN_MAGIC_COOKIE, 0x2112A442);
+        assert_eq!(STUN_TRANSACTION_ID_SIZE, 12);
+
+        // Test STUN packet construction would be valid
+        let mut packet = vec![0u8; 20];
+        packet[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
+        packet[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+
+        // Verify message type
+        let msg_type = u16::from_be_bytes([packet[0], packet[1]]);
+        assert_eq!(msg_type, STUN_BINDING_REQUEST);
+
+        // Verify magic cookie
+        let magic = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        assert_eq!(magic, STUN_MAGIC_COOKIE);
+    }
+
+    #[tokio::test]
+    async fn test_ice_connectivity_check_builder_method() {
+        let builder_enabled = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .with_ice_connectivity_check(true);
+        assert!(builder_enabled.ice_connectivity_check);
+
+        let builder_disabled = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .with_ice_connectivity_check(false);
+        assert!(!builder_disabled.ice_connectivity_check);
+    }
+
+    #[test]
+    fn test_ice_connectivity_terminology() {
+        // Verify we're using correct ICE terminology
+        // ICE connectivity checks use STUN Binding Requests
+        // This is part of the ICE (Interactive Connectivity Establishment) standard
+
+        // The purpose is:
+        // 1. NAT traversal and hole punching
+        // 2. Connectivity verification
+        // 3. Keep-alive for NAT bindings
+        // 4. Path validation
+
+        assert_eq!(STUN_BINDING_REQUEST, 0x0001); // RFC 5389
+        assert_eq!(STUN_MAGIC_COOKIE, 0x2112A442); // RFC 5389
     }
 }
