@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use std::sync::{Arc, RwLock};
+use std::sync::{atomic::Ordering, Arc, RwLock};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -29,6 +29,11 @@ pub fn router() -> Router<AppState> {
 async fn health_handler(State(state): State<AppState>) -> Response {
     let health = serde_json::json!({
         "status": "running",
+        "uptime": state.uptime,
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": env!("BUILD_TIME"),
+        "totalCalls": state.total_calls.load(Ordering::Relaxed),
+        "totalFailedCalls": state.total_failed_calls.load(Ordering::Relaxed),
         "runnings": state.active_calls.lock().await.len(),
     });
     Json(health).into_response()

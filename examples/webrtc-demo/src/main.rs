@@ -64,7 +64,8 @@ struct WebRTCAnswer {
 
 // Index page handler
 async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let html_html = std::fs::read_to_string(state.root_dir.join("static/index.html")).unwrap();
+    let html_html =
+        std::fs::read_to_string(state.root_dir.join("static/index.html")).unwrap_or_default();
     Html(html_html)
 }
 
