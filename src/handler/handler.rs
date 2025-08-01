@@ -2,7 +2,7 @@ use super::{
     call::{handle_call, ActiveCallState, ActiveCallType, CallParams},
     middleware::clientaddr::ClientAddr,
 };
-use crate::{app::AppState, callrecord::CallRecord};
+use crate::{app::AppState, callrecord::CallRecord, version::get_version_info};
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
     response::{IntoResponse, Response},
@@ -30,10 +30,9 @@ async fn health_handler(State(state): State<AppState>) -> Response {
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
-        "version": env!("CARGO_PKG_VERSION"),
-        "build": env!("BUILD_TIME"),
-        "totalCalls": state.total_calls.load(Ordering::Relaxed),
-        "totalFailedCalls": state.total_failed_calls.load(Ordering::Relaxed),
+        "version": get_version_info(),
+        "total": state.total_calls.load(Ordering::Relaxed),
+        "failed": state.total_failed_calls.load(Ordering::Relaxed),
         "runnings": state.active_calls.lock().await.len(),
     });
     Json(health).into_response()
