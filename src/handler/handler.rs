@@ -53,7 +53,8 @@ async fn list_calls(State(state): State<AppState>) -> Response {
                 "created_at": call_state.created_at.to_rfc3339(),
                 "ring_time": call_state.ring_time.map(|t| t.to_rfc3339()),
                 "answer_time": call_state.answer_time.map(|t| t.to_rfc3339()),
-                "duration": call_state.created_at.signed_duration_since(Utc::now()).num_seconds(),
+                "duration": call_state.answer_time
+                    .map(|t| (Utc::now() - t).num_seconds()),
             })
         }).collect::<Vec<_>>(),
     });
