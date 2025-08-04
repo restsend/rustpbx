@@ -1,10 +1,8 @@
 use crate::{
     app::AppStateBuilder,
+    call::{active_call::CallParams, ActiveCallType},
     config::{Config, ProxyConfig, UseragentConfig},
-    handler::{
-        call::{ActiveCallType, CallParams},
-        middleware::clientaddr::ClientAddr,
-    },
+    handler::middleware::clientaddr::ClientAddr,
     media::engine::StreamEngine,
 };
 use axum::{

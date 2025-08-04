@@ -1,4 +1,5 @@
 use crate::app::{AppState, AppStateBuilder};
+use crate::call::{CallOption, Command};
 use crate::callrecord::CallRecordManagerBuilder;
 use crate::config::{Config, ProxyConfig, UseragentConfig};
 use crate::event::SessionEvent;
@@ -9,7 +10,6 @@ use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
 use crate::transcription::TranscriptionType;
 use crate::{
-    handler::{CallOption, Command},
     synthesis::{SynthesisOption, SynthesisType},
     transcription::TranscriptionOption,
 };
@@ -267,7 +267,11 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         if sample_rate != encoder.sample_rate() {
             audio_samples = resample_mono(&audio_samples, sample_rate, encoder.sample_rate());
         }
-        info!("Audio samples length: {} duration: {}", audio_samples.len(), audio_samples.len() as f64 / sample_rate as f64);
+        info!(
+            "Audio samples length: {} duration: {}",
+            audio_samples.len(),
+            audio_samples.len() as f64 / sample_rate as f64
+        );
         let start_time = SystemTime::now();
         for chunk in audio_samples.chunks(chunk_size) {
             let encoded = encoder.encode(&chunk);
@@ -282,7 +286,10 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             packet_timestamp += chunk_size as u32;
             ticker.tick().await;
         }
-        info!("Audio sent done, duration: {:?}", start_time.elapsed().unwrap());
+        info!(
+            "Audio sent done, duration: {:?}",
+            start_time.elapsed().unwrap()
+        );
     };
 
     select! {

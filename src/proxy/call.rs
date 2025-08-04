@@ -1,7 +1,6 @@
 use super::{server::SipServerRef, ProxyAction, ProxyModule};
 use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig, RouteResult};
-use crate::handler::call::ActiveCallType;
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
 use crate::proxy::locator::Location;
 use crate::proxy::server::TransactionCookie;
@@ -539,7 +538,7 @@ impl CallModule {
         hangup_reason: Option<CallRecordHangupReason>,
     ) -> CallRecord {
         CallRecord {
-            call_type: ActiveCallType::Sip,
+            call_type: crate::call::ActiveCallType::Sip,
             option: None,
             call_id: session.dialog_id.to_string(),
             start_time: session.start_time,
