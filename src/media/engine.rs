@@ -9,8 +9,8 @@ use super::{
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
+    call::{CallOption, EouOption},
     event::EventSender,
-    handler::{CallOption, EouOption},
     synthesis::{
         AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient,
         VoiceApiTtsClient,

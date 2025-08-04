@@ -1,8 +1,13 @@
-use super::{
-    call::{handle_call, ActiveCallState, ActiveCallType, CallParams},
-    middleware::clientaddr::ClientAddr,
+use super::middleware::clientaddr::ClientAddr;
+use crate::{
+    app::AppState,
+    call::{
+        active_call::{handle_call, CallParams},
+        ActiveCallState, ActiveCallType,
+    },
+    callrecord::CallRecord,
+    version::get_version_info,
 };
-use crate::{app::AppState, callrecord::CallRecord, version::get_version_info};
 use axum::{
     extract::{Path, Query, State, WebSocketUpgrade},
     response::{IntoResponse, Response},
@@ -49,10 +54,10 @@ async fn list_calls(State(state): State<AppState>) -> Response {
             };
             serde_json::json!({
                 "id": id,
-                "call_type": call.call_type,
-                "created_at": call_state.created_at.to_rfc3339(),
-                "ring_time": call_state.ring_time.map(|t| t.to_rfc3339()),
-                "answer_time": call_state.answer_time.map(|t| t.to_rfc3339()),
+                "callType": call.call_type,
+                "created_At": call_state.created_at.to_rfc3339(),
+                "ringTime": call_state.ring_time.map(|t| t.to_rfc3339()),
+                "answerTime": call_state.answer_time.map(|t| t.to_rfc3339()),
                 "duration": call_state.answer_time
                     .map(|t| (Utc::now() - t).num_seconds()),
             })

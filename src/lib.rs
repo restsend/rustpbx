@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod app;
+pub mod call;
 pub mod callrecord;
 pub mod config;
 pub mod console;
@@ -14,7 +15,6 @@ pub mod synthesis;
 pub mod transcription;
 pub mod useragent;
 pub mod version;
-
 pub type TrackId = String;
 pub type Sample = i16;
 pub type PcmBuf = Vec<Sample>;

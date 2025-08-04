@@ -2,13 +2,10 @@
 mod wait_input_timeout_tests {
     use crate::{
         app::{AppState, AppStateBuilder},
+        call::{ActiveCall, ActiveCallState, ActiveCallType, CallOption},
         callrecord::CallRecordManagerBuilder,
         config::{Config, UseragentConfig},
         event::{create_event_sender, SessionEvent},
-        handler::{
-            call::{ActiveCall, ActiveCallState, ActiveCallType},
-            CallOption,
-        },
         media::stream::MediaStreamBuilder,
         synthesis::{SynthesisOption, SynthesisType},
     };

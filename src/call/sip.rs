@@ -1,9 +1,9 @@
 use super::CallOption;
 use crate::app::AppState;
+use crate::call::active_call::ActiveCallStateRef;
+use crate::call::ActiveCallState;
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::EventSender;
-use crate::handler::call::{ActiveCallState, ActiveCallStateRef};
-use crate::handler::ReferOption;
 use crate::media::engine::StreamEngine;
 use crate::media::stream::MediaStream;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
@@ -18,21 +18,10 @@ use rsipstack::dialog::dialog::{
 };
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::DialogId;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
-pub struct SipOption {
-    pub username: String,
-    pub password: String,
-    pub realm: String,
-    pub headers: Option<HashMap<String, String>>,
-}
 
 pub async fn new_rtp_track_with_pending_call(
     state: AppState,
@@ -307,7 +296,7 @@ pub(crate) async fn make_sip_invite_with_stream(
     auto_hangup: Arc<Mutex<Option<u32>>>,
     caller: String,
     callee: String,
-    options: Option<ReferOption>,
+    options: Option<super::ReferOption>,
 ) -> Result<()> {
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
     let refer_call_state = Arc::new(RwLock::new(ActiveCallState {

@@ -1,7 +1,8 @@
 use crate::{
+    call::ActiveCallRef,
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
     config::Config,
-    handler::{call::ActiveCallRef, middleware::clientaddr::ClientAddr},
+    handler::middleware::clientaddr::ClientAddr,
     media::engine::StreamEngine,
     proxy::{
         acl::AclModule,
