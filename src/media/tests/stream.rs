@@ -4,7 +4,6 @@ use crate::media::track::TrackConfig;
 use crate::{
     event::EventSender,
     media::{
-        processor::Processor,
         stream::MediaStreamBuilder,
         track::{Track, TrackPacketSender},
     },
@@ -49,13 +48,8 @@ impl Track for TestTrack {
     fn config(&self) -> &TrackConfig {
         &self.config
     }
-
-    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
-        self.processor_chain.insert_processor(processor);
-    }
-
-    fn append_processor(&mut self, processor: Box<dyn Processor>) {
-        self.processor_chain.append_processor(processor);
+    fn processor_chain(&mut self) -> &mut ProcessorChain {
+        &mut self.processor_chain
     }
     async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
         Ok("".to_string())

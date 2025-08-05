@@ -180,6 +180,30 @@ impl MediaStream {
             }
         }
     }
+
+    pub async fn mute_track(&self, id: Option<TrackId>) {
+        if let Some(id) = id {
+            if let Some(track) = self.tracks.lock().await.get_mut(&id) {
+                MuteProcessor::mute_track(track.as_mut());
+            }
+        } else {
+            for track in self.tracks.lock().await.values_mut() {
+                MuteProcessor::mute_track(track.as_mut());
+            }
+        }
+    }
+
+    pub async fn unmute_track(&self, id: Option<TrackId>) {
+        if let Some(id) = id {
+            if let Some(track) = self.tracks.lock().await.get_mut(&id) {
+                MuteProcessor::unmute_track(track.as_mut());
+            }
+        } else {
+            for track in self.tracks.lock().await.values_mut() {
+                MuteProcessor::unmute_track(track.as_mut());
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -271,5 +295,32 @@ impl MediaStream {
             }
             _ => {}
         }
+    }
+}
+
+pub struct MuteProcessor;
+
+impl MuteProcessor {
+    pub fn mute_track(track: &mut dyn Track) {
+        let chain = track.processor_chain();
+        if !chain.has_processor::<MuteProcessor>() {
+            chain.insert_processor(Box::new(MuteProcessor));
+        }
+    }
+
+    pub fn unmute_track(track: &mut dyn Track) {
+        let chain = track.processor_chain();
+        chain.remove_processor::<MuteProcessor>();
+    }
+}
+
+impl Processor for MuteProcessor {
+    fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
+        if let Samples::PCM { samples } = &mut frame.samples {
+            samples.fill(0);
+        } else {
+            unreachable!("pcm samples only");
+        }
+        Ok(())
     }
 }

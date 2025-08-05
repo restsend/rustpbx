@@ -1,10 +1,7 @@
 use super::{track_codec::TrackCodec, Track, TrackConfig, TrackPacketSender};
 use crate::{
     event::{EventSender, SessionEvent},
-    media::{
-        codecs::bytes_to_samples,
-        processor::{Processor, ProcessorChain},
-    },
+    media::{codecs::bytes_to_samples, processor::ProcessorChain},
     AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
@@ -69,13 +66,8 @@ impl Track for WebsocketTrack {
     fn config(&self) -> &TrackConfig {
         &self.config
     }
-
-    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
-        self.processor_chain.insert_processor(processor);
-    }
-
-    fn append_processor(&mut self, processor: Box<dyn Processor>) {
-        self.processor_chain.append_processor(processor);
+    fn processor_chain(&mut self) -> &mut ProcessorChain {
+        &mut self.processor_chain
     }
 
     async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
