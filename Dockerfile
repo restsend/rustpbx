@@ -10,7 +10,7 @@ RUN --mount=type=cache,target=/build/.cargo/registry \
 
 FROM debian:bookworm
 LABEL maintainer="shenjindi@fourz.cn"
-RUN --mount=type=cache,target=/var/apt apt-get update && apt-get install -y ca-certificates tzdata
+RUN --mount=type=cache,target=/var/apt apt-get update && apt-get install -y ca-certificates tzdata libopus0
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
