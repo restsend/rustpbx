@@ -658,11 +658,13 @@ impl ActiveCall {
         Ok(())
     }
 
-    async fn do_mute(&self, _track_id: Option<String>) -> Result<()> {
+    async fn do_mute(&self, track_id: Option<String>) -> Result<()> {
+        self.media_stream.mute_track(track_id).await;
         Ok(())
     }
 
-    async fn do_unmute(&self, _track_id: Option<String>) -> Result<()> {
+    async fn do_unmute(&self, track_id: Option<String>) -> Result<()> {
+        self.media_stream.unmute_track(track_id).await;
         Ok(())
     }
 

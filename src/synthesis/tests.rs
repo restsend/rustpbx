@@ -41,7 +41,7 @@ async fn test_tencent_cloud_tts() {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
         app_id: Some(app_id),
-        speaker: Some("501004".to_string()), // Standard female voice
+        speaker: Some("101001".to_string()), // Standard female voice
         volume: Some(0),                     // Medium volume
         speed: Some(0.0),                    // Normal speed
         codec: Some("pcm".to_string()),      // PCM format for easy verification

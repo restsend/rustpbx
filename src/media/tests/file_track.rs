@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tempfile::TempDir;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -6,9 +7,10 @@ use tokio::time::Duration;
 
 use crate::event::SessionEvent;
 use crate::media::processor::Processor;
+use crate::media::stream::MuteProcessor;
 use crate::media::track::file::FileTrack;
 use crate::media::track::Track;
-use crate::AudioFrame;
+use crate::{AudioFrame, Samples};
 
 // Simple test processor that counts frames
 struct CountingProcessor {
@@ -34,7 +36,7 @@ impl Processor for CountingProcessor {
     }
 }
 
-async fn create_test_wav_file() -> Result<String> {
+async fn create_test_wav_file() -> Result<(String, TempDir)> {
     // Create a temporary WAV file for testing
     let temp_dir = tempfile::tempdir()?;
     let file_path = temp_dir.path().join("test.wav");
@@ -62,13 +64,13 @@ async fn create_test_wav_file() -> Result<String> {
     writer.finalize()?;
     println!("Test WAV file created successfully");
 
-    Ok(path_str)
+    Ok((path_str, temp_dir))
 }
 
 #[tokio::test]
 async fn test_file_track_wav() -> Result<()> {
     // Create a test WAV file
-    let test_file = create_test_wav_file().await?;
+    let (test_file, _temp_dir) = create_test_wav_file().await?;
 
     // Create a FileTrack
     let track_id = "test_file_track".to_string();
@@ -154,7 +156,7 @@ async fn test_file_track_wav() -> Result<()> {
     file_track.stop().await?;
 
     // Should receive a track stop event
-    match event_receiver.try_recv() {
+    match event_receiver.recv().await {
         Ok(event) => {
             if let SessionEvent::TrackEnd { track_id: id, .. } = event {
                 assert_eq!(id, track_id);
@@ -171,5 +173,67 @@ async fn test_file_track_wav() -> Result<()> {
     }
 
     println!("Test completed successfully");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn test_mute_and_unmute() -> Result<()> {
+    let test_file = "fixtures/noise_gating_zh_16k.wav".to_string();
+    let track_id = "test_file_track".to_string();
+    let mut file_track = FileTrack::new(track_id.clone());
+
+    // Set up the path
+    file_track = file_track.with_path(test_file);
+
+    file_track = file_track.with_config(
+        crate::media::track::TrackConfig::default()
+            .with_sample_rate(16000)
+            .with_ptime(Duration::from_millis(10)),
+    );
+
+    // Create channels
+    let (event_sender, _) = broadcast::channel(16);
+    let (packet_sender, mut packet_receiver) = mpsc::unbounded_channel();
+
+    file_track.start(event_sender, packet_sender).await?;
+    MuteProcessor::mute_track(&mut file_track);
+
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::pin!(timeout);
+    let mut muted = true;
+    let mut received_packets = 0;
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                break;
+            },
+            packet = packet_receiver.recv() => {
+                if let Some(packet) = packet {
+                    if let Samples::PCM { samples } = packet.samples {
+                        let have_non_zero = samples.iter().any(|&x| x != 0);
+                        if muted {
+                            assert!(!have_non_zero, "Expected zero samples");
+                        } else {
+                            assert!(have_non_zero, "Expected non-zero samples");
+                        }
+                    } else {
+                        unreachable!("Expected PCM samples");
+                    }
+                    assert_eq!(packet.track_id, track_id);
+                    received_packets += 1;
+                    if received_packets > 10 {
+                        MuteProcessor::unmute_track(&mut file_track);
+                        muted = false;
+                    }else if received_packets > 20 {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
     Ok(())
 }
