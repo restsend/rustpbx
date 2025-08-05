@@ -59,6 +59,7 @@ async fn test_tencent_cloud_asr() {
         secret_id: Some(secret_id),
         secret_key: Some(secret_key),
         app_id: Some(app_id),
+        model_type: Some("16k_zh".to_string()),
         ..Default::default()
     };
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
