@@ -116,9 +116,9 @@ async fn main() -> Result<()> {
 
     // Set log level based on verbose flag
     if args.verbose {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug") };
     } else {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe { std::env::set_var("RUST_LOG", "info") };
     }
 
     // Display command information
