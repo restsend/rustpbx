@@ -196,14 +196,8 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     let option = CallOption {
         offer: Some(offer.sdp.clone()),
         vad: Some(crate::media::vad::VADOption::default()),
-        asr: Some(TranscriptionOption {
-            provider: Some(TranscriptionType::TencentCloud),
-            ..Default::default()
-        }),
-        tts: Some(SynthesisOption {
-            provider: Some(SynthesisType::TencentCloud),
-            ..Default::default()
-        }),
+        asr: Some(asr_config),
+        tts: Some(tts_config),
         ..Default::default()
     };
 
