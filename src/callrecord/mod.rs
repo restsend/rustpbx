@@ -5,8 +5,8 @@ use crate::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use object_store::{
-    aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder,
-    path::Path as ObjectPath, ObjectStore,
+    ObjectStore, aws::AmazonS3Builder, azure::MicrosoftAzureBuilder,
+    gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
