@@ -2,21 +2,24 @@ use super::middleware::clientaddr::ClientAddr;
 use crate::{
     app::AppState,
     call::{
-        active_call::{handle_call, CallParams},
-        ActiveCallState, ActiveCallType,
+        ActiveCallType, Command,
+        active_call::{CallParams, handle_call},
     },
-    callrecord::CallRecord,
-    version::get_version_info,
+    event::SessionEvent,
 };
 use axum::{
-    extract::{Path, Query, State, WebSocketUpgrade},
+    Json, Router,
+    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
+use bytes::Bytes;
 use chrono::Utc;
-use std::sync::{atomic::Ordering, Arc, RwLock};
-use tracing::{error, info};
+use futures::{SinkExt, StreamExt};
+use std::{sync::atomic::Ordering};
+use tokio::{join, select};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -35,7 +38,7 @@ async fn health_handler(State(state): State<AppState>) -> Response {
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
-        "version": get_version_info(),
+        "version": crate::version::get_version_info(),
         "total": state.total_calls.load(Ordering::Relaxed),
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
         "runnings": state.active_calls.lock().await.len(),
@@ -55,7 +58,7 @@ async fn list_calls(State(state): State<AppState>) -> Response {
             serde_json::json!({
                 "id": id,
                 "callType": call.call_type,
-                "created_At": call_state.created_at.to_rfc3339(),
+                "startTime": call_state.start_time.to_rfc3339(),
                 "ringTime": call_state.ring_time.map(|t| t.to_rfc3339()),
                 "answerTime": call_state.answer_time.map(|t| t.to_rfc3339()),
                 "duration": call_state.answer_time
@@ -105,94 +108,155 @@ pub async fn call_handler(
     client_ip: ClientAddr,
     call_type: ActiveCallType,
     ws: WebSocketUpgrade,
-    state: AppState,
+    app_state: AppState,
     params: CallParams,
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let state_clone = state.clone();
     let dump_events = params.dump_events.unwrap_or(true);
-
-    ws.on_upgrade(move |socket| async move {
-        let start_time = Utc::now();
-        let call_state = Arc::new(RwLock::new(ActiveCallState {
-            created_at: Utc::now(),
-            ring_time: None,
-            answer_time: None,
-            hangup_reason: None,
-            last_status_code: 0,
-            answer: None,
-            option: None,
-        }));
-        match handle_call(
-            call_type.clone(),
-            session_id.clone(),
-            socket,
-            state.clone(),
-            call_state.clone(),
-            dump_events,
-        )
-        .await
-        {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error handling connection {client_ip}: {}", e);
-            }
-        }
-
-        let call_record = match state_clone.active_calls.lock().await.remove(&session_id) {
-            Some(call) => {
-                call.cancel_token.cancel();
-                call.get_callrecord().await
-            }
-            _ => {
-                let dump_events_file = state_clone.get_dump_events_file(&session_id);
-                let dump_events = if tokio::fs::metadata(&dump_events_file).await.is_ok() {
-                    Some(dump_events_file)
-                } else {
-                    None
-                };
-
-                let call_state = call_state.read().unwrap();
-                let option = call_state.option.clone();
-                let caller = option.as_ref().map(|o| o.caller.clone()).flatten();
-                let callee = option.as_ref().map(|o| o.callee.clone()).flatten();
-                let hangup_reason = call_state.hangup_reason.clone();
-                let offer = option.as_ref().map(|o| o.offer.clone()).flatten();
-                let answer = call_state.answer.clone();
-
-                CallRecord {
-                    call_type: call_type.clone(),
-                    call_id: session_id.clone(),
-                    start_time,
-                    end_time: Utc::now(),
-                    ring_time: call_state.ring_time.clone(),
-                    answer_time: call_state.answer_time.clone(),
-                    caller: caller.unwrap_or_else(|| "".to_string()),
-                    callee: callee.unwrap_or_else(|| "".to_string()),
-                    status_code: call_state.last_status_code,
-                    offer,
-                    answer,
-                    hangup_reason,
-                    recorder: vec![],
-                    extras: None,
-                    option,
-                    dump_event_file: dump_events,
+    let resp = ws.on_upgrade(move |socket| async move {
+        let event_sender = crate::event::create_event_sender();
+        let (mut ws_sender, mut ws_receiver) = socket.split();
+        let cmd_sender = tokio::sync::broadcast::Sender::<Command>::new(32);
+        let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        
+        let cancel_token = CancellationToken::new();
+        let dump_cmd_receiver = cmd_sender.subscribe();
+        let cmd_receiver = cmd_sender.subscribe();
+        
+        let recv_from_ws_loop = async {
+            while let Some(Ok(message)) = ws_receiver.next().await {
+                match message {
+                    Message::Text(text) => {
+                        let command = match serde_json::from_str::<Command>(&text) {
+                            Ok(cmd) => cmd,
+                            Err(e) => {
+                                warn!(session_id, %client_ip, %text, "Failed to parse command {}",e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = cmd_sender.send(command) {
+                            error!("Failed to send WebSocket message: {}", e);
+                            break;
+                        }
+                    }
+                    Message::Binary(bin) => {
+                        audio_sender.send(bin.into()).ok();
+                    }
+                    Message::Close(_) => {
+                        info!(session_id, %client_ip, "WebSocket closed by client");
+                        break;
+                    }
+                    _ => {}
                 }
             }
         };
-        info!(
-            client_ip = client_ip.to_string(),
-            session_id,
-            hangup_reason = format!("{:?}", call_record.hangup_reason),
-            "call end, duration {}s",
-            Utc::now()
-                .signed_duration_since(start_time)
-                .as_seconds_f32()
-        );
-        if let Some(sender) = state_clone.callrecord_sender.lock().await.as_ref() {
-            if let Err(e) = sender.send(call_record) {
-                error!("Failed to send call record: {}", e);
+
+        let mut event_receiver = event_sender.subscribe();
+        let send_to_ws_loop = async {
+            while let Ok(event) = event_receiver.recv().await {
+                match event {
+                    SessionEvent::Binary { data,.. } => {
+                        let message = Message::Binary(data.into());
+                        if let Err(e) = ws_sender.send(message).await {
+                            warn!(session_id, %client_ip, "Failed to send WebSocket message: {}", e);
+                            break;
+                        }
+                    }
+                    _ => {
+                        match serde_json::to_string(&event) {
+                            Ok(message) => {
+                                if let Err(e) = ws_sender.send(Message::Text(message.into())).await {
+                                    warn!(session_id, %client_ip, "Failed to send WebSocket message: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id, %client_ip, "Failed to serialize event: {}", e);
+                            }
+                        }
+                    }
+                }
             }
-        }
-    })
+        };
+
+        let token_ref = cancel_token.clone();
+        let handle_call_loop = async {
+            app_state.total_calls.fetch_add(1, Ordering::Relaxed);
+            match handle_call(
+                cancel_token,
+                call_type,
+                session_id.clone(),
+                dump_events,
+                app_state.clone(),
+                event_sender.clone(),
+                audio_receiver,
+                dump_cmd_receiver,
+                cmd_receiver,
+            )
+            .await
+            {
+                Ok(call_record) => {
+                    info!(
+                        session_id,
+                        %client_ip,
+                        hangup_reason = ?call_record.hangup_reason,
+                        call_type = ?call_record.call_type,
+                        duration = Utc::now()
+                            .signed_duration_since(call_record.start_time)
+                            .as_seconds_f32(),
+                        "Call ended"
+                    );
+                    if let Some(sender) = app_state.callrecord_sender.lock().await.as_ref() {
+                        if let Err(e) = sender.send(call_record) {
+                            warn!(session_id, %client_ip, "Failed to send call record: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(session_id, %client_ip, "Call handling error: {}", e);
+                    app_state.total_failed_calls.fetch_add(1, Ordering::Relaxed);
+                    let error_event = SessionEvent::Error {
+                        track_id:session_id.clone(),
+                        timestamp:crate::get_timestamp(),
+                        error:e.to_string(),
+                        sender: "handle_call".to_string(),
+                        code: None
+                    };
+                    event_sender.send(error_event).ok();
+                }
+            };
+            token_ref.cancel();
+        };
+
+        join!{
+            async {
+                select!{
+                    _ = token_ref.cancelled() => {},
+                    _ = send_to_ws_loop => {},
+                    _ = recv_from_ws_loop => {},
+                }
+                token_ref.cancel();
+            }, 
+            handle_call_loop
+        };
+        
+        // Drain remaining events
+        while let Ok(event) = event_receiver.try_recv() {
+            match event {
+                SessionEvent::Binary { .. } => { }
+                _ => {
+                    match serde_json::to_string(&event) {
+                        Ok(message) => {
+                            if let Err(_) = ws_sender.send(Message::Text(message.into())).await {
+                                break;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        };
+        debug!(session_id, %client_ip, "WebSocket connection closed");
+    });
+    resp
 }

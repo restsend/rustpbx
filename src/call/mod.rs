@@ -13,6 +13,9 @@ pub use active_call::ActiveCallRef;
 pub use active_call::ActiveCallState;
 pub use active_call::ActiveCallType;
 
+pub type CommandSender = tokio::sync::broadcast::Sender<Command>;
+pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct SipOption {
@@ -88,7 +91,7 @@ impl CallOption {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferOption {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,7 +125,7 @@ pub struct EouOption {
 }
 
 // WebSocket Commands
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "command")]
 #[serde(rename_all = "camelCase")]
 pub enum Command {
