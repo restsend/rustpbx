@@ -71,7 +71,7 @@ pub struct ActiveCall {
     pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
     pub tts_handle: Mutex<Option<TtsHandle>>,
-    pub auto_hangup: Arc<Mutex<Option<u32>>>,
+    pub auto_hangup: Arc<Mutex<Option<(u32, CallRecordHangupReason)>>>,
     pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
     pub event_sender: EventSender,
     pub app_state: AppState,
@@ -217,15 +217,20 @@ impl ActiveCall {
                         }
                         let mut auto_hangup_ref = auto_hangup.lock().await;
                         if let Some(ref auto_hangup_ssrc) = *auto_hangup_ref {
-                            if *auto_hangup_ssrc == ssrc {
-                                auto_hangup_ref.take();
-                                info!(
-                                    session_id = self.session_id,
-                                    ssrc, "auto hangup when track end track_id:{}", track_id
-                                );
-                                self.do_hangup(Some("autohangup".to_string()), None)
-                                    .await
-                                    .ok();
+                            if auto_hangup_ssrc.0 == ssrc {
+                                let auto_hangup_ssrc = auto_hangup_ref.take();
+                                match auto_hangup_ssrc {
+                                    Some((_, auto_hangup_reason)) => {
+                                        info!(
+                                            session_id = self.session_id,
+                                            ssrc,
+                                            "auto hangup when track end track_id:{}",
+                                            track_id
+                                        );
+                                        self.do_hangup(Some(auto_hangup_reason), None).await.ok();
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         if let Some(timeout) = wait_input_timeout.lock().await.take() {
@@ -287,7 +292,13 @@ impl ActiveCall {
                 auto_hangup,
                 wait_input_timeout,
             } => self.do_play(url, auto_hangup, wait_input_timeout).await,
-            Command::Hangup { reason, initiator } => self.do_hangup(reason, initiator).await,
+            Command::Hangup { reason, initiator } => {
+                let reason = reason.map(|r| {
+                    r.parse::<CallRecordHangupReason>()
+                        .unwrap_or(CallRecordHangupReason::BySystem)
+                });
+                self.do_hangup(reason, initiator).await
+            }
             Command::Refer {
                 caller,
                 callee,
@@ -347,7 +358,9 @@ impl ActiveCall {
         );
         let ssrc = rand::random::<u32>();
         match auto_hangup {
-            Some(true) => *self.auto_hangup.lock().await = Some(ssrc),
+            Some(true) => {
+                *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::BySystem))
+            }
             _ => *self.auto_hangup.lock().await = None,
         }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
@@ -400,7 +413,9 @@ impl ActiveCall {
             .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
         match auto_hangup {
-            Some(true) => *self.auto_hangup.lock().await = Some(ssrc),
+            Some(true) => {
+                *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::BySystem))
+            }
             _ => *self.auto_hangup.lock().await = None,
         }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
@@ -434,7 +449,11 @@ impl ActiveCall {
     async fn do_resume(&self) -> Result<()> {
         Ok(())
     }
-    async fn do_hangup(&self, reason: Option<String>, initiator: Option<String>) -> Result<()> {
+    async fn do_hangup(
+        &self,
+        reason: Option<CallRecordHangupReason>,
+        initiator: Option<String>,
+    ) -> Result<()> {
         info!(
             session_id = self.session_id,
             ?reason,
@@ -447,17 +466,12 @@ impl ActiveCall {
             Some("caller") => CallRecordHangupReason::ByCaller,
             Some("callee") => CallRecordHangupReason::ByCallee,
             Some("system") => CallRecordHangupReason::Autohangup,
-            _ => match reason.as_deref() {
-                Some("autohangup") => CallRecordHangupReason::Autohangup,
-                Some("canceled") => CallRecordHangupReason::Canceled,
-                Some("rejected") => CallRecordHangupReason::Rejected,
-                Some("no_answer") => CallRecordHangupReason::NoAnswer,
-                _ => CallRecordHangupReason::BySystem,
-            },
+            _ => reason.unwrap_or(CallRecordHangupReason::BySystem),
         };
 
         self.tts_handle.lock().await.take();
-        self.media_stream.stop(reason, initiator);
+        self.media_stream
+            .stop(Some(hangup_reason.to_string()), initiator);
 
         let dialog_id = match self.call_state.write().as_mut() {
             Ok(call_state) => {
@@ -535,7 +549,7 @@ impl ActiveCall {
             .and_then(|o| o.auto_hangup)
             .unwrap_or(true)
         {
-            *self.auto_hangup.lock().await = Some(ssrc);
+            *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::ByRefer));
         } else {
             *self.auto_hangup.lock().await = None;
         }
