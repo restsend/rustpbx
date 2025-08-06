@@ -8,17 +8,13 @@ use crate::media::codecs::resample::resample_mono;
 use crate::media::codecs::{CodecType, Encoder};
 use crate::media::track::file::read_wav_file;
 use crate::media::track::webrtc::WebrtcTrack;
-use crate::transcription::TranscriptionType;
-use crate::{
-    synthesis::{SynthesisOption, SynthesisType},
-    transcription::TranscriptionOption,
-};
+use crate::{synthesis::SynthesisOption, transcription::TranscriptionOption};
 use anyhow::Result;
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Router,
 };
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};

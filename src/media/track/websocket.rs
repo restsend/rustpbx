@@ -1,26 +1,29 @@
-use super::{track_codec::TrackCodec, Track, TrackConfig, TrackPacketSender};
+use super::{Track, TrackConfig, TrackPacketSender, track_codec::TrackCodec};
 use crate::{
+    AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
     media::{
         codecs::bytes_to_samples,
         processor::{Processor, ProcessorChain},
     },
-    AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{sync::Mutex, time::Duration};
-use tokio::{select, sync::mpsc::UnboundedReceiver};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
+
+pub type WebsocketBytesSender = tokio::sync::mpsc::UnboundedSender<Bytes>;
+pub type WebsocketBytesReceiver = tokio::sync::mpsc::UnboundedReceiver<Bytes>;
 
 pub struct WebsocketTrack {
     track_id: TrackId,
     config: TrackConfig,
     cancel_token: CancellationToken,
     processor_chain: ProcessorChain,
-    rx: Mutex<Option<UnboundedReceiver<Bytes>>>,
+    rx: Mutex<Option<WebsocketBytesReceiver>>,
     encoder: TrackCodec,
     payload_type: u8,
     event_sender: EventSender,
@@ -31,13 +34,13 @@ impl WebsocketTrack {
     pub fn new(
         cancel_token: CancellationToken,
         track_id: TrackId,
-        config: TrackConfig,
+        track_config: TrackConfig,
         event_sender: EventSender,
-        rx: UnboundedReceiver<Bytes>,
+        audio_receiver: WebsocketBytesReceiver,
         codec: Option<String>,
         ssrc: u32,
     ) -> Self {
-        let processor_chain = ProcessorChain::new(config.samplerate);
+        let processor_chain = ProcessorChain::new(track_config.samplerate);
         let payload_type = match codec.unwrap_or("pcm".to_string()).to_lowercase().as_str() {
             "pcmu" => 0,
             "pcma" => 8,
@@ -46,10 +49,10 @@ impl WebsocketTrack {
         };
         Self {
             track_id,
-            config,
+            config: track_config,
             cancel_token,
             processor_chain,
-            rx: Mutex::new(Some(rx)),
+            rx: Mutex::new(Some(audio_receiver)),
             encoder: TrackCodec::new(),
             payload_type,
             event_sender,
@@ -92,7 +95,7 @@ impl Track for WebsocketTrack {
         let mut audio_from_ws = match self.rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
-                error!("no audio from ws");
+                error!(track_id, "no audio from ws");
                 return Ok(());
             }
         };
