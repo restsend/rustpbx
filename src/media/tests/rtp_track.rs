@@ -8,7 +8,7 @@ use crate::{
     AudioFrame, PcmBuf, Sample, Samples,
 };
 use anyhow::Result;
-use async_trait::async_trait;
+
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -25,7 +25,6 @@ const RTP_MTU: usize = 1500;
 // Simple processor for testing
 struct TestProcessor;
 
-#[async_trait]
 impl Processor for TestProcessor {
     fn process_frame(&self, _frame: &mut AudioFrame) -> Result<()> {
         // Simple pass-through processor

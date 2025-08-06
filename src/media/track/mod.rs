@@ -1,6 +1,6 @@
 use super::codecs::CodecType;
 use crate::event::EventSender;
-use crate::media::processor::Processor;
+use crate::media::processor::{Processor, ProcessorChain};
 use crate::{AudioFrame, TrackId};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -68,8 +68,14 @@ pub trait Track: Send + Sync {
     fn ssrc(&self) -> u32;
     fn id(&self) -> &TrackId;
     fn config(&self) -> &TrackConfig;
-    fn insert_processor(&mut self, processor: Box<dyn Processor>);
-    fn append_processor(&mut self, processor: Box<dyn Processor>);
+    fn processor_chain(&mut self) -> &mut ProcessorChain;
+    fn insert_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain().insert_processor(processor);
+    }
+    fn append_processor(&mut self, processor: Box<dyn Processor>) {
+        self.processor_chain().append_processor(processor);
+    }
+
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String>;
     async fn start(
         &self,

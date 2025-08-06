@@ -180,13 +180,17 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     let tencent_secret_id = std::env::var("TENCENT_SECRET_ID").unwrap();
     let tencent_secret_key = std::env::var("TENCENT_SECRET_KEY").unwrap();
 
+    asr_config.provider = Some(TranscriptionType::TencentCloud);
     asr_config.app_id = Some(tencent_appid.clone());
     asr_config.secret_id = Some(tencent_secret_id.clone());
     asr_config.secret_key = Some(tencent_secret_key.clone());
+    asr_config.model_type = Some("16k_zh".to_string());
 
+    tts_config.provider = Some(SynthesisType::TencentCloud);
     tts_config.app_id = Some(tencent_appid);
     tts_config.secret_id = Some(tencent_secret_id);
     tts_config.secret_key = Some(tencent_secret_key);
+    tts_config.speaker = Some("101001".to_string());
 
     // Create the invite command with proper options
     let option = CallOption {
