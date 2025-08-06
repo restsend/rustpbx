@@ -5,7 +5,7 @@ mod wait_input_timeout_tests {
         call::{ActiveCall, ActiveCallState, ActiveCallType, CallOption},
         callrecord::CallRecordManagerBuilder,
         config::{Config, UseragentConfig},
-        event::{create_event_sender, SessionEvent},
+        event::{SessionEvent, create_event_sender},
         media::stream::MediaStreamBuilder,
         synthesis::{SynthesisOption, SynthesisType},
     };
@@ -58,13 +58,9 @@ mod wait_input_timeout_tests {
         let event_sender = create_event_sender();
 
         let call_state = Arc::new(RwLock::new(ActiveCallState {
-            created_at: Utc::now(),
-            ring_time: None,
-            answer_time: None,
-            hangup_reason: None,
+            start_time: Utc::now(),
             last_status_code: 200,
-            answer: None,
-            option: None,
+            ..Default::default()
         }));
 
         let mut option = CallOption::default();
@@ -78,19 +74,15 @@ mod wait_input_timeout_tests {
             .with_cancel_token(cancel_token.clone())
             .build();
 
-        ActiveCall::new(
+        Ok(Arc::new(ActiveCall::new(
             call_state,
             ActiveCallType::WebSocket,
             cancel_token,
             event_sender,
             session_id,
             media_stream,
-            option,
-            None,
             app_state,
-        )
-        .await
-        .map(Arc::new)
+        )))
     }
 
     #[tokio::test]

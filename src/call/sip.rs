@@ -1,7 +1,8 @@
 use super::CallOption;
+use crate::TrackId;
 use crate::app::AppState;
-use crate::call::active_call::ActiveCallStateRef;
 use crate::call::ActiveCallState;
+use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::EventSender;
 use crate::media::engine::StreamEngine;
@@ -9,17 +10,16 @@ use crate::media::stream::MediaStream;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
 use crate::media::track::{Track, TrackConfig};
 use crate::useragent::invitation::PendingDialog;
-use crate::TrackId;
 use anyhow::Result;
 use chrono::Utc;
+use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::{
     DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
 use rsipstack::dialog::invitation::InviteOption;
-use rsipstack::dialog::DialogId;
 use std::sync::{Arc, RwLock};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -31,7 +31,7 @@ pub async fn new_rtp_track_with_pending_call(
     track_config: TrackConfig,
     _option: &CallOption,
     dlg_state_sender: DialogStateSender,
-    pending_call: PendingDialog,
+    pending_dialog: PendingDialog,
 ) -> Result<(DialogId, RtpTrack)> {
     let mut rtp_track = RtpTrackBuilder::new(track_id.clone(), track_config)
         .with_ssrc(ssrc)
@@ -55,7 +55,7 @@ pub async fn new_rtp_track_with_pending_call(
     }
 
     let mut rtp_track = rtp_track.build().await?;
-    let initial_request = pending_call.dialog.initial_request();
+    let initial_request = pending_dialog.dialog.initial_request();
     let offer = String::from_utf8_lossy(&initial_request.body);
     match rtp_track.set_remote_description(&offer) {
         Ok(_) => (),
@@ -76,7 +76,7 @@ pub async fn new_rtp_track_with_pending_call(
         "application/sdp".to_string().into(),
     )];
 
-    match pending_call
+    match pending_dialog
         .dialog
         .accept(Some(headers), Some(answer.as_bytes().to_vec()))
     {
@@ -87,10 +87,10 @@ pub async fn new_rtp_track_with_pending_call(
         }
     }
 
-    let dialog_id = pending_call.dialog.id();
+    let dialog_id = pending_dialog.dialog.id();
 
-    let mut state_receiver = pending_call.state_receiver;
-    let token_clone = pending_call.token;
+    let mut state_receiver = pending_dialog.state_receiver;
+    let token_clone = pending_dialog.token;
     tokio::spawn(async move {
         tokio::select! {
             _ = token_clone.cancelled() => {}
@@ -300,13 +300,8 @@ pub(crate) async fn make_sip_invite_with_stream(
 ) -> Result<()> {
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
     let refer_call_state = Arc::new(RwLock::new(ActiveCallState {
-        created_at: Utc::now(),
-        ring_time: None,
-        answer_time: None,
-        hangup_reason: None,
-        last_status_code: 0,
-        answer: None,
-        option: None,
+        start_time: Utc::now(),
+        ..Default::default()
     }));
     let dialog_layer = app_state.useragent.dialog_layer.clone();
     let ssrc = rand::random::<u32>();
