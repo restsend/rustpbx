@@ -1,9 +1,10 @@
 use super::track::track_codec::TrackCodec;
 use crate::{AudioFrame, Samples};
 use anyhow::Result;
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-pub trait Processor: Send + Sync {
+pub trait Processor: Send + Sync + Any {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()>;
 }
 
@@ -29,7 +30,7 @@ impl Samples {
 }
 
 #[derive(Clone)]
-pub(crate) struct ProcessorChain {
+pub struct ProcessorChain {
     processors: Arc<Mutex<Vec<Box<dyn Processor>>>>,
     codec: Arc<Mutex<TrackCodec>>,
     sample_rate: u32,
@@ -50,6 +51,18 @@ impl ProcessorChain {
     }
     pub fn append_processor(&mut self, processor: Box<dyn Processor>) {
         self.processors.lock().unwrap().push(processor);
+    }
+
+    pub fn has_processor<T: 'static>(&self) -> bool {
+        let processors = self.processors.lock().unwrap();
+        processors
+            .iter()
+            .any(|processor| (processor.as_ref() as &dyn Any).is::<T>())
+    }
+
+    pub fn remove_processor<T: 'static>(&self) {
+        let mut processors = self.processors.lock().unwrap();
+        processors.retain(|processor| !(processor.as_ref() as &dyn Any).is::<T>());
     }
 
     pub fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
