@@ -529,8 +529,7 @@ function mainApp() {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
-                                                this.addLogEntry('LLM', 'LLM requested to hang up the call');
-                                                autoHangup = true;
+                                                this.doHangup();
                                             }
                                         });
                                     }
@@ -568,7 +567,14 @@ function mainApp() {
                     }
                 });
         },
-
+        doHangup() {
+            this.addLogEntry('info', 'Hanging up the call');
+            // Send hangup command to WebSocket
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ command: 'hangup' }));
+            }
+            this.endCall();
+        },
         // Send TTS request to the WebSocket
         sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined) {
             if (!text || text.trim() === '') {

@@ -1,4 +1,5 @@
 use crate::{
+    AudioFrame, Samples,
     event::{EventSender, SessionEvent},
     media::{
         cache,
@@ -7,21 +8,20 @@ use crate::{
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
     synthesis::{SynthesisClient, SynthesisOption},
-    AudioFrame, Samples,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
 use tokio::{
     select,
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;

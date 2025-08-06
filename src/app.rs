@@ -13,14 +13,14 @@ use crate::{
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
     },
-    useragent::{invitation::create_invite_handler, UserAgent},
+    useragent::{UserAgent, invitation::create_invite_handler},
 };
 use anyhow::Result;
 use axum::{
+    Router,
     extract::WebSocketUpgrade,
     response::{Html, IntoResponse, Response},
     routing::get,
-    Router,
 };
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -181,7 +181,7 @@ impl AppStateBuilder {
                 Ok(server) => Some(server),
                 Err(e) => {
                     warn!("Failed to build proxy server: {}", e);
-                    return Err(anyhow::anyhow!("Failed to build proxy server: {}", e));
+                    return Err(anyhow::anyhow!("{}", e));
                 }
             }
         } else {

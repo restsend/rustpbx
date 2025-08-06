@@ -3,22 +3,22 @@ use crate::config::UseragentConfig;
 use crate::useragent::invitation::{
     InvitationHandler, PendingDialog, UnavailableInvitationHandler,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use humantime::parse_duration;
 use rsip::prelude::HeadersExt;
+use rsipstack::EndpointBuilder;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointOption;
 use rsipstack::transaction::{Endpoint, TransactionReceiver};
-use rsipstack::transport::{udp::UdpConnection, TransportLayer};
-use rsipstack::EndpointBuilder;
+use rsipstack::transport::{TransportLayer, udp::UdpConnection};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::select;
-use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -79,7 +79,7 @@ impl UserAgentBuilder {
         let udp_conn =
             UdpConnection::create_connection(local_addr, None, Some(cancel_token.child_token()))
                 .await
-                .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
+                .map_err(|e| anyhow!("Create useragent UDP connection: {} {}", local_addr, e))?;
 
         transport_layer.add_transport(udp_conn.into());
         info!("start useragent, addr: {}", local_addr);

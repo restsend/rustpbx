@@ -1,4 +1,4 @@
-use super::{server::SipServerRef, ProxyAction, ProxyModule};
+use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender};
 use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig, RouteResult};
 use crate::proxy::bridge::{MediaBridgeBuilder, MediaBridgeType};
@@ -6,15 +6,15 @@ use crate::proxy::locator::Location;
 use crate::proxy::server::TransactionCookie;
 use crate::proxy::session::{Session, SessionParty};
 use crate::proxy::user::SipUser;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use rsip::headers::UntypedHeader;
 use rsip::prelude::HeadersExt;
+use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::DialogState;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
-use rsipstack::dialog::DialogId;
 use rsipstack::rsip_ext::RsipResponseExt;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipAddr;
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -256,7 +256,11 @@ impl CallModule {
             invite_option.caller,
             invite_option.callee,
             invite_option.contact,
-            invite_option.destination.as_ref().map(|d|d.to_string()).unwrap_or_default(),
+            invite_option
+                .destination
+                .as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
             should_bridge_media,
             outbound_sdp
         );
@@ -558,6 +562,7 @@ impl CallModule {
             recorder: vec![],
             extras: None,
             dump_event_file: None,
+            refer_callrecord: None,
         }
     }
 
