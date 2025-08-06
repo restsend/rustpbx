@@ -10,7 +10,10 @@ use object_store::{
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, future::Future, path::Path, pin::Pin, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap, future::Future, path::Path, pin::Pin, str::FromStr, sync::Arc,
+    time::Instant,
+};
 use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -124,6 +127,47 @@ pub enum CallRecordHangupReason {
     Rejected,
     Failed,
     Other,
+}
+
+impl FromStr for CallRecordHangupReason {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "caller" => Ok(Self::ByCaller),
+            "callee" => Ok(Self::ByCallee),
+            "refer" => Ok(Self::ByRefer),
+            "system" => Ok(Self::BySystem),
+            "autohangup" => Ok(Self::Autohangup),
+            "no_answer" => Ok(Self::NoAnswer),
+            "no_balance" => Ok(Self::NoBalance),
+            "answer_machine" => Ok(Self::AnswerMachine),
+            "server_unavailable" => Ok(Self::ServerUnavailable),
+            "canceled" => Ok(Self::Canceled),
+            "rejected" => Ok(Self::Rejected),
+            "failed" => Ok(Self::Failed),
+            _ => Ok(Self::Other),
+        }
+    }
+}
+impl ToString for CallRecordHangupReason {
+    fn to_string(&self) -> String {
+        match self {
+            Self::ByCaller => "caller".to_string(),
+            Self::ByCallee => "callee".to_string(),
+            Self::ByRefer => "refer".to_string(),
+            Self::BySystem => "system".to_string(),
+            Self::Autohangup => "autohangup".to_string(),
+            Self::NoAnswer => "no_answer".to_string(),
+            Self::NoBalance => "no_balance".to_string(),
+            Self::AnswerMachine => "answer_machine".to_string(),
+            Self::ServerUnavailable => "server_unavailable".to_string(),
+            Self::Canceled => "canceled".to_string(),
+            Self::Rejected => "rejected".to_string(),
+            Self::Failed => "failed".to_string(),
+            Self::Other => "other".to_string(),
+        }
+    }
 }
 pub trait CallRecordFormatter: Send + Sync {
     fn format_file_name(&self, root: &str, record: &CallRecord) -> String {
