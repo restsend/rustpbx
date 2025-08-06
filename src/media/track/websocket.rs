@@ -2,10 +2,7 @@ use super::{Track, TrackConfig, TrackPacketSender, track_codec::TrackCodec};
 use crate::{
     AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
-    media::{
-        codecs::bytes_to_samples,
-        processor::{Processor, ProcessorChain},
-    },
+    media::{codecs::bytes_to_samples, processor::ProcessorChain},
 };
 use anyhow::Result;
 use async_trait::async_trait;

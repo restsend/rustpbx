@@ -95,6 +95,8 @@ pub struct CallRecord {
     pub extras: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dump_event_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refer_callrecord: Option<Box<CallRecord>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +113,7 @@ pub struct CallRecordMedia {
 pub enum CallRecordHangupReason {
     ByCaller,
     ByCallee,
+    ByRefer,
     BySystem,
     Autohangup,
     NoAnswer,

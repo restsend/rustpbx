@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::{fs::File, join, select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub type ActiveCallRef = Arc<ActiveCall>;
 #[derive(Deserialize)]
@@ -47,7 +47,7 @@ pub enum ActiveCallType {
     Sip,
     WebSocket,
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ActiveCallState {
     pub start_time: DateTime<Utc>,
     pub ring_time: Option<DateTime<Utc>>,
@@ -58,6 +58,7 @@ pub struct ActiveCallState {
     pub answer: Option<String>,
     pub dialog_id: Option<DialogId>,
     pub ssrc: u32,
+    pub refer_callstate: Option<ActiveCallStateRef>,
 }
 
 pub type ActiveCallStateRef = Arc<RwLock<ActiveCallState>>;
@@ -434,7 +435,12 @@ impl ActiveCall {
         Ok(())
     }
     async fn do_hangup(&self, reason: Option<String>, initiator: Option<String>) -> Result<()> {
-        info!("Call {} do_hangup", self.session_id);
+        info!(
+            session_id = self.session_id,
+            ?reason,
+            ?initiator,
+            "do_hangup"
+        );
 
         // Set hangup reason based on initiator and reason
         let hangup_reason = match initiator.as_deref() {
@@ -478,43 +484,74 @@ impl ActiveCall {
         &self,
         caller: String,
         callee: String,
-        options: Option<ReferOption>,
+        refer_option: Option<ReferOption>,
     ) -> Result<()> {
-        if let Some(moh) = options.as_ref().and_then(|o| o.moh.clone()) {
+        if let Some(moh) = refer_option.as_ref().and_then(|o| o.moh.clone()) {
             self.do_play(moh, None, None).await?;
         }
-        let token = self.cancel_token.child_token();
+        let token = self.cancel_token.clone();
         let session_id = self.session_id.clone();
         let app_state = self.app_state.clone();
         let event_sender = self.media_stream.get_event_sender();
         let track_id = self.track_config.server_side_track_id.clone();
         let stream = self.media_stream.clone();
         let track_config = self.track_config.clone();
-        let auto_hangup = self.auto_hangup.clone();
+
+        let call_option = CallOption {
+            caller: Some(caller),
+            callee: Some(callee.clone()),
+            sip: refer_option.as_ref().and_then(|o| o.sip.clone()),
+            asr: refer_option.as_ref().and_then(|o| o.asr.clone()),
+            denoise: refer_option.as_ref().and_then(|o| o.denoise.clone()),
+            recorder: self
+                .call_state
+                .read()
+                .as_ref()
+                .map(|cs| cs.option.recorder.clone())
+                .ok()
+                .flatten(),
+            ..Default::default()
+        };
+
+        let ssrc = rand::random::<u32>();
+        let refer_call_state = Arc::new(RwLock::new(ActiveCallState {
+            start_time: Utc::now(),
+            ssrc,
+            option: call_option,
+            ..Default::default()
+        }));
+
+        self.call_state
+            .write()
+            .as_mut()
+            .and_then(|cs| {
+                cs.refer_callstate.replace(refer_call_state.clone());
+                Ok(())
+            })
+            .ok();
+
+        if refer_option
+            .as_ref()
+            .and_then(|o| o.auto_hangup)
+            .unwrap_or(true)
+        {
+            *self.auto_hangup.lock().await = Some(ssrc);
+        } else {
+            *self.auto_hangup.lock().await = None;
+        }
 
         tokio::spawn(async move {
-            match super::sip::make_sip_invite_with_stream(
+            super::sip::make_sip_invite_with_stream(
                 token,
                 app_state,
-                session_id.clone(),
+                session_id,
                 track_id,
                 track_config,
                 event_sender,
                 stream,
-                auto_hangup,
-                caller,
-                callee.clone(),
-                options,
+                refer_call_state,
             )
             .await
-            {
-                Ok(_) => {
-                    info!(session_id, callee, "Refer call started successfully");
-                }
-                Err(e) => {
-                    error!(session_id, callee, "Failed to start refer call: {}", e);
-                }
-            }
         });
         Ok(())
     }
@@ -591,6 +628,24 @@ impl ActiveCallState {
             None
         };
 
+        let refer_callrecord = self.refer_callstate.as_ref().and_then(|rc| {
+            let rc = rc.read().unwrap();
+            if rc.start_time != Utc::now() {
+                let call_id = rc
+                    .dialog_id
+                    .as_ref()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+                Some(Box::new(rc.build_callrecord(
+                    app_state.clone(),
+                    call_id,
+                    ActiveCallType::Sip,
+                )))
+            } else {
+                None
+            }
+        });
+
         let option = &self.option;
         CallRecord {
             option: Some(option.clone()),
@@ -609,6 +664,7 @@ impl ActiveCallState {
             extras: None,
             dump_event_file,
             recorder,
+            refer_callrecord,
         }
     }
 }
@@ -907,7 +963,7 @@ pub async fn process_call(
     let call_state_ref = active_call.call_state.clone();
     let session_id = active_call.session_id.clone();
     let process_sip_dlg_loop = async {
-        super::sip::sip_event_loop(
+        super::sip::sip_dialog_event_loop(
             session_id.clone(),
             session_id,
             event_sender.clone(),

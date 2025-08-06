@@ -1,5 +1,6 @@
 use super::track_codec::TrackCodec;
 use crate::{
+    AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
     media::{
         codecs::CodecType,
@@ -7,23 +8,22 @@ use crate::{
         processor::ProcessorChain,
         track::{Track, TrackConfig, TrackPacketSender},
     },
-    AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use rsip::HostWithPort;
-use rsipstack::transport::{udp::UdpConnection, SipAddr};
+use rsipstack::transport::{SipAddr, udp::UdpConnection};
 use std::{
     io::Cursor,
     net::{IpAddr, SocketAddr},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::{select, time::interval_at, time::Instant};
+use tokio::{select, time::Instant, time::interval_at};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use webrtc::{
@@ -39,19 +39,19 @@ use webrtc::{
     rtp::{
         codecs::g7xx::G7xxPayloader,
         packet::Packet,
-        packetizer::{new_packetizer, Packetizer},
-        sequence::{new_random_sequencer, Sequencer},
+        packetizer::{Packetizer, new_packetizer},
+        sequence::{Sequencer, new_random_sequencer},
     },
     sdp::{
+        MediaDescription, SessionDescription,
         description::{
             common::{Address, Attribute, ConnectionInformation},
             media::{MediaName, RangedPort},
             session::{
-                Origin, TimeDescription, Timing, ATTR_KEY_RTCPMUX, ATTR_KEY_SEND_ONLY,
-                ATTR_KEY_SEND_RECV, ATTR_KEY_SSRC,
+                ATTR_KEY_RTCPMUX, ATTR_KEY_SEND_ONLY, ATTR_KEY_SEND_RECV, ATTR_KEY_SSRC, Origin,
+                TimeDescription, Timing,
             },
         },
-        MediaDescription, SessionDescription,
     },
     util::{Marshal, Unmarshal},
 };
@@ -843,9 +843,11 @@ impl RtpTrack {
                     if magic_cookie == STUN_MAGIC_COOKIE
                         || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
                     {
-                        debug!(track_id,
+                        debug!(
+                            track_id,
                             "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
-                            msg_type, n
+                            msg_type,
+                            n
                         );
                         continue;
                     }
@@ -878,7 +880,8 @@ impl RtpTrack {
 
                 // RTP payload types should be < 128 (7 bits)
                 if rtp_pt >= 128 {
-                    debug!(track_id,
+                    debug!(
+                        track_id,
                         "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
                         rtp_pt
                     );

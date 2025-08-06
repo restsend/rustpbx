@@ -1,10 +1,9 @@
 use super::CallOption;
 use crate::TrackId;
 use crate::app::AppState;
-use crate::call::ActiveCallState;
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
-use crate::event::EventSender;
+use crate::event::{EventSender, SessionEvent};
 use crate::media::engine::StreamEngine;
 use crate::media::stream::MediaStream;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
@@ -18,8 +17,9 @@ use rsipstack::dialog::dialog::{
     DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
 use rsipstack::dialog::invitation::InviteOption;
-use std::sync::{Arc, RwLock};
-use tokio::sync::{Mutex, mpsc};
+use std::sync::Arc;
+use tokio::select;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -203,7 +203,7 @@ pub async fn new_rtp_track_with_sip(
     }
 }
 
-pub async fn sip_event_loop(
+pub async fn sip_dialog_event_loop(
     session_id: String,
     track_id: TrackId,
     event_sender: EventSender,
@@ -236,6 +236,9 @@ pub async fn sip_event_loop(
                 })?;
             }
             DialogState::Confirmed(dialog_id) => {
+                if call_state_ref.dialog_id.is_none() {
+                    call_state_ref.dialog_id = Some(dialog_id.clone());
+                }
                 call_state_ref.answer_time.replace(Utc::now());
                 call_state_ref.last_status_code = 200;
                 info!(session_id, track_id, "dialog confirmed: {}", dialog_id);
@@ -243,8 +246,30 @@ pub async fn sip_event_loop(
             DialogState::Terminated(dialog_id, reason) => {
                 info!(
                     session_id,
-                    track_id, "dialog terminated: {} {:?}", dialog_id, reason
+                    track_id,
+                    ?dialog_id,
+                    ?reason,
+                    "dialog terminated"
                 );
+
+                call_state_ref.last_status_code = match &reason {
+                    TerminatedReason::UacCancel => 487,
+                    TerminatedReason::UacBye => 200,
+                    TerminatedReason::UacBusy => 486,
+                    TerminatedReason::UasBye => 200,
+                    TerminatedReason::UasBusy => 486,
+                    TerminatedReason::UasDecline => 603,
+                    TerminatedReason::UacOther(code) => code
+                        .clone()
+                        .unwrap_or(rsip::StatusCode::ServerInternalError)
+                        .code(),
+                    TerminatedReason::UasOther(code) => code
+                        .clone()
+                        .unwrap_or(rsip::StatusCode::ServerInternalError)
+                        .code(),
+                    _ => 500, // Default to internal server error
+                };
+
                 if call_state_ref.hangup_reason.is_none() {
                     call_state_ref.hangup_reason.replace(match reason {
                         TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
@@ -293,118 +318,103 @@ pub(crate) async fn make_sip_invite_with_stream(
     track_config: TrackConfig,
     event_sender: EventSender,
     stream: Arc<MediaStream>,
-    auto_hangup: Arc<Mutex<Option<u32>>>,
-    caller: String,
-    callee: String,
-    options: Option<super::ReferOption>,
+    refer_call_state: ActiveCallStateRef,
 ) -> Result<()> {
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
-    let refer_call_state = Arc::new(RwLock::new(ActiveCallState {
-        start_time: Utc::now(),
-        ..Default::default()
-    }));
     let dialog_layer = app_state.useragent.dialog_layer.clone();
-    let ssrc = rand::random::<u32>();
-    let auto_hangup_when_done = options.as_ref().and_then(|o| o.auto_hangup);
-    let call_option = CallOption {
-        caller: Some(caller),
-        callee: Some(callee.clone()),
-        sip: options.as_ref().and_then(|o| o.sip.clone()),
-        asr: options.as_ref().and_then(|o| o.asr.clone()),
-        denoise: options.as_ref().and_then(|o| o.denoise.clone()),
-        ..Default::default()
-    };
-    if auto_hangup_when_done.unwrap_or(false) {
-        *auto_hangup.lock().await = Some(ssrc);
-    } else {
-        *auto_hangup.lock().await = None;
-    }
+    let ssrc = refer_call_state.read().map(|cs| cs.ssrc).unwrap_or(0);
+    let start_time = crate::get_timestamp();
 
-    let r = tokio::join!(
-        async {
-            match sip_event_loop(
-                session_id.clone(),
+    let call_option = refer_call_state
+        .read()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(CallOption::default());
+
+    let refer_rtp_track_loop = async {
+        match new_rtp_track_with_sip(
+            app_state.clone(),
+            token.clone(),
+            track_id.clone(),
+            ssrc,
+            track_config,
+            &call_option,
+            dlg_state_sender,
+        )
+        .await
+        {
+            Ok((dialog_id, rtp_track)) => {
+                refer_call_state
+                    .write()
+                    .as_mut()
+                    .map(|cs| cs.dialog_id = Some(dialog_id.clone()))
+                    .ok();
+                let mut callee_track = Box::new(rtp_track) as Box<dyn Track + Send + Sync>;
+                let processors = match StreamEngine::create_processors(
+                    app_state.stream_engine.clone(),
+                    callee_track.as_ref(),
+                    token.clone(),
+                    event_sender.clone(),
+                    &call_option,
+                )
+                .await
+                {
+                    Ok(processors) => processors,
+                    Err(e) => {
+                        warn!(session_id, %dialog_id, "Failed to prepare stream processors: {}", e);
+                        vec![]
+                    }
+                };
+
+                info!(session_id, %dialog_id, processors = processors.len(), "RTP track created with dialog ID");
+                // Add all processors from the hook
+                for processor in processors {
+                    callee_track.append_processor(processor);
+                }
+                stream.update_track(callee_track).await;
+                token.cancelled().await;
+                info!(session_id, %dialog_id, "RTP track for refer call stopped");
+                match dialog_layer.get_dialog(&dialog_id) {
+                    Some(dialog) => {
+                        dialog.hangup().await.ok();
+                    }
+                    _ => {}
+                };
+            }
+            Err(e) => {
+                warn!(session_id, "Failed to create RTP track: {}", e);
+                let event = SessionEvent::Error {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    error: e.to_string(),
+                    sender: "make_sip_invite_with_stream".to_string(),
+                    code: None,
+                };
+                event_sender.send(event).ok();
+
+                let track_end_event = SessionEvent::TrackEnd {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    duration: crate::get_timestamp() - start_time,
+                    ssrc,
+                };
+                event_sender.send(track_end_event).ok();
+                return Err(e);
+            }
+        };
+        Ok(())
+    };
+    select! {
+        _ = sip_dialog_event_loop(session_id.clone(),
                 track_id.clone(),
                 event_sender.clone(),
                 dlg_state_receiver,
                 refer_call_state.clone(),
-            )
-            .await
-            {
-                Ok(dialog_id) => {
-                    info!(
-                        session_id,
-                        "Refer call dialog created with ID: {}", dialog_id
-                    );
-                }
-                Err(e) => {
-                    error!(session_id, "Failed to handle SIP event loop: {}", e);
-                    return Err(e);
-                }
-            }
-            Ok(())
-        },
-        async {
-            match new_rtp_track_with_sip(
-                app_state.clone(),
-                token.clone(),
-                track_id.clone(),
-                ssrc,
-                track_config,
-                &call_option,
-                dlg_state_sender,
-            )
-            .await
-            {
-                Ok((dialog_id, rtp_track)) => {
-                    let mut callee_track = Box::new(rtp_track) as Box<dyn Track + Send + Sync>;
-                    let processors = match StreamEngine::create_processors(
-                        app_state.stream_engine.clone(),
-                        callee_track.as_ref(),
-                        token.clone(),
-                        event_sender.clone(),
-                        &call_option,
-                    )
-                    .await
-                    {
-                        Ok(processors) => processors,
-                        Err(e) => {
-                            warn!(session_id, %dialog_id, "Failed to prepare stream processors: {}", e);
-                            vec![]
-                        }
-                    };
-
-                    info!(session_id, %dialog_id, processors = processors.len(), "RTP track created with dialog ID");
-                    // Add all processors from the hook
-                    for processor in processors {
-                        callee_track.append_processor(processor);
-                    }
-                    stream.update_track(callee_track).await;
-                    token.cancelled().await;
-                    info!(session_id, "RTP track for refer call to {} stopped", callee);
-                    match dialog_layer.get_dialog(&dialog_id) {
-                        Some(dialog) => {
-                            dialog.hangup().await.ok();
-                        }
-                        _ => {}
-                    };
-                }
-                Err(e) => {
-                    error!(session_id, "Failed to create RTP track: {}", e);
-                    return Err(e);
-                }
-            };
-            Ok(())
+            ) => {
+                info!(session_id, "Refer sip_event_loop done");
         }
-    );
-    match r {
-        (Ok(()), Ok(())) => {
-            info!(session_id, "Refer call completed successfully");
+        _ = refer_rtp_track_loop => {
+            info!(session_id, "Refer RTP track loop completed");
         }
-        (Err(e), _) | (_, Err(e)) => {
-            error!(session_id, "Refer call failed: {}", e);
-            return Err(e);
-        }
-    };
+    }
     Ok(())
 }

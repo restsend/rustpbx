@@ -5,7 +5,7 @@ use rustpbx::{app::AppStateBuilder, config::Config, version};
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{
-    fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
+    EnvFilter, fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
 #[derive(Parser, Debug)]

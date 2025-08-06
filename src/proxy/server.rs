@@ -1,27 +1,27 @@
 use super::{
-    locator::{create_locator, Locator},
-    user::{create_user_backend, UserBackend},
     FnCreateProxyModule, ProxyAction, ProxyModule,
+    locator::{Locator, create_locator},
+    user::{UserBackend, create_user_backend},
 };
 use crate::{callrecord::CallRecordSender, config::ProxyConfig, proxy::user::SipUser};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
 use rsipstack::{
+    EndpointBuilder,
     transaction::{
-        endpoint::EndpointOption, key::TransactionKey, transaction::Transaction, Endpoint,
-        TransactionReceiver,
+        Endpoint, TransactionReceiver, endpoint::EndpointOption, key::TransactionKey,
+        transaction::Transaction,
     },
     transport::{
-        udp::UdpConnection, TcpListenerConnection, TransportLayer, WebSocketListenerConnection,
+        TcpListenerConnection, TransportLayer, WebSocketListenerConnection, udp::UdpConnection,
     },
-    EndpointBuilder,
 };
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -202,7 +202,7 @@ impl SipServerBuilder {
                 Some(cancel_token.child_token()),
             )
             .await
-            .map_err(|e| anyhow!("Failed to create UDP connection: {}", e))?;
+            .map_err(|e| anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e))?;
             transport_layer.add_transport(udp_conn.into());
             info!("start proxy, udp port: {}", local_addr);
         }
