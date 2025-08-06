@@ -323,7 +323,6 @@ pub(crate) async fn make_sip_invite_with_stream(
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
     let dialog_layer = app_state.useragent.dialog_layer.clone();
     let ssrc = refer_call_state.read().map(|cs| cs.ssrc).unwrap_or(0);
-    let start_time = crate::get_timestamp();
 
     let call_option = refer_call_state
         .read()
@@ -390,19 +389,12 @@ pub(crate) async fn make_sip_invite_with_stream(
                     code: None,
                 };
                 event_sender.send(event).ok();
-
-                let track_end_event = SessionEvent::TrackEnd {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                    duration: crate::get_timestamp() - start_time,
-                    ssrc,
-                };
-                event_sender.send(track_end_event).ok();
                 return Err(e);
             }
         };
         Ok(())
     };
+    let start_time = crate::get_timestamp();
     select! {
         _ = sip_dialog_event_loop(session_id.clone(),
                 track_id.clone(),
@@ -416,5 +408,12 @@ pub(crate) async fn make_sip_invite_with_stream(
             info!(session_id, "Refer RTP track loop completed");
         }
     }
+    let track_end_event = SessionEvent::TrackEnd {
+        track_id: track_id.clone(),
+        timestamp: crate::get_timestamp(),
+        duration: crate::get_timestamp() - start_time,
+        ssrc,
+    };
+    event_sender.send(track_end_event).ok();
     Ok(())
 }
