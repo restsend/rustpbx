@@ -412,10 +412,10 @@ impl SipServer {
                         let final_status = tx.last_response.as_ref().map(|r| r.status_code());
                         match r {
                             Ok(_) => {
-                                info!(key, ?final_status, "Transaction processed in {:?} ", start_time.elapsed());
+                                info!(key, ?final_status, "Transaction processed in {} s ", start_time.elapsed().as_secs_f32());
                             },
                             Err(e) => {
-                                warn!(key, ?final_status, "Failed to process transaction: {} in {:?}", e, start_time.elapsed());
+                                warn!(key, ?final_status, "Failed to process transaction: {} in {} s", e, start_time.elapsed().as_secs_f32());
                             }
                         }
                     }

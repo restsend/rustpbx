@@ -1,7 +1,7 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
     app::AppState,
-    call::CommandReceiver,
+    call::{CommandReceiver, sip::Invitation},
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
@@ -75,6 +75,7 @@ pub struct ActiveCall {
     pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
     pub event_sender: EventSender,
     pub app_state: AppState,
+    pub invitation: Invitation,
 }
 
 impl ActiveCall {
@@ -88,7 +89,7 @@ impl ActiveCall {
     ) -> Result<MediaStream> {
         let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
-            .with_cancel_token(cancel_token.clone());
+            .with_cancel_token(cancel_token.child_token());
 
         if let Some(recorder_option) = &option.recorder {
             let recorder_file = app_state.get_recorder_file(&session_id);
@@ -135,7 +136,7 @@ impl ActiveCall {
         {
             Ok(processors) => processors,
             Err(e) => {
-                warn!(session_id, "Failed to prepare stream processors: {}", e);
+                warn!(session_id, "failed to prepare stream processors: {}", e);
                 vec![]
             }
         };
@@ -157,6 +158,7 @@ impl ActiveCall {
         session_id: String,
         media_stream: MediaStream,
         app_state: AppState,
+        invitation: Invitation,
     ) -> Self {
         Self {
             cancel_token,
@@ -170,6 +172,7 @@ impl ActiveCall {
             event_sender,
             tts_handle: Mutex::new(None),
             app_state,
+            invitation,
         }
     }
 
@@ -249,16 +252,16 @@ impl ActiveCall {
 
         select! {
             _ = wait_input_timeout_loop=>{
-                info!(session_id = self.session_id, "Wait input timeout loop done");
+                info!(session_id = self.session_id, "wait input timeout loop done");
             }
             _ = event_hook_loop => {
-                info!(session_id = self.session_id, "Event loop done");
+                info!(session_id = self.session_id, "event loop done");
             }
             _ = self.media_stream.serve() => {
-                info!(session_id = self.session_id, "Media stream serve done");
+                info!(session_id = self.session_id, "media stream serve done");
             }
             _ = self.cancel_token.cancelled() => {
-                info!(session_id = self.session_id, "Event loop cancelled");
+                info!(session_id = self.session_id, "event loop cancelled");
             }
         }
         Ok(())
@@ -484,8 +487,7 @@ impl ActiveCall {
         };
 
         if let Some(dialog_id) = dialog_id {
-            self.app_state
-                .useragent
+            self.invitation
                 .hangup(dialog_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to hangup: {}", e))?;
@@ -553,7 +555,7 @@ impl ActiveCall {
         } else {
             *self.auto_hangup.lock().await = None;
         }
-
+        let invitation = self.invitation.clone();
         tokio::spawn(async move {
             super::sip::make_sip_invite_with_stream(
                 token,
@@ -564,6 +566,7 @@ impl ActiveCall {
                 event_sender,
                 stream,
                 refer_call_state,
+                invitation,
             )
             .await
         });
@@ -589,7 +592,7 @@ impl ActiveCall {
         };
 
         if let Some(dialog_id) = dialog_id {
-            self.app_state.useragent.hangup(dialog_id).await.ok();
+            self.invitation.hangup(dialog_id).await.ok();
         }
 
         self.tts_handle.lock().await.take();
@@ -733,6 +736,7 @@ pub async fn handle_call(
     audio_receiver: WebsocketBytesReceiver,
     dump_cmd_receiver: CommandReceiver,
     mut cmd_receiver: CommandReceiver,
+    invitation: Invitation,
 ) -> Result<CallRecord, (Error, Option<CallRecord>)> {
     let dump_events_loop = async {
         if !dump_events {
@@ -829,6 +833,7 @@ pub async fn handle_call(
             cmd_receiver,
             dlg_state_sender,
             call_state_ref.clone(),
+            invitation,
         )
         .await;
 
@@ -870,6 +875,7 @@ pub async fn process_call(
     mut cmd_receiver: CommandReceiver,
     dlg_state_sender: DialogStateSender,
     call_state_ref: ActiveCallStateRef,
+    invitation: Invitation,
 ) -> Result<CallRecord> {
     let track_config = TrackConfig::default();
     let caller_track = match call_type {
@@ -913,6 +919,7 @@ pub async fn process_call(
                     session_id.clone(),
                     app_state.clone(),
                     dlg_state_sender,
+                    &invitation,
                 )
                 .await
             }
@@ -957,6 +964,7 @@ pub async fn process_call(
         session_id.clone(),
         media_stream,
         app_state.clone(),
+        invitation,
     ));
 
     let active_calls_len = {
@@ -1117,6 +1125,7 @@ async fn create_outgoing_sip_track(
     session_id: String,
     app_state: AppState,
     dlg_state_sender: DialogStateSender,
+    invitation: &Invitation,
 ) -> Result<Box<dyn Track>> {
     let ssrc = call_state_ref
         .read()
@@ -1137,6 +1146,7 @@ async fn create_outgoing_sip_track(
         track_config,
         &option,
         dlg_state_sender,
+        invitation,
     )
     .await;
     match r {

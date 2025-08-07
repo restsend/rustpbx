@@ -180,6 +180,7 @@ pub async fn call_handler(
         };
 
         let token_ref = cancel_token.clone();
+        let invitation = app_state.useragent.invitation.clone();
         let handle_call_loop = async {
             match handle_call(
                 cancel_token,
@@ -191,6 +192,7 @@ pub async fn call_handler(
                 audio_receiver,
                 dump_cmd_receiver,
                 cmd_receiver,
+                invitation,
             )
             .await
             {

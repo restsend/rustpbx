@@ -1,6 +1,6 @@
 use crate::{
     config::{InviteHandlerConfig, UseragentConfig},
-    useragent::{invitation::create_invite_handler, UserAgent, UserAgentBuilder},
+    useragent::{UserAgent, UserAgentBuilder, invitation::create_invite_handler},
 };
 use anyhow::Result;
 use rsipstack::dialog::invitation::InviteOption;
@@ -12,7 +12,7 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use warp::{http::StatusCode as HttpStatusCode, Filter};
+use warp::{Filter, http::StatusCode as HttpStatusCode};
 
 // Mock webhook server to capture webhook calls
 #[derive(Debug, Clone)]
@@ -179,7 +179,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
             info!("Bob initiating call to Alice...");
 
             // Start the invite in a separate task so we can handle Alice's response concurrently
-            let bob_ua_invite = bob_ua_arc.clone();
+            let bob_ua_invite = bob_ua_arc.invitation.clone();
             let invite_handle = tokio::spawn(async move {
                 bob_ua_invite.invite(invite_option, state_sender).await
             });
