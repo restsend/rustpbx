@@ -158,7 +158,6 @@ pub struct RtpTrackBuilder {
     config: TrackConfig,
     local_addr: Option<IpAddr>,
     external_addr: Option<IpAddr>,
-    stun_server: Option<String>,
     rtp_socket: Option<UdpConnection>,
     rtcp_socket: Option<UdpConnection>,
     rtcp_mux: bool,
@@ -202,7 +201,6 @@ impl RtpTrackBuilder {
             config,
             local_addr: None,
             external_addr: None,
-            stun_server: None,
             cancel_token: None,
             rtp_socket: None,
             rtcp_socket: None,
@@ -249,11 +247,6 @@ impl RtpTrackBuilder {
 
     pub fn with_external_addr(mut self, external_addr: IpAddr) -> Self {
         self.external_addr = Some(external_addr);
-        self
-    }
-
-    pub fn with_stun_server(mut self, stun_server: String) -> Self {
-        self.stun_server = Some(stun_server);
         self
     }
 
@@ -339,36 +332,7 @@ impl RtpTrackBuilder {
             None => return Err(anyhow::anyhow!("failed to bind RTCP socket")),
         };
 
-        if self.external_addr.is_none() && self.stun_server.is_some() {
-            if let Some(ref server) = self.stun_server {
-                match crate::net_tool::external_by_stun(
-                    &mut rtp_conn,
-                    &server,
-                    Duration::from_secs(5),
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => info!(
-                        "failed to get media external rtp addr, stunserver {} : {:?}",
-                        server, e
-                    ),
-                }
-                match crate::net_tool::external_by_stun(
-                    &mut rtcp_conn,
-                    &server,
-                    Duration::from_secs(5),
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => info!(
-                        "failed to get media external rtcp addr, stunserver {} : {:?}",
-                        server, e
-                    ),
-                }
-            }
-        } else if let Some(addr) = self.external_addr {
+        if let Some(addr) = self.external_addr {
             rtp_conn.external = Some(
                 SocketAddr::new(
                     addr,
