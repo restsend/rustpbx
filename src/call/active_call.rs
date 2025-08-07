@@ -79,84 +79,13 @@ pub struct ActiveCall {
 }
 
 impl ActiveCall {
-    pub async fn create_stream(
-        cancel_token: CancellationToken,
-        session_id: String,
-        option: &CallOption,
-        mut caller_track: Box<dyn Track>,
-        app_state: AppState,
-        event_sender: EventSender,
-    ) -> Result<MediaStream> {
-        let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
-            .with_id(session_id.clone())
-            .with_cancel_token(cancel_token.child_token());
-
-        if let Some(recorder_option) = &option.recorder {
-            let recorder_file = app_state.get_recorder_file(&session_id);
-            info!(session_id, "created recording file: {}", recorder_file);
-
-            let track_samplerate = caller_track.config().samplerate;
-            let recorder_samplerate = if track_samplerate > 0 {
-                track_samplerate
-            } else {
-                recorder_option.samplerate
-            };
-            let recorder_ptime = if recorder_option.ptime.is_zero() {
-                Duration::from_millis(200)
-            } else {
-                recorder_option.ptime
-            };
-            let recorder_config = RecorderOption {
-                recorder_file,
-                samplerate: recorder_samplerate,
-                ptime: recorder_ptime,
-            };
-
-            info!(
-                session_id,
-                sample_rate = recorder_samplerate,
-                ptime = recorder_ptime.as_millis(),
-                track_sample_rate = track_samplerate,
-                "recorder config",
-            );
-
-            media_stream_builder = media_stream_builder.with_recorder_config(recorder_config);
-        }
-
-        let media_stream = media_stream_builder.build();
-        // Use the prepare_stream_hook to set up processors
-        let processors = match StreamEngine::create_processors(
-            app_state.stream_engine.clone(),
-            caller_track.as_ref(),
-            cancel_token,
-            event_sender.clone(),
-            &option,
-        )
-        .await
-        {
-            Ok(processors) => processors,
-            Err(e) => {
-                warn!(session_id, "failed to prepare stream processors: {}", e);
-                vec![]
-            }
-        };
-
-        // Add all processors from the hook
-        for processor in processors {
-            caller_track.append_processor(processor);
-        }
-
-        media_stream.update_track(caller_track).await;
-        Ok(media_stream)
-    }
-
     pub fn new(
         call_state: ActiveCallStateRef,
         call_type: ActiveCallType,
         cancel_token: CancellationToken,
         event_sender: EventSender,
         session_id: String,
-        media_stream: MediaStream,
+        media_stream: Arc<MediaStream>,
         app_state: AppState,
         invitation: Invitation,
     ) -> Self {
@@ -165,7 +94,7 @@ impl ActiveCall {
             call_type,
             session_id,
             call_state,
-            media_stream: Arc::new(media_stream),
+            media_stream,
             track_config: TrackConfig::default(),
             auto_hangup: Arc::new(Mutex::new(None)),
             wait_input_timeout: Arc::new(Mutex::new(None)),
@@ -256,9 +185,6 @@ impl ActiveCall {
             }
             _ = event_hook_loop => {
                 info!(session_id = self.session_id, "event loop done");
-            }
-            _ = self.media_stream.serve() => {
-                info!(session_id = self.session_id, "media stream serve done");
             }
             _ = self.cancel_token.cancelled() => {
                 info!(session_id = self.session_id, "event loop cancelled");
@@ -686,6 +612,52 @@ impl ActiveCallState {
     }
 }
 
+pub async fn create_stream(
+    cancel_token: CancellationToken,
+    session_id: String,
+    option: &CallOption,
+    track_config: &TrackConfig,
+    app_state: AppState,
+    event_sender: EventSender,
+) -> Result<MediaStream> {
+    let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
+        .with_id(session_id.clone())
+        .with_cancel_token(cancel_token.child_token());
+
+    if let Some(recorder_option) = &option.recorder {
+        let recorder_file = app_state.get_recorder_file(&session_id);
+        info!(session_id, "created recording file: {}", recorder_file);
+
+        let track_samplerate = track_config.samplerate;
+        let recorder_samplerate = if track_samplerate > 0 {
+            track_samplerate
+        } else {
+            recorder_option.samplerate
+        };
+        let recorder_ptime = if recorder_option.ptime.is_zero() {
+            Duration::from_millis(200)
+        } else {
+            recorder_option.ptime
+        };
+        let recorder_config = RecorderOption {
+            recorder_file,
+            samplerate: recorder_samplerate,
+            ptime: recorder_ptime,
+        };
+
+        info!(
+            session_id,
+            sample_rate = recorder_samplerate,
+            ptime = recorder_ptime.as_millis(),
+            track_sample_rate = track_samplerate,
+            "recorder config",
+        );
+
+        media_stream_builder = media_stream_builder.with_recorder_config(recorder_config);
+    }
+    Ok(media_stream_builder.build())
+}
+
 pub async fn dump_events_to_file(
     cancel_token: CancellationToken,
     dump_file: &mut File,
@@ -803,6 +775,21 @@ pub async fn handle_call(
     option.check_default(); // check default
 
     info!(session_id, ?call_type, "prepare call option: {:?}", option);
+    let track_config = TrackConfig::default();
+
+    let media_stream = Arc::new(
+        create_stream(
+            cancel_token.clone(),
+            session_id.clone(),
+            &option,
+            &track_config,
+            app_state.clone(),
+            event_sender.clone(),
+        )
+        .await
+        .map_err(|e| (e, None))?,
+    );
+
     let call_state_ref = Arc::new(RwLock::new(ActiveCallState {
         start_time: Utc::now(),
         option: option,
@@ -813,11 +800,15 @@ pub async fn handle_call(
     let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
     let process_sip_dlg_loop = async {
         super::sip::sip_dialog_event_loop(
+            cancel_token.clone(),
+            app_state.clone(),
             session_id.clone(),
             session_id.clone(),
+            track_config.clone(),
             event_sender.clone(),
             dlg_state_receiver,
             call_state_ref.clone(),
+            media_stream.clone(),
         )
         .await
     };
@@ -826,8 +817,10 @@ pub async fn handle_call(
         let r = process_call(
             cancel_token.clone(),
             call_type.clone(),
+            track_config.clone(),
             session_id.clone(),
             app_state.clone(),
+            media_stream.clone(),
             event_sender.clone(),
             audio_receiver,
             cmd_receiver,
@@ -845,7 +838,8 @@ pub async fn handle_call(
     };
 
     app_state.total_calls.fetch_add(1, Ordering::Relaxed);
-    let (_, _, process_call_result) = join! {
+    let (_, _, _, process_call_result) = join! {
+        media_stream.serve(),
         process_sip_dlg_loop,
         dump_events_loop,
         process_call_loop
@@ -868,8 +862,10 @@ pub async fn handle_call(
 pub async fn process_call(
     cancel_token: CancellationToken,
     call_type: ActiveCallType,
+    track_config: TrackConfig,
     session_id: String,
     app_state: AppState,
+    media_stream: Arc<MediaStream>,
     event_sender: EventSender,
     audio_receiver: WebsocketBytesReceiver,
     mut cmd_receiver: CommandReceiver,
@@ -877,7 +873,12 @@ pub async fn process_call(
     call_state_ref: ActiveCallStateRef,
     invitation: Invitation,
 ) -> Result<CallRecord> {
-    let track_config = TrackConfig::default();
+    let option = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(Default::default());
+
     let caller_track = match call_type {
         ActiveCallType::WebSocket => {
             create_websocket_track(
@@ -896,6 +897,7 @@ pub async fn process_call(
                 track_config,
                 call_state_ref.clone(),
                 session_id.clone(),
+                &option,
             )
             .await
         }
@@ -926,35 +928,29 @@ pub async fn process_call(
         }
     }?;
 
-    let answer = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.answer.clone())
-        .unwrap_or(None)
-        .unwrap_or_default();
-
     let option = call_state_ref
         .read()
         .as_ref()
         .map(|cs| cs.option.clone())
         .unwrap_or(Default::default());
 
-    let media_stream = match ActiveCall::create_stream(
+    setup_track_with_stream(
         cancel_token.clone(),
-        session_id.clone(),
-        &option,
-        caller_track,
-        app_state.clone(),
+        app_state.stream_engine.clone(),
+        &session_id,
         event_sender.clone(),
+        media_stream.clone(),
+        caller_track,
+        &option,
     )
-    .await
-    {
-        Ok(media_stream) => media_stream,
-        Err(e) => {
-            warn!(session_id, "error creating media stream: {}", e);
-            return Err(anyhow::anyhow!("error creating media stream: {}", e));
-        }
-    };
+    .await;
+
+    let answer = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.answer.clone())
+        .unwrap_or(None)
+        .unwrap_or_default();
 
     let active_call = Arc::new(ActiveCall::new(
         call_state_ref,
@@ -1019,11 +1015,44 @@ pub async fn process_call(
     Ok(active_call.get_callrecord().await)
 }
 
+pub async fn setup_track_with_stream(
+    cancel_token: CancellationToken,
+    engine: Arc<StreamEngine>,
+    session_id: &String,
+    event_sender: EventSender,
+    media_stream: Arc<MediaStream>,
+    mut caller_track: Box<dyn Track>,
+    option: &CallOption,
+) {
+    let processors = match StreamEngine::create_processors(
+        engine,
+        caller_track.as_ref(),
+        cancel_token,
+        event_sender.clone(),
+        &option,
+    )
+    .await
+    {
+        Ok(processors) => processors,
+        Err(e) => {
+            warn!(session_id, "failed to prepare stream processors: {}", e);
+            vec![]
+        }
+    };
+
+    // Add all processors from the hook
+    for processor in processors {
+        caller_track.append_processor(processor);
+    }
+
+    media_stream.update_track(caller_track).await;
+}
+
 async fn create_websocket_track(
     cancel_token: CancellationToken,
     track_config: TrackConfig,
     call_state_ref: ActiveCallStateRef,
-    sesion_id: String,
+    session_id: String,
     event_sender: EventSender,
     audio_receiver: WebsocketBytesReceiver,
 ) -> Result<Box<dyn Track>> {
@@ -1040,9 +1069,9 @@ async fn create_websocket_track(
 
     let ws_track = WebsocketTrack::new(
         cancel_token.child_token(),
-        sesion_id,
+        session_id.clone(),
         track_config,
-        event_sender,
+        event_sender.clone(),
         audio_receiver,
         codec,
         ssrc,
@@ -1065,17 +1094,13 @@ async fn create_webrtc_track(
     track_config: TrackConfig,
     call_state_ref: ActiveCallStateRef,
     session_id: String,
+    option: &CallOption,
 ) -> Result<Box<dyn Track>> {
     let ssrc = call_state_ref
         .read()
         .as_ref()
         .map(|cs| cs.ssrc)
         .unwrap_or(0);
-    let option = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.clone())
-        .unwrap_or(Default::default());
     let mut webrtc_track =
         WebrtcTrack::new(cancel_token.child_token(), session_id.clone(), track_config)
             .with_ssrc(ssrc);

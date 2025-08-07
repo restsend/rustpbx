@@ -69,10 +69,12 @@ mod wait_input_timeout_tests {
             ..Default::default()
         });
 
-        let media_stream = MediaStreamBuilder::new(event_sender.clone())
-            .with_id(session_id.clone())
-            .with_cancel_token(cancel_token.clone())
-            .build();
+        let media_stream = Arc::new(
+            MediaStreamBuilder::new(event_sender.clone())
+                .with_id(session_id.clone())
+                .with_cancel_token(cancel_token.clone())
+                .build(),
+        );
 
         let invitation = app_state.useragent.invitation.clone();
         Ok(Arc::new(ActiveCall::new(
@@ -103,7 +105,10 @@ mod wait_input_timeout_tests {
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
-                let _ = active_call_clone.serve().await;
+                tokio::select! {
+                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.media_stream.serve() => {},
+                }
             })
         };
 
@@ -177,7 +182,10 @@ mod wait_input_timeout_tests {
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
-                let _ = active_call_clone.serve().await;
+                tokio::select! {
+                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.media_stream.serve() => {},
+                }
             })
         };
 
@@ -236,7 +244,10 @@ mod wait_input_timeout_tests {
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
-                let _ = active_call_clone.serve().await;
+                tokio::select! {
+                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.media_stream.serve() => {},
+                }
             })
         };
 
@@ -296,7 +307,10 @@ mod wait_input_timeout_tests {
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
-                let _ = active_call_clone.serve().await;
+                tokio::select! {
+                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.media_stream.serve() => {},
+                }
             })
         };
 

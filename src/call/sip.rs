@@ -1,13 +1,12 @@
 use super::CallOption;
 use crate::TrackId;
 use crate::app::AppState;
-use crate::call::active_call::ActiveCallStateRef;
+use crate::call::active_call::{ActiveCallStateRef, setup_track_with_stream};
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::{EventSender, SessionEvent};
-use crate::media::engine::StreamEngine;
 use crate::media::stream::MediaStream;
+use crate::media::track::TrackConfig;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
-use crate::media::track::{Track, TrackConfig};
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
 use chrono::Utc;
@@ -89,21 +88,18 @@ impl Invitation {
     }
 }
 
-pub async fn new_rtp_track_with_pending_call(
-    state: AppState,
-    token: CancellationToken,
+pub async fn create_rtp_track(
+    cancel_token: CancellationToken,
+    app_state: AppState,
     track_id: TrackId,
-    ssrc: u32,
     track_config: TrackConfig,
-    _option: &CallOption,
-    dlg_state_sender: DialogStateSender,
-    pending_dialog: PendingDialog,
-) -> Result<(DialogId, RtpTrack)> {
+    ssrc: u32,
+) -> Result<RtpTrack> {
     let mut rtp_track = RtpTrackBuilder::new(track_id.clone(), track_config)
         .with_ssrc(ssrc)
-        .with_cancel_token(token);
+        .with_cancel_token(cancel_token);
 
-    if let Some(ref sip) = state.config.ua {
+    if let Some(ref sip) = app_state.config.ua {
         if let Some(rtp_start_port) = sip.rtp_start_port {
             rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
         }
@@ -114,13 +110,28 @@ pub async fn new_rtp_track_with_pending_call(
         if let Some(ref external_ip) = sip.external_ip {
             rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
         }
-
-        if let Some(ref stun_server) = sip.stun_server {
-            rtp_track = rtp_track.with_stun_server(stun_server.clone());
-        }
     }
+    rtp_track.build().await
+}
 
-    let mut rtp_track = rtp_track.build().await?;
+pub async fn new_rtp_track_with_pending_call(
+    state: AppState,
+    token: CancellationToken,
+    track_id: TrackId,
+    ssrc: u32,
+    track_config: TrackConfig,
+    _option: &CallOption,
+    dlg_state_sender: DialogStateSender,
+    pending_dialog: PendingDialog,
+) -> Result<(DialogId, RtpTrack)> {
+    let mut rtp_track = create_rtp_track(
+        token.clone(),
+        state.clone(),
+        track_id.clone(),
+        track_config,
+        ssrc,
+    )
+    .await?;
     let initial_request = pending_dialog.dialog.initial_request();
     let offer = String::from_utf8_lossy(&initial_request.body);
     match rtp_track.set_remote_description(&offer) {
@@ -156,10 +167,11 @@ pub async fn new_rtp_track_with_pending_call(
     let dialog_id = pending_dialog.dialog.id();
 
     let mut state_receiver = pending_dialog.state_receiver;
-    let token_clone = pending_dialog.token;
+    let pending_token_clone = pending_dialog.token;
     tokio::spawn(async move {
         tokio::select! {
-            _ = token_clone.cancelled() => {}
+            _ = token.cancelled() => {}
+            _ = pending_token_clone.cancelled() => {}
             _ = async {
                 while let Some(state) = state_receiver.recv().await {
                     if let Err(_) = dlg_state_sender.send(state) {
@@ -191,31 +203,18 @@ pub async fn new_rtp_track_with_sip(
         Some(ref callee) => callee.clone(),
         None => return Err(rsipstack::Error::Error("callee is required".to_string())),
     };
-    let mut rtp_track = RtpTrackBuilder::new(track_id.clone(), track_config)
-        .with_ssrc(ssrc)
-        .with_cancel_token(token);
 
-    if let Some(ref sip) = app_state.config.ua {
-        if let Some(rtp_start_port) = sip.rtp_start_port {
-            rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
-        }
-        if let Some(rtp_end_port) = sip.rtp_end_port {
-            rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
-        }
-
-        if let Some(ref external_ip) = sip.external_ip {
-            rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
-        }
-
-        if let Some(ref stun_server) = sip.stun_server {
-            rtp_track = rtp_track.with_stun_server(stun_server.clone());
-        }
-    }
-
-    let mut rtp_track = rtp_track
-        .build()
-        .await
-        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
+    let mut rtp_track = create_rtp_track(
+        token.clone(),
+        app_state.clone(),
+        track_id.clone(),
+        track_config,
+        ssrc,
+    )
+    .await
+    .map_err(|e| {
+        rsipstack::Error::Error(format!("failed to create rtp track: {}", e.to_string()))
+    })?;
 
     let offer = rtp_track.local_description().ok();
 
@@ -278,31 +277,95 @@ pub async fn new_rtp_track_with_sip(
 }
 
 pub async fn sip_dialog_event_loop(
+    cancel_token: CancellationToken,
+    app_state: AppState,
     session_id: String,
     track_id: TrackId,
+    track_config: TrackConfig,
     event_sender: EventSender,
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
+    media_stream: Arc<MediaStream>,
 ) -> Result<DialogId> {
     while let Some(event) = dlg_state_receiver.recv().await {
-        let mut call_state_ref = call_state.write().unwrap();
-
         match event {
             DialogState::Trying(dialog_id) => {
                 info!(session_id, "dialog trying: {}", dialog_id);
             }
-            DialogState::Early(dialog_id, _) => {
-                info!(session_id, track_id, "dialog early: {}", dialog_id);
-                call_state_ref.ring_time.replace(Utc::now());
+            DialogState::Early(dialog_id, resp) => {
+                let body = resp.body();
+                let answer = String::from_utf8_lossy(body);
+                info!(session_id, track_id, %dialog_id,  ", answer: \n{}", answer);
+
+                call_state
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| Ok(cs.ring_time.replace(Utc::now())))
+                    .ok();
+
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
                     early_media: true,
                 })?;
+
+                if answer.is_empty() {
+                    continue;
+                }
+
+                let mut rtp_track = match create_rtp_track(
+                    cancel_token.clone(),
+                    app_state.clone(),
+                    track_id.clone(),
+                    track_config.clone(),
+                    0,
+                )
+                .await
+                {
+                    Ok(track) => track,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+                match rtp_track.set_remote_description(&answer) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        warn!(
+                            session_id,
+                            track_id,
+                            %dialog_id,
+                            "failed to set remote description: {}", e
+                        );
+                        continue;
+                    }
+                }
+                let caller_track = Box::new(rtp_track);
+                let option = call_state
+                    .read()
+                    .map(|cs| cs.option.clone())
+                    .unwrap_or(CallOption::default());
+                setup_track_with_stream(
+                    cancel_token.clone(),
+                    app_state.stream_engine.clone(),
+                    &session_id,
+                    event_sender.clone(),
+                    media_stream.clone(),
+                    caller_track,
+                    &option,
+                )
+                .await;
+                info!(
+                    session_id,
+                    track_id, "RTP track for early media setup completed"
+                );
             }
             DialogState::Calling(dialog_id) => {
-                info!(session_id, track_id, "dialog calling: {}", dialog_id);
-                call_state_ref.ring_time.replace(Utc::now());
+                info!(session_id, track_id, %dialog_id, "dialog calling");
+                call_state
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| Ok(cs.ring_time.replace(Utc::now())))
+                    .ok();
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
@@ -310,12 +373,19 @@ pub async fn sip_dialog_event_loop(
                 })?;
             }
             DialogState::Confirmed(dialog_id) => {
-                if call_state_ref.dialog_id.is_none() {
-                    call_state_ref.dialog_id = Some(dialog_id.clone());
-                }
-                call_state_ref.answer_time.replace(Utc::now());
-                call_state_ref.last_status_code = 200;
-                info!(session_id, track_id, "dialog confirmed: {}", dialog_id);
+                call_state
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| {
+                        if cs.dialog_id.is_none() {
+                            cs.dialog_id = Some(dialog_id.clone());
+                        }
+                        cs.answer_time.replace(Utc::now());
+                        cs.last_status_code = 200;
+                        Ok(())
+                    })
+                    .ok();
+                info!(session_id, track_id, %dialog_id, "dialog confirmed");
             }
             DialogState::Terminated(dialog_id, reason) => {
                 info!(
@@ -326,6 +396,12 @@ pub async fn sip_dialog_event_loop(
                     "dialog terminated"
                 );
 
+                let mut call_state_ref = match call_state.write() {
+                    Ok(cs) => cs,
+                    Err(_) => {
+                        break;
+                    }
+                };
                 call_state_ref.last_status_code = match &reason {
                     TerminatedReason::UacCancel => 487,
                     TerminatedReason::UacBye => 200,
@@ -391,7 +467,7 @@ pub(crate) async fn make_sip_invite_with_stream(
     track_id: TrackId,
     track_config: TrackConfig,
     event_sender: EventSender,
-    stream: Arc<MediaStream>,
+    media_stream: Arc<MediaStream>,
     refer_call_state: ActiveCallStateRef,
     invitation: Invitation,
 ) -> Result<()> {
@@ -410,7 +486,7 @@ pub(crate) async fn make_sip_invite_with_stream(
             token.clone(),
             track_id.clone(),
             ssrc,
-            track_config,
+            track_config.clone(),
             &call_option,
             dlg_state_sender,
             &invitation,
@@ -423,29 +499,25 @@ pub(crate) async fn make_sip_invite_with_stream(
                     .as_mut()
                     .map(|cs| cs.dialog_id = Some(dialog_id.clone()))
                     .ok();
-                let mut callee_track = Box::new(rtp_track) as Box<dyn Track + Send + Sync>;
-                let processors = match StreamEngine::create_processors(
-                    app_state.stream_engine.clone(),
-                    callee_track.as_ref(),
-                    token.clone(),
-                    event_sender.clone(),
-                    &call_option,
-                )
-                .await
-                {
-                    Ok(processors) => processors,
-                    Err(e) => {
-                        warn!(session_id, %dialog_id, "Failed to prepare stream processors: {}", e);
-                        vec![]
-                    }
-                };
 
-                info!(session_id, %dialog_id, processors = processors.len(), "RTP track created with dialog ID");
-                // Add all processors from the hook
-                for processor in processors {
-                    callee_track.append_processor(processor);
-                }
-                stream.update_track(callee_track).await;
+                let option = refer_call_state
+                    .read()
+                    .map(|cs| cs.option.clone())
+                    .unwrap_or(CallOption::default());
+
+                let callee_track = Box::new(rtp_track);
+
+                setup_track_with_stream(
+                    token.clone(),
+                    app_state.stream_engine.clone(),
+                    &session_id,
+                    event_sender.clone(),
+                    media_stream.clone(),
+                    callee_track,
+                    &option,
+                )
+                .await;
+
                 token.cancelled().await;
                 info!(session_id, %dialog_id, "RTP track for refer call stopped");
                 match dialog_layer.get_dialog(&dialog_id) {
@@ -472,11 +544,16 @@ pub(crate) async fn make_sip_invite_with_stream(
     };
     let start_time = crate::get_timestamp();
     select! {
-        _ = sip_dialog_event_loop(session_id.clone(),
+        _ = sip_dialog_event_loop(
+                token.clone(),
+                app_state.clone(),
+                session_id.clone(),
                 track_id.clone(),
+                track_config.clone(),
                 event_sender.clone(),
                 dlg_state_receiver,
                 refer_call_state.clone(),
+                media_stream.clone(),
             ) => {
                 info!(session_id, "Refer sip_event_loop done");
         }
