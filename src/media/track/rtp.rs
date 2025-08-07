@@ -4,6 +4,7 @@ use crate::{
     event::{EventSender, SessionEvent},
     media::{
         codecs::CodecType,
+        jitter::JitterBuffer,
         negotiate::select_peer_media,
         processor::ProcessorChain,
         track::{Track, TrackConfig, TrackPacketSender},
@@ -815,6 +816,7 @@ impl RtpTrack {
         state: Arc<RtpTrackStats>,
     ) -> Result<()> {
         let mut buf = vec![0u8; RTP_MTU];
+        let mut jitter = JitterBuffer::new();
         loop {
             let (n, _) = match rtp_socket.recv_raw(&mut buf).await {
                 Ok(r) => r,
@@ -909,7 +911,7 @@ impl RtpTrack {
                 _ => 8000,
             };
 
-            let mut frame = AudioFrame {
+            let frame = AudioFrame {
                 track_id: track_id.clone(),
                 samples: Samples::RTP {
                     payload_type,
@@ -918,6 +920,14 @@ impl RtpTrack {
                 },
                 timestamp: crate::get_timestamp(),
                 sample_rate,
+            };
+
+            jitter.push(frame);
+
+            let frame = jitter.pop();
+            let mut frame = match frame {
+                Some(f) => f,
+                None => continue,
             };
 
             if let Err(e) = processor_chain.process_frame(&mut frame) {
