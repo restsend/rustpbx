@@ -16,12 +16,78 @@ use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::{
     DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
+use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::select;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+#[derive(Clone)]
+pub struct Invitation {
+    pub dialog_layer: Arc<DialogLayer>,
+    pub pending_dialogs: Arc<Mutex<HashMap<String, PendingDialog>>>,
+}
+
+impl Invitation {
+    pub fn new(dialog_layer: Arc<DialogLayer>) -> Self {
+        Self {
+            dialog_layer,
+            pending_dialogs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
+        let dialog_id_str = dialog_id.to_string();
+        if let Some(call) = self.pending_dialogs.lock().await.remove(&dialog_id_str) {
+            call.dialog.reject().ok();
+            call.token.cancel();
+        }
+
+        let dialog = self
+            .dialog_layer
+            .get_dialog(&dialog_id)
+            .ok_or(anyhow::anyhow!("dialog not found"))?;
+        dialog.hangup().await.ok();
+        self.dialog_layer.remove_dialog(&dialog_id);
+        Ok(())
+    }
+
+    pub async fn invite(
+        &self,
+        invite_option: InviteOption,
+        state_sender: DialogStateSender,
+    ) -> Result<(DialogId, Option<Vec<u8>>), rsipstack::Error> {
+        let (dialog, resp) = self
+            .dialog_layer
+            .do_invite(invite_option, state_sender)
+            .await?;
+
+        let offer = match resp {
+            Some(resp) => match resp.status_code.kind() {
+                rsip::StatusCodeKind::Successful => {
+                    let offer = resp.body.clone();
+                    Some(offer)
+                }
+                _ => {
+                    return Err(rsipstack::Error::DialogError(
+                        resp.status_code.to_string(),
+                        dialog.id(),
+                    ));
+                }
+            },
+            None => {
+                return Err(rsipstack::Error::DialogError(
+                    "No response received".to_string(),
+                    dialog.id(),
+                ));
+            }
+        };
+        Ok((dialog.id(), offer))
+    }
+}
 
 pub async fn new_rtp_track_with_pending_call(
     state: AppState,
@@ -115,8 +181,8 @@ pub async fn new_rtp_track_with_sip(
     track_config: TrackConfig,
     option: &CallOption,
     dlg_state_sender: DialogStateSender,
+    invitation: &Invitation,
 ) -> Result<(DialogId, RtpTrack), rsipstack::Error> {
-    let ua = app_state.useragent.clone();
     let caller = match option.caller {
         Some(ref caller) => caller.clone(),
         None => return Err(rsipstack::Error::Error("caller is required".to_string())),
@@ -186,7 +252,7 @@ pub async fn new_rtp_track_with_sip(
         invite_option.callee,
         offer.as_ref().map(|s| s.as_str()).unwrap_or("<NO OFFER>")
     );
-    let (dialog_id, answer) = ua.invite(invite_option, dlg_state_sender).await?;
+    let (dialog_id, answer) = invitation.invite(invite_option, dlg_state_sender).await?;
     match answer {
         Some(answer) => {
             let answer = String::from_utf8_lossy(&answer);
@@ -327,6 +393,7 @@ pub(crate) async fn make_sip_invite_with_stream(
     event_sender: EventSender,
     stream: Arc<MediaStream>,
     refer_call_state: ActiveCallStateRef,
+    invitation: Invitation,
 ) -> Result<()> {
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
     let dialog_layer = app_state.useragent.dialog_layer.clone();
@@ -346,6 +413,7 @@ pub(crate) async fn make_sip_invite_with_stream(
             track_config,
             &call_option,
             dlg_state_sender,
+            &invitation,
         )
         .await
         {

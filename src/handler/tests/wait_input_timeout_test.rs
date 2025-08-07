@@ -74,6 +74,7 @@ mod wait_input_timeout_tests {
             .with_cancel_token(cancel_token.clone())
             .build();
 
+        let invitation = app_state.useragent.invitation.clone();
         Ok(Arc::new(ActiveCall::new(
             call_state,
             ActiveCallType::WebSocket,
@@ -82,6 +83,7 @@ mod wait_input_timeout_tests {
             session_id,
             media_stream,
             app_state,
+            invitation,
         )))
     }
 

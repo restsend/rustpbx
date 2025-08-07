@@ -1,4 +1,5 @@
 use super::registration::RegistrationHandle;
+use crate::call::sip::Invitation;
 use crate::config::UseragentConfig;
 use crate::useragent::invitation::{
     InvitationHandler, PendingDialog, UnavailableInvitationHandler,
@@ -36,7 +37,7 @@ pub struct UserAgent {
     pub alive_users: Arc<RwLock<HashSet<String>>>,
     pub dialog_layer: Arc<DialogLayer>,
     pub invitation_handler: Box<dyn InvitationHandler>,
-    pub pending_dialogs: Arc<Mutex<HashMap<String, PendingDialog>>>,
+    pub invitation: Invitation,
 }
 
 impl UserAgentBuilder {
@@ -102,12 +103,12 @@ impl UserAgentBuilder {
             endpoint,
             registration_handles: Mutex::new(HashMap::new()),
             alive_users: Arc::new(RwLock::new(HashSet::new())),
-            dialog_layer,
+            dialog_layer: dialog_layer.clone(),
             invitation_handler: self
                 .invitation_handler
                 .take()
                 .unwrap_or_else(|| Box::new(UnavailableInvitationHandler)),
-            pending_dialogs: Arc::new(Mutex::new(HashMap::new())),
+            invitation: Invitation::new(dialog_layer),
         })
     }
 }
@@ -195,7 +196,8 @@ impl UserAgent {
                         state_receiver,
                     };
                     let dialog_id_str = dialog.id().to_string();
-                    self.pending_dialogs
+                    self.invitation
+                        .pending_dialogs
                         .lock()
                         .await
                         .insert(dialog_id_str.clone(), pending_dialog);
@@ -207,7 +209,7 @@ impl UserAgent {
                         .map(|t| parse_duration(t).ok())
                         .flatten()
                         .unwrap_or_else(|| Duration::from_secs(60));
-                    let pending_dialogs = self.pending_dialogs.clone();
+                    let pending_dialogs = self.invitation.pending_dialogs.clone();
                     let dialog_id = dialog.id();
                     let token_ref = token.clone();
 
@@ -276,12 +278,12 @@ impl UserAgent {
     }
     ///
     pub async fn get_pending_call(&self, session_id: &String) -> Option<PendingDialog> {
-        let mut pending_dialogs = self.pending_dialogs.lock().await;
+        let mut pending_dialogs = self.invitation.pending_dialogs.lock().await;
         pending_dialogs.remove(session_id)
     }
 
     pub async fn is_pending_call(&self, session_id: &String) -> bool {
-        let pending_dialogs = self.pending_dialogs.lock().await;
+        let pending_dialogs = self.invitation.pending_dialogs.lock().await;
         pending_dialogs.contains_key(session_id)
     }
 
