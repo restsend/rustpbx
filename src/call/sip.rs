@@ -125,7 +125,7 @@ pub async fn new_rtp_track_with_pending_call(
     pending_dialog: PendingDialog,
 ) -> Result<(DialogId, RtpTrack)> {
     let mut rtp_track = create_rtp_track(
-        token.clone(),
+        token.child_token(),
         state.clone(),
         track_id.clone(),
         track_config,
@@ -205,7 +205,7 @@ pub async fn new_rtp_track_with_sip(
     };
 
     let mut rtp_track = create_rtp_track(
-        token.clone(),
+        token.child_token(),
         app_state.clone(),
         track_id.clone(),
         track_config,
@@ -314,7 +314,7 @@ pub async fn sip_dialog_event_loop(
                 }
 
                 let mut rtp_track = match create_rtp_track(
-                    cancel_token.clone(),
+                    cancel_token.child_token(),
                     app_state.clone(),
                     track_id.clone(),
                     track_config.clone(),
@@ -340,12 +340,18 @@ pub async fn sip_dialog_event_loop(
                     }
                 }
                 let caller_track = Box::new(rtp_track);
-                let option = call_state
+                let mut option = call_state
                     .read()
                     .map(|cs| cs.option.clone())
                     .unwrap_or(CallOption::default());
+
+                //TODO: remove these options from the call option
+                option.asr = None;
+                option.vad = None;
+                option.denoise = None;
+
                 setup_track_with_stream(
-                    cancel_token.clone(),
+                    cancel_token.child_token(),
                     app_state.stream_engine.clone(),
                     &session_id,
                     event_sender.clone(),
