@@ -807,6 +807,7 @@ impl RtpTrack {
     }
 
     async fn recv_rtp_packets(
+        ptime: Duration,
         rtp_socket: UdpConnection,
         track_id: TrackId,
         processor_chain: ProcessorChain,
@@ -816,129 +817,127 @@ impl RtpTrack {
         state: Arc<RtpTrackStats>,
     ) -> Result<()> {
         let mut buf = vec![0u8; RTP_MTU];
+        let mut send_ticker = tokio::time::interval(ptime);
         let mut jitter = JitterBuffer::new();
+
         loop {
-            let (n, _) = match rtp_socket.recv_raw(&mut buf).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(track_id, "Error receiving RTP packet: {}", e);
-                    return Err(anyhow::anyhow!("Error receiving RTP packet: {}", e));
-                }
-            };
-            if n <= 0 {
-                continue;
-            }
-
-            // RTCP packet detection and filtering for rtcp-mux scenarios
-            if n >= 2 {
-                let version = (buf[0] >> 6) & 0x03;
-
-                // Check if this is a STUN packet first
-                // STUN packets have specific message types and magic cookie
-                if n >= 8 {
-                    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
-                    let msg_length = u16::from_be_bytes([buf[2], buf[3]]);
-                    let magic_cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-
-                    // STUN magic cookie is 0x2112A442
-                    // STUN message types are in specific ranges (0x0001, 0x0101, etc.)
-                    if magic_cookie == STUN_MAGIC_COOKIE
-                        || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
-                    {
-                        debug!(
-                            track_id,
-                            "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
-                            msg_type,
-                            n
-                        );
+            select! {
+                Ok((n, _)) = rtp_socket.recv_raw(&mut buf) => {
+                    if n <= 0 {
                         continue;
                     }
-                }
+                    // RTCP packet detection and filtering for rtcp-mux scenarios
+                    if n >= 2 {
+                        let version = (buf[0] >> 6) & 0x03;
 
-                // Check if this is an RTCP packet
-                // RTCP packet structure: V(2) + P(1) + RC(5) + PT(8) + Length(16) + ...
-                // For RTCP: PT is the full second byte (200-207)
-                let rtcp_pt = buf[1]; // Full second byte for RTCP
-                if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
-                    if let Err(e) = Self::handle_rtcp_packet(&track_id, &buf, n, &state, ssrc).await
-                    {
-                        warn!(track_id, "Failed to handle RTCP packet: {:?}", e);
+                        // Check if this is a STUN packet first
+                        // STUN packets have specific message types and magic cookie
+                        if n >= 8 {
+                            let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+                            let msg_length = u16::from_be_bytes([buf[2], buf[3]]);
+                            let magic_cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+
+                            // STUN magic cookie is 0x2112A442
+                            // STUN message types are in specific ranges (0x0001, 0x0101, etc.)
+                            if magic_cookie == STUN_MAGIC_COOKIE
+                                || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
+                            {
+                                debug!(
+                                    track_id,
+                                    "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
+                                    msg_type,
+                                    n
+                                );
+                                continue;
+                            }
+                        }
+
+                        // Check if this is an RTCP packet
+                        // RTCP packet structure: V(2) + P(1) + RC(5) + PT(8) + Length(16) + ...
+                        // For RTCP: PT is the full second byte (200-207)
+                        let rtcp_pt = buf[1]; // Full second byte for RTCP
+                        if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
+                            if let Err(e) = Self::handle_rtcp_packet(&track_id, &buf, n, &state, ssrc).await
+                            {
+                                warn!(track_id, "Failed to handle RTCP packet: {:?}", e);
+                            }
+                            continue;
+                        }
+
+                        // For RTP packets: V(2) + P(1) + X(1) + CC(4) + M(1) + PT(7) + ...
+                        // PT is only 7 bits for RTP
+                        let rtp_pt = buf[1] & 0x7F; // Extract payload type (7 bits) for RTP
+
+                        // Additional validation for RTP packets
+                        if version != 2 {
+                            info!(
+                                track_id,
+                                "Received packet with invalid RTP version: {}, skipping", version
+                            );
+                            continue;
+                        }
+
+                        // RTP payload types should be < 128 (7 bits)
+                        if rtp_pt >= 128 {
+                            debug!(
+                                track_id,
+                                "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
+                                rtp_pt
+                            );
+                            continue;
+                        }
                     }
-                    continue;
+
+                    let packet = match Packet::unmarshal(&mut &buf[0..n]) {
+                        Ok(packet) => packet,
+                        Err(e) => {
+                            info!(track_id, "Error creating RTP reader: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    let seq_num = packet.header.sequence_number as u32;
+                    let payload_len = packet.payload.len() as u32;
+                    state.update_receive_stats(seq_num, payload_len);
+
+                    let payload_type = packet.header.payload_type;
+                    let payload = packet.payload.to_vec();
+                    let sample_rate = match payload_type {
+                        9 => 16000,   // G.722
+                        111 => 48000, // Opus
+                        _ => 8000,
+                    };
+
+                    let frame = AudioFrame {
+                        track_id: track_id.clone(),
+                        samples: Samples::RTP {
+                            payload_type,
+                            payload,
+                            sequence_number: packet.header.sequence_number.into(),
+                        },
+                        timestamp: crate::get_timestamp(),
+                        sample_rate,
+                    };
+
+                    jitter.push(frame);
                 }
-
-                // For RTP packets: V(2) + P(1) + X(1) + CC(4) + M(1) + PT(7) + ...
-                // PT is only 7 bits for RTP
-                let rtp_pt = buf[1] & 0x7F; // Extract payload type (7 bits) for RTP
-
-                // Additional validation for RTP packets
-                if version != 2 {
-                    info!(
-                        track_id,
-                        "Received packet with invalid RTP version: {}, skipping", version
-                    );
-                    continue;
-                }
-
-                // RTP payload types should be < 128 (7 bits)
-                if rtp_pt >= 128 {
-                    debug!(
-                        track_id,
-                        "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
-                        rtp_pt
-                    );
-                    continue;
-                }
-            }
-
-            let packet = match Packet::unmarshal(&mut &buf[0..n]) {
-                Ok(packet) => packet,
-                Err(e) => {
-                    info!(track_id, "Error creating RTP reader: {:?}", e);
-                    continue;
-                }
-            };
-
-            let seq_num = packet.header.sequence_number as u32;
-            let payload_len = packet.payload.len() as u32;
-            state.update_receive_stats(seq_num, payload_len);
-
-            let payload_type = packet.header.payload_type;
-            let payload = packet.payload.to_vec();
-            let sample_rate = match payload_type {
-                9 => 16000,   // G.722
-                111 => 48000, // Opus
-                _ => 8000,
-            };
-
-            let frame = AudioFrame {
-                track_id: track_id.clone(),
-                samples: Samples::RTP {
-                    payload_type,
-                    payload,
-                    sequence_number: packet.header.sequence_number.into(),
-                },
-                timestamp: crate::get_timestamp(),
-                sample_rate,
-            };
-
-            jitter.push(frame);
-
-            let frame = jitter.pop();
-            let mut frame = match frame {
-                Some(f) => f,
-                None => continue,
-            };
-
-            if let Err(e) = processor_chain.process_frame(&mut frame) {
-                error!(track_id, "Failed to process frame: {}", e);
-                break;
-            }
-            match packet_sender.send(frame) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!(track_id, "Error sending audio frame: {}", e);
-                    break;
+                _ = send_ticker.tick() => {
+                    let frame = jitter.pop();
+                    let mut frame = match frame {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    if let Err(e) = processor_chain.process_frame(&mut frame) {
+                        error!(track_id, "Failed to process frame: {}", e);
+                        break;
+                    }
+                    match packet_sender.send(frame) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!(track_id, "Error sending audio frame: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1086,6 +1085,7 @@ impl Track for RtpTrack {
         let start_time = crate::get_timestamp();
         let ice_connectivity_check = self.ice_connectivity_check;
         let remote_addr = self.remote_addr.clone();
+        let ptime = self.config.ptime;
 
         tokio::spawn(async move {
             // Send ICE connectivity check if enabled and remote address is available
@@ -1105,7 +1105,6 @@ impl Track for RtpTrack {
                     }
                 }
             }
-
             select! {
                 _ = token.cancelled() => {
                     info!(track_id, "RTC process cancelled");
@@ -1114,6 +1113,7 @@ impl Track for RtpTrack {
                     info!(track_id, "RTCP sender process completed {:?}", r);
                 }
                 r = Self::recv_rtp_packets(
+                    ptime,
                     rtp_socket,
                     track_id.clone(),
                     processor_chain,
