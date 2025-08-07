@@ -1,16 +1,15 @@
 use crate::{config::InviteHandlerConfig, useragent::webhook::WebhookInvitationHandler};
 
 use super::UserAgent;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::dialog::{
+    DialogId,
     dialog::{Dialog, DialogStateReceiver, DialogStateSender},
     invitation::InviteOption,
     server_dialog::ServerInviteDialog,
-    DialogId,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 pub struct PendingDialog {
     pub token: CancellationToken,
@@ -67,25 +66,31 @@ impl UserAgent {
         &self,
         invite_option: InviteOption,
         state_sender: DialogStateSender,
-    ) -> Result<(DialogId, Option<Vec<u8>>)> {
+    ) -> Result<(DialogId, Option<Vec<u8>>), rsipstack::Error> {
         let (dialog, resp) = self
             .dialog_layer
             .do_invite(invite_option, state_sender)
-            .await
-            .map_err(|e| anyhow!("{}", e))?;
+            .await?;
 
         let offer = match resp {
-            Some(resp) => {
-                info!("invite response: {}", resp);
-                match resp.status_code.kind() {
-                    rsip::StatusCodeKind::Successful => {
-                        let offer = resp.body.clone();
-                        Some(offer)
-                    }
-                    _ => return Err(anyhow!("{}", resp.status_code)),
+            Some(resp) => match resp.status_code.kind() {
+                rsip::StatusCodeKind::Successful => {
+                    let offer = resp.body.clone();
+                    Some(offer)
                 }
+                _ => {
+                    return Err(rsipstack::Error::DialogError(
+                        resp.status_code.to_string(),
+                        dialog.id(),
+                    ));
+                }
+            },
+            None => {
+                return Err(rsipstack::Error::DialogError(
+                    "No response received".to_string(),
+                    dialog.id(),
+                ));
             }
-            None => return Err(anyhow!("no response received")),
         };
         Ok((dialog.id(), offer))
     }

@@ -20,12 +20,12 @@ use crate::{
     synthesis::SynthesisOption,
     useragent::invitation::PendingDialog,
 };
-use anyhow::Result;
+use anyhow::{Error, Result};
 use chrono::{DateTime, Utc};
 use rsipstack::dialog::{DialogId, dialog::DialogStateSender};
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, atomic::Ordering},
     time::Duration,
 };
 use tokio::{fs::File, join, select, sync::Mutex, time::sleep};
@@ -732,8 +732,8 @@ pub async fn handle_call(
     event_sender: EventSender,
     audio_receiver: WebsocketBytesReceiver,
     dump_cmd_receiver: CommandReceiver,
-    cmd_receiver: CommandReceiver,
-) -> Result<CallRecord> {
+    mut cmd_receiver: CommandReceiver,
+) -> Result<CallRecord, (Error, Option<CallRecord>)> {
     let dump_events_loop = async {
         if !dump_events {
             return;
@@ -780,15 +780,55 @@ pub async fn handle_call(
         }
     };
 
+    let mut option = match cmd_receiver.recv().await {
+        Ok(command) => match command {
+            Command::Invite { option } => option,
+            Command::Accept { option } => option,
+            _ => {
+                info!(
+                    session_id,
+                    "the first message must be an invite {:?}", command
+                );
+                return Err((anyhow::anyhow!("the first message must be an invite"), None));
+            }
+        },
+        _ => {
+            return Err((anyhow::anyhow!("Invalid message type"), None));
+        }
+    };
+    option.check_default(); // check default
+
+    info!(session_id, ?call_type, "prepare call option: {:?}", option);
+    let call_state_ref = Arc::new(RwLock::new(ActiveCallState {
+        start_time: Utc::now(),
+        option: option,
+        ssrc: rand::random::<u32>(),
+        ..Default::default()
+    }));
+
+    let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let process_sip_dlg_loop = async {
+        super::sip::sip_dialog_event_loop(
+            session_id.clone(),
+            session_id.clone(),
+            event_sender.clone(),
+            dlg_state_receiver,
+            call_state_ref.clone(),
+        )
+        .await
+    };
+
     let process_call_loop = async {
         let r = process_call(
             cancel_token.clone(),
-            call_type,
+            call_type.clone(),
             session_id.clone(),
             app_state.clone(),
             event_sender.clone(),
             audio_receiver,
             cmd_receiver,
+            dlg_state_sender,
+            call_state_ref.clone(),
         )
         .await;
 
@@ -798,12 +838,26 @@ pub async fn handle_call(
         cancel_token.cancel();
         r
     };
-    let (_, process_call_result) = join! {
+
+    app_state.total_calls.fetch_add(1, Ordering::Relaxed);
+    let (_, _, process_call_result) = join! {
+        process_sip_dlg_loop,
         dump_events_loop,
         process_call_loop
     };
     debug!(session_id, "call processing completed");
-    process_call_result
+    match process_call_result {
+        Ok(call_record) => Ok(call_record),
+        Err(e) => {
+            app_state.total_failed_calls.fetch_add(1, Ordering::Relaxed);
+            let call_record = call_state_ref
+                .read()
+                .as_ref()
+                .map(|cs| cs.build_callrecord(app_state, session_id, call_type))
+                .ok();
+            Err((e, call_record))
+        }
+    }
 }
 
 pub async fn process_call(
@@ -814,65 +868,38 @@ pub async fn process_call(
     event_sender: EventSender,
     audio_receiver: WebsocketBytesReceiver,
     mut cmd_receiver: CommandReceiver,
+    dlg_state_sender: DialogStateSender,
+    call_state_ref: ActiveCallStateRef,
 ) -> Result<CallRecord> {
-    let mut option = match cmd_receiver.recv().await {
-        Ok(command) => match command {
-            Command::Invite { option } => option,
-            Command::Accept { option } => option,
-            _ => {
-                info!(
-                    session_id,
-                    "the first message must be an invite {:?}", command
-                );
-                return Err(anyhow::anyhow!("the first message must be an invite"));
-            }
-        },
-        _ => {
-            return Err(anyhow::anyhow!("Invalid message type"));
-        }
-    };
-    option.check_default(); // check default
-
-    info!(session_id, ?call_type, "prepare call option: {:?}", option);
-    let mut call_state = ActiveCallState {
-        start_time: Utc::now(),
-        option: option,
-        ssrc: rand::random::<u32>(),
-        ..Default::default()
-    };
-
     let track_config = TrackConfig::default();
-    let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
     let caller_track = match call_type {
         ActiveCallType::WebSocket => {
             create_websocket_track(
                 cancel_token.clone(),
                 track_config,
-                &mut call_state,
+                call_state_ref.clone(),
                 session_id.clone(),
                 event_sender.clone(),
                 audio_receiver,
             )
-            .await?
+            .await
         }
         ActiveCallType::Webrtc => {
             create_webrtc_track(
                 cancel_token.clone(),
                 track_config,
-                &mut call_state,
+                call_state_ref.clone(),
                 session_id.clone(),
             )
-            .await?
+            .await
         }
         ActiveCallType::Sip => {
-            let r = if let Some(pending_dialog) =
-                app_state.useragent.get_pending_call(&session_id).await
-            {
+            if let Some(pending_dialog) = app_state.useragent.get_pending_call(&session_id).await {
                 create_incoming_sip_track(
                     pending_dialog,
                     cancel_token.clone(),
                     track_config,
-                    &mut call_state,
+                    call_state_ref.clone(),
                     session_id.clone(),
                     app_state.clone(),
                     dlg_state_sender,
@@ -882,37 +909,33 @@ pub async fn process_call(
                 create_outgoing_sip_track(
                     cancel_token.clone(),
                     track_config,
-                    &mut call_state,
+                    call_state_ref.clone(),
                     session_id.clone(),
                     app_state.clone(),
                     dlg_state_sender,
                 )
                 .await
-            };
-            let rtp_track = match r {
-                Ok(Some(track)) => track,
-                Ok(None) => {
-                    warn!(session_id, "no rtp track created for sip call");
-                    return Ok(call_state.build_callrecord(
-                        app_state.clone(),
-                        session_id.clone(),
-                        call_type,
-                    ));
-                }
-                Err(e) => {
-                    warn!(session_id, "error creating sip/rtp track: {}", e);
-                    return Err(anyhow::anyhow!("error creating sip/rtp track: {}", e));
-                }
-            };
-            rtp_track
+            }
         }
-    };
+    }?;
 
-    let answer = call_state.answer.clone().unwrap_or_default();
+    let answer = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.answer.clone())
+        .unwrap_or(None)
+        .unwrap_or_default();
+
+    let option = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(Default::default());
+
     let media_stream = match ActiveCall::create_stream(
         cancel_token.clone(),
         session_id.clone(),
-        &call_state.option,
+        &option,
         caller_track,
         app_state.clone(),
         event_sender.clone(),
@@ -926,9 +949,8 @@ pub async fn process_call(
         }
     };
 
-    let call_state = Arc::new(RwLock::new(call_state));
     let active_call = Arc::new(ActiveCall::new(
-        call_state,
+        call_state_ref,
         call_type,
         cancel_token.clone(),
         event_sender.clone(),
@@ -974,28 +996,7 @@ pub async fn process_call(
         }
     };
 
-    let call_state_ref = active_call.call_state.clone();
-    let session_id = active_call.session_id.clone();
-    let process_sip_dlg_loop = async {
-        super::sip::sip_dialog_event_loop(
-            session_id.clone(),
-            session_id,
-            event_sender.clone(),
-            dlg_state_receiver,
-            call_state_ref,
-        )
-        .await
-    };
-
     select! {
-        _ = async {
-            join! {
-                process_sip_dlg_loop,
-                cancel_token.cancelled()
-            }
-        } => {
-            info!(session_id = active_call.session_id, "audio/call loop done");
-        }
         _ = process_command_loop => {
             info!(session_id = active_call.session_id, "command loop done");
         }
@@ -1013,53 +1014,80 @@ pub async fn process_call(
 async fn create_websocket_track(
     cancel_token: CancellationToken,
     track_config: TrackConfig,
-    call_state: &mut ActiveCallState,
+    call_state_ref: ActiveCallStateRef,
     sesion_id: String,
     event_sender: EventSender,
     audio_receiver: WebsocketBytesReceiver,
 ) -> Result<Box<dyn Track>> {
+    let ssrc = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.ssrc)
+        .unwrap_or(0);
+    let codec = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.codec.clone())
+        .unwrap_or_default();
+
     let ws_track = WebsocketTrack::new(
         cancel_token.child_token(),
         sesion_id,
         track_config,
         event_sender,
         audio_receiver,
-        call_state.option.codec.clone(),
-        call_state.ssrc,
+        codec,
+        ssrc,
     );
-    call_state.answer_time = Some(Utc::now());
-    call_state.answer = Some("".to_string());
-    call_state.last_status_code = 200;
+    call_state_ref
+        .write()
+        .as_mut()
+        .and_then(|cs| {
+            cs.answer_time = Some(Utc::now());
+            cs.answer = Some("".to_string());
+            cs.last_status_code = 200;
+            Ok(())
+        })
+        .ok();
     Ok(Box::new(ws_track))
 }
 
 async fn create_webrtc_track(
     cancel_token: CancellationToken,
     track_config: TrackConfig,
-    call_state: &mut ActiveCallState,
+    call_state_ref: ActiveCallStateRef,
     session_id: String,
 ) -> Result<Box<dyn Track>> {
+    let ssrc = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.ssrc)
+        .unwrap_or(0);
+    let option = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(Default::default());
     let mut webrtc_track =
         WebrtcTrack::new(cancel_token.child_token(), session_id.clone(), track_config)
-            .with_ssrc(call_state.ssrc);
+            .with_ssrc(ssrc);
 
-    let timeout = call_state
-        .option
+    let timeout = option
         .handshake_timeout
         .as_ref()
         .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
         .flatten();
 
-    let offer = match call_state.option.enable_ipv6 {
+    let offer = match option.enable_ipv6 {
         Some(false) | None => {
-            strip_ipv6_candidates(call_state.option.offer.as_ref().unwrap_or(&"".to_string()))
+            strip_ipv6_candidates(option.offer.as_ref().unwrap_or(&"".to_string()))
         }
-        _ => call_state.option.offer.clone().unwrap_or("".to_string()),
+        _ => option.offer.clone().unwrap_or("".to_string()),
     };
     let answer: Option<String>;
     match webrtc_track.handshake(offer, timeout).await {
         Ok(answer_sdp) => {
-            answer = match call_state.option.enable_ipv6 {
+            answer = match option.enable_ipv6 {
                 Some(false) | None => Some(strip_ipv6_candidates(&answer_sdp)),
                 Some(true) => Some(answer_sdp),
             };
@@ -1069,38 +1097,63 @@ async fn create_webrtc_track(
             return Err(anyhow::anyhow!("Failed to setup track: {}", e));
         }
     }
-    call_state.answer_time = Some(Utc::now());
-    call_state.answer = answer;
-    call_state.last_status_code = 200;
+    call_state_ref
+        .write()
+        .as_mut()
+        .and_then(|cs| {
+            cs.answer_time = Some(Utc::now());
+            cs.answer = answer;
+            cs.last_status_code = 200;
+            Ok(())
+        })
+        .ok();
     Ok(Box::new(webrtc_track))
 }
 
 async fn create_outgoing_sip_track(
     cancel_token: CancellationToken,
     track_config: TrackConfig,
-    call_state: &mut ActiveCallState,
+    call_state_ref: ActiveCallStateRef,
     session_id: String,
     app_state: AppState,
     dlg_state_sender: DialogStateSender,
-) -> Result<Option<Box<dyn Track>>> {
+) -> Result<Box<dyn Track>> {
+    let ssrc = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.ssrc)
+        .unwrap_or(0);
+    let option = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(Default::default());
+
     let r = super::sip::new_rtp_track_with_sip(
         app_state,
         cancel_token.child_token(),
         session_id.clone(),
-        call_state.ssrc,
+        ssrc,
         track_config,
-        &call_state.option,
+        &option,
         dlg_state_sender,
     )
     .await;
     match r {
         Ok((dialog_id, rtp_track)) => {
-            call_state.dialog_id = Some(dialog_id);
-            call_state.option.offer = rtp_track.local_description().ok();
-            call_state.answer = rtp_track.remote_description();
-            call_state.answer_time = Some(Utc::now());
-            call_state.last_status_code = 200;
-            Ok(Some(Box::new(rtp_track)))
+            call_state_ref
+                .write()
+                .as_mut()
+                .and_then(|cs| {
+                    cs.dialog_id = Some(dialog_id);
+                    cs.option.offer = rtp_track.local_description().ok();
+                    cs.answer = rtp_track.remote_description();
+                    cs.answer_time = Some(Utc::now());
+                    cs.last_status_code = 200;
+                    Ok(())
+                })
+                .ok();
+            Ok(Box::new(rtp_track))
         }
         Err(e) => {
             warn!(session_id, "error creating rtp track: {}", e);
@@ -1113,30 +1166,47 @@ async fn create_incoming_sip_track(
     pending_dialog: PendingDialog,
     cancel_token: CancellationToken,
     track_config: TrackConfig,
-    call_state: &mut ActiveCallState,
+    call_state_ref: ActiveCallStateRef,
     session_id: String,
     app_state: AppState,
     dlg_state_sender: DialogStateSender,
-) -> Result<Option<Box<dyn Track>>> {
+) -> Result<Box<dyn Track>> {
+    let ssrc = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.ssrc)
+        .unwrap_or(0);
+    let option = call_state_ref
+        .read()
+        .as_ref()
+        .map(|cs| cs.option.clone())
+        .unwrap_or(Default::default());
     let r = super::sip::new_rtp_track_with_pending_call(
         app_state,
         cancel_token.child_token(),
         session_id.clone(),
-        call_state.ssrc,
+        ssrc,
         track_config,
-        &call_state.option,
+        &option,
         dlg_state_sender,
         pending_dialog,
     )
     .await;
     match r {
         Ok((dialog_id, rtp_track)) => {
-            call_state.dialog_id = Some(dialog_id);
-            call_state.option.offer = rtp_track.remote_description();
-            call_state.answer = rtp_track.local_description().ok();
-            call_state.answer_time = Some(Utc::now());
-            call_state.last_status_code = 200;
-            Ok(Some(Box::new(rtp_track)))
+            call_state_ref
+                .write()
+                .as_mut()
+                .and_then(|cs| {
+                    cs.dialog_id = Some(dialog_id);
+                    cs.option.offer = rtp_track.remote_description();
+                    cs.answer = rtp_track.local_description().ok();
+                    cs.answer_time = Some(Utc::now());
+                    cs.last_status_code = 200;
+                    Ok(())
+                })
+                .ok();
+            Ok(Box::new(rtp_track))
         }
         Err(e) => {
             warn!(session_id, "error creating rtp track: {}", e);

@@ -181,7 +181,6 @@ pub async fn call_handler(
 
         let token_ref = cancel_token.clone();
         let handle_call_loop = async {
-            app_state.total_calls.fetch_add(1, Ordering::Relaxed);
             match handle_call(
                 cancel_token,
                 call_type,
@@ -212,9 +211,8 @@ pub async fn call_handler(
                         }
                     }
                 }
-                Err(e) => {
+                Err((e, call_record)) => {
                     warn!(session_id, %client_ip, "Call handling error: {}", e);
-                    app_state.total_failed_calls.fetch_add(1, Ordering::Relaxed);
                     let error_event = SessionEvent::Error {
                         track_id:session_id.clone(),
                         timestamp:crate::get_timestamp(),
@@ -223,6 +221,27 @@ pub async fn call_handler(
                         code: None
                     };
                     event_sender.send(error_event).ok();
+                    match call_record {
+                        Some(record) => {
+                            info!(
+                                session_id,
+                                %client_ip,
+                                hangup_reason = ?record.hangup_reason,
+                                call_type = ?record.call_type,
+                                duration = Utc::now()
+                                    .signed_duration_since(record.start_time)
+                                    .as_seconds_f32(),
+                                "Call ended with error"
+                            );
+                            if let Some(sender) = app_state.callrecord_sender.lock().await.as_ref() {
+                                if let Err(e) = sender.send(record) {
+                                    warn!(session_id, %client_ip, "Failed to send call record: {}", e);
+                                }
+                            }
+                        }
+                        None => {
+                        }
+                    }
                 }
             };
             token_ref.cancel();

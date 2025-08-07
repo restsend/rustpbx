@@ -115,15 +115,15 @@ pub async fn new_rtp_track_with_sip(
     track_config: TrackConfig,
     option: &CallOption,
     dlg_state_sender: DialogStateSender,
-) -> Result<(DialogId, RtpTrack)> {
+) -> Result<(DialogId, RtpTrack), rsipstack::Error> {
     let ua = app_state.useragent.clone();
     let caller = match option.caller {
         Some(ref caller) => caller.clone(),
-        None => return Err(anyhow::anyhow!("caller is required")),
+        None => return Err(rsipstack::Error::Error("caller is required".to_string())),
     };
     let callee = match option.callee {
         Some(ref callee) => callee.clone(),
-        None => return Err(anyhow::anyhow!("callee is required")),
+        None => return Err(rsipstack::Error::Error("callee is required".to_string())),
     };
     let mut rtp_track = RtpTrackBuilder::new(track_id.clone(), track_config)
         .with_ssrc(ssrc)
@@ -146,7 +146,11 @@ pub async fn new_rtp_track_with_sip(
         }
     }
 
-    let mut rtp_track = rtp_track.build().await?;
+    let mut rtp_track = rtp_track
+        .build()
+        .await
+        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
+
     let offer = rtp_track.local_description().ok();
 
     let headers = option
@@ -182,25 +186,29 @@ pub async fn new_rtp_track_with_sip(
         invite_option.callee,
         offer.as_ref().map(|s| s.as_str()).unwrap_or("<NO OFFER>")
     );
-    match ua.invite(invite_option, dlg_state_sender).await {
-        Ok((dialog_id, answer)) => {
-            match answer {
-                Some(answer) => {
-                    let answer = String::from_utf8_lossy(&answer);
-                    match rtp_track.set_remote_description(&answer) {
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!(track_id, "sip_call:failed to set remote description: {}", e);
-                            return Err(anyhow::anyhow!("failed to set remote description"));
-                        }
-                    }
+    let (dialog_id, answer) = ua.invite(invite_option, dlg_state_sender).await?;
+    match answer {
+        Some(answer) => {
+            let answer = String::from_utf8_lossy(&answer);
+            match rtp_track.set_remote_description(&answer) {
+                Ok(_) => (),
+                Err(e) => {
+                    warn!(track_id, "sip_call:failed to set remote description: {}", e);
+                    return Err(rsipstack::Error::DialogError(
+                        "failed to set remote description".to_string(),
+                        dialog_id.clone(),
+                    ));
                 }
-                None => return Err(anyhow::anyhow!("failed to get answer")),
             }
-            Ok((dialog_id, rtp_track))
         }
-        Err(e) => Err(e),
+        None => {
+            return Err(rsipstack::Error::DialogError(
+                "no answer received".to_string(),
+                dialog_id.clone(),
+            ));
+        }
     }
+    Ok((dialog_id, rtp_track))
 }
 
 pub async fn sip_dialog_event_loop(

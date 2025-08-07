@@ -922,8 +922,7 @@ impl RtpTrack {
                     jitter.push(frame);
                 }
                 _ = send_ticker.tick() => {
-                    let frame = jitter.pop();
-                    let mut frame = match frame {
+                    let mut frame = match jitter.pop() {
                         Some(f) => f,
                         None => continue,
                     };
