@@ -277,6 +277,8 @@ pub async fn call_handler(
                 }
             }
         };
+        ws_sender.flush().await.ok();
+        ws_sender.close().await.ok();
         debug!(session_id, %client_ip, "WebSocket connection closed");
     });
     resp
