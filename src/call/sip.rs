@@ -456,6 +456,7 @@ pub async fn sip_dialog_event_loop(
                         initiator: Some(initiator),
                     })
                     .ok();
+                cancel_token.cancel(); // Cancel the token to stop any ongoing tasks
                 return Ok(dialog_id);
             }
             _ => (),
