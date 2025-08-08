@@ -19,7 +19,6 @@ use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::select;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
