@@ -1070,12 +1070,10 @@ impl Track for RtpTrack {
             }
             select! {
                 _ = token.cancelled() => {
-                    info!(track_id, "RTC process cancelled");
                 },
-                r = Self::send_rtcp_reports(track_id.clone(), token.clone(), state.clone(), &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
-                    info!(track_id, "RTCP sender process completed {:?}", r);
+                _ = Self::send_rtcp_reports(track_id.clone(), token.clone(), state.clone(), &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
                 }
-                r = Self::recv_rtp_packets(
+                _ = Self::recv_rtp_packets(
                     ptime,
                     rtp_socket,
                     track_id.clone(),
@@ -1085,7 +1083,6 @@ impl Track for RtpTrack {
                     ssrc,
                     state.clone()
                 ) => {
-                    info!(track_id, "RTP processor completed {:?}", r);
                 }
             };
 
@@ -1105,7 +1102,7 @@ impl Track for RtpTrack {
                 }
                 None => {}
             }
-
+            info!(track_id, "RTP processor completed");
             event_sender
                 .send(SessionEvent::TrackEnd {
                     track_id,
