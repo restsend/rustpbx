@@ -544,36 +544,39 @@ pub(crate) async fn make_sip_invite_with_stream(
                     code: None,
                 };
                 event_sender.send(event).ok();
+                // The rtp track creation failed, we need to send a track end event
+                let track_end_event = SessionEvent::TrackEnd {
+                    track_id: track_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    duration: 0,
+                    ssrc,
+                };
+                event_sender.send(track_end_event).ok();
                 return Err(e);
             }
         };
         Ok(())
     };
     let start_time = crate::get_timestamp();
-    select! {
-        _ = sip_dialog_event_loop(
-                token.clone(),
-                app_state.clone(),
-                session_id.clone(),
-                track_id.clone(),
-                track_config.clone(),
-                event_sender.clone(),
-                dlg_state_receiver,
-                refer_call_state.clone(),
-                media_stream.clone(),
-            ) => {
-                info!(session_id, "Refer sip_event_loop done");
-        }
-        _ = refer_rtp_track_loop => {
-            info!(session_id, "Refer RTP track loop completed");
-        }
-    }
-    let track_end_event = SessionEvent::TrackEnd {
-        track_id: track_id.clone(),
-        timestamp: crate::get_timestamp(),
-        duration: crate::get_timestamp() - start_time,
-        ssrc,
-    };
-    event_sender.send(track_end_event).ok();
+    let (_, r) = tokio::join!(
+        sip_dialog_event_loop(
+            token.clone(),
+            app_state.clone(),
+            session_id.clone(),
+            track_id.clone(),
+            track_config.clone(),
+            event_sender.clone(),
+            dlg_state_receiver,
+            refer_call_state.clone(),
+            media_stream.clone(),
+        ),
+        refer_rtp_track_loop
+    );
+    info!(
+        session_id,
+        "refer call ended after {} ms, reason: {:?}",
+        crate::get_timestamp() - start_time,
+        r
+    );
     Ok(())
 }

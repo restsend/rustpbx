@@ -431,7 +431,7 @@ impl ActiveCall {
         if let Some(moh) = refer_option.as_ref().and_then(|o| o.moh.clone()) {
             self.do_play(moh, None, None).await?;
         }
-        let token = self.cancel_token.clone();
+        let token = self.cancel_token.child_token();
         let session_id = self.session_id.clone();
         let app_state = self.app_state.clone();
         let event_sender = self.media_stream.get_event_sender();
