@@ -92,26 +92,29 @@ impl MediaStream {
         let packet_receiver = match self.packet_receiver.lock().await.take() {
             Some(receiver) => receiver,
             None => {
-                warn!("MediaStream::serve() called multiple times, stream already serving");
+                warn!(
+                    session_id = self.id,
+                    "MediaStream::serve() called multiple times, stream already serving"
+                );
                 return Ok(());
             }
         };
         self.start_recorder().await.ok();
         info!(
-            id = self.id,
-            "media_stream: Serving tracks {:?}",
+            session_id = self.id,
+            "serving tracks {:?}",
             self.tracks.lock().await.keys()
         );
         select! {
             _ = self.cancel_token.cancelled() => {}
             r = self.handle_forward_track(packet_receiver) => {
-                info!("media_stream: Track packet receiver stopped {:?}", r);
+                info!(session_id = self.id, "track packet receiver stopped {:?}", r);
             }
         }
         Ok(())
     }
 
-    pub fn stop(&self, reason: Option<String>, initiator: Option<String>) {
+    pub fn stop(&self, _reason: Option<String>, _initiator: Option<String>) {
         self.cancel_token.cancel()
     }
 
@@ -120,9 +123,9 @@ impl MediaStream {
         if let Some(recorder_handle) = self.recorder_handle.lock().await.take() {
             if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(30), recorder_handle).await
             {
-                info!("media_stream: Recorder stopped");
+                info!(session_id = self.id, "recorder stopped");
             } else {
-                error!("media_stream: Recorder timeout");
+                warn!(session_id = self.id, "recorder timeout");
             }
         }
         Ok(())
@@ -140,7 +143,7 @@ impl MediaStream {
             match track.stop().await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("media_stream: Failed to stop track: {}", e);
+                    warn!(session_id = self.id, "failed to stop track: {}", e);
                 }
             }
         }
@@ -158,7 +161,7 @@ impl MediaStream {
             .await
         {
             Ok(_) => {
-                info!("media_stream: track started {:?}", track.id());
+                info!(session_id = self.id, track_id = track.id(), "track started");
                 let track_id = track.id().clone();
                 self.tracks.lock().await.insert(track_id.clone(), track);
                 self.event_sender
@@ -169,7 +172,12 @@ impl MediaStream {
                     .ok();
             }
             Err(e) => {
-                error!("Failed to start track: {}", e);
+                warn!(
+                    session_id = self.id,
+                    track_id = track.id(),
+                    "Failed to start track: {}",
+                    e
+                );
             }
         }
     }
@@ -224,23 +232,30 @@ impl MediaStream {
             let recorder_receiver = match self.recorder_receiver.lock().await.take() {
                 Some(receiver) => receiver,
                 None => {
-                    warn!("Recorder already started, skipping");
+                    warn!(session_id = self.id, "Recorder already started, skipping");
                     return Ok(());
                 }
             };
             let cancel_token = self.cancel_token.child_token();
             let recorder_config_clone = recorder_config.clone();
-
+            let session_id_clone = self.id.clone();
             let recorder_handle = tokio::spawn(async move {
                 let recorder_file = recorder_config_clone.recorder_file.clone();
-                let recorder = Recorder::new(cancel_token, recorder_config_clone);
+                let recorder = Recorder::new(
+                    cancel_token,
+                    session_id_clone.clone(),
+                    recorder_config_clone,
+                );
                 match recorder
                     .process_recording(Path::new(&recorder_file), recorder_receiver)
                     .await
                 {
                     Ok(_) => {}
                     Err(e) => {
-                        error!("media_stream: Failed to process recorder: {}", e);
+                        warn!(
+                            session_id = session_id_clone,
+                            "Failed to process recorder: {}", e
+                        );
                     }
                 }
             });

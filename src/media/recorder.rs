@@ -1,4 +1,4 @@
-use crate::{media::codecs::samples_to_bytes, AudioFrame, PcmBuf, Samples};
+use crate::{AudioFrame, PcmBuf, Samples, media::codecs::samples_to_bytes};
 use anyhow::Result;
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
@@ -7,8 +7,8 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
     u32,
@@ -55,6 +55,7 @@ impl Default for RecorderOption {
 }
 
 pub struct Recorder {
+    session_id: String,
     option: RecorderOption,
     samples_written: AtomicUsize,
     cancel_token: CancellationToken,
@@ -65,8 +66,13 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn new(cancel_token: CancellationToken, option: RecorderOption) -> Self {
+    pub fn new(
+        cancel_token: CancellationToken,
+        session_id: String,
+        option: RecorderOption,
+    ) -> Self {
         Self {
+            session_id,
             option,
             samples_written: AtomicUsize::new(0),
             cancel_token,
@@ -146,12 +152,17 @@ impl Recorder {
                 return Err(anyhow::anyhow!("Failed to create recording file"));
             }
         };
-        info!("recorder: created recording file: {}", file_path.display());
+        info!(
+            session_id = self.session_id,
+            "recorder: created recording file: {}",
+            file_path.display()
+        );
         // Create an initial WAV header
         self.update_wav_header(&mut file).await?;
         let chunk_size =
             (self.option.samplerate / 1000 * self.option.ptime.as_millis() as u32) as usize;
         info!(
+            session_id = self.session_id,
             "Recording to {} ptime: {}ms chunk_size: {}",
             file_path.display(),
             self.option.ptime.as_millis(),
@@ -175,7 +186,6 @@ impl Recorder {
 
                     // Update the final header before finishing
                     self.update_wav_header(&mut file).await?;
-                    info!("Recording stopped, final header updated");
                     return Ok(());
                 }
             }
@@ -190,7 +200,12 @@ impl Recorder {
         } else {
             let new_idx = self.channel_idx.fetch_add(1, Ordering::SeqCst);
             channels.insert(track_id.to_string(), new_idx);
-            info!("Assigned channel {} to track: {}", new_idx % 2, track_id);
+            info!(
+                session_id = self.session_id,
+                "Assigned channel {} to track: {}",
+                new_idx % 2,
+                track_id
+            );
             new_idx % 2
         }
     }
@@ -364,8 +379,6 @@ impl Recorder {
 
     /// Flush all remaining buffer content
     async fn flush_buffers(&self, file: &mut File) -> Result<()> {
-        info!("Flushing remaining buffer content before stopping...");
-
         loop {
             let (mono_buf, stereo_buf) = self.pop(usize::MAX).await;
 
@@ -377,7 +390,6 @@ impl Recorder {
             if samples_written > 0 {
                 self.samples_written
                     .fetch_add(samples_written, Ordering::SeqCst);
-                info!("Flushed {} samples", samples_written);
             }
         }
 

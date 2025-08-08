@@ -1,6 +1,6 @@
 use crate::{
-    media::recorder::{Recorder, RecorderOption},
     AudioFrame, PcmBuf, Sample, Samples,
+    media::recorder::{Recorder, RecorderOption},
 };
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
@@ -17,7 +17,11 @@ async fn test_recorder() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let config = RecorderOption::default();
 
-    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
+    let recorder = Arc::new(Recorder::new(
+        cancel_token.clone(),
+        "test".to_string(),
+        config,
+    ));
 
     // Create channels for testing
     let (tx, rx) = mpsc::unbounded_channel();
@@ -117,7 +121,11 @@ async fn test_recorder_intermittent_data() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let config = RecorderOption::default();
 
-    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
+    let recorder = Arc::new(Recorder::new(
+        cancel_token.clone(),
+        "test".to_string(),
+        config,
+    ));
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Start recording
@@ -201,7 +209,11 @@ async fn test_constant_value_detection() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let config = RecorderOption::default();
 
-    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
+    let recorder = Arc::new(Recorder::new(
+        cancel_token.clone(),
+        "test".to_string(),
+        config,
+    ));
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Start recording
@@ -297,7 +309,11 @@ async fn test_recorder_200ms_timing() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let config = RecorderOption::default(); // Uses 200ms ptime now
 
-    let recorder = Arc::new(Recorder::new(cancel_token.clone(), config));
+    let recorder = Arc::new(Recorder::new(
+        cancel_token.clone(),
+        "test".to_string(),
+        config,
+    ));
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Start recording
