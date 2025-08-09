@@ -124,7 +124,7 @@ pub async fn new_rtp_track_with_pending_call(
     pending_dialog: PendingDialog,
 ) -> Result<(DialogId, RtpTrack)> {
     let mut rtp_track = create_rtp_track(
-        token.child_token(),
+        token.clone(),
         state.clone(),
         track_id.clone(),
         track_config,
