@@ -114,8 +114,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
 
     tokio::spawn(async move {
         warp::serve(webhook_route)
-            .serve_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-            .await;
+            .incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
     });
 
     // Wait for webhook server to start

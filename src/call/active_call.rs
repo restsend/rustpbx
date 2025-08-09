@@ -1068,7 +1068,7 @@ async fn create_websocket_track(
         .unwrap_or_default();
 
     let ws_track = WebsocketTrack::new(
-        cancel_token.child_token(),
+        cancel_token,
         session_id.clone(),
         track_config,
         event_sender.clone(),
@@ -1102,8 +1102,7 @@ async fn create_webrtc_track(
         .map(|cs| cs.ssrc)
         .unwrap_or(0);
     let mut webrtc_track =
-        WebrtcTrack::new(cancel_token.child_token(), session_id.clone(), track_config)
-            .with_ssrc(ssrc);
+        WebrtcTrack::new(cancel_token, session_id.clone(), track_config).with_ssrc(ssrc);
 
     let timeout = option
         .handshake_timeout
@@ -1165,7 +1164,7 @@ async fn create_outgoing_sip_track(
 
     let r = super::sip::new_rtp_track_with_sip(
         app_state,
-        cancel_token.child_token(),
+        cancel_token,
         session_id.clone(),
         ssrc,
         track_config,
@@ -1218,7 +1217,7 @@ async fn create_incoming_sip_track(
         .unwrap_or(Default::default());
     let r = super::sip::new_rtp_track_with_pending_call(
         app_state,
-        cancel_token.child_token(),
+        cancel_token,
         session_id.clone(),
         ssrc,
         track_config,
