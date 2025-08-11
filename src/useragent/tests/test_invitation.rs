@@ -76,7 +76,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
     let alice_dialog_id = Arc::new(Mutex::new(None::<String>));
     let alice_dialog_id_clone = alice_dialog_id.clone();
 
-    let webhook_route = warp::path("webhook")
+    let webhook_route = warp::path(String::from("webhook"))
         .and(warp::post())
         .and(warp::header::headers_cloned())
         .and(warp::body::json())
@@ -103,7 +103,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
                 }
 
                 info!("Webhook received: {:?}", body);
-                warp::reply::with_status("OK", HttpStatusCode::OK)
+                warp::reply::with_status(String::from("OK"), HttpStatusCode::OK)
             },
         );
 
@@ -111,10 +111,12 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let webhook_addr = listener.local_addr()?;
     let webhook_url = format!("http://127.0.0.1:{}/webhook", webhook_addr.port());
+    drop(listener);
 
     tokio::spawn(async move {
         warp::serve(webhook_route)
-            .incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+            .run(webhook_addr)
+            .await;
     });
 
     // Wait for webhook server to start
