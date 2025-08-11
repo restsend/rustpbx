@@ -4,7 +4,6 @@ pub mod app;
 pub mod call;
 pub mod callrecord;
 pub mod config;
-pub mod console;
 pub mod event;
 pub mod handler;
 pub mod llm;

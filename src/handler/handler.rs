@@ -7,74 +7,29 @@ use crate::{
     },
     event::SessionEvent,
 };
-use axum::{
-    Json, Router,
-    extract::{Path, Query, State, WebSocketUpgrade, ws::Message},
-    response::{IntoResponse, Response},
-    routing::{get, post},
+use axum::{Router,
+    extract::{ Query, State, WebSocketUpgrade, ws::Message},
+    response::{ Response},
+    routing::{get},
 };
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
-use std::{sync::atomic::Ordering};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-pub fn router() -> Router<AppState> {
+pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/call", get(ws_handler))
         .route("/call/webrtc", get(webrtc_handler))
         .route("/call/sip", get(sip_handler))
-        .route("/call/lists", get(list_calls))
-        .route("/call/kill/{id}", post(kill_call))
         .nest("/llm/v1", super::llmproxy::router())
         .route("/iceservers", get(super::webrtc::get_iceservers))
-        .route("/health", get(health_handler))
-}
+        .route("/health", get(super::ami::health_handler))
+        .nest("/ami/v1", super::ami::router(app_state))
 
-async fn health_handler(State(state): State<AppState>) -> Response {
-    let health = serde_json::json!({
-        "status": "running",
-        "uptime": state.uptime,
-        "version": crate::version::get_version_info(),
-        "total": state.total_calls.load(Ordering::Relaxed),
-        "failed": state.total_failed_calls.load(Ordering::Relaxed),
-        "runnings": state.active_calls.lock().await.len(),
-    });
-    Json(health).into_response()
-}
-
-async fn list_calls(State(state): State<AppState>) -> Response {
-    let active_calls = state.active_calls.lock().await;
-    let result = serde_json::json!({
-        "total": active_calls.len(),
-        "calls": active_calls.iter().map(|(id, call)| {
-            let call_state = match call.call_state.read() {
-                Ok(call_state) => call_state,
-                Err(_) => return serde_json::json!({"id": id, "error": "Failed to read call state"}),
-            };
-            serde_json::json!({
-                "id": id,
-                "callType": call.call_type,
-                "startTime": call_state.start_time.to_rfc3339(),
-                "ringTime": call_state.ring_time.map(|t| t.to_rfc3339()),
-                "answerTime": call_state.answer_time.map(|t| t.to_rfc3339()),
-                "duration": call_state.answer_time
-                    .map(|t| (Utc::now() - t).num_seconds()),
-            })
-        }).collect::<Vec<_>>(),
-    });
-    Json(result).into_response()
-}
-
-async fn kill_call(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if let Some(call) = state.active_calls.lock().await.remove(&id) {
-        call.cancel_token.cancel();
-        info!(id, "Call killed");
-    }
-    Json(true).into_response()
 }
 
 pub async fn ws_handler(

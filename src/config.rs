@@ -1,6 +1,6 @@
 use crate::{
     proxy::{
-        routing::{matcher::match_invite, DefaultRoute, RouteRule, TrunkConfig},
+        routing::{DefaultRoute, RouteRule, TrunkConfig, matcher::match_invite},
         user::SipUser,
     },
     useragent::RegisterOption,
@@ -33,6 +33,7 @@ pub struct Config {
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub ice_servers: Option<Vec<IceServerItem>>,
+    pub ami: Option<AmiConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -247,6 +248,29 @@ pub enum RouteResult {
     Abort(u16, String),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AmiConfig {
+    pub allows: Option<Vec<String>>,
+}
+
+impl AmiConfig {
+    pub fn is_allowed(&self, addr: &str) -> bool {
+        if let Some(allows) = &self.allows {
+            allows.iter().any(|a| a == addr || a == "*")
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for AmiConfig {
+    fn default() -> Self {
+        Self {
+            allows: Some(vec!["127.0.0.1".to_string(), "::1".to_string()]), // Default to allow localhost
+        }
+    }
+}
+
 impl ProxyConfig {
     pub fn normalize_realm(realm: &str) -> &str {
         if realm.is_empty() || realm == "*" || realm == "127.0.0.1" || realm == "::1" {
@@ -369,6 +393,7 @@ impl Default for Config {
             callrecord: None,
             llmproxy: None,
             ice_servers: None,
+            ami: Some(AmiConfig::default()),
         }
     }
 }

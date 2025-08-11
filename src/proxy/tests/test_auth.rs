@@ -7,9 +7,9 @@ use super::common::{
 use crate::proxy::auth::AuthModule;
 use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
+use rsip::Header;
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
 use rsip::services::DigestGenerator;
-use rsip::Header;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
@@ -143,7 +143,9 @@ async fn test_auth_module_invite_success() {
         };
         let auth_header = rsip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
-            nonce, uri.to_string(), digest.compute()
+            nonce,
+            uri.to_string(),
+            digest.compute()
         ));
         headers.push(auth_header.into());
         rsip::Request {
@@ -291,7 +293,9 @@ async fn test_auth_module_register_success() {
         };
         let auth_header = rsip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
-            nonce, uri.to_string(), digest.compute()
+            nonce,
+            uri.to_string(),
+            digest.compute()
         ));
         headers.push(auth_header.into());
         rsip::Request {
@@ -482,10 +486,13 @@ async fn test_auth_no_credentials() {
     );
 
     let key = TransactionKey::from_request(&request, TransactionRole::Server).unwrap();
-    let mut tx = Transaction::new_server(key, request, endpoint_inner, None);
+    let tx = Transaction::new_server(key, request, endpoint_inner, None);
 
     // Should return false because no credentials are provided
-    let result = auth_module.authenticate_request(&mut tx).await.unwrap();
+    let result = auth_module
+        .authenticate_request(&tx.original)
+        .await
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -553,10 +560,13 @@ async fn test_auth_disabled_user() {
     );
 
     let key = TransactionKey::from_request(&request, TransactionRole::Server).unwrap();
-    let mut tx = Transaction::new_server(key, request, endpoint_inner, None);
+    let tx = Transaction::new_server(key, request, endpoint_inner, None);
 
     // Should return false because user is disabled
-    let result = auth_module.authenticate_request(&mut tx).await.unwrap();
+    let result = auth_module
+        .authenticate_request(&tx.original)
+        .await
+        .unwrap();
     println!("Authentication result: {:?}", result);
     assert!(result.is_none());
 }
@@ -630,7 +640,7 @@ async fn test_proxy_auth_invite_success() {
         .await
         .unwrap();
 
-    let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
+    let auth_result = module.authenticate_request(&tx2.original).await.unwrap();
     assert!(
         auth_result.is_some(),
         "Authentication should succeed with correct credentials"
@@ -740,7 +750,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let (mut tx2, _) = create_transaction(request_with_wrong_auth).await;
 
     // Test authentication
-    let auth_result = module.authenticate_request(&mut tx2).await.unwrap();
+    let auth_result = module.authenticate_request(&tx.original).await.unwrap();
     println!("Direct authentication result: {:?}", auth_result);
 
     let result = module
