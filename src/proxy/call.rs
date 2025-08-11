@@ -9,6 +9,7 @@ use crate::proxy::user::SipUser;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use rsip::Uri;
 use rsip::headers::UntypedHeader;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
@@ -25,6 +26,31 @@ use tokio::select;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, Clone)]
+pub struct RingTarget {
+    pub uri: Uri,
+    pub priority: u32,
+    pub timeout_seconds: u32,
+    pub supports_webrtc: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum RingStrategy {
+    Sequential(Vec<RingTarget>),
+    Parallel(Vec<RingTarget>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RingGroup {
+    pub targets: RingStrategy,
+    pub max_ring_time: u32,
+}
+
+#[async_trait]
+pub trait CallRouter: Send + Sync {
+    async fn resolve(&self, original: &rsip::Request) -> Result<RingGroup>;
+}
 
 #[derive(Clone)]
 pub struct CallModuleInner {
@@ -107,6 +133,10 @@ impl CallModule {
                 Ok(false)
             }
         }
+    }
+
+    async fn default_resolve(&self, _original: &rsip::Request) -> Result<RingGroup> {
+        todo!()
     }
 
     pub(crate) async fn handle_invite(

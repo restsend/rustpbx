@@ -1,21 +1,27 @@
-use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
+use super::{ProxyAction, ProxyModule, server::SipServerRef, user::SipUser};
 use crate::config::ProxyConfig;
 use crate::proxy::server::TransactionCookie;
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::headers::auth::Algorithm;
+use rsip::Header;
+use rsip::Uri;
 use rsip::headers::UntypedHeader;
+use rsip::headers::auth::Algorithm;
 use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsip::prelude::HeadersExt;
 use rsip::prelude::ToTypedHeader;
 use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
-use rsip::Header;
-use rsip::Uri;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use tracing::{debug, info};
+
+#[async_trait]
+pub trait AuthBackend: Send + Sync {
+    fn authenticate(&self, original: &rsip::Request) -> Result<Option<SipUser>>;
+}
 
 #[derive(Clone)]
 pub struct AuthModule {
@@ -32,10 +38,10 @@ impl AuthModule {
         Self { server }
     }
 
-    pub async fn authenticate_request(&self, tx: &mut Transaction) -> Result<Option<SipUser>> {
+    pub async fn authenticate_request(&self, original: &rsip::Request) -> Result<Option<SipUser>> {
         // Check for both Authorization and Proxy-Authorization headers
         // Prioritize Authorization for backward compatibility
-        let auth_result = check_authorization_headers(&tx.original)?;
+        let auth_result = check_authorization_headers(&original)?;
 
         if let Some((user, auth_inner)) = auth_result {
             // Check if user exists and is enabled
@@ -58,8 +64,8 @@ impl AuthModule {
                     }
                     let result = self.verify_credentials(
                         &stored_user,
-                        &tx.original.uri,
-                        &tx.original.method,
+                        &original.uri,
+                        &original.method,
                         &auth_inner,
                     )?;
                     debug!("Credential verification result: {}", result);
@@ -166,7 +172,7 @@ impl ProxyModule for AuthModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
-        _cookie: TransactionCookie,
+        cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         // Only authenticate INVITE and REGISTER requests
         if tx.original.method != rsip::Method::Invite
@@ -180,12 +186,25 @@ impl ProxyModule for AuthModule {
             "Auth module processing request"
         );
 
-        // Perform authentication
-        match self.authenticate_request(tx).await {
+        match self.server.auth_backend.as_ref() {
+            Some(backend) => match backend.authenticate(&tx.original) {
+                Ok(Some(user)) => {
+                    cookie.set_user(user);
+                    return Ok(ProxyAction::Continue);
+                }
+                Err(e) => {
+                    warn!("Authentication failed {:} request: {:?}", e, tx.original)
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+
+        match self.authenticate_request(&tx.original).await {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
                     debug!("Authentication successful, continuing");
-                    _cookie.set_user(user);
+                    cookie.set_user(user);
                     Ok(ProxyAction::Continue)
                 } else {
                     let from_uri = tx.original.from_header()?.uri()?;

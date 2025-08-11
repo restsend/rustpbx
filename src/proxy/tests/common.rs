@@ -2,16 +2,16 @@ use crate::config::ProxyConfig;
 use crate::proxy::locator::MemoryLocator;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::{MemoryUserBackend, SipUser};
-use rsip::services::DigestGenerator;
 use rsip::Header;
-use rsip::{prelude::*, HostWithPort};
+use rsip::services::DigestGenerator;
+use rsip::{HostWithPort, prelude::*};
+use rsipstack::EndpointBuilder;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::channel::ChannelConnection;
 use rsipstack::transport::{SipAddr, TransportLayer};
-use rsipstack::EndpointBuilder;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -45,6 +45,8 @@ pub async fn create_test_server_with_config(
         config: config.clone(),
         cancel_token: CancellationToken::new(),
         user_backend: Arc::new(user_backend),
+        auth_backend: Arc::new(None),
+        call_router: Arc::new(None),
         locator: Arc::new(locator),
         callrecord_sender: None,
         endpoint,
@@ -206,10 +208,14 @@ pub fn create_test_request(
             qop: None,
         };
 
-        let auth_header =  rsip::headers::Authorization::new(format!(
-        "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
-        username, realm, demo_nonce, uri.to_string(), digest.compute()
-    ));
+        let auth_header = rsip::headers::Authorization::new(format!(
+            "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            username,
+            realm,
+            demo_nonce,
+            uri.to_string(),
+            digest.compute()
+        ));
         headers.push(auth_header.into());
     }
 
@@ -331,7 +337,11 @@ pub fn create_proxy_auth_request_with_nonce(
 
         let proxy_auth_header = rsip::headers::ProxyAuthorization::new(format!(
             "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
-            username, realm, nonce, uri.to_string(), digest.compute()
+            username,
+            realm,
+            nonce,
+            uri.to_string(),
+            digest.compute()
         ));
         headers.push(proxy_auth_header.into());
     }

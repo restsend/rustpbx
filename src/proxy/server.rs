@@ -3,7 +3,11 @@ use super::{
     locator::{Locator, create_locator},
     user::{UserBackend, create_user_backend},
 };
-use crate::{callrecord::CallRecordSender, config::ProxyConfig, proxy::user::SipUser};
+use crate::{
+    callrecord::CallRecordSender,
+    config::ProxyConfig,
+    proxy::{auth::AuthBackend, call::CallRouter, user::SipUser},
+};
 use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
 use rsipstack::{
@@ -84,6 +88,8 @@ pub struct SipServerInner {
     pub cancel_token: CancellationToken,
     pub config: Arc<ProxyConfig>,
     pub user_backend: Arc<Box<dyn UserBackend>>,
+    pub auth_backend: Arc<Option<Box<dyn AuthBackend>>>,
+    pub call_router: Arc<Option<Box<dyn CallRouter>>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
@@ -102,6 +108,8 @@ pub struct SipServerBuilder {
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
     user_backend: Option<Box<dyn UserBackend>>,
+    auth_backend: Option<Box<dyn AuthBackend>>,
+    call_router: Option<Box<dyn CallRouter>>,
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
@@ -113,6 +121,8 @@ impl SipServerBuilder {
             config,
             cancel_token: None,
             user_backend: None,
+            auth_backend: None,
+            call_router: None,
             module_fns: HashMap::new(),
             locator: None,
             callrecord_sender: None,
@@ -123,10 +133,22 @@ impl SipServerBuilder {
         self.user_backend = Some(user_backend);
         self
     }
+
+    pub fn with_auth_backend(mut self, auth_backend: Box<dyn AuthBackend>) -> Self {
+        self.auth_backend = Some(auth_backend);
+        self
+    }
+
+    pub fn with_call_router(mut self, call_router: Box<dyn CallRouter>) -> Self {
+        self.call_router = Some(call_router);
+        self
+    }
+
     pub fn with_locator(mut self, locator: Box<dyn Locator>) -> Self {
         self.locator = Some(locator);
         self
     }
+
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
@@ -157,6 +179,7 @@ impl SipServerBuilder {
                 }
             }
         };
+        let auth_backend = self.auth_backend;
         let locator = if let Some(locator) = self.locator {
             locator
         } else {
@@ -242,10 +265,14 @@ impl SipServerBuilder {
 
         let endpoint = endpoint_builder.build();
 
+        let call_router = self.call_router;
+
         let inner = Arc::new(SipServerInner {
             config: self.config.clone(),
             cancel_token,
             user_backend: Arc::new(user_backend),
+            auth_backend: Arc::new(auth_backend),
+            call_router: Arc::new(call_router),
             locator: Arc::new(locator),
             callrecord_sender: self.callrecord_sender,
             endpoint,
