@@ -3,13 +3,12 @@ use crate::{
         tts::{TtsCommand, TtsTrack},
         Track,
     },
-    synthesis::{SynthesisClient, SynthesisOption, SynthesisType},
+    synthesis::{SynthesisClient, SynthesisOption, TTSEvent, SynthesisType},
     Samples,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::{stream, Stream};
-use std::pin::Pin;
+use futures::{stream::{self, BoxStream}, };
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
@@ -23,11 +22,11 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn synthesize<'a>(
-        &'a self,
-        _text: &'a str,
+    async fn synthesize(
+        &self,
+        _text: &str,
         _option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
+    ) -> Result<BoxStream<Result<TTSEvent>>> {
         // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
@@ -55,7 +54,7 @@ impl SynthesisClient for MockSynthesisClient {
                 chunk_data.push(((sample >> 8) & 0xFF) as u8);
             }
 
-            chunks.push(Ok(chunk_data));
+            chunks.push(Ok(TTSEvent::AudioChunk(chunk_data)));
         }
 
         // Create a stream from the chunks

@@ -1,12 +1,13 @@
+use crate::synthesis::TTSEvent;
+
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD, Engine};
-use futures::{stream, SinkExt, Stream, StreamExt};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use futures::{SinkExt, StreamExt, stream::BoxStream};
 use http::{Request, StatusCode, Uri};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 /// https://github.com/ruzhila/voiceapi
@@ -44,11 +45,11 @@ impl VoiceApiTtsClient {
         Self { option }
     }
     // WebSocket-based TTS synthesis
-    async fn ws_synthesize<'a>(
-        &'a self,
-        text: &'a str,
+    async fn ws_synthesize(
+        &self,
+        text: &str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
+    ) -> Result<BoxStream<'_, Result<TTSEvent>>> {
         let option = self.option.merge_with(option);
         let endpoint = option
             .endpoint
@@ -95,60 +96,44 @@ impl VoiceApiTtsClient {
         // Send the TTS request
         ws_sender.send(Message::Text(text.into())).await?;
 
-        // Create a stream that will yield audio chunks
-        let stream = Box::pin(stream::unfold(
-            (ws_receiver, ws_sender, false),
-            move |(mut read, write, finished)| async move {
-                // If we've finished processing, end the stream
-                if finished {
-                    return None;
-                }
+        let stream = ws_receiver.filter_map(|message| async {
+            match message {
+                Ok(Message::Binary(data)) => Some(Ok(TTSEvent::AudioChunk(data.to_vec()))),
+                Ok(Message::Text(text_data)) => {
+                    match serde_json::from_str::<TtsResult>(&text_data) {
+                        Ok(metadata) => {
+                            debug!(
+                                "Received metadata: progress={}, elapsed={}, duration={}, size={}",
+                                metadata.progress,
+                                metadata.elapsed,
+                                metadata.duration,
+                                metadata.size
+                            );
 
-                // Receive message from WebSocket
-                match read.next().await {
-                    Some(Ok(Message::Binary(data))) => {
-                        let audio_data = data.to_vec();
-                        Some((Ok(audio_data), (read, write, false)))
-                    }
-                    Some(Ok(Message::Text(text_data))) => {
-                        // Text data is metadata
-                        match serde_json::from_str::<TtsResult>(&text_data) {
-                            Ok(metadata) => {
-                                debug!("Received metadata: progress={}, elapsed={}, duration={}, size={}", 
-                                      metadata.progress, metadata.elapsed, metadata.duration, metadata.size);
-
-                                // If progress is 1.0, this is the final message
-                                let is_finished = metadata.progress >= 1.0;
-
-                                // Return empty chunk and continue or finish
-                                Some((Ok(Vec::new()), (read, write, is_finished)))
+                            if metadata.progress == 1.0 {
+                                return Some(Ok(TTSEvent::Finished));
                             }
-                            Err(e) => {
-                                warn!("Failed to parse metadata: {}", e);
-                                // Continue receiving data
-                                Some((Ok(Vec::new()), (read, write, false)))
-                            }
+
+                            None
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse metadata: {}", e);
+                            Some(Err(anyhow!(
+                                "Failed to parse metadata: {}, {}",
+                                text_data,
+                                e
+                            )))
                         }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        // Connection closed
-                        debug!("WebSocket closed by server");
-                        None
-                    }
-                    Some(Err(e)) => {
-                        warn!("WebSocket error: {:?}", e);
-                        // Error occurred
-                        Some((Err(anyhow!("WebSocket error: {}", e)), (read, write, true)))
-                    }
-                    _ => {
-                        // Other message types (ping/pong/etc.)
-                        Some((Ok(Vec::new()), (read, write, false)))
-                    }
                 }
-            },
-        ));
-
-        Ok(stream)
+                Ok(Message::Close(_)) => {
+                    Some(Err(anyhow!("VoiceAPI TTS websocket closed by remote")))
+                }
+                Err(e) => Some(Err(anyhow!("WebSocket error: {}", e))),
+                _ => None,
+            }
+        });
+        Ok(Box::pin(stream))
     }
 }
 
@@ -157,11 +142,11 @@ impl SynthesisClient for VoiceApiTtsClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::VoiceApi
     }
-    async fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
+    async fn synthesize(
+        &self,
+        text: &str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
+    ) -> Result<BoxStream<Result<TTSEvent>>> {
         self.ws_synthesize(text, option).await
     }
 }
