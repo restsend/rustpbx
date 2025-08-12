@@ -44,8 +44,9 @@ pub struct CallParams {
 #[serde(rename_all = "snake_case")]
 pub enum ActiveCallType {
     Webrtc,
-    Sip,
+    B2bua,
     WebSocket,
+    Sip,
 }
 #[derive(Default, Clone)]
 pub struct ActiveCallState {
@@ -106,13 +107,13 @@ impl ActiveCall {
     }
 
     pub async fn serve(&self) -> Result<()> {
-        let mut event_receiver = self.media_stream.subscribe();
+        let mut event_receiver = self.event_sender.subscribe();
         let auto_hangup = self.auto_hangup.clone();
         let wait_input_timeout = self.wait_input_timeout.clone();
 
         let input_timeout_expire = Arc::new(Mutex::new((0u64, 0u32)));
         let input_timeout_expire_ref = input_timeout_expire.clone();
-        let event_sender = self.media_stream.get_event_sender();
+        let event_sender = self.event_sender.clone();
         let wait_input_timeout_loop = async {
             loop {
                 let (start_time, expire) = { *input_timeout_expire.lock().await };
@@ -353,8 +354,7 @@ impl ActiveCall {
     }
 
     async fn do_history(&self, speaker: String, text: String) -> Result<()> {
-        self.media_stream
-            .get_event_sender()
+        self.event_sender
             .send(SessionEvent::AddHistory {
                 sender: Some(self.session_id.clone()),
                 timestamp: crate::get_timestamp(),
@@ -434,7 +434,7 @@ impl ActiveCall {
         let token = self.cancel_token.child_token();
         let session_id = self.session_id.clone();
         let app_state = self.app_state.clone();
-        let event_sender = self.media_stream.get_event_sender();
+        let event_sender = self.event_sender.clone();
         let track_id = self.track_config.server_side_track_id.clone();
         let stream = self.media_stream.clone();
         let track_config = self.track_config.clone();
@@ -582,7 +582,7 @@ impl ActiveCallState {
                 Some(Box::new(rc.build_callrecord(
                     app_state.clone(),
                     call_id,
-                    ActiveCallType::Sip,
+                    ActiveCallType::B2bua,
                 )))
             } else {
                 None
@@ -698,6 +698,59 @@ pub async fn dump_events_to_file(
     }
 }
 
+pub(super) async fn dump_events_loop(
+    app_state: AppState,
+    event_sender: EventSender,
+    cancel_token: CancellationToken,
+    session_id: String,
+    dump_events: bool,
+    dump_cmd_receiver: CommandReceiver,
+) {
+    if !dump_events {
+        return;
+    }
+    let file_name = app_state.get_dump_events_file(&session_id);
+    let mut dump_file = match File::options()
+        .create(true)
+        .append(true)
+        .open(&file_name)
+        .await
+    {
+        Ok(file) => file,
+        Err(e) => {
+            warn!(
+                session_id,
+                file_name, "Failed to open dump events file: {}", e
+            );
+            return;
+        }
+    };
+    let mut event_receiver = event_sender.subscribe();
+
+    dump_events_to_file(
+        cancel_token.clone(),
+        &mut dump_file,
+        dump_cmd_receiver,
+        &mut event_receiver,
+    )
+    .await;
+
+    while let Ok(event) = event_receiver.try_recv() {
+        if matches!(event, SessionEvent::Binary { .. }) {
+            continue;
+        }
+        let text = match serde_json::to_string(&event) {
+            Ok(text) => text,
+            Err(_) => {
+                continue;
+            }
+        };
+        CallRecordEvent::new(CallRecordEventType::Event, &text)
+            .write_to_file(&mut dump_file)
+            .await;
+    }
+}
+
 pub async fn handle_call(
     cancel_token: CancellationToken,
     call_type: ActiveCallType,
@@ -705,57 +758,11 @@ pub async fn handle_call(
     dump_events: bool,
     app_state: AppState,
     event_sender: EventSender,
-    audio_receiver: WebsocketBytesReceiver,
+    audio_receiver: Option<WebsocketBytesReceiver>,
     dump_cmd_receiver: CommandReceiver,
     mut cmd_receiver: CommandReceiver,
     invitation: Invitation,
 ) -> Result<CallRecord, (Error, Option<CallRecord>)> {
-    let dump_events_loop = async {
-        if !dump_events {
-            return;
-        }
-        let file_name = app_state.get_dump_events_file(&session_id);
-        let mut dump_file = match File::options()
-            .create(true)
-            .append(true)
-            .open(&file_name)
-            .await
-        {
-            Ok(file) => file,
-            Err(e) => {
-                warn!(
-                    session_id,
-                    file_name, "Failed to open dump events file: {}", e
-                );
-                return;
-            }
-        };
-        let mut event_receiver = event_sender.subscribe();
-
-        dump_events_to_file(
-            cancel_token.clone(),
-            &mut dump_file,
-            dump_cmd_receiver,
-            &mut event_receiver,
-        )
-        .await;
-
-        while let Ok(event) = event_receiver.try_recv() {
-            if matches!(event, SessionEvent::Binary { .. }) {
-                continue;
-            }
-            let text = match serde_json::to_string(&event) {
-                Ok(text) => text,
-                Err(_) => {
-                    continue;
-                }
-            };
-            CallRecordEvent::new(CallRecordEventType::Event, &text)
-                .write_to_file(&mut dump_file)
-                .await;
-        }
-    };
-
     let mut option = match cmd_receiver.recv().await {
         Ok(command) => match command {
             Command::Invite { option } => option,
@@ -824,7 +831,7 @@ pub async fn handle_call(
             event_sender.clone(),
             audio_receiver,
             cmd_receiver,
-            dlg_state_sender,
+            Some(dlg_state_sender),
             call_state_ref.clone(),
             invitation,
         )
@@ -841,7 +848,14 @@ pub async fn handle_call(
     let (_, _, _, process_call_result) = join! {
         media_stream.serve(),
         process_sip_dlg_loop,
-        dump_events_loop,
+        dump_events_loop(
+            app_state.clone(),
+            event_sender.clone(),
+            cancel_token.clone(),
+            session_id.clone(),
+            dump_events,
+            dump_cmd_receiver
+        ),
         process_call_loop
     };
     debug!(session_id, "call processing completed");
@@ -867,9 +881,9 @@ pub async fn process_call(
     app_state: AppState,
     media_stream: Arc<MediaStream>,
     event_sender: EventSender,
-    audio_receiver: WebsocketBytesReceiver,
+    audio_receiver: Option<WebsocketBytesReceiver>,
     mut cmd_receiver: CommandReceiver,
-    dlg_state_sender: DialogStateSender,
+    dlg_state_sender: Option<DialogStateSender>,
     call_state_ref: ActiveCallStateRef,
     invitation: Invitation,
 ) -> Result<CallRecord> {
@@ -881,7 +895,13 @@ pub async fn process_call(
 
     let caller_track = match call_type {
         ActiveCallType::WebSocket => {
-            create_websocket_track(
+            let audio_receiver = match audio_receiver {
+                Some(receiver) => receiver,
+                None => {
+                    return Err(anyhow::anyhow!("WebSocket call requires an audio receiver"));
+                }
+            };
+            match create_websocket_track(
                 cancel_token.clone(),
                 track_config,
                 call_state_ref.clone(),
@@ -890,9 +910,16 @@ pub async fn process_call(
                 audio_receiver,
             )
             .await
+            {
+                Ok(track) => Some(track),
+                Err(e) => {
+                    warn!(session_id, "Failed to create WebSocket track: {}", e);
+                    return Err(e);
+                }
+            }
         }
         ActiveCallType::Webrtc => {
-            create_webrtc_track(
+            match create_webrtc_track(
                 cancel_token.clone(),
                 track_config,
                 call_state_ref.clone(),
@@ -900,9 +927,18 @@ pub async fn process_call(
                 &option,
             )
             .await
+            {
+                Ok(track) => Some(track),
+                Err(e) => {
+                    warn!(session_id, "Failed to create WebRTC track: {}", e);
+                    return Err(e);
+                }
+            }
         }
         ActiveCallType::Sip => {
-            if let Some(pending_dialog) = app_state.useragent.get_pending_call(&session_id).await {
+            let dlg_state_sender = dlg_state_sender
+                .ok_or_else(|| anyhow::anyhow!("SIP call requires a dialog state sender"))?;
+            let r = if let Some(pending_dialog) = invitation.get_pending_call(&session_id).await {
                 create_incoming_sip_track(
                     pending_dialog,
                     cancel_token.clone(),
@@ -924,9 +960,17 @@ pub async fn process_call(
                     &invitation,
                 )
                 .await
+            };
+            match r {
+                Ok(track) => Some(track),
+                Err(e) => {
+                    warn!(session_id, "Failed to create SIP track: {}", e);
+                    return Err(e);
+                }
             }
         }
-    }?;
+        ActiveCallType::B2bua => None,
+    };
 
     let option = call_state_ref
         .read()
@@ -934,16 +978,18 @@ pub async fn process_call(
         .map(|cs| cs.option.clone())
         .unwrap_or(Default::default());
 
-    setup_track_with_stream(
-        cancel_token.clone(),
-        app_state.stream_engine.clone(),
-        &session_id,
-        event_sender.clone(),
-        media_stream.clone(),
-        caller_track,
-        &option,
-    )
-    .await;
+    if let Some(caller_track) = caller_track {
+        setup_track_with_stream(
+            cancel_token.clone(),
+            app_state.stream_engine.clone(),
+            &session_id,
+            event_sender.clone(),
+            media_stream.clone(),
+            caller_track,
+            &option,
+        )
+        .await;
+    }
 
     let answer = call_state_ref
         .read()
@@ -977,13 +1023,15 @@ pub async fn process_call(
         "new call"
     );
 
-    event_sender
-        .send(SessionEvent::Answer {
-            track_id: active_call.session_id.clone(),
-            timestamp: crate::get_timestamp(),
-            sdp: answer,
-        })
-        .ok();
+    if !answer.is_empty() {
+        event_sender
+            .send(SessionEvent::Answer {
+                track_id: active_call.session_id.clone(),
+                timestamp: crate::get_timestamp(),
+                sdp: answer,
+            })
+            .ok();
+    }
 
     let active_call_ref = active_call.clone();
     let process_command_loop = async move {
@@ -1089,7 +1137,7 @@ async fn create_websocket_track(
     Ok(Box::new(ws_track))
 }
 
-async fn create_webrtc_track(
+pub(super) async fn create_webrtc_track(
     cancel_token: CancellationToken,
     track_config: TrackConfig,
     call_state_ref: ActiveCallStateRef,
@@ -1196,7 +1244,7 @@ async fn create_outgoing_sip_track(
     }
 }
 
-async fn create_incoming_sip_track(
+pub(super) async fn create_incoming_sip_track(
     pending_dialog: PendingDialog,
     cancel_token: CancellationToken,
     track_config: TrackConfig,
@@ -1215,7 +1263,7 @@ async fn create_incoming_sip_track(
         .as_ref()
         .map(|cs| cs.option.clone())
         .unwrap_or(Default::default());
-    let r = super::sip::new_rtp_track_with_pending_call(
+    let r = super::sip::new_track_with_pending_call(
         app_state,
         cancel_token,
         session_id.clone(),
@@ -1227,20 +1275,20 @@ async fn create_incoming_sip_track(
     )
     .await;
     match r {
-        Ok((dialog_id, rtp_track)) => {
+        Ok((dialog_id, rtp_track, offer, answer)) => {
             call_state_ref
                 .write()
                 .as_mut()
                 .and_then(|cs| {
                     cs.dialog_id = Some(dialog_id);
-                    cs.option.offer = rtp_track.remote_description();
-                    cs.answer = rtp_track.local_description().ok();
+                    cs.option.offer = offer;
+                    cs.answer = answer;
                     cs.answer_time = Some(Utc::now());
                     cs.last_status_code = 200;
                     Ok(())
                 })
                 .ok();
-            Ok(Box::new(rtp_track))
+            Ok(rtp_track)
         }
         Err(e) => {
             warn!(session_id, "error creating rtp track: {}", e);

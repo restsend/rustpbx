@@ -1,8 +1,10 @@
-use super::locator::{Location as LocatorLocation, Locator};
+use crate::call::Location;
+
+use super::locator::Locator;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sea_orm::{entity::prelude::*, ActiveModelTrait, Database, Set};
+use sea_orm::{ActiveModelTrait, Database, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{boolean, integer, pk_auto, string, timestamp};
 use std::time::{Instant, SystemTime};
@@ -131,7 +133,7 @@ impl Locator for DbLocator {
         &self,
         username: &str,
         realm: Option<&str>,
-        location: LocatorLocation,
+        location: Location,
     ) -> Result<()> {
         // Default implementation for standard cases:
         let aor = location.aor.to_string();
@@ -223,7 +225,7 @@ impl Locator for DbLocator {
         Ok(())
     }
 
-    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<LocatorLocation>> {
+    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>> {
         // Default implementation for standard cases
         let realm_value = realm.unwrap_or_default();
         let models = Entity::find()
@@ -262,12 +264,13 @@ impl Locator for DbLocator {
                 addr,
             };
 
-            locations.push(LocatorLocation {
+            locations.push(Location {
                 aor,
                 expires: model.expires as u32,
                 destination,
-                last_modified: Instant::now(), // We can't store Instant in DB, so create a new one
+                last_modified: None,
                 supports_webrtc: model.supports_webrtc,
+                ..Default::default()
             });
         }
 

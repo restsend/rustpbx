@@ -47,7 +47,7 @@ pub async fn sip_handler(
     State(state): State<AppState>,
     Query(params): Query<CallParams>,
 ) -> Response {
-    call_handler(client_ip, ActiveCallType::Sip, ws, state, params).await
+    call_handler(client_ip, ActiveCallType::B2bua, ws, state, params).await
 }
 
 pub async fn webrtc_handler(
@@ -144,7 +144,7 @@ pub async fn call_handler(
                 dump_events,
                 app_state.clone(),
                 event_sender.clone(),
-                audio_receiver,
+                Some(audio_receiver),
                 dump_cmd_receiver,
                 cmd_receiver,
                 invitation,
@@ -162,7 +162,7 @@ pub async fn call_handler(
                             .as_seconds_f32(),
                         "Call ended"
                     );
-                    if let Some(sender) = app_state.callrecord_sender.lock().await.as_ref() {
+                    if let Some(sender) = app_state.callrecord_sender.as_ref() {
                         if let Err(e) = sender.send(call_record) {
                             warn!(session_id, %client_ip, "Failed to send call record: {}", e);
                         }
@@ -190,7 +190,7 @@ pub async fn call_handler(
                                     .as_seconds_f32(),
                                 "Call ended with error"
                             );
-                            if let Some(sender) = app_state.callrecord_sender.lock().await.as_ref() {
+                            if let Some(sender) = app_state.callrecord_sender.as_ref() {
                                 if let Err(e) = sender.send(record) {
                                     warn!(session_id, %client_ip, "Failed to send call record: {}", e);
                                 }

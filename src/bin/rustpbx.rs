@@ -81,11 +81,11 @@ async fn main() -> Result<()> {
     }
 
     let state_builder = AppStateBuilder::new().config(config);
-    let state = state_builder.build().await.expect("Failed to build app");
+    let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
 
     info!("starting rustpbx on {}", state.config.http_addr);
     select! {
-        _ = rustpbx::app::run(state) => {}
+        _ = rustpbx::app::run(state, sip_server) => {}
         _ = tokio::signal::ctrl_c() => {
             info!("received CTRL+C, shutting down");
         }

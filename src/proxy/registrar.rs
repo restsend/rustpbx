@@ -1,8 +1,7 @@
-use super::{server::SipServerRef, user::SipUser, ProxyAction, ProxyModule};
-use crate::{
-    config::ProxyConfig,
-    proxy::{locator::Location, server::TransactionCookie},
-};
+use super::{ProxyAction, ProxyModule, server::SipServerRef};
+use crate::call::user::SipUser;
+use crate::call::{Location, TransactionCookie};
+use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::{HeadersExt, UntypedHeader};
@@ -132,8 +131,9 @@ impl ProxyModule for RegistrarModule {
             aor: contact.uri.clone(),
             expires,
             destination: destination.clone(),
-            last_modified: Instant::now(),
+            last_modified: Some(Instant::now()),
             supports_webrtc: user.is_support_webrtc,
+            ..Default::default()
         };
 
         match self

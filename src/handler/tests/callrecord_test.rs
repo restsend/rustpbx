@@ -1,6 +1,6 @@
 use crate::{
     app::AppStateBuilder,
-    call::{active_call::CallParams, ActiveCallType},
+    call::{ActiveCallType, active_call::CallParams},
     config::{Config, ProxyConfig, UseragentConfig},
     handler::middleware::clientaddr::ClientAddr,
     media::engine::StreamEngine,
@@ -57,7 +57,7 @@ async fn test_call_record_creation() {
     });
 
     // Build app state
-    let state = AppStateBuilder::new()
+    let (state, _) = AppStateBuilder::new()
         .config(config)
         .with_stream_engine(Arc::new(StreamEngine::default()))
         .build()

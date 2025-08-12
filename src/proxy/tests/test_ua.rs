@@ -1,15 +1,16 @@
-use anyhow::{anyhow, Result};
+use crate::call::user::SipUser;
+use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
 use rsip::typed::MediaType;
+use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::registration::Registration;
-use rsipstack::dialog::DialogId;
 use rsipstack::transaction::{EndpointBuilder, TransactionReceiver};
-use rsipstack::transport::udp::UdpConnection;
 use rsipstack::transport::TransportLayer;
+use rsipstack::transport::udp::UdpConnection;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::select;
@@ -485,14 +486,11 @@ a=rtpmap:8 PCMA/8000\r
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::AppStateBuilder;
     use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig};
     use crate::proxy::{
-        auth::AuthModule,
-        call::CallModule,
-        locator::MemoryLocator,
-        registrar::RegistrarModule,
-        server::SipServerBuilder,
-        user::{MemoryUserBackend, SipUser},
+        auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
+        server::SipServerBuilder, user::MemoryUserBackend,
     };
     use std::time::Duration;
     use tokio::time::sleep;
@@ -583,7 +581,8 @@ mod tests {
                     Ok(Box::new(CallModule::new(config, inner)))
                 });
 
-            let server = builder.build().await?;
+            let app_state = AppStateBuilder::new().build().await.unwrap().0;
+            let server = builder.build(app_state).await?;
 
             // Start server
             tokio::spawn(async move {

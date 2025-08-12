@@ -4,9 +4,11 @@ use crate::app::AppState;
 use crate::call::active_call::{ActiveCallStateRef, setup_track_with_stream};
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::{EventSender, SessionEvent};
+use crate::media::negotiate::strip_ipv6_candidates;
 use crate::media::stream::MediaStream;
-use crate::media::track::TrackConfig;
 use crate::media::track::rtp::{RtpTrack, RtpTrackBuilder};
+use crate::media::track::webrtc::WebrtcTrack;
+use crate::media::track::{Track, TrackConfig};
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
 use chrono::Utc;
@@ -19,9 +21,10 @@ use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct Invitation {
@@ -35,6 +38,15 @@ impl Invitation {
             dialog_layer,
             pending_dialogs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+    pub async fn add_pending(&self, session_id: String, pending: PendingDialog) {
+        let mut pending_dialogs = self.pending_dialogs.lock().await;
+        pending_dialogs.insert(session_id, pending);
+    }
+
+    pub async fn get_pending_call(&self, session_id: &String) -> Option<PendingDialog> {
+        let mut pending_dialogs = self.pending_dialogs.lock().await;
+        pending_dialogs.remove(session_id)
     }
 
     pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
@@ -94,7 +106,7 @@ pub async fn create_rtp_track(
     track_config: TrackConfig,
     ssrc: u32,
 ) -> Result<RtpTrack> {
-    let mut rtp_track = RtpTrackBuilder::new(track_id.clone(), track_config)
+    let mut rtp_track = RtpTrackBuilder::new(track_id, track_config)
         .with_ssrc(ssrc)
         .with_cancel_token(cancel_token);
 
@@ -112,42 +124,59 @@ pub async fn create_rtp_track(
     }
     rtp_track.build().await
 }
+/// Detect if SDP is WebRTC format
+pub fn is_webrtc_sdp(sdp: &str) -> bool {
+    sdp.contains("a=ice-ufrag:") || sdp.contains("a=ice-pwd:")
+}
 
-pub async fn new_rtp_track_with_pending_call(
+pub async fn new_track_with_pending_call(
     state: AppState,
     token: CancellationToken,
     track_id: TrackId,
     ssrc: u32,
     track_config: TrackConfig,
-    _option: &CallOption,
+    option: &CallOption,
     dlg_state_sender: DialogStateSender,
     pending_dialog: PendingDialog,
-) -> Result<(DialogId, RtpTrack)> {
-    let mut rtp_track = create_rtp_track(
-        token.clone(),
-        state.clone(),
-        track_id.clone(),
-        track_config,
-        ssrc,
-    )
-    .await?;
+) -> Result<(DialogId, Box<dyn Track>, Option<String>, Option<String>)> {
     let initial_request = pending_dialog.dialog.initial_request();
-    let offer = String::from_utf8_lossy(&initial_request.body);
-    match rtp_track.set_remote_description(&offer) {
-        Ok(_) => (),
-        Err(e) => {
-            error!(track_id, "failed to set remote description: {}", e);
-            return Err(anyhow::anyhow!("failed to set remote description"));
-        }
-    }
+    let offer = String::from_utf8_lossy(&initial_request.body).to_string();
 
-    let answer = match rtp_track.local_description() {
+    let offer = match option.enable_ipv6 {
+        Some(false) | None => strip_ipv6_candidates(&offer),
+        _ => offer.clone(),
+    };
+
+    let timeout = option
+        .handshake_timeout
+        .as_ref()
+        .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
+        .flatten();
+
+    let mut media_track = if is_webrtc_sdp(&offer) {
+        let webrtc_track =
+            WebrtcTrack::new(token.clone(), track_id.clone(), track_config).with_ssrc(ssrc);
+        Box::new(webrtc_track) as Box<dyn Track>
+    } else {
+        let rtp_track = create_rtp_track(
+            token.clone(),
+            state.clone(),
+            track_id.clone(),
+            track_config,
+            ssrc,
+        )
+        .await?;
+        Box::new(rtp_track) as Box<dyn Track>
+    };
+
+    let answer = match media_track.handshake(offer.clone(), timeout).await {
         Ok(answer) => answer,
         Err(e) => {
-            error!(track_id, "failed to get local description: {}", e);
-            return Err(anyhow::anyhow!("failed to get local description"));
+            warn!(track_id, "failed to handshake: {}", e);
+            return Err(anyhow::anyhow!("failed to handshake"));
         }
     };
+
     let headers = vec![rsip::Header::ContentType(
         "application/sdp".to_string().into(),
     )];
@@ -158,7 +187,7 @@ pub async fn new_rtp_track_with_pending_call(
     {
         Ok(_) => (),
         Err(e) => {
-            error!(track_id, "failed to accept call: {}", e);
+            warn!(track_id, "failed to accept call: {}", e);
             return Err(anyhow::anyhow!("failed to accept call"));
         }
     }
@@ -181,7 +210,7 @@ pub async fn new_rtp_track_with_pending_call(
         }
     });
 
-    Ok((dialog_id, rtp_track))
+    Ok((dialog_id, media_track, Some(offer), Some(answer)))
 }
 
 pub async fn new_rtp_track_with_sip(
@@ -478,7 +507,7 @@ pub(crate) async fn make_sip_invite_with_stream(
     invitation: Invitation,
 ) -> Result<()> {
     let (dlg_state_sender, dlg_state_receiver) = mpsc::unbounded_channel();
-    let dialog_layer = app_state.useragent.dialog_layer.clone();
+    let dialog_layer = invitation.dialog_layer.clone();
     let ssrc = refer_call_state.read().map(|cs| cs.ssrc).unwrap_or(0);
 
     let call_option = refer_call_state

@@ -1,6 +1,6 @@
-use crate::proxy::{
-    locator::{Location, Locator},
-    locator_db::DbLocator,
+use crate::{
+    call::Location,
+    proxy::{locator::Locator, locator_db::DbLocator},
 };
 use rsip::{HostWithPort, Scheme};
 use rsipstack::transport::SipAddr;
@@ -30,8 +30,8 @@ async fn test_db_locator() {
         aor: aor.clone(),
         expires: 3600,
         destination: destination.clone(),
-        last_modified: Instant::now(),
-        supports_webrtc: false,
+        last_modified: Some(Instant::now()),
+        ..Default::default()
     };
 
     // Setup DB locator
@@ -101,8 +101,8 @@ async fn test_db_locator_with_custom_table() {
         aor: aor.clone(),
         expires: 1800,
         destination: destination.clone(),
-        last_modified: Instant::now(),
-        supports_webrtc: false,
+        last_modified: Some(Instant::now()),
+        ..Default::default()
     };
 
     // Test register
@@ -169,8 +169,8 @@ async fn test_db_locator_multiple_lookups() {
         aor: aor1.clone(),
         expires: 3600,
         destination: destination1.clone(),
-        last_modified: Instant::now(),
-        supports_webrtc: false,
+        last_modified: Some(Instant::now()),
+        ..Default::default()
     };
 
     // Register the first one (this test will currently fail since our DB implementation
@@ -207,8 +207,8 @@ async fn test_db_locator_multiple_lookups() {
         aor: aor2.clone(),
         expires: 1800,
         destination: destination2.clone(),
-        last_modified: Instant::now(),
-        supports_webrtc: false,
+        last_modified: Some(Instant::now()),
+        ..Default::default()
     };
 
     // Register with a different realm

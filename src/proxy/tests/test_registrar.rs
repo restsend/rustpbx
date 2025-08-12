@@ -2,9 +2,9 @@ use super::common::{
     create_register_request, create_test_request, create_test_server,
     create_test_server_with_config, create_transaction,
 };
+use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::proxy::registrar::RegistrarModule;
-use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use tokio_util::sync::CancellationToken;
 

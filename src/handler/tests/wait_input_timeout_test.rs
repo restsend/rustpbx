@@ -42,11 +42,12 @@ mod wait_input_timeout_tests {
             callrecord.serve().await;
         });
 
-        AppStateBuilder::new()
+        let (state, _) = AppStateBuilder::new()
             .config(config)
             .with_callrecord_sender(callrecord_sender)
             .build()
-            .await
+            .await?;
+        return Ok(state);
     }
 
     /// Helper function to create a test ActiveCall
@@ -97,7 +98,7 @@ mod wait_input_timeout_tests {
 
         let active_call = create_test_active_call(session_id.clone(), app_state).await?;
 
-        let mut event_receiver = active_call.media_stream.subscribe();
+        let mut event_receiver = active_call.event_sender.subscribe();
 
         // Set wait_input_timeout
         *active_call.wait_input_timeout.lock().await = Some(timeout_ms);
@@ -116,15 +117,12 @@ mod wait_input_timeout_tests {
         sleep(Duration::from_millis(50)).await;
 
         // Simulate TrackEnd event to trigger wait_input_timeout
-        active_call
-            .media_stream
-            .get_event_sender()
-            .send(SessionEvent::TrackEnd {
-                track_id: active_call.track_config.server_side_track_id.clone(),
-                timestamp: crate::get_timestamp(),
-                duration: 1000,
-                ssrc: 0,
-            })?;
+        active_call.event_sender.send(SessionEvent::TrackEnd {
+            track_id: active_call.track_config.server_side_track_id.clone(),
+            timestamp: crate::get_timestamp(),
+            duration: 1000,
+            ssrc: 0,
+        })?;
 
         // Wait for the Silence event with more generous timeout
         let silence_event = timeout(Duration::from_millis(800), async {
@@ -166,10 +164,10 @@ mod wait_input_timeout_tests {
 
         let active_call = create_test_active_call(session_id.clone(), app_state).await?;
 
-        let mut event_receiver = active_call.media_stream.subscribe();
+        let mut event_receiver = active_call.event_sender.subscribe();
         *active_call.wait_input_timeout.lock().await = Some(timeout_ms);
 
-        let event_sender = active_call.media_stream.get_event_sender();
+        let event_sender = active_call.event_sender.clone();
 
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
@@ -228,10 +226,10 @@ mod wait_input_timeout_tests {
 
         let active_call = create_test_active_call(session_id.clone(), app_state).await?;
 
-        let mut event_receiver = active_call.media_stream.subscribe();
+        let mut event_receiver = active_call.event_sender.subscribe();
         *active_call.wait_input_timeout.lock().await = Some(timeout_ms);
 
-        let event_sender = active_call.media_stream.get_event_sender();
+        let event_sender = active_call.event_sender.clone();
 
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
@@ -289,12 +287,12 @@ mod wait_input_timeout_tests {
 
         let active_call = create_test_active_call(session_id.clone(), app_state).await?;
 
-        let mut event_receiver = active_call.media_stream.subscribe();
+        let mut event_receiver = active_call.event_sender.subscribe();
 
         // Set wait_input_timeout to 0 (disabled)
         *active_call.wait_input_timeout.lock().await = Some(0);
 
-        let event_sender = active_call.media_stream.get_event_sender();
+        let event_sender = active_call.event_sender.clone();
 
         // Simulate TrackEnd
         event_sender.send(SessionEvent::TrackEnd {

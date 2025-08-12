@@ -131,13 +131,6 @@ impl MediaStream {
         Ok(())
     }
 
-    pub fn subscribe(&self) -> EventReceiver {
-        self.event_sender.subscribe()
-    }
-    pub fn get_event_sender(&self) -> EventSender {
-        self.event_sender.clone()
-    }
-
     pub async fn remove_track(&self, id: &TrackId) {
         if let Some(track) = self.tracks.lock().await.remove(id) {
             match track.stop().await {

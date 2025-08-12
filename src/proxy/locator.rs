@@ -1,19 +1,12 @@
 use super::locator_db::DbLocator;
-use crate::config::{LocatorConfig, ProxyConfig};
+use crate::{
+    call::Location,
+    config::{LocatorConfig, ProxyConfig},
+};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsipstack::transport::SipAddr;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
-
-#[derive(Debug, Clone)]
-pub struct Location {
-    pub aor: rsip::Uri,
-    pub expires: u32,
-    pub destination: SipAddr,
-    pub last_modified: Instant,
-    pub supports_webrtc: bool,
-}
 
 #[async_trait]
 pub trait Locator: Send + Sync {
@@ -25,7 +18,7 @@ pub trait Locator: Send + Sync {
         }
     }
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
-        -> Result<()>;
+    -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>>;
 }

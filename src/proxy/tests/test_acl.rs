@@ -1,7 +1,8 @@
 use super::common::{create_acl_request, create_transaction};
+use crate::app::{AppState, AppStateBuilder};
+use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::proxy::acl::AclModule;
-use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
