@@ -1,8 +1,6 @@
 use crate::{
-    proxy::{
-        routing::{DefaultRoute, RouteRule, TrunkConfig, matcher::match_invite},
-        user::SipUser,
-    },
+    call::user::SipUser,
+    proxy::routing::{DefaultRoute, RouteRule, TrunkConfig, matcher::match_invite},
     useragent::RegisterOption,
 };
 use anyhow::{Error, Result};
@@ -278,22 +276,6 @@ impl ProxyConfig {
         } else {
             realm
         }
-    }
-    pub async fn route_invite(
-        &self,
-        option: InviteOption,
-        origin: &rsip::Request,
-        routing_state: &crate::proxy::routing::RoutingState,
-    ) -> Result<RouteResult> {
-        match_invite(
-            Some(&self.trunks),
-            self.routes.as_ref(),
-            self.default.as_ref(),
-            option,
-            origin,
-            routing_state,
-        )
-        .await
     }
 }
 

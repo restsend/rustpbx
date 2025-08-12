@@ -1,4 +1,5 @@
-use crate::{config::ProxyConfig, proxy::server::TransactionCookie};
+use crate::call::TransactionCookie;
+use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transaction::transaction::Transaction;
@@ -8,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 pub mod acl;
 pub mod auth;
-pub mod bridge;
 pub mod call;
 pub mod locator;
 pub mod locator_db;

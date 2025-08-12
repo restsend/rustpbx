@@ -1,5 +1,6 @@
-use super::{server::SipServerRef, ProxyAction, ProxyModule};
-use crate::{config::ProxyConfig, proxy::server::TransactionCookie};
+use super::{ProxyAction, ProxyModule, server::SipServerRef};
+use crate::call::TransactionCookie;
+use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::HeadersExt;

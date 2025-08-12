@@ -4,8 +4,8 @@ use super::common::{
     create_auth_request, create_proxy_auth_request_with_nonce, create_test_request,
     create_test_server, create_transaction, extract_nonce_from_proxy_authenticate,
 };
+use crate::call::TransactionCookie;
 use crate::proxy::auth::AuthModule;
-use crate::proxy::server::TransactionCookie;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsip::Header;
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};

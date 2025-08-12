@@ -9,10 +9,10 @@ use crate::synthesis::{SynthesisOption, SynthesisType};
 use crate::transcription::{TranscriptionOption, TranscriptionType};
 use anyhow::Result;
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Router,
 };
 use dotenv::dotenv;
 use futures::{SinkExt, StreamExt};
@@ -80,7 +80,8 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
                 .config(config)
                 .with_callrecord_sender(callrecord_sender)
                 .build()
-                .await?,
+                .await?
+                .0,
         );
 
     // Start the server

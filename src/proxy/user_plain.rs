@@ -1,4 +1,5 @@
-use super::user::{SipUser, UserBackend};
+use super::user::UserBackend;
+use crate::call::user::SipUser;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::io::BufRead;

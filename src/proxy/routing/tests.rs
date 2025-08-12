@@ -6,12 +6,13 @@ use crate::proxy::routing::{
 };
 use rsipstack::dialog::invitation::InviteOption;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Configuration parsing tests removed - focus on core routing functionality
 
 #[tokio::test]
 async fn test_match_invite_no_routes() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let option = create_test_invite_option();
     let origin = create_test_request();
 
@@ -24,7 +25,7 @@ async fn test_match_invite_no_routes() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -37,7 +38,7 @@ async fn test_match_invite_no_routes() {
 
 #[tokio::test]
 async fn test_match_invite_exact_match() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -84,7 +85,7 @@ async fn test_match_invite_exact_match() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .expect("Failed to match invite");
@@ -108,7 +109,7 @@ async fn test_match_invite_exact_match() {
 
 #[tokio::test]
 async fn test_match_invite_regex_match() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -162,7 +163,7 @@ async fn test_match_invite_regex_match() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -177,7 +178,7 @@ async fn test_match_invite_regex_match() {
 
 #[tokio::test]
 async fn test_match_invite_reject_rule() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let routes = vec![RouteRule {
         name: "emergency_reject".to_string(),
         description: None,
@@ -216,7 +217,7 @@ async fn test_match_invite_reject_rule() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -232,7 +233,7 @@ async fn test_match_invite_reject_rule() {
 
 #[tokio::test]
 async fn test_match_invite_rewrite_rules() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -283,7 +284,7 @@ async fn test_match_invite_rewrite_rules() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -300,7 +301,7 @@ async fn test_match_invite_rewrite_rules() {
 
 #[tokio::test]
 async fn test_match_invite_load_balancing() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -387,7 +388,7 @@ async fn test_match_invite_load_balancing() {
             None,
             test_option,
             &origin,
-            &routing_state,
+            routing_state.clone(),
         )
         .await
         .unwrap();
@@ -409,7 +410,7 @@ async fn test_match_invite_load_balancing() {
 
 #[tokio::test]
 async fn test_match_invite_header_matching() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -471,7 +472,7 @@ async fn test_match_invite_header_matching() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -486,7 +487,7 @@ async fn test_match_invite_header_matching() {
 
 #[tokio::test]
 async fn test_match_invite_default_route() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -533,7 +534,7 @@ async fn test_match_invite_default_route() {
         None,
         option,
         &origin,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();
@@ -549,7 +550,7 @@ async fn test_match_invite_default_route() {
 
 #[tokio::test]
 async fn test_match_invite_advanced_rewrite_patterns() {
-    let routing_state = RoutingState::new();
+    let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
 
     trunks.insert(
@@ -606,7 +607,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         None,
         option_us,
         &origin_us,
-        &routing_state,
+        routing_state.clone(),
     )
     .await
     .unwrap();
@@ -657,7 +658,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         None,
         option_digits,
         &origin_digits,
-        &routing_state,
+        routing_state,
     )
     .await
     .unwrap();

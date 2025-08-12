@@ -1,6 +1,8 @@
-use super::{ProxyAction, ProxyModule, server::SipServerRef, user::SipUser};
+use super::{ProxyAction, ProxyModule, server::SipServerRef};
+use crate::call::TransactionCookie;
+use crate::call::user::SipUser;
+use crate::call::user::check_authorization_headers;
 use crate::config::ProxyConfig;
-use crate::proxy::server::TransactionCookie;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::Header;
@@ -9,7 +11,6 @@ use rsip::headers::UntypedHeader;
 use rsip::headers::auth::Algorithm;
 use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsip::prelude::HeadersExt;
-use rsip::prelude::ToTypedHeader;
 use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
@@ -250,33 +251,4 @@ impl ProxyModule for AuthModule {
             }
         }
     }
-}
-
-pub fn check_authorization_headers(
-    req: &rsip::Request,
-) -> Result<Option<(SipUser, Authorization)>> {
-    // First try Authorization header (for backward compatibility with existing tests)
-    if let Some(auth_header) = rsip::header_opt!(req.headers.iter(), Header::Authorization) {
-        let challenge = auth_header.typed()?;
-        let user = SipUser {
-            username: challenge.username.to_string(),
-            realm: Some(challenge.realm.to_string()),
-            ..Default::default()
-        };
-        return Ok(Some((user, challenge)));
-    }
-    // Then try Proxy-Authorization header
-    if let Some(proxy_auth_header) =
-        rsip::header_opt!(req.headers.iter(), Header::ProxyAuthorization)
-    {
-        let challenge = proxy_auth_header.typed()?;
-        let user = SipUser {
-            username: challenge.0.username.to_string(),
-            realm: Some(challenge.0.realm.to_string()),
-            ..Default::default()
-        };
-        return Ok(Some((user, challenge.0)));
-    }
-
-    Ok(None)
 }

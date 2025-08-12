@@ -13,7 +13,7 @@ async fn test_save_with_http_without_media() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_call_123".to_string(),
         start_time: Utc::now(),
@@ -81,7 +81,7 @@ async fn test_save_with_http_with_media() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_call_with_media_456".to_string(),
         start_time: Utc::now(),
@@ -137,7 +137,7 @@ async fn test_save_with_http_with_custom_headers() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
@@ -191,7 +191,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
@@ -251,7 +251,7 @@ async fn test_save_with_s3_like_memory_store() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
@@ -318,7 +318,7 @@ async fn test_save_with_s3_like_with_media() {
     );
 
     let record = CallRecord {
-        call_type: crate::call::ActiveCallType::Sip,
+        call_type: crate::call::ActiveCallType::B2bua,
         option: Some(crate::call::CallOption::default()),
         call_id: "test_s3_media_456".to_string(),
         start_time: Utc::now(),

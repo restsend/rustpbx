@@ -1,12 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use regex::Regex;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
 };
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
+    sync::Arc,
 };
 use tracing::{debug, info, warn};
 
@@ -28,7 +29,7 @@ pub async fn match_invite(
     default: Option<&DefaultRoute>,
     mut option: InviteOption,
     origin: &rsip::Request,
-    routing_state: &RoutingState,
+    routing_state: Arc<RoutingState>,
 ) -> Result<RouteResult> {
     let routes = match routes {
         Some(routes) => routes,
@@ -114,7 +115,7 @@ pub async fn match_invite(
                         &rule.action.select,
                         &rule.action.hash_key,
                         &option,
-                        routing_state,
+                        routing_state.clone(),
                     )?;
 
                     if let Some(trunk_config) = trunks
@@ -495,7 +496,7 @@ fn select_trunk(
     select_method: &str,
     hash_key: &Option<String>,
     option: &InviteOption,
-    routing_state: &RoutingState,
+    routing_state: Arc<RoutingState>,
 ) -> Result<String> {
     let trunks = match dest_config {
         crate::proxy::routing::DestConfig::Single(trunk) => vec![trunk.clone()],

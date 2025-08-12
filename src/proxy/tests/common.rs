@@ -1,7 +1,9 @@
+use crate::app::AppStateBuilder;
+use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::locator::MemoryLocator;
 use crate::proxy::server::SipServerInner;
-use crate::proxy::user::{MemoryUserBackend, SipUser};
+use crate::proxy::user::MemoryUserBackend;
 use rsip::Header;
 use rsip::services::DigestGenerator;
 use rsip::{HostWithPort, prelude::*};
@@ -40,8 +42,10 @@ pub async fn create_test_server_with_config(
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(config);
     let endpoint = EndpointBuilder::new().build();
+
     // Create server inner directly
     let server_inner = Arc::new(SipServerInner {
+        app_state: AppStateBuilder::new().build().await.unwrap().0,
         config: config.clone(),
         cancel_token: CancellationToken::new(),
         user_backend: Arc::new(user_backend),
@@ -50,7 +54,6 @@ pub async fn create_test_server_with_config(
         locator: Arc::new(locator),
         callrecord_sender: None,
         endpoint,
-        routing_state: Arc::new(crate::proxy::routing::RoutingState::new()),
     });
 
     // Add test users

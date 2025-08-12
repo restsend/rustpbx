@@ -2,12 +2,12 @@ use crate::media::processor::ProcessorChain;
 use crate::media::recorder::RecorderOption;
 use crate::media::track::TrackConfig;
 use crate::{
+    AudioFrame, Samples, TrackId,
     event::EventSender,
     media::{
         stream::MediaStreamBuilder,
         track::{Track, TrackPacketSender},
     },
-    AudioFrame, Samples, TrackId,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -150,9 +150,9 @@ async fn test_media_stream_basic() -> Result<()> {
 #[tokio::test]
 async fn test_media_stream_events() -> Result<()> {
     let event_sender = crate::event::create_event_sender();
-    let stream = MediaStreamBuilder::new(event_sender).build();
+    let stream = MediaStreamBuilder::new(event_sender.clone()).build();
 
-    let _events = stream.subscribe();
+    let _events = event_sender.subscribe();
 
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));

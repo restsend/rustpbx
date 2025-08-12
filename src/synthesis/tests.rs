@@ -1,14 +1,14 @@
 use crate::synthesis::{
-    tencent_cloud::TencentCloudTtsClient, AliyunTtsClient, SynthesisClient, SynthesisOption,
-    SynthesisType,
+    AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
+    tencent_cloud::TencentCloudTtsClient,
 };
+use anyhow::Result;
 use dotenv::dotenv;
 use futures::StreamExt;
+use hound::{SampleFormat, WavSpec, WavWriter};
 use std::env;
 use std::fs::File;
 use std::io::Write;
-use hound::{WavSpec, WavWriter, SampleFormat};
-use anyhow::Result;
 
 fn get_tencent_credentials() -> Option<(String, String, String)> {
     dotenv().ok();
@@ -95,10 +95,10 @@ async fn test_aliyun_tts() {
         provider: Some(SynthesisType::Aliyun),
         secret_key: Some(api_key),
         speaker: Some("longyumi_v2".to_string()), // Default voice
-        volume: Some(5),                         // Medium volume (0-10)
-        speed: Some(1.0),                        // Normal speed
-        codec: Some("pcm".to_string()),          // PCM format for easy verification
-        samplerate: Some(16000),                 // 16kHz sample rate
+        volume: Some(5),                          // Medium volume (0-10)
+        speed: Some(1.0),                         // Normal speed
+        codec: Some("pcm".to_string()),           // PCM format for easy verification
+        samplerate: Some(16000),                  // 16kHz sample rate
         ..Default::default()
     };
 
@@ -123,16 +123,14 @@ async fn test_aliyun_tts() {
                     panic!("Error in audio stream chunk: {:?}", e);
                 }
             }
-        }        
+        }
         println!("Total audio size: {} bytes", audio_collector.len());
         println!("Total chunks: {}", chunks_count);
         // save_audio_to_files(&audio_collector, 16000, "test_aliyun_tts").unwrap();
     } else {
         panic!("Error in audio stream: {:?}", stream.err());
     }
-
 }
-
 
 /// Save PCM audio data to files for testing
 #[allow(dead_code)]
@@ -146,7 +144,10 @@ fn save_audio_to_files(audio_data: &[u8], sample_rate: u32, prefix: &str) -> Res
     let mut pcm_file = File::create(&pcm_filename)?;
     pcm_file.write_all(audio_data)?;
     println!("✓ Saved raw PCM audio to: {}", pcm_filename);
-    println!("  Play with: ffplay -f s16le -ar {} -ac 1 {}", sample_rate, pcm_filename);
+    println!(
+        "  Play with: ffplay -f s16le -ar {} -ac 1 {}",
+        sample_rate, pcm_filename
+    );
 
     // Convert bytes to samples and save as WAV
     let samples: Vec<i16> = audio_data

@@ -1,17 +1,27 @@
 use crate::{
+    config::RouteResult,
     media::{recorder::RecorderOption, vad::VADOption},
     synthesis::SynthesisOption,
     transcription::TranscriptionOption,
 };
+use anyhow::Result;
+use rsipstack::{
+    dialog::{authenticate::Credential, invitation::InviteOption},
+    transport::SipAddr,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
+use std::{collections::HashMap, sync::Arc, time::Instant};
 pub mod active_call;
+pub mod b2bua;
+pub mod cookie;
 pub mod sip;
+pub mod user;
 pub use active_call::ActiveCall;
 pub use active_call::ActiveCallRef;
 pub use active_call::ActiveCallState;
 pub use active_call::ActiveCallType;
+pub use cookie::TransactionCookie;
+pub use user::SipUser;
 
 pub type CommandSender = tokio::sync::broadcast::Sender<Command>;
 pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;
@@ -201,4 +211,55 @@ pub enum Command {
         speaker: String,
         text: String,
     },
+}
+
+#[derive(Clone, Default)]
+pub struct Location {
+    pub aor: rsip::Uri,
+    pub expires: u32,
+    pub destination: SipAddr,
+    pub last_modified: Option<Instant>,
+    pub supports_webrtc: bool,
+    pub credential: Option<Credential>,
+    pub headers: Option<Vec<rsip::Header>>,
+}
+
+#[derive(Clone)]
+pub enum DialStrategy {
+    Sequential(Vec<Location>),
+    Parallel(Vec<Location>),
+}
+
+pub struct Dialplan {
+    pub targets: DialStrategy,
+    pub max_ring_time: u32,
+    pub route_invite: Option<Box<dyn RouteInvite>>,
+}
+
+impl Dialplan {
+    pub fn is_empty(&self) -> bool {
+        match &self.targets {
+            DialStrategy::Sequential(targets) => targets.is_empty(),
+            DialStrategy::Parallel(targets) => targets.is_empty(),
+        }
+    }
+}
+
+impl Default for Dialplan {
+    fn default() -> Self {
+        Self {
+            targets: DialStrategy::Sequential(vec![]),
+            max_ring_time: 60,
+            route_invite: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait RouteInvite: Sync + Send {
+    async fn route_invite(
+        &self,
+        option: InviteOption,
+        origin: &rsip::Request,
+    ) -> Result<RouteResult>;
 }
