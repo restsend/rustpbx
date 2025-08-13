@@ -37,7 +37,7 @@ use tracing::{debug, info, warn};
 
 pub struct AppStateInner {
     pub config: Arc<Config>,
-    pub useragent: Arc<UserAgent>,
+    pub useragent: Option<Arc<UserAgent>>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
@@ -102,13 +102,13 @@ impl AppStateBuilder {
         }
     }
 
-    pub fn config(mut self, config: Config) -> Self {
+    pub fn with_config(mut self, config: Config) -> Self {
         self.config = Some(config);
         self
     }
 
-    pub fn with_useragent(mut self, useragent: Arc<UserAgent>) -> Self {
-        self.useragent = Some(useragent);
+    pub fn with_useragent(mut self, useragent: Option<Arc<UserAgent>>) -> Self {
+        self.useragent = useragent;
         self
     }
 
@@ -140,19 +140,23 @@ impl AppStateBuilder {
         let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
 
         let useragent = if let Some(ua) = self.useragent {
-            ua
+            Some(ua)
         } else {
             let config = config.ua.clone();
-            let invite_handler = config
-                .as_ref()
-                .and_then(|c| c.handler.as_ref())
-                .map(|c| create_invite_handler(c))
-                .flatten();
-            let ua_builder = crate::useragent::UserAgentBuilder::new()
-                .with_cancel_token(token.child_token())
-                .with_invitation_handler(invite_handler)
-                .with_config(config);
-            Arc::new(ua_builder.build().await?)
+            if let Some(config) = config {
+                let invite_handler = config
+                    .handler
+                    .as_ref()
+                    .map(|c| create_invite_handler(c))
+                    .flatten();
+                let ua_builder = crate::useragent::UserAgentBuilder::new()
+                    .with_cancel_token(token.child_token())
+                    .with_invitation_handler(invite_handler)
+                    .with_config(Some(config));
+                Some(Arc::new(ua_builder.build().await?))
+            } else {
+                None
+            }
         };
         let stream_engine = self.stream_engine.unwrap_or_default();
 
@@ -266,7 +270,14 @@ pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
                 }
             }
         }
-        ua_result = state.useragent.serve() => {
+        ua_result = async {
+            if let Some(useragent) = &state.useragent {
+                useragent.serve().await
+            } else {
+                token.cancelled().await;
+                Ok(())
+            }
+        } => {
             if let Err(e) = ua_result {
                 tracing::error!("User agent server error: {}", e);
                 return Err(anyhow::anyhow!("User agent server error: {}", e));
@@ -276,7 +287,10 @@ pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
             info!("Application shutting down due to cancellation");
         }
     }
-    state.useragent.stop();
+
+    state.useragent.as_ref().map(|ua| {
+        ua.stop();
+    });
     Ok(())
 }
 

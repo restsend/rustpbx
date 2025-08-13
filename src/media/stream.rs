@@ -1,4 +1,4 @@
-use crate::event::{EventReceiver, EventSender, SessionEvent};
+use crate::event::{EventSender, SessionEvent};
 use crate::media::{
     dtmf::DtmfDetector,
     processor::Processor,
@@ -22,7 +22,7 @@ use uuid;
 pub struct MediaStream {
     id: String,
     cancel_token: CancellationToken,
-    recorder_config: Option<RecorderOption>,
+    recorder_option: Mutex<Option<RecorderOption>>,
     tracks: Mutex<HashMap<TrackId, Box<dyn Track>>>,
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
@@ -74,7 +74,7 @@ impl MediaStreamBuilder {
         MediaStream {
             id: self.id.unwrap_or_default(),
             cancel_token,
-            recorder_config: self.recorder_config,
+            recorder_option: Mutex::new(self.recorder_config),
             tracks,
             event_sender: self.event_sender,
             packet_sender: track_packet_sender,
@@ -131,6 +131,11 @@ impl MediaStream {
         Ok(())
     }
 
+    pub async fn update_recorder_option(&self, recorder_config: RecorderOption) {
+        *self.recorder_option.lock().await = Some(recorder_config);
+        self.start_recorder().await.ok();
+    }
+
     pub async fn remove_track(&self, id: &TrackId) {
         if let Some(track) = self.tracks.lock().await.remove(id) {
             match track.stop().await {
@@ -144,7 +149,7 @@ impl MediaStream {
 
     pub async fn update_track(&self, mut track: Box<dyn Track>) {
         self.remove_track(track.id()).await;
-        if self.recorder_config.is_some() {
+        if self.recorder_option.lock().await.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
                 self.recorder_sender.clone(),
             )));
@@ -220,25 +225,29 @@ impl Processor for RecorderProcessor {
 }
 
 impl MediaStream {
-    async fn start_recorder(&self) -> Result<()> {
-        if let Some(ref recorder_config) = self.recorder_config {
+    pub async fn start_recorder(&self) -> Result<()> {
+        let recorder_option = self.recorder_option.lock().await.clone();
+        if let Some(recorder_option) = recorder_option {
             let recorder_receiver = match self.recorder_receiver.lock().await.take() {
                 Some(receiver) => receiver,
                 None => {
-                    warn!(session_id = self.id, "Recorder already started, skipping");
                     return Ok(());
                 }
             };
             let cancel_token = self.cancel_token.child_token();
-            let recorder_config_clone = recorder_config.clone();
             let session_id_clone = self.id.clone();
+
+            info!(
+                session_id = session_id_clone,
+                sample_rate = recorder_option.samplerate,
+                ptime = recorder_option.ptime.as_millis(),
+                "start recorder",
+            );
+
             let recorder_handle = tokio::spawn(async move {
-                let recorder_file = recorder_config_clone.recorder_file.clone();
-                let recorder = Recorder::new(
-                    cancel_token,
-                    session_id_clone.clone(),
-                    recorder_config_clone,
-                );
+                let recorder_file = recorder_option.recorder_file.clone();
+                let recorder =
+                    Recorder::new(cancel_token, session_id_clone.clone(), recorder_option);
                 match recorder
                     .process_recording(Path::new(&recorder_file), recorder_receiver)
                     .await

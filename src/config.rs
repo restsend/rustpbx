@@ -1,6 +1,6 @@
 use crate::{
     call::user::SipUser,
-    proxy::routing::{DefaultRoute, RouteRule, TrunkConfig, matcher::match_invite},
+    proxy::routing::{DefaultRoute, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
 use anyhow::{Error, Result};

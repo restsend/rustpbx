@@ -45,7 +45,16 @@ pub async fn create_test_server_with_config(
 
     // Create server inner directly
     let server_inner = Arc::new(SipServerInner {
-        app_state: AppStateBuilder::new().build().await.unwrap().0,
+        app_state: AppStateBuilder::new()
+            .with_config(crate::config::Config {
+                proxy: None,
+                ua: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap()
+            .0,
         config: config.clone(),
         cancel_token: CancellationToken::new(),
         user_backend: Arc::new(user_backend),

@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    let state_builder = AppStateBuilder::new().config(config);
+    let state_builder = AppStateBuilder::new().with_config(config);
     let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
 
     info!("starting rustpbx on {}", state.config.http_addr);

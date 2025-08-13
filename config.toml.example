@@ -3,7 +3,7 @@
 # cargo run . --bin rustpbx --conf config.toml
 
 http_addr = "0.0.0.0:8080"
-log_level = "info"
+log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 stun_server = "stun.l.google.com:19302"
 recorder_path = "/tmp/recorders"

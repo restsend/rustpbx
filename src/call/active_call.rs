@@ -1,7 +1,11 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
+    TrackId,
     app::AppState,
-    call::{CommandReceiver, sip::Invitation},
+    call::{
+        CommandReceiver, CommandSender,
+        sip::{Invitation, sip_dialog_event_loop},
+    },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
     media::{
@@ -12,6 +16,7 @@ use crate::{
         track::{
             Track, TrackConfig,
             file::FileTrack,
+            rtp::{RtpTrack, RtpTrackBuilder},
             tts::{TtsCommand, TtsHandle},
             webrtc::WebrtcTrack,
             websocket::{WebsocketBytesReceiver, WebsocketTrack},
@@ -20,19 +25,18 @@ use crate::{
     synthesis::SynthesisOption,
     useragent::invitation::PendingDialog,
 };
-use anyhow::{Error, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsipstack::dialog::{DialogId, dialog::DialogStateSender};
+use rsipstack::dialog::{DialogId, dialog::DialogStateSender, invitation::InviteOption};
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{Arc, RwLock, atomic::Ordering},
+    sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::{fs::File, join, select, sync::Mutex, time::sleep};
+use tokio::{fs::File, select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-pub type ActiveCallRef = Arc<ActiveCall>;
 #[derive(Deserialize)]
 pub struct CallParams {
     pub id: Option<String>,
@@ -55,13 +59,14 @@ pub struct ActiveCallState {
     pub answer_time: Option<DateTime<Utc>>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     pub last_status_code: u16,
-    pub option: CallOption,
+    pub option: Option<CallOption>,
     pub answer: Option<String>,
     pub dialog_id: Option<DialogId>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
 }
 
+pub type ActiveCallRef = Arc<ActiveCall>;
 pub type ActiveCallStateRef = Arc<RwLock<ActiveCallState>>;
 
 pub struct ActiveCall {
@@ -77,36 +82,117 @@ pub struct ActiveCall {
     pub event_sender: EventSender,
     pub app_state: AppState,
     pub invitation: Invitation,
+    pub cmd_sender: CommandSender,
+    pub audio_receiver: Mutex<Option<WebsocketBytesReceiver>>,
+    pub dump_events: bool,
+    can_start_send_command: CancellationToken,
 }
 
 impl ActiveCall {
     pub fn new(
-        call_state: ActiveCallStateRef,
         call_type: ActiveCallType,
         cancel_token: CancellationToken,
-        event_sender: EventSender,
         session_id: String,
-        media_stream: Arc<MediaStream>,
-        app_state: AppState,
         invitation: Invitation,
+        app_state: AppState,
+        track_config: TrackConfig,
+        audio_receiver: Option<WebsocketBytesReceiver>,
+        dump_events: bool,
     ) -> Self {
+        let event_sender = crate::event::create_event_sender();
+        let cmd_sender = tokio::sync::broadcast::Sender::<Command>::new(32);
+        let media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
+            .with_id(session_id.clone())
+            .with_cancel_token(cancel_token.child_token());
+        let media_stream = Arc::new(media_stream_builder.build());
+        let call_state = Arc::new(RwLock::new(ActiveCallState {
+            start_time: Utc::now(),
+            ssrc: rand::random::<u32>(),
+            ..Default::default()
+        }));
         Self {
             cancel_token,
             call_type,
             session_id,
             call_state,
             media_stream,
-            track_config: TrackConfig::default(),
+            track_config,
             auto_hangup: Arc::new(Mutex::new(None)),
             wait_input_timeout: Arc::new(Mutex::new(None)),
             event_sender,
             tts_handle: Mutex::new(None),
             app_state,
             invitation,
+            cmd_sender,
+            audio_receiver: Mutex::new(audio_receiver),
+            dump_events,
+            can_start_send_command: CancellationToken::new(),
         }
     }
 
+    pub async fn enqueue_command(&self, command: Command) -> Result<()> {
+        if !self.can_start_send_command.is_cancelled() {
+            self.can_start_send_command.cancelled().await
+        }
+
+        self.cmd_sender
+            .send(command)
+            .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))?;
+        Ok(())
+    }
+
     pub async fn serve(&self) -> Result<()> {
+        let mut cmd_receiver = self.cmd_sender.subscribe();
+        let dump_cmd_receiver = self.cmd_sender.subscribe();
+        let dump_event_receiver = self.event_sender.subscribe();
+        // can `enqueue_command` when subscribe is done
+        // so we can start sending commands
+        self.can_start_send_command.cancel();
+
+        let process_command_loop = async move {
+            while let Ok(command) = cmd_receiver.recv().await {
+                match self.dispatch(command).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        warn!(session_id = self.session_id, "{}", e);
+                    }
+                }
+            }
+        };
+        self.app_state
+            .total_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        tokio::join!(
+            self.dump_loop(self.dump_events, dump_cmd_receiver, dump_event_receiver),
+            async {
+                select! {
+                    _ = process_command_loop => {
+                        info!(session_id = self.session_id, "command loop done");
+                    }
+                    _ = self.process() => {
+                        info!(session_id = self.session_id, "call serve done");
+                    }
+                    _ = self.cancel_token.cancelled() => {
+                        info!(session_id = self.session_id, "call cancelled");
+                    }
+                }
+            }
+        );
+        self.cleanup().await.ok();
+        // Send call record if available
+        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
+            if let Err(e) = sender.send(self.get_callrecord().await) {
+                warn!(
+                    session_id = self.session_id,
+                    "failed to send call record: {}", e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn process(&self) -> Result<()> {
         let mut event_receiver = self.event_sender.subscribe();
         let auto_hangup = self.auto_hangup.clone();
         let wait_input_timeout = self.wait_input_timeout.clone();
@@ -184,6 +270,9 @@ impl ActiveCall {
             _ = wait_input_timeout_loop=>{
                 info!(session_id = self.session_id, "wait input timeout loop done");
             }
+            _ = self.media_stream.serve() => {
+                info!(session_id = self.session_id, "media stream loop done");
+            }
             _ = event_hook_loop => {
                 info!(session_id = self.session_id, "event loop done");
             }
@@ -193,8 +282,13 @@ impl ActiveCall {
         }
         Ok(())
     }
-    pub async fn dispatch(&self, command: Command) -> Result<()> {
+
+    async fn dispatch(&self, command: Command) -> Result<()> {
         match command {
+            Command::Invite { option } => self.do_invite(option).await,
+            Command::Accept { option } => self.do_accept(option).await,
+            Command::Reject { reason, code } => self.do_reject(reason, code).await,
+            Command::Ringing { ringtone } => self.do_ringing(ringtone).await,
             Command::Tts {
                 text,
                 speaker,
@@ -240,11 +334,84 @@ impl ActiveCall {
             Command::Resume {} => self.do_resume().await,
             Command::Interrupt {} => self.do_interrupt().await,
             Command::History { speaker, text } => self.do_history(speaker, text).await,
-            _ => {
-                info!("Invalid command: {:?}", command);
-                Ok(())
+        }
+    }
+
+    fn build_record_option(&self, option: &CallOption) -> Option<RecorderOption> {
+        if let Some(recorder_option) = &option.recorder {
+            let recorder_file = self.app_state.get_recorder_file(&self.session_id);
+            info!(
+                session_id = self.session_id,
+                recorder_file, "created recording file"
+            );
+
+            let track_samplerate = self.track_config.samplerate;
+            let recorder_samplerate = if track_samplerate > 0 {
+                track_samplerate
+            } else {
+                recorder_option.samplerate
+            };
+            let recorder_ptime = if recorder_option.ptime.is_zero() {
+                Duration::from_millis(200)
+            } else {
+                recorder_option.ptime
+            };
+            let recorder_config = RecorderOption {
+                recorder_file,
+                samplerate: recorder_samplerate,
+                ptime: recorder_ptime,
+            };
+            Some(recorder_config)
+        } else {
+            None
+        }
+    }
+
+    async fn invite_or_accept(&self, mut option: CallOption, sender: String) -> Result<()> {
+        option.check_default();
+        match self.build_record_option(&option) {
+            Some(opt) => {
+                self.media_stream.update_recorder_option(opt).await;
+            }
+            None => {}
+        }
+        match self.setup_caller_track(option).await {
+            Ok(_) => {}
+            Err(e) => {
+                self.app_state
+                    .total_failed_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let error_event = crate::event::SessionEvent::Error {
+                    track_id: self.session_id.clone(),
+                    timestamp: crate::get_timestamp(),
+                    sender,
+                    error: e.to_string(),
+                    code: None,
+                };
+                self.event_sender.send(error_event).ok();
+                self.do_hangup(Some(CallRecordHangupReason::BySystem), None)
+                    .await
+                    .ok();
+                return Err(e);
             }
         }
+        Ok(())
+    }
+
+    async fn do_invite(&self, option: CallOption) -> Result<()> {
+        self.invite_or_accept(option, "invite".to_string()).await
+    }
+
+    async fn do_accept(&self, option: CallOption) -> Result<()> {
+        self.invite_or_accept(option, "accept".to_string()).await
+    }
+
+    async fn do_reject(&self, _reason: String, _code: Option<u32>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn do_ringing(&self, _ringtone: Option<String>) -> Result<()> {
+        Ok(())
     }
 
     async fn do_tts(
@@ -259,8 +426,8 @@ impl ActiveCall {
         wait_input_timeout: Option<u32>,
     ) -> Result<()> {
         let tts_option = match self.call_state.read() {
-            Ok(ref call_state) => match call_state.option.tts {
-                Some(ref opt) => opt.clone(),
+            Ok(ref call_state) => match call_state.option.clone().unwrap_or_default().tts {
+                Some(opt) => opt,
                 None => return Ok(()),
             },
             Err(_) => return Err(anyhow::anyhow!("failed to read call state")),
@@ -281,11 +448,12 @@ impl ActiveCall {
 
         info!(
             session_id = self.session_id,
-            "new tts command, text: {} speaker: {:?} auto_hangup: {:?}",
-            play_command.text,
-            play_command.speaker,
-            auto_hangup
+            text = %play_command.text,
+            speaker = ?play_command.speaker,
+            auto_hangup = ?auto_hangup,
+            "new tts command"
         );
+
         let ssrc = rand::random::<u32>();
         match auto_hangup {
             Some(true) => {
@@ -437,7 +605,6 @@ impl ActiveCall {
         let event_sender = self.event_sender.clone();
         let track_id = self.track_config.server_side_track_id.clone();
         let stream = self.media_stream.clone();
-        let track_config = self.track_config.clone();
 
         let call_option = CallOption {
             caller: Some(caller),
@@ -449,17 +616,24 @@ impl ActiveCall {
                 .call_state
                 .read()
                 .as_ref()
-                .map(|cs| cs.option.recorder.clone())
+                .map(|cs| {
+                    cs.option
+                        .as_ref()
+                        .map(|o| o.recorder.clone())
+                        .unwrap_or_default()
+                })
                 .ok()
                 .flatten(),
             ..Default::default()
         };
 
+        let invite_option = call_option.build_invite_option()?;
+
         let ssrc = rand::random::<u32>();
         let refer_call_state = Arc::new(RwLock::new(ActiveCallState {
             start_time: Utc::now(),
             ssrc,
-            option: call_option,
+            option: Some(call_option),
             ..Default::default()
         }));
 
@@ -481,21 +655,43 @@ impl ActiveCall {
         } else {
             *self.auto_hangup.lock().await = None;
         }
-        let invitation = self.invitation.clone();
-        tokio::spawn(async move {
-            super::sip::make_sip_invite_with_stream(
-                token,
-                app_state,
-                session_id,
-                track_id,
-                track_config,
-                event_sender,
-                stream,
-                refer_call_state,
-                invitation,
+
+        match self
+            .create_outgoing_sip_track(
+                token.clone(),
+                refer_call_state.clone(),
+                &track_id,
+                invite_option,
             )
             .await
-        });
+        {
+            Ok(track) => {
+                let call_option = refer_call_state
+                    .read()
+                    .as_ref()
+                    .and_then(|cs| Ok(cs.option.clone()))
+                    .unwrap_or_default()
+                    .unwrap_or_default();
+
+                Self::setup_track_with_stream(
+                    app_state,
+                    token,
+                    stream,
+                    event_sender,
+                    &session_id,
+                    &call_option,
+                    track,
+                )
+                .await?;
+            }
+            Err(e) => {
+                warn!(
+                    session_id = session_id,
+                    "failed to create refer sip track: {}", e
+                );
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -510,15 +706,35 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        info!(session_id = self.session_id, "call cleanup");
+        debug!(session_id = self.session_id, "call cleanup");
+        {
+            let dialog_id = match self.call_state.write().as_mut() {
+                Ok(call_state) => call_state.dialog_id.take(),
+                Err(_) => None,
+            };
 
-        let dialog_id = match self.call_state.write().as_mut() {
-            Ok(call_state) => call_state.dialog_id.take(),
-            Err(_) => None,
-        };
+            if let Some(dialog_id) = dialog_id {
+                self.invitation.hangup(dialog_id).await.ok();
+            }
+        }
 
-        if let Some(dialog_id) = dialog_id {
-            self.invitation.hangup(dialog_id).await.ok();
+        {
+            let refer_dialog_id = self
+                .call_state
+                .write()
+                .as_mut()
+                .ok()
+                .map(|cs| {
+                    cs.refer_callstate
+                        .as_mut()
+                        .map(|rcs| rcs.write().as_mut().ok().map(|rcs| rcs.dialog_id.take()))
+                })
+                .flatten()
+                .flatten()
+                .flatten();
+            if let Some(dialog_id) = refer_dialog_id {
+                self.invitation.hangup(dialog_id).await.ok();
+            }
         }
 
         self.tts_handle.lock().await.take();
@@ -535,6 +751,628 @@ impl ActiveCall {
             self.call_type.clone(),
         )
     }
+
+    async fn dump_to_file(
+        &self,
+        dump_file: &mut File,
+        cmd_receiver: &mut CommandReceiver,
+        event_receiver: &mut EventReceiver,
+    ) {
+        loop {
+            select! {
+                _ = self.cancel_token.cancelled() => {
+                    break;
+                }
+                Ok(cmd) = cmd_receiver.recv() => {
+                    let text = match serde_json::to_string(&cmd){
+                        Ok(text) => text,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
+                    CallRecordEvent::new(CallRecordEventType::Command, &text)
+                        .write_to_file(dump_file)
+                        .await;
+                }
+                Ok(event) = event_receiver.recv() => {
+                    if matches!(event, SessionEvent::Binary{..}) {
+                        continue;
+                    }
+                    let text = match serde_json::to_string(&event) {
+                        Ok(text) => text,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
+                    CallRecordEvent::new(CallRecordEventType::Event, &text)
+                        .write_to_file(dump_file)
+                        .await;
+                }
+            };
+        }
+    }
+
+    async fn dump_loop(
+        &self,
+        dump_events: bool,
+        mut dump_cmd_receiver: CommandReceiver,
+        mut dump_event_receiver: EventReceiver,
+    ) {
+        if !dump_events {
+            return;
+        }
+
+        let file_name = self.app_state.get_dump_events_file(&self.session_id);
+        let mut dump_file = match File::options()
+            .create(true)
+            .append(true)
+            .open(&file_name)
+            .await
+        {
+            Ok(file) => file,
+            Err(e) => {
+                warn!(
+                    session_id = self.session_id,
+                    file_name, "failed to open dump events file: {}", e
+                );
+                return;
+            }
+        };
+        self.dump_to_file(
+            &mut dump_file,
+            &mut dump_cmd_receiver,
+            &mut dump_event_receiver,
+        )
+        .await;
+
+        while let Ok(event) = dump_event_receiver.try_recv() {
+            if matches!(event, SessionEvent::Binary { .. }) {
+                continue;
+            }
+            let text = match serde_json::to_string(&event) {
+                Ok(text) => text,
+                Err(_) => {
+                    continue;
+                }
+            };
+            CallRecordEvent::new(CallRecordEventType::Event, &text)
+                .write_to_file(&mut dump_file)
+                .await;
+        }
+    }
+}
+
+impl ActiveCall {
+    pub async fn create_rtp_track(
+        cancel_token: CancellationToken,
+        app_state: AppState,
+        track_id: TrackId,
+        track_config: TrackConfig,
+        ssrc: u32,
+    ) -> Result<RtpTrack> {
+        let mut rtp_track = RtpTrackBuilder::new(track_id, track_config)
+            .with_ssrc(ssrc)
+            .with_cancel_token(cancel_token);
+
+        if let Some(ref sip) = app_state.config.ua {
+            if let Some(rtp_start_port) = sip.rtp_start_port {
+                rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
+            }
+            if let Some(rtp_end_port) = sip.rtp_end_port {
+                rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
+            }
+
+            if let Some(ref external_ip) = sip.external_ip {
+                rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
+            }
+        }
+        rtp_track.build().await
+    }
+
+    async fn setup_caller_track(&self, option: CallOption) -> Result<()> {
+        self.call_state
+            .write()
+            .as_mut()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .option = Some(option.clone());
+        info!(
+            session_id = self.session_id,
+            call_type = ?self.call_type,
+            "setup caller track"
+        );
+
+        let track = match self.call_type {
+            ActiveCallType::Webrtc => Some(self.create_webrtc_track().await?),
+            ActiveCallType::WebSocket => {
+                let audio_receiver = self.audio_receiver.lock().await.take();
+                if let Some(receiver) = audio_receiver {
+                    Some(self.create_websocket_track(receiver).await?)
+                } else {
+                    None
+                }
+            }
+            ActiveCallType::Sip => {
+                let track = if let Some(pending_dialog) =
+                    self.invitation.get_pending_call(&self.session_id).await
+                {
+                    self.create_incoming_sip_track(
+                        self.cancel_token.clone(),
+                        self.call_state.clone(),
+                        &self.session_id,
+                        pending_dialog,
+                    )
+                    .await?
+                } else {
+                    let invite_option =
+                        match self.call_state.read().as_ref().map(|cs| cs.option.as_ref()) {
+                            Ok(Some(option)) => option.build_invite_option()?,
+                            _ => return Err(anyhow::anyhow!("call option not found")),
+                        };
+                    self.create_outgoing_sip_track(
+                        self.cancel_token.clone(),
+                        self.call_state.clone(),
+                        &self.session_id,
+                        invite_option,
+                    )
+                    .await?
+                };
+                Some(track)
+            }
+            ActiveCallType::B2bua => {
+                match self.invitation.get_pending_call(&self.session_id).await {
+                    Some(pending_dialog) => {
+                        let track = self
+                            .create_incoming_sip_track(
+                                self.cancel_token.clone(),
+                                self.call_state.clone(),
+                                &self.session_id,
+                                pending_dialog,
+                            )
+                            .await?;
+                        Some(track)
+                    }
+                    None => {
+                        warn!(
+                            session_id = self.session_id,
+                            "no pending dialog found for B2BUA call"
+                        );
+                        return Err(anyhow::anyhow!("no pending dialog found for B2BUA call"));
+                    }
+                }
+            }
+        };
+
+        match track {
+            Some(track) => {
+                Self::setup_track_with_stream(
+                    self.app_state.clone(),
+                    self.cancel_token.child_token(),
+                    self.media_stream.clone(),
+                    self.event_sender.clone(),
+                    &self.session_id,
+                    &option,
+                    track,
+                )
+                .await?;
+            }
+            None => {
+                warn!(
+                    session_id = self.session_id,
+                    "no track created for call type: {:?}", self.call_type
+                );
+            }
+        }
+
+        match self.call_state.read() {
+            Ok(call_state) => {
+                if let Some(ref answer) = call_state.answer {
+                    info!(session_id = self.session_id, "call answer: {}", answer,);
+                    self.event_sender
+                        .send(SessionEvent::Answer {
+                            timestamp: crate::get_timestamp(),
+                            track_id: self.session_id.clone(),
+                            sdp: answer.clone(),
+                        })
+                        .ok();
+                }
+            }
+            Err(e) => {
+                warn!(
+                    session_id = self.session_id,
+                    "failed to read call state: {}", e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn setup_track_with_stream(
+        app_state: AppState,
+        cancel_token: CancellationToken,
+        media_stream: Arc<MediaStream>,
+        event_sender: EventSender,
+        session_id: &String,
+        option: &CallOption,
+        mut track: Box<dyn Track>,
+    ) -> Result<()> {
+        let processors = match StreamEngine::create_processors(
+            app_state.stream_engine.clone(),
+            track.as_ref(),
+            cancel_token.clone(),
+            event_sender.clone(),
+            option,
+        )
+        .await
+        {
+            Ok(processors) => processors,
+            Err(e) => {
+                warn!(session_id, "failed to prepare stream processors: {}", e);
+                vec![]
+            }
+        };
+
+        // Add all processors from the hook
+        for processor in processors {
+            track.append_processor(processor);
+        }
+
+        media_stream.update_track(track).await;
+        Ok(())
+    }
+
+    pub async fn create_websocket_track(
+        &self,
+        audio_receiver: WebsocketBytesReceiver,
+    ) -> Result<Box<dyn Track>> {
+        let (ssrc, codec) = {
+            let call_state = self
+                .call_state
+                .read()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            (
+                call_state.ssrc,
+                call_state
+                    .option
+                    .as_ref()
+                    .map(|o| o.codec.clone())
+                    .unwrap_or_default(),
+            )
+        };
+
+        let ws_track = WebsocketTrack::new(
+            self.cancel_token.child_token(),
+            self.session_id.clone(),
+            self.track_config.clone(),
+            self.event_sender.clone(),
+            audio_receiver,
+            codec,
+            ssrc,
+        );
+
+        self.call_state
+            .write()
+            .as_mut()
+            .and_then(|call_state| {
+                call_state.answer_time = Some(Utc::now());
+                call_state.answer = Some("".to_string());
+                call_state.last_status_code = 200;
+                Ok(())
+            })
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(Box::new(ws_track))
+    }
+
+    pub(super) async fn create_webrtc_track(&self) -> Result<Box<dyn Track>> {
+        let (ssrc, option) = {
+            let call_state = self
+                .call_state
+                .read()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            (
+                call_state.ssrc,
+                call_state.option.clone().unwrap_or_default(),
+            )
+        };
+        let mut webrtc_track = WebrtcTrack::new(
+            self.cancel_token.child_token(),
+            self.session_id.clone(),
+            self.track_config.clone(),
+        )
+        .with_ssrc(ssrc);
+
+        let timeout = option
+            .handshake_timeout
+            .as_ref()
+            .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
+            .flatten();
+
+        let offer = match option.enable_ipv6 {
+            Some(false) | None => {
+                strip_ipv6_candidates(option.offer.as_ref().unwrap_or(&"".to_string()))
+            }
+            _ => option.offer.clone().unwrap_or("".to_string()),
+        };
+        let answer: Option<String>;
+        match webrtc_track.handshake(offer, timeout).await {
+            Ok(answer_sdp) => {
+                answer = match option.enable_ipv6 {
+                    Some(false) | None => Some(strip_ipv6_candidates(&answer_sdp)),
+                    Some(true) => Some(answer_sdp),
+                };
+            }
+            Err(e) => {
+                warn!(session_id = self.session_id, "failed to setup track: {}", e);
+                return Err(anyhow::anyhow!("Failed to setup track: {}", e));
+            }
+        }
+
+        self.call_state
+            .write()
+            .as_mut()
+            .and_then(|call_state| {
+                call_state.answer_time = Some(Utc::now());
+                call_state.answer = answer;
+                call_state.last_status_code = 200;
+                Ok(())
+            })
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(Box::new(webrtc_track))
+    }
+
+    async fn create_outgoing_sip_track(
+        &self,
+        cancel_token: CancellationToken,
+        call_state_ref: ActiveCallStateRef,
+        track_id: &String,
+        mut invite_option: InviteOption,
+    ) -> Result<Box<dyn Track>> {
+        let ssrc = call_state_ref
+            .read()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ssrc;
+        let mut rtp_track = Self::create_rtp_track(
+            cancel_token.child_token(),
+            self.app_state.clone(),
+            track_id.clone(),
+            self.track_config.clone(),
+            ssrc,
+        )
+        .await?;
+
+        let offer = rtp_track.local_description().ok();
+        invite_option.offer = offer.clone().map(|s| s.into());
+
+        info!(
+            session_id = self.session_id,
+            track_id,
+            contact = %invite_option.contact,
+            "invite {} -> {} offer: \n{}",
+            invite_option.caller,
+            invite_option.callee,
+            offer.as_ref().map(|s| s.as_str()).unwrap_or("<NO OFFER>")
+        );
+
+        let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let app_state = self.app_state.clone();
+        let session_id = self.session_id.clone();
+        let track_config = self.track_config.clone();
+        let event_sender = self.event_sender.clone();
+        let media_stream = self.media_stream.clone();
+        let call_state = call_state_ref.clone();
+        let track_id = track_id.clone();
+
+        tokio::spawn(async move {
+            sip_dialog_event_loop(
+                cancel_token,
+                app_state,
+                session_id,
+                track_id,
+                track_config,
+                event_sender,
+                dlg_state_receiver,
+                call_state,
+                media_stream,
+            )
+            .await
+            .ok();
+        });
+
+        let (dialog_id, answer) = self
+            .invitation
+            .invite(invite_option, dlg_state_sender)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let answer = match answer {
+            Some(answer) => String::from_utf8_lossy(&answer).to_string(),
+            None => {
+                warn!(session_id = self.session_id, "no answer received");
+                return Err(anyhow::anyhow!(
+                    "no answer received for dialog: {}",
+                    dialog_id
+                ));
+            }
+        };
+        rtp_track.set_remote_description(&answer)?;
+
+        call_state_ref
+            .write()
+            .as_mut()
+            .and_then(|cs| {
+                cs.dialog_id = Some(dialog_id);
+                cs.option.as_mut().map(|o| o.offer = offer);
+                cs.answer = Some(answer);
+                cs.answer_time = Some(Utc::now());
+                cs.last_status_code = 200;
+                Ok(())
+            })
+            .ok();
+        Ok(Box::new(rtp_track))
+    }
+
+    /// Detect if SDP is WebRTC format
+    pub fn is_webrtc_sdp(sdp: &str) -> bool {
+        sdp.contains("a=ice-ufrag:") || sdp.contains("a=ice-pwd:")
+    }
+
+    pub async fn new_track_with_pending_call(
+        &self,
+        ssrc: u32,
+        option: &CallOption,
+        dlg_state_sender: DialogStateSender,
+        pending_dialog: PendingDialog,
+    ) -> Result<(DialogId, Box<dyn Track>, Option<String>, Option<String>)> {
+        let mut state_receiver = pending_dialog.state_receiver;
+        let pending_token_clone = pending_dialog.token;
+        let token = self.cancel_token.clone();
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = pending_token_clone.cancelled() => {}
+                _ = async {
+                    while let Some(state) = state_receiver.recv().await {
+                        if let Err(_) = dlg_state_sender.send(state) {
+                            break;
+                        }
+                    }
+                } => {}
+            }
+            warn!("dialog state receiver closed");
+        });
+
+        let initial_request = pending_dialog.dialog.initial_request();
+        let offer = String::from_utf8_lossy(&initial_request.body).to_string();
+
+        let offer = match option.enable_ipv6 {
+            Some(false) | None => strip_ipv6_candidates(&offer),
+            _ => offer.clone(),
+        };
+
+        let timeout = option
+            .handshake_timeout
+            .as_ref()
+            .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
+            .flatten();
+
+        let mut media_track = if Self::is_webrtc_sdp(&offer) {
+            let webrtc_track = WebrtcTrack::new(
+                self.cancel_token.clone(),
+                self.session_id.clone(),
+                self.track_config.clone(),
+            )
+            .with_ssrc(ssrc);
+            Box::new(webrtc_track) as Box<dyn Track>
+        } else {
+            let rtp_track = Self::create_rtp_track(
+                self.cancel_token.clone(),
+                self.app_state.clone(),
+                self.session_id.clone(),
+                self.track_config.clone(),
+                ssrc,
+            )
+            .await?;
+            Box::new(rtp_track) as Box<dyn Track>
+        };
+
+        let answer = match media_track.handshake(offer.clone(), timeout).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                warn!(session_id = self.session_id, "failed to handshake: {}", e);
+                return Err(anyhow::anyhow!("failed to handshake"));
+            }
+        };
+
+        let headers = vec![rsip::Header::ContentType(
+            "application/sdp".to_string().into(),
+        )];
+
+        match pending_dialog
+            .dialog
+            .accept(Some(headers), Some(answer.as_bytes().to_vec()))
+        {
+            Ok(_) => (),
+            Err(e) => {
+                warn!(session_id = self.session_id, "failed to accept call: {}", e);
+                return Err(anyhow::anyhow!("failed to accept call"));
+            }
+        }
+        let dialog_id = pending_dialog.dialog.id();
+
+        Ok((dialog_id, media_track, Some(offer), Some(answer)))
+    }
+
+    pub async fn create_incoming_sip_track(
+        &self,
+        cancel_token: CancellationToken,
+        call_state_ref: ActiveCallStateRef,
+        track_id: &String,
+        pending_dialog: PendingDialog,
+    ) -> Result<Box<dyn Track>> {
+        let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let app_state = self.app_state.clone();
+        let session_id = self.session_id.clone();
+        let track_config = self.track_config.clone();
+        let event_sender = self.event_sender.clone();
+        let media_stream = self.media_stream.clone();
+        let call_state = self.call_state.clone();
+        let track_id = track_id.clone();
+
+        tokio::spawn(async move {
+            sip_dialog_event_loop(
+                cancel_token,
+                app_state,
+                session_id,
+                track_id,
+                track_config,
+                event_sender,
+                dlg_state_receiver,
+                call_state,
+                media_stream,
+            )
+            .await
+        });
+        let (ssrc, option) = {
+            let call_state = call_state_ref
+                .read()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            (
+                call_state.ssrc,
+                call_state.option.clone().unwrap_or_default(),
+            )
+        };
+
+        match self
+            .new_track_with_pending_call(ssrc, &option, dlg_state_sender, pending_dialog)
+            .await
+        {
+            Ok((dialog_id, rtp_track, offer, answer)) => {
+                call_state_ref
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| {
+                        cs.dialog_id = Some(dialog_id);
+                        cs.option.as_mut().map(|o| {
+                            o.offer = offer;
+                        });
+                        cs.answer = answer;
+                        cs.answer_time = Some(Utc::now());
+                        cs.last_status_code = 200;
+                        Ok(())
+                    })
+                    .ok();
+                Ok(rtp_track)
+            }
+            Err(e) => {
+                warn!(
+                    session_id = self.session_id,
+                    "error creating rtp track: {}", e
+                );
+                Err(anyhow::anyhow!("error creating sip/rtp track: {}", e))
+            }
+        }
+    }
 }
 
 impl ActiveCallState {
@@ -544,7 +1382,7 @@ impl ActiveCallState {
         session_id: String,
         call_type: ActiveCallType,
     ) -> CallRecord {
-        let option = &self.option;
+        let option = self.option.clone().unwrap_or_default();
         let recorder = if option.recorder.is_some() {
             let recorder_file = app_state.get_recorder_file(&session_id);
             if std::path::Path::new(&recorder_file).exists() {
@@ -589,710 +1427,28 @@ impl ActiveCallState {
             }
         });
 
-        let option = &self.option;
+        let offer = option.offer.clone();
+        let caller = option.caller.clone().unwrap_or_default();
+        let callee = option.callee.clone().unwrap_or_default();
+
         CallRecord {
-            option: Some(option.clone()),
+            option: Some(option),
             call_id: session_id,
             call_type,
             start_time: self.start_time,
             ring_time: self.ring_time.clone(),
             answer_time: self.answer_time.clone(),
             end_time: Utc::now(),
-            caller: option.caller.clone().unwrap_or_default(),
-            callee: option.callee.clone().unwrap_or_default(),
+            caller,
+            callee,
             hangup_reason: self.hangup_reason.clone(),
             status_code: self.last_status_code,
             answer: self.answer.clone(),
-            offer: self.option.offer.clone(),
+            offer,
             extras: None,
             dump_event_file,
             recorder,
             refer_callrecord,
-        }
-    }
-}
-
-pub async fn create_stream(
-    cancel_token: CancellationToken,
-    session_id: String,
-    option: &CallOption,
-    track_config: &TrackConfig,
-    app_state: AppState,
-    event_sender: EventSender,
-) -> Result<MediaStream> {
-    let mut media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
-        .with_id(session_id.clone())
-        .with_cancel_token(cancel_token.child_token());
-
-    if let Some(recorder_option) = &option.recorder {
-        let recorder_file = app_state.get_recorder_file(&session_id);
-        info!(session_id, "created recording file: {}", recorder_file);
-
-        let track_samplerate = track_config.samplerate;
-        let recorder_samplerate = if track_samplerate > 0 {
-            track_samplerate
-        } else {
-            recorder_option.samplerate
-        };
-        let recorder_ptime = if recorder_option.ptime.is_zero() {
-            Duration::from_millis(200)
-        } else {
-            recorder_option.ptime
-        };
-        let recorder_config = RecorderOption {
-            recorder_file,
-            samplerate: recorder_samplerate,
-            ptime: recorder_ptime,
-        };
-
-        info!(
-            session_id,
-            sample_rate = recorder_samplerate,
-            ptime = recorder_ptime.as_millis(),
-            track_sample_rate = track_samplerate,
-            "recorder config",
-        );
-
-        media_stream_builder = media_stream_builder.with_recorder_config(recorder_config);
-    }
-    Ok(media_stream_builder.build())
-}
-
-pub async fn dump_events_to_file(
-    cancel_token: CancellationToken,
-    dump_file: &mut File,
-    mut cmd_receiver: CommandReceiver,
-    event_receiver: &mut EventReceiver,
-) {
-    loop {
-        select! {
-            _ = cancel_token.cancelled() => {
-                break;
-            }
-            Ok(cmd) = cmd_receiver.recv() => {
-                let text = match serde_json::to_string(&cmd){
-                    Ok(text) => text,
-                    Err(_) => {
-                        continue;
-                    }
-                };
-                CallRecordEvent::new(CallRecordEventType::Command, &text)
-                    .write_to_file(dump_file)
-                    .await;
-            }
-            Ok(event) = event_receiver.recv() => {
-                if matches!(event, SessionEvent::Binary{..}) {
-                    continue;
-                }
-                let text = match serde_json::to_string(&event) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        continue;
-                    }
-                };
-                CallRecordEvent::new(CallRecordEventType::Event, &text)
-                    .write_to_file(dump_file)
-                    .await;
-            }
-        };
-    }
-}
-
-pub(super) async fn dump_events_loop(
-    app_state: AppState,
-    event_sender: EventSender,
-    cancel_token: CancellationToken,
-    session_id: String,
-    dump_events: bool,
-    dump_cmd_receiver: CommandReceiver,
-) {
-    if !dump_events {
-        return;
-    }
-    let file_name = app_state.get_dump_events_file(&session_id);
-    let mut dump_file = match File::options()
-        .create(true)
-        .append(true)
-        .open(&file_name)
-        .await
-    {
-        Ok(file) => file,
-        Err(e) => {
-            warn!(
-                session_id,
-                file_name, "Failed to open dump events file: {}", e
-            );
-            return;
-        }
-    };
-    let mut event_receiver = event_sender.subscribe();
-
-    dump_events_to_file(
-        cancel_token.clone(),
-        &mut dump_file,
-        dump_cmd_receiver,
-        &mut event_receiver,
-    )
-    .await;
-
-    while let Ok(event) = event_receiver.try_recv() {
-        if matches!(event, SessionEvent::Binary { .. }) {
-            continue;
-        }
-        let text = match serde_json::to_string(&event) {
-            Ok(text) => text,
-            Err(_) => {
-                continue;
-            }
-        };
-        CallRecordEvent::new(CallRecordEventType::Event, &text)
-            .write_to_file(&mut dump_file)
-            .await;
-    }
-}
-
-pub async fn handle_call(
-    cancel_token: CancellationToken,
-    call_type: ActiveCallType,
-    session_id: String,
-    dump_events: bool,
-    app_state: AppState,
-    event_sender: EventSender,
-    audio_receiver: Option<WebsocketBytesReceiver>,
-    dump_cmd_receiver: CommandReceiver,
-    mut cmd_receiver: CommandReceiver,
-    invitation: Invitation,
-) -> Result<CallRecord, (Error, Option<CallRecord>)> {
-    let mut option = match cmd_receiver.recv().await {
-        Ok(command) => match command {
-            Command::Invite { option } => option,
-            Command::Accept { option } => option,
-            _ => {
-                info!(
-                    session_id,
-                    "the first message must be an invite {:?}", command
-                );
-                return Err((anyhow::anyhow!("the first message must be an invite"), None));
-            }
-        },
-        _ => {
-            return Err((anyhow::anyhow!("Invalid message type"), None));
-        }
-    };
-    option.check_default(); // check default
-
-    info!(session_id, ?call_type, "prepare call option: {:?}", option);
-    let track_config = TrackConfig::default();
-
-    let media_stream = Arc::new(
-        create_stream(
-            cancel_token.clone(),
-            session_id.clone(),
-            &option,
-            &track_config,
-            app_state.clone(),
-            event_sender.clone(),
-        )
-        .await
-        .map_err(|e| (e, None))?,
-    );
-
-    let call_state_ref = Arc::new(RwLock::new(ActiveCallState {
-        start_time: Utc::now(),
-        option: option,
-        ssrc: rand::random::<u32>(),
-        ..Default::default()
-    }));
-
-    let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let process_sip_dlg_loop = async {
-        super::sip::sip_dialog_event_loop(
-            cancel_token.clone(),
-            app_state.clone(),
-            session_id.clone(),
-            session_id.clone(),
-            track_config.clone(),
-            event_sender.clone(),
-            dlg_state_receiver,
-            call_state_ref.clone(),
-            media_stream.clone(),
-        )
-        .await
-    };
-
-    let process_call_loop = async {
-        let r = process_call(
-            cancel_token.clone(),
-            call_type.clone(),
-            track_config.clone(),
-            session_id.clone(),
-            app_state.clone(),
-            media_stream.clone(),
-            event_sender.clone(),
-            audio_receiver,
-            cmd_receiver,
-            Some(dlg_state_sender),
-            call_state_ref.clone(),
-            invitation,
-        )
-        .await;
-
-        let mut active_calls = app_state.active_calls.lock().await;
-        active_calls.remove(&session_id);
-
-        cancel_token.cancel();
-        r
-    };
-
-    app_state.total_calls.fetch_add(1, Ordering::Relaxed);
-    let (_, _, _, process_call_result) = join! {
-        media_stream.serve(),
-        process_sip_dlg_loop,
-        dump_events_loop(
-            app_state.clone(),
-            event_sender.clone(),
-            cancel_token.clone(),
-            session_id.clone(),
-            dump_events,
-            dump_cmd_receiver
-        ),
-        process_call_loop
-    };
-    debug!(session_id, "call processing completed");
-    match process_call_result {
-        Ok(call_record) => Ok(call_record),
-        Err(e) => {
-            app_state.total_failed_calls.fetch_add(1, Ordering::Relaxed);
-            let call_record = call_state_ref
-                .read()
-                .as_ref()
-                .map(|cs| cs.build_callrecord(app_state, session_id, call_type))
-                .ok();
-            Err((e, call_record))
-        }
-    }
-}
-
-pub async fn process_call(
-    cancel_token: CancellationToken,
-    call_type: ActiveCallType,
-    track_config: TrackConfig,
-    session_id: String,
-    app_state: AppState,
-    media_stream: Arc<MediaStream>,
-    event_sender: EventSender,
-    audio_receiver: Option<WebsocketBytesReceiver>,
-    mut cmd_receiver: CommandReceiver,
-    dlg_state_sender: Option<DialogStateSender>,
-    call_state_ref: ActiveCallStateRef,
-    invitation: Invitation,
-) -> Result<CallRecord> {
-    let option = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.clone())
-        .unwrap_or(Default::default());
-
-    let caller_track = match call_type {
-        ActiveCallType::WebSocket => {
-            let audio_receiver = match audio_receiver {
-                Some(receiver) => receiver,
-                None => {
-                    return Err(anyhow::anyhow!("WebSocket call requires an audio receiver"));
-                }
-            };
-            match create_websocket_track(
-                cancel_token.clone(),
-                track_config,
-                call_state_ref.clone(),
-                session_id.clone(),
-                event_sender.clone(),
-                audio_receiver,
-            )
-            .await
-            {
-                Ok(track) => Some(track),
-                Err(e) => {
-                    warn!(session_id, "Failed to create WebSocket track: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-        ActiveCallType::Webrtc => {
-            match create_webrtc_track(
-                cancel_token.clone(),
-                track_config,
-                call_state_ref.clone(),
-                session_id.clone(),
-                &option,
-            )
-            .await
-            {
-                Ok(track) => Some(track),
-                Err(e) => {
-                    warn!(session_id, "Failed to create WebRTC track: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-        ActiveCallType::Sip => {
-            let dlg_state_sender = dlg_state_sender
-                .ok_or_else(|| anyhow::anyhow!("SIP call requires a dialog state sender"))?;
-            let r = if let Some(pending_dialog) = invitation.get_pending_call(&session_id).await {
-                create_incoming_sip_track(
-                    pending_dialog,
-                    cancel_token.clone(),
-                    track_config,
-                    call_state_ref.clone(),
-                    session_id.clone(),
-                    app_state.clone(),
-                    dlg_state_sender,
-                )
-                .await
-            } else {
-                create_outgoing_sip_track(
-                    cancel_token.clone(),
-                    track_config,
-                    call_state_ref.clone(),
-                    session_id.clone(),
-                    app_state.clone(),
-                    dlg_state_sender,
-                    &invitation,
-                )
-                .await
-            };
-            match r {
-                Ok(track) => Some(track),
-                Err(e) => {
-                    warn!(session_id, "Failed to create SIP track: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-        ActiveCallType::B2bua => None,
-    };
-
-    let option = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.clone())
-        .unwrap_or(Default::default());
-
-    if let Some(caller_track) = caller_track {
-        setup_track_with_stream(
-            cancel_token.clone(),
-            app_state.stream_engine.clone(),
-            &session_id,
-            event_sender.clone(),
-            media_stream.clone(),
-            caller_track,
-            &option,
-        )
-        .await;
-    }
-
-    let answer = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.answer.clone())
-        .unwrap_or(None)
-        .unwrap_or_default();
-
-    let active_call = Arc::new(ActiveCall::new(
-        call_state_ref,
-        call_type,
-        cancel_token.clone(),
-        event_sender.clone(),
-        session_id.clone(),
-        media_stream,
-        app_state.clone(),
-        invitation,
-    ));
-
-    let active_calls_len = {
-        let mut active_calls = app_state.active_calls.lock().await;
-        active_calls.insert(session_id, active_call.clone());
-        active_calls.len()
-    };
-
-    info!(
-        active_calls = active_calls_len,
-        session_id = active_call.session_id,
-        call_type = ?active_call.call_type,
-        answer,
-        "new call"
-    );
-
-    if !answer.is_empty() {
-        event_sender
-            .send(SessionEvent::Answer {
-                track_id: active_call.session_id.clone(),
-                timestamp: crate::get_timestamp(),
-                sdp: answer,
-            })
-            .ok();
-    }
-
-    let active_call_ref = active_call.clone();
-    let process_command_loop = async move {
-        while let Ok(command) = cmd_receiver.recv().await {
-            match active_call_ref.dispatch(command).await {
-                Ok(_) => (),
-                Err(e) => {
-                    warn!(
-                        session_id = active_call_ref.session_id,
-                        "Error dispatching command: {}", e
-                    );
-                }
-            }
-        }
-    };
-
-    select! {
-        _ = process_command_loop => {
-            info!(session_id = active_call.session_id, "command loop done");
-        }
-        _ = active_call.serve() => {
-            info!(session_id = active_call.session_id, "call serve done");
-        }
-        _ = cancel_token.cancelled() => {
-            info!(session_id = active_call.session_id, "call cancelled");
-        }
-    }
-    active_call.cleanup().await.ok();
-    Ok(active_call.get_callrecord().await)
-}
-
-pub async fn setup_track_with_stream(
-    cancel_token: CancellationToken,
-    engine: Arc<StreamEngine>,
-    session_id: &String,
-    event_sender: EventSender,
-    media_stream: Arc<MediaStream>,
-    mut caller_track: Box<dyn Track>,
-    option: &CallOption,
-) {
-    let processors = match StreamEngine::create_processors(
-        engine,
-        caller_track.as_ref(),
-        cancel_token,
-        event_sender.clone(),
-        &option,
-    )
-    .await
-    {
-        Ok(processors) => processors,
-        Err(e) => {
-            warn!(session_id, "failed to prepare stream processors: {}", e);
-            vec![]
-        }
-    };
-
-    // Add all processors from the hook
-    for processor in processors {
-        caller_track.append_processor(processor);
-    }
-
-    media_stream.update_track(caller_track).await;
-}
-
-async fn create_websocket_track(
-    cancel_token: CancellationToken,
-    track_config: TrackConfig,
-    call_state_ref: ActiveCallStateRef,
-    session_id: String,
-    event_sender: EventSender,
-    audio_receiver: WebsocketBytesReceiver,
-) -> Result<Box<dyn Track>> {
-    let ssrc = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.ssrc)
-        .unwrap_or(0);
-    let codec = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.codec.clone())
-        .unwrap_or_default();
-
-    let ws_track = WebsocketTrack::new(
-        cancel_token,
-        session_id.clone(),
-        track_config,
-        event_sender.clone(),
-        audio_receiver,
-        codec,
-        ssrc,
-    );
-    call_state_ref
-        .write()
-        .as_mut()
-        .and_then(|cs| {
-            cs.answer_time = Some(Utc::now());
-            cs.answer = Some("".to_string());
-            cs.last_status_code = 200;
-            Ok(())
-        })
-        .ok();
-    Ok(Box::new(ws_track))
-}
-
-pub(super) async fn create_webrtc_track(
-    cancel_token: CancellationToken,
-    track_config: TrackConfig,
-    call_state_ref: ActiveCallStateRef,
-    session_id: String,
-    option: &CallOption,
-) -> Result<Box<dyn Track>> {
-    let ssrc = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.ssrc)
-        .unwrap_or(0);
-    let mut webrtc_track =
-        WebrtcTrack::new(cancel_token, session_id.clone(), track_config).with_ssrc(ssrc);
-
-    let timeout = option
-        .handshake_timeout
-        .as_ref()
-        .map(|d| d.parse::<u64>().map(|d| Duration::from_secs(d)).ok())
-        .flatten();
-
-    let offer = match option.enable_ipv6 {
-        Some(false) | None => {
-            strip_ipv6_candidates(option.offer.as_ref().unwrap_or(&"".to_string()))
-        }
-        _ => option.offer.clone().unwrap_or("".to_string()),
-    };
-    let answer: Option<String>;
-    match webrtc_track.handshake(offer, timeout).await {
-        Ok(answer_sdp) => {
-            answer = match option.enable_ipv6 {
-                Some(false) | None => Some(strip_ipv6_candidates(&answer_sdp)),
-                Some(true) => Some(answer_sdp),
-            };
-        }
-        Err(e) => {
-            warn!(session_id, "Failed to setup track: {}", e);
-            return Err(anyhow::anyhow!("Failed to setup track: {}", e));
-        }
-    }
-    call_state_ref
-        .write()
-        .as_mut()
-        .and_then(|cs| {
-            cs.answer_time = Some(Utc::now());
-            cs.answer = answer;
-            cs.last_status_code = 200;
-            Ok(())
-        })
-        .ok();
-    Ok(Box::new(webrtc_track))
-}
-
-async fn create_outgoing_sip_track(
-    cancel_token: CancellationToken,
-    track_config: TrackConfig,
-    call_state_ref: ActiveCallStateRef,
-    session_id: String,
-    app_state: AppState,
-    dlg_state_sender: DialogStateSender,
-    invitation: &Invitation,
-) -> Result<Box<dyn Track>> {
-    let ssrc = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.ssrc)
-        .unwrap_or(0);
-    let option = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.clone())
-        .unwrap_or(Default::default());
-
-    let r = super::sip::new_rtp_track_with_sip(
-        app_state,
-        cancel_token,
-        session_id.clone(),
-        ssrc,
-        track_config,
-        &option,
-        dlg_state_sender,
-        invitation,
-    )
-    .await;
-    match r {
-        Ok((dialog_id, rtp_track)) => {
-            call_state_ref
-                .write()
-                .as_mut()
-                .and_then(|cs| {
-                    cs.dialog_id = Some(dialog_id);
-                    cs.option.offer = rtp_track.local_description().ok();
-                    cs.answer = rtp_track.remote_description();
-                    cs.answer_time = Some(Utc::now());
-                    cs.last_status_code = 200;
-                    Ok(())
-                })
-                .ok();
-            Ok(Box::new(rtp_track))
-        }
-        Err(e) => {
-            warn!(session_id, "error creating rtp track: {}", e);
-            Err(anyhow::anyhow!("error creating sip/rtp track: {}", e))
-        }
-    }
-}
-
-pub(super) async fn create_incoming_sip_track(
-    pending_dialog: PendingDialog,
-    cancel_token: CancellationToken,
-    track_config: TrackConfig,
-    call_state_ref: ActiveCallStateRef,
-    session_id: String,
-    app_state: AppState,
-    dlg_state_sender: DialogStateSender,
-) -> Result<Box<dyn Track>> {
-    let ssrc = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.ssrc)
-        .unwrap_or(0);
-    let option = call_state_ref
-        .read()
-        .as_ref()
-        .map(|cs| cs.option.clone())
-        .unwrap_or(Default::default());
-    let r = super::sip::new_track_with_pending_call(
-        app_state,
-        cancel_token,
-        session_id.clone(),
-        ssrc,
-        track_config,
-        &option,
-        dlg_state_sender,
-        pending_dialog,
-    )
-    .await;
-    match r {
-        Ok((dialog_id, rtp_track, offer, answer)) => {
-            call_state_ref
-                .write()
-                .as_mut()
-                .and_then(|cs| {
-                    cs.dialog_id = Some(dialog_id);
-                    cs.option.offer = offer;
-                    cs.answer = answer;
-                    cs.answer_time = Some(Utc::now());
-                    cs.last_status_code = 200;
-                    Ok(())
-                })
-                .ok();
-            Ok(rtp_track)
-        }
-        Err(e) => {
-            warn!(session_id, "error creating rtp track: {}", e);
-            Err(anyhow::anyhow!("error creating sip/rtp track: {}", e))
         }
     }
 }

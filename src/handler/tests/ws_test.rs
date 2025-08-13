@@ -77,7 +77,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
         .fallback(handle_error)
         .with_state(
             AppStateBuilder::new()
-                .config(config)
+                .with_config(config)
                 .with_callrecord_sender(callrecord_sender)
                 .build()
                 .await?
