@@ -375,6 +375,12 @@ impl ActiveCall {
             }
             None => {}
         }
+        info!(
+            session_id = self.session_id,
+            call_type = ?self.call_type,
+            sender,
+            "caller with option: {:?}", option
+        );
         match self.setup_caller_track(option).await {
             Ok(_) => {}
             Err(e) => {
