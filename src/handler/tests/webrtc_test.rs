@@ -79,7 +79,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         callrecord.serve().await;
     });
     let (state, _) = AppStateBuilder::new()
-        .config(config)
+        .with_config(config)
         .with_callrecord_sender(callrecord_sender)
         .build()
         .await?;

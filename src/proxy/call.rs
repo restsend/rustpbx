@@ -13,7 +13,6 @@ use crate::proxy::routing::matcher::match_invite;
 use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono::Utc;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
@@ -23,6 +22,7 @@ use rsipstack::transport::SipAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
 #[async_trait]
 pub trait CallRouter: Send + Sync {
     async fn resolve(
@@ -200,48 +200,18 @@ impl CallModule {
             )
             .await
         {
-            Ok(call_record) => {
+            Ok(()) => {
                 info!(
                     session_id = b2bua.session_id,
                     "session established successfully"
                 );
-                if let Some(sender) = self.inner.server.callrecord_sender.as_ref() {
-                    if let Err(e) = sender.send(call_record) {
-                        warn!(
-                            session_id = b2bua.session_id,
-                            "failed to send call record: {}", e
-                        );
-                    }
-                }
                 Ok(())
             }
-            Err((e, call_record)) => {
+            Err(e) => {
                 warn!(
                     session_id = b2bua.session_id,
                     "error establishing session: {}", e
                 );
-                match call_record {
-                    Some(record) => {
-                        info!(
-                            session_id = b2bua.session_id,
-                            hangup_reason = ?record.hangup_reason,
-                            call_type = ?record.call_type,
-                            duration = Utc::now()
-                                .signed_duration_since(record.start_time)
-                                .as_seconds_f32(),
-                            "call ended with error"
-                        );
-                        if let Some(sender) = app_state.callrecord_sender.as_ref() {
-                            if let Err(e) = sender.send(record) {
-                                warn!(
-                                    session_id = b2bua.session_id,
-                                    "failed to send call record: {}", e
-                                );
-                            }
-                        }
-                    }
-                    None => {}
-                }
                 Err(e)
             }
         }

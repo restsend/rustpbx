@@ -1,13 +1,12 @@
-use crate::call::Location;
-
 use super::locator::Locator;
+use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
 use sea_orm::{ActiveModelTrait, Database, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{boolean, integer, pk_auto, string, timestamp};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use tracing::{error, info};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

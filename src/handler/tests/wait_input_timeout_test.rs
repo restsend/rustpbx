@@ -2,19 +2,15 @@
 mod wait_input_timeout_tests {
     use crate::{
         app::{AppState, AppStateBuilder},
-        call::{ActiveCall, ActiveCallState, ActiveCallType, CallOption},
+        call::{ActiveCall, ActiveCallType, CallOption},
         callrecord::CallRecordManagerBuilder,
         config::{Config, UseragentConfig},
-        event::{SessionEvent, create_event_sender},
-        media::stream::MediaStreamBuilder,
+        event::SessionEvent,
+        media::track::TrackConfig,
         synthesis::{SynthesisOption, SynthesisType},
     };
     use anyhow::Result;
-    use chrono::Utc;
-    use std::{
-        sync::{Arc, RwLock},
-        time::Duration,
-    };
+    use std::{sync::Arc, time::Duration};
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
@@ -43,7 +39,7 @@ mod wait_input_timeout_tests {
         });
 
         let (state, _) = AppStateBuilder::new()
-            .config(config)
+            .with_config(config)
             .with_callrecord_sender(callrecord_sender)
             .build()
             .await?;
@@ -56,37 +52,24 @@ mod wait_input_timeout_tests {
         app_state: AppState,
     ) -> Result<Arc<ActiveCall>> {
         let cancel_token = CancellationToken::new();
-        let event_sender = create_event_sender();
-
-        let call_state = Arc::new(RwLock::new(ActiveCallState {
-            start_time: Utc::now(),
-            last_status_code: 200,
-            ..Default::default()
-        }));
-
         let mut option = CallOption::default();
         option.tts = Some(SynthesisOption {
             provider: Some(SynthesisType::TencentCloud),
             ..Default::default()
         });
-
-        let media_stream = Arc::new(
-            MediaStreamBuilder::new(event_sender.clone())
-                .with_id(session_id.clone())
-                .with_cancel_token(cancel_token.clone())
-                .build(),
-        );
-
-        let invitation = app_state.useragent.invitation.clone();
+        let useragent = app_state.useragent.clone().ok_or(anyhow::anyhow!(
+            "User agent must be initialized in app state for tests"
+        ))?;
+        let invitation = useragent.invitation.clone();
         Ok(Arc::new(ActiveCall::new(
-            call_state,
             ActiveCallType::WebSocket,
             cancel_token,
-            event_sender,
             session_id,
-            media_stream,
-            app_state,
             invitation,
+            app_state,
+            TrackConfig::default(),
+            None,
+            false,
         )))
     }
 
@@ -108,7 +91,6 @@ mod wait_input_timeout_tests {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = active_call_clone.serve() => {},
-                    _ = active_call_clone.media_stream.serve() => {},
                 }
             })
         };

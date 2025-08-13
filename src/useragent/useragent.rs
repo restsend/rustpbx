@@ -276,16 +276,6 @@ impl UserAgent {
         }
         Ok(())
     }
-    ///
-    pub async fn get_pending_call(&self, session_id: &String) -> Option<PendingDialog> {
-        let mut pending_dialogs = self.invitation.pending_dialogs.lock().await;
-        pending_dialogs.remove(session_id)
-    }
-
-    pub async fn is_pending_call(&self, session_id: &String) -> bool {
-        let pending_dialogs = self.invitation.pending_dialogs.lock().await;
-        pending_dialogs.contains_key(session_id)
-    }
 
     pub async fn serve(&self) -> Result<()> {
         let incoming_txs = self.endpoint.incoming_transactions();

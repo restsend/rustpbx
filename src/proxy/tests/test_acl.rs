@@ -1,5 +1,4 @@
 use super::common::{create_acl_request, create_transaction};
-use crate::app::{AppState, AppStateBuilder};
 use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::proxy::acl::AclModule;

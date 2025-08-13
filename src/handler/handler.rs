@@ -1,23 +1,19 @@
+use std::sync::Arc;
 use super::middleware::clientaddr::ClientAddr;
 use crate::{
-    app::AppState,
+    app::{AppState},
     call::{
-        ActiveCallType, Command,
-        active_call::{CallParams, handle_call},
+        active_call::{ CallParams}, ActiveCall, ActiveCallType, Command
     },
-    event::SessionEvent,
+    event::SessionEvent, media::track::TrackConfig,
 };
-use axum::{Router,
-    extract::{ Query, State, WebSocketUpgrade, ws::Message},
-    response::{ Response},
-    routing::{get},
+use axum::{extract::{ ws::Message, Query, State, WebSocketUpgrade}, response::{IntoResponse, Response}, routing::get, Json, Router
 };
 use bytes::Bytes;
-use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub fn router(app_state: AppState) -> Router<AppState> {
@@ -47,7 +43,7 @@ pub async fn sip_handler(
     State(state): State<AppState>,
     Query(params): Query<CallParams>,
 ) -> Response {
-    call_handler(client_ip, ActiveCallType::B2bua, ws, state, params).await
+    call_handler(client_ip, ActiveCallType::Sip, ws, state, params).await
 }
 
 pub async fn webrtc_handler(
@@ -68,15 +64,32 @@ pub async fn call_handler(
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let dump_events = params.dump_events.unwrap_or(true);
+    let useragent = match app_state.useragent.clone() {
+        Some(ua) => ua,
+        None => {
+                return Json(serde_json::json!({
+                    "error": "User agent not initialized",
+                    "message": "User agent must be initialized in app state for WebSocket calls"
+                })).into_response();
+        }
+    };
+
     let resp = ws.on_upgrade(move |socket| async move {
-        let event_sender = crate::event::create_event_sender();
         let (mut ws_sender, mut ws_receiver) = socket.split();
-        let cmd_sender = tokio::sync::broadcast::Sender::<Command>::new(32);
         let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
         
         let cancel_token = CancellationToken::new();
-        let dump_cmd_receiver = cmd_sender.subscribe();
-        let cmd_receiver = cmd_sender.subscribe();
+        let track_config = TrackConfig::default();
+        let active_call = Arc::new(ActiveCall::new(
+            call_type.clone(),
+            cancel_token.clone(),
+            session_id.clone(),
+            useragent.invitation.clone(),
+            app_state.clone(),
+            track_config,
+            Some(audio_receiver),
+            dump_events
+        ));
         
         let recv_from_ws_loop = async {
             while let Some(Ok(message)) = ws_receiver.next().await {
@@ -89,9 +102,8 @@ pub async fn call_handler(
                                 continue;
                             }
                         };
-                        if let Err(e) = cmd_sender.send(command) {
-                            error!("Failed to send WebSocket message: {}", e);
-                            break;
+                        if let Err(_) = active_call.enqueue_command(command).await {
+                            break
                         }
                     }
                     Message::Binary(bin) => {
@@ -106,7 +118,7 @@ pub async fn call_handler(
             }
         };
 
-        let mut event_receiver = event_sender.subscribe();
+        let mut event_receiver = active_call.event_sender.subscribe();
         let send_to_ws_loop = async {
             while let Ok(event) = event_receiver.recv().await {
                 match event {
@@ -134,88 +146,31 @@ pub async fn call_handler(
             }
         };
 
-        let token_ref = cancel_token.clone();
-        let invitation = app_state.useragent.invitation.clone();
-        let handle_call_loop = async {
-            match handle_call(
-                cancel_token,
-                call_type,
-                session_id.clone(),
-                dump_events,
-                app_state.clone(),
-                event_sender.clone(),
-                Some(audio_receiver),
-                dump_cmd_receiver,
-                cmd_receiver,
-                invitation,
-            )
-            .await
-            {
-                Ok(call_record) => {
-                    info!(
-                        session_id,
-                        %client_ip,
-                        hangup_reason = ?call_record.hangup_reason,
-                        call_type = ?call_record.call_type,
-                        duration = Utc::now()
-                            .signed_duration_since(call_record.start_time)
-                            .as_seconds_f32(),
-                        "Call ended"
-                    );
-                    if let Some(sender) = app_state.callrecord_sender.as_ref() {
-                        if let Err(e) = sender.send(call_record) {
-                            warn!(session_id, %client_ip, "Failed to send call record: {}", e);
-                        }
-                    }
-                }
-                Err((e, call_record)) => {
-                    warn!(session_id, %client_ip, "Call handling error: {}", e);
-                    let error_event = SessionEvent::Error {
-                        track_id:session_id.clone(),
-                        timestamp:crate::get_timestamp(),
-                        error:e.to_string(),
-                        sender: "handle_call".to_string(),
-                        code: None
-                    };
-                    event_sender.send(error_event).ok();
-                    match call_record {
-                        Some(record) => {
-                            info!(
-                                session_id,
-                                %client_ip,
-                                hangup_reason = ?record.hangup_reason,
-                                call_type = ?record.call_type,
-                                duration = Utc::now()
-                                    .signed_duration_since(record.start_time)
-                                    .as_seconds_f32(),
-                                "Call ended with error"
-                            );
-                            if let Some(sender) = app_state.callrecord_sender.as_ref() {
-                                if let Err(e) = sender.send(record) {
-                                    warn!(session_id, %client_ip, "Failed to send call record: {}", e);
-                                }
-                            }
-                        }
-                        None => {
-                        }
-                    }
-                }
-            };
-            token_ref.cancel();
+        let active_calls = {
+            let mut calls = app_state.active_calls.lock().await;
+            calls.insert(session_id.clone(), active_call.clone());
+            calls.len()
         };
+        info!(session_id, %client_ip, active_calls, ?call_type,"new call started");
 
-        join!{
+        let (r,_) = join!{
+            active_call.serve(),
             async {
                 select!{
-                    _ = token_ref.cancelled() => {},
-                    _ = send_to_ws_loop => {},
-                    _ = recv_from_ws_loop => {},
+                    _ = cancel_token.cancelled() => {},
+                    _ = send_to_ws_loop => { cancel_token.cancel() },
+                    _ = recv_from_ws_loop => { cancel_token.cancel() },
                 }
-                token_ref.cancel();
             }, 
-            handle_call_loop
         };
-        
+
+        match r {
+            Ok(_) => info!(session_id, %client_ip, "call ended successfully"),
+            Err(e) => warn!(session_id, %client_ip, "call ended with error: {}", e),
+        }
+
+        app_state.active_calls.lock().await.remove(&session_id);
+
         // Drain remaining events
         while let Ok(event) = event_receiver.try_recv() {
             match event {

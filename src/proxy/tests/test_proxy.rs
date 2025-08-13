@@ -67,7 +67,16 @@ async fn test_proxy_full_flow() {
         .register_module("auth", AuthModule::create)
         .register_module("registrar", RegistrarModule::create)
         .register_module("call", CallModule::create);
-    let app_state = AppStateBuilder::new().build().await.unwrap().0;
+
+    let app_state = AppStateBuilder::new()
+        .with_config(crate::config::Config {
+            ua: None,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .unwrap()
+        .0;
     let _proxy = proxy_builder
         .build(app_state)
         .await

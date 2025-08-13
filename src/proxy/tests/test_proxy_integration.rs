@@ -93,7 +93,15 @@ impl TestProxyServer {
         let locator = MemoryLocator::new();
         let cancel_token = CancellationToken::new();
 
-        let app_state = AppStateBuilder::new().build().await.unwrap().0;
+        let app_state = AppStateBuilder::new()
+            .with_config(crate::config::Config {
+                ua: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap()
+            .0;
         // Build server
         let mut builder = SipServerBuilder::new(config)
             .with_user_backend(Box::new(user_backend))

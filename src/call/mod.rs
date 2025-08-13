@@ -10,7 +10,7 @@ use rsipstack::{
     transport::SipAddr,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, time::Instant};
 pub mod active_call;
 pub mod b2bua;
 pub mod cookie;
@@ -99,6 +99,34 @@ impl CallOption {
         }
         self
     }
+
+    pub fn build_invite_option(&self) -> Result<InviteOption> {
+        let mut invite_option = InviteOption::default();
+        if let Some(offer) = &self.offer {
+            invite_option.offer = Some(offer.clone().into());
+        }
+        if let Some(callee) = &self.callee {
+            invite_option.callee = callee.clone().try_into()?;
+        }
+        if let Some(caller) = &self.caller {
+            invite_option.caller = caller.clone().try_into()?;
+            invite_option.contact = invite_option.caller.clone();
+        }
+
+        if let Some(sip) = &self.sip {
+            invite_option.credential = Some(Credential {
+                username: sip.username.clone(),
+                password: sip.password.clone(),
+                realm: Some(sip.realm.clone()),
+            });
+            invite_option.headers = sip.headers.as_ref().map(|h| {
+                h.iter()
+                    .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+            });
+        }
+        Ok(invite_option)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -148,6 +176,9 @@ pub enum Command {
     Reject {
         reason: String,
         code: Option<u32>,
+    },
+    Ringing {
+        ringtone: Option<String>,
     },
     Tts {
         text: String,
