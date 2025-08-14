@@ -1,6 +1,6 @@
 use crate::{
     config::RouteResult,
-    media::{recorder::RecorderOption, vad::VADOption},
+    media::{media_pass::MediaPassOption, recorder::RecorderOption, vad::VADOption},
     synthesis::SynthesisOption,
     transcription::TranscriptionOption,
 };
@@ -67,6 +67,8 @@ pub struct CallOption {
     pub codec: Option<String>, // pcmu, pcma, g722, pcm, only for websocket call
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eou: Option<EouOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_pass: Option<MediaPassOption>,
 }
 
 impl Default for CallOption {
@@ -86,6 +88,7 @@ impl Default for CallOption {
             extra: None,
             codec: None,
             eou: None,
+            media_pass: None,
         }
     }
 }

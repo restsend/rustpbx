@@ -129,7 +129,7 @@ async fn test_aliyun_tts() {
                 Ok(TTSEvent::Finished) => {
                     break;
                 }
-                Ok(TTSEvent::Subtitles(_subtitles)) => {
+                Ok(TTSEvent::Subtitles(..)) => {
                     // ignore progress
                 }
                 Err(e) => {
@@ -139,7 +139,6 @@ async fn test_aliyun_tts() {
         }
         println!("Total audio size: {} bytes", audio_collector.len());
         println!("Total chunks: {}", chunks_count);
-        // save_audio_to_files(&audio_collector, 16000, "test_aliyun_tts").unwrap();
     } else {
         panic!("Error in audio stream: {:?}", stream.err());
     }

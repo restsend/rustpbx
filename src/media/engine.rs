@@ -2,6 +2,7 @@ use super::{
     asr_processor::AsrProcessor,
     denoiser::NoiseReducer,
     processor::Processor,
+    media_pass::MediaPassProcessor,
     track::{
         tts::{TtsHandle, TtsTrack},
         Track,
@@ -305,6 +306,12 @@ impl StreamEngine {
                     processors.push(eou_processor);
                 }
                 None => {}
+            }
+
+            if let Some(option) = &option.media_pass {
+                let media_pass_processor =
+                    MediaPassProcessor::new(option.clone(), cancel_token.child_token());
+                processors.push(Box::new(media_pass_processor) as Box<dyn Processor>);
             }
 
             Ok(processors)

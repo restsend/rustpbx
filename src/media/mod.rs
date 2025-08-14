@@ -5,6 +5,7 @@ pub mod denoiser;
 pub mod dtmf;
 pub mod engine;
 pub mod jitter;
+pub mod media_pass;
 pub mod negotiate;
 pub mod processor;
 pub mod recorder;
