@@ -5,6 +5,7 @@ use crate::{
     transcription::TranscriptionOption,
 };
 use anyhow::Result;
+use async_trait::async_trait;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
@@ -178,6 +179,8 @@ pub enum Command {
         code: Option<u32>,
     },
     Ringing {
+        recorder: bool,
+        early_media: bool,
         ringtone: Option<String>,
     },
     Tts {
@@ -242,6 +245,15 @@ pub enum Command {
         speaker: String,
         text: String,
     },
+}
+
+#[async_trait]
+pub trait LocationInspector: Send + Sync {
+    async fn inspect_location(
+        &self,
+        location: Location,
+        original: &rsip::Request,
+    ) -> Result<Location, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
 #[derive(Clone, Default)]

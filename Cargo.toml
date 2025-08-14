@@ -51,7 +51,7 @@ hound = "3.5.1"
 ort = { version = "2.0.0-rc.10", features = ["ndarray"], optional = true }
 ort-sys = { version = "2.0.0-rc.10", optional = true }
 chrono = "0.4.41"
-rsipstack = "0.2.32"
+rsipstack = "0.2.34"
 #rsipstack = { path = "../rsipstack" }
 rsip = "0.4.0"
 reqwest = { version = "0.12.15", features = [

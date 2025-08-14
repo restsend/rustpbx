@@ -116,9 +116,7 @@ async fn test_aliyun_tts() {
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
 
-    let stream = client
-        .synthesize("Hello, how are you?", None)
-        .await;
+    let stream = client.synthesize("Hello, how are you?", None).await;
     if let Ok(mut stream) = stream {
         let mut audio_collector = Vec::with_capacity(8096);
         let mut chunks_count = 0;
@@ -131,7 +129,7 @@ async fn test_aliyun_tts() {
                 Ok(TTSEvent::Finished) => {
                     break;
                 }
-                Ok(TTSEvent::Subtitles(subtitles)) => {
+                Ok(TTSEvent::Subtitles(_subtitles)) => {
                     // ignore progress
                 }
                 Err(e) => {

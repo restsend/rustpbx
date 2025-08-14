@@ -63,6 +63,7 @@ pub async fn create_test_server_with_config(
         locator: Arc::new(locator),
         callrecord_sender: None,
         endpoint,
+        location_inspector: Arc::new(None),
     });
 
     // Add test users
@@ -120,6 +121,7 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
         vec![rsip::Method::Invite, rsip::Method::Register],
+        None,
         None,
     );
 

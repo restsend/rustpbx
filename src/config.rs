@@ -18,27 +18,37 @@ pub(crate) struct Cli {
     pub conf: Option<String>,
 }
 
+fn default_config_recorder_path() -> String {
+    #[cfg(target_os = "windows")]
+    return "./recorder".to_string();
+    #[cfg(not(target_os = "windows"))]
+    return "/tmp/recorder".to_string();
+}
+fn default_config_media_cache_path() -> String {
+    #[cfg(target_os = "windows")]
+    return "./mediacache".to_string();
+    #[cfg(not(target_os = "windows"))]
+    return "/tmp/mediacache".to_string();
+}
+fn default_config_http_addr() -> String {
+    "0.0.0.0:8080".to_string()
+}
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default = "default_config_http_addr")]
     pub http_addr: String,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
-    pub console: Option<ConsoleConfig>,
     pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
+    #[serde(default = "default_config_recorder_path")]
     pub recorder_path: String,
     pub callrecord: Option<CallRecordConfig>,
+    #[serde(default = "default_config_media_cache_path")]
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub ice_servers: Option<Vec<IceServerItem>>,
     pub ami: Option<AmiConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ConsoleConfig {
-    pub prefix: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Serialize)]
@@ -46,16 +56,6 @@ pub struct IceServerItem {
     pub urls: Vec<String>,
     pub username: Option<String>,
     pub password: Option<String>,
-}
-
-impl Default for ConsoleConfig {
-    fn default() -> Self {
-        Self {
-            prefix: "/console".to_string(),
-            username: None,
-            password: None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -358,20 +358,13 @@ impl Default for CallRecordConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            http_addr: "0.0.0.0:8080".to_string(),
+            http_addr: default_config_http_addr(),
             log_level: None,
             log_file: None,
-            console: Some(ConsoleConfig::default()),
             ua: Some(UseragentConfig::default()),
             proxy: None,
-            #[cfg(target_os = "windows")]
-            recorder_path: "./recorder".to_string(),
-            #[cfg(not(target_os = "windows"))]
-            recorder_path: "/tmp/recorder".to_string(),
-            #[cfg(target_os = "windows")]
-            media_cache_path: "./mediacache".to_string(),
-            #[cfg(not(target_os = "windows"))]
-            media_cache_path: "/tmp/mediacache".to_string(),
+            recorder_path: default_config_recorder_path(),
+            media_cache_path: default_config_media_cache_path(),
             callrecord: None,
             llmproxy: None,
             ice_servers: None,

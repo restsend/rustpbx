@@ -551,9 +551,8 @@ async fn test_tts_interrupt_with_config(tts_config: SynthesisOption, text: &str)
     let interrupted_clone = Arc::clone(&interrupted);
     let peer_connection_clone = Arc::clone(&peer_connection);
     let recv_event_loop = async move {
-        while let Some(Ok(msg)) = ws_receiver.next().await
-            && let Ok(event) = serde_json::from_str(&msg.to_string())
-        {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            let event = serde_json::from_str(&msg.to_string()).expect("Failed to parse event");
             match event {
                 SessionEvent::Answer { sdp, .. } => {
                     info!("Received answer: {}", sdp);

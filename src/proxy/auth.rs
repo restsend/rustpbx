@@ -21,7 +21,7 @@ use tracing::{debug, info};
 
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
-    fn authenticate(&self, original: &rsip::Request) -> Result<Option<SipUser>>;
+    async fn authenticate(&self, original: &rsip::Request) -> Result<Option<SipUser>>;
 }
 
 #[derive(Clone)]
@@ -188,7 +188,7 @@ impl ProxyModule for AuthModule {
         );
 
         match self.server.auth_backend.as_ref() {
-            Some(backend) => match backend.authenticate(&tx.original) {
+            Some(backend) => match backend.authenticate(&tx.original).await {
                 Ok(Some(user)) => {
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
