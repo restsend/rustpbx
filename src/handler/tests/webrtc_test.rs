@@ -320,7 +320,13 @@ async fn test_tts_interrupt() -> Result<()> {
         ..Default::default()
     };
 
-    assert!(test_tts_interrupt_with_config(tecent_tts_config.clone(), "你好，我是吴彦祖，今天星期二，我想吃一碗拉面").await?);
+    assert!(
+        test_tts_interrupt_with_config(
+            tecent_tts_config.clone(),
+            "你好，我是吴彦祖，今天星期二，我想吃一碗拉面"
+        )
+        .await?
+    );
 
     let dashscope_api_key = std::env::var("DASHSCOPE_API_KEY").unwrap();
     let aliyun_tts_config = SynthesisOption {
@@ -334,7 +340,13 @@ async fn test_tts_interrupt() -> Result<()> {
         ..Default::default()
     };
 
-    assert!(test_tts_interrupt_with_config(aliyun_tts_config, "你好，我是吴彦祖，今天星期三，我想吃麻辣烫").await?);
+    assert!(
+        test_tts_interrupt_with_config(
+            aliyun_tts_config,
+            "你好，我是吴彦祖，今天星期三，我想吃麻辣烫"
+        )
+        .await?
+    );
     Ok(())
 }
 
@@ -381,19 +393,18 @@ async fn test_tts_interrupt_with_config(tts_config: SynthesisOption, text: &str)
         callrecord.serve().await;
     });
 
+    let (state, _) = AppStateBuilder::new()
+        .with_config(config)
+        .with_callrecord_sender(callrecord_sender)
+        .build()
+        .await?;
     let app = Router::new()
         .route(
             "/ws",
             axum::routing::get(crate::handler::handler::webrtc_handler),
         )
         .fallback(handle_error)
-        .with_state(
-            AppStateBuilder::new()
-                .config(config)
-                .with_callrecord_sender(callrecord_sender)
-                .build()
-                .await?,
-        );
+        .with_state(state);
 
     // Start the server
     let listener = TcpListener::bind("127.0.0.1:0").await?;
