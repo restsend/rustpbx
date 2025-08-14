@@ -15,7 +15,7 @@ use crate::{
 use anyhow::Result;
 use chrono::Utc;
 use rsip::prelude::HeadersExt;
-use rsipstack::transaction::transaction::Transaction;
+use rsipstack::{dialog::dialog::DialogState, transaction::transaction::Transaction};
 use std::{
     sync::{Arc, RwLock},
     time::Duration,
@@ -350,7 +350,7 @@ impl B2bua {
             })
             .ok();
 
-        let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (dlg_state_sender, mut dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
         let app_state = active_call.app_state.clone();
         let session_id = self.session_id.clone();
         let track_config = active_call.track_config.clone();
@@ -359,20 +359,51 @@ impl B2bua {
         let call_state = call_state_ref.clone();
         let track_id = track_id.clone();
         let cancel_token = self.cancel_token.clone();
+        let active_call_ref = active_call.clone();
+        let recorder = self.recorder;
 
         tokio::spawn(async move {
-            let r = sip_dialog_event_loop(
-                cancel_token,
-                app_state,
-                session_id.clone(),
-                track_id,
-                track_config,
-                event_sender,
-                dlg_state_receiver,
-                call_state,
-                media_stream,
-            )
-            .await;
+            let (refer_dlg_state_sender, refer_dlg_state_receiver) = mpsc::unbounded_channel();
+
+            let forward_dlg_state_loop = async {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {}
+                    _ = async {
+                        while let Some(state) = dlg_state_receiver.recv().await {
+                            match &state {
+                                DialogState::Early(_, resp) => {
+                                    let body = String::from_utf8_lossy(&resp.body);
+                                    let rinning_command = Command::Ringing {
+                                        ringtone: None,
+                                        recorder,
+                                        early_media: !body.is_empty()
+                                    };
+                                    active_call_ref.enqueue_command(rinning_command).await.ok();
+                                }
+                                _ => {}
+                            }
+                            if let Err(_) = refer_dlg_state_sender.send(state) {
+                                break;
+                            }
+                        }
+                    } => {}
+                }
+            };
+
+            let (_, r) = tokio::join!(
+                forward_dlg_state_loop,
+                sip_dialog_event_loop(
+                    cancel_token.clone(),
+                    app_state,
+                    session_id.clone(),
+                    track_id,
+                    track_config,
+                    event_sender,
+                    refer_dlg_state_receiver,
+                    call_state,
+                    media_stream,
+                )
+            );
             info!(
                 session_id = session_id,
                 "b2bua callee completed with: {:?}", r

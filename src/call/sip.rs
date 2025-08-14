@@ -11,7 +11,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::{
-    DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
+    Dialog, DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
@@ -42,6 +42,22 @@ impl Invitation {
     pub async fn get_pending_call(&self, session_id: &String) -> Option<PendingDialog> {
         let mut pending_dialogs = self.pending_dialogs.lock().await;
         pending_dialogs.remove(session_id)
+    }
+
+    pub async fn ringing(&self, dialog_id: DialogId, early_media: Option<String>) -> Result<()> {
+        let dialog = self
+            .dialog_layer
+            .get_dialog(&dialog_id)
+            .ok_or(anyhow::anyhow!("dialog not found"))?;
+        match dialog {
+            Dialog::ServerInvite(dialog) => {
+                dialog
+                    .ringing(None, early_media.map(|early| early.into_bytes()))
+                    .ok();
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
@@ -301,6 +317,9 @@ pub async fn sip_dialog_event_loop(
                         timestamp: crate::get_timestamp(),
                         reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
                         initiator: Some(initiator),
+                        start_time: call_state_ref.start_time.to_rfc3339(),
+                        answer_time: call_state_ref.answer_time.map(|t| t.to_rfc3339()),
+                        ringing_time: call_state_ref.ring_time.map(|t| t.to_rfc3339()),
                     })
                     .ok();
                 cancel_token.cancel(); // Cancel the token to stop any ongoing tasks

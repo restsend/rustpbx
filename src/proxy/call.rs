@@ -28,6 +28,7 @@ pub trait CallRouter: Send + Sync {
     async fn resolve(
         &self,
         original: &rsip::Request,
+        route_invite: Box<dyn RouteInvite>,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 pub struct DefaultRouteInvite {
@@ -90,6 +91,7 @@ impl CallModule {
     async fn default_resolve(
         &self,
         original: &rsip::Request,
+        route_invite: Box<dyn RouteInvite>,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
         let callee_uri = original
             .to_header()
@@ -100,17 +102,26 @@ impl CallModule {
         let callee_realm = callee_uri.host().to_string();
 
         // Check if this is an external realm
-        let route_invite = Box::new(DefaultRouteInvite {
-            routing_state: self.inner.routing_state.clone(),
-            config: self.inner.config.clone(),
-        }) as Box<dyn RouteInvite>;
         if !self.inner.server.is_same_realm(&callee_realm).await {
             info!(callee=%callee_uri, "Creating dialplan for external realm");
-            let location = Location {
+            let mut location = Location {
                 aor: callee_uri.clone(),
                 destination: SipAddr::try_from(&callee_uri).map_err(|e| (anyhow!(e), None))?,
                 ..Default::default()
             };
+
+            if let Some(location_inspector) = self.inner.server.location_inspector.as_ref() {
+                match location_inspector
+                    .inspect_location(location, original)
+                    .await
+                {
+                    Ok(r) => location = r,
+                    Err(e) => {
+                        warn!(callee=%callee_uri, "failed to inspect location: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
             return Ok(Dialplan {
                 targets: crate::call::DialStrategy::Sequential(vec![location]),
                 route_invite: Some(route_invite),
@@ -118,7 +129,7 @@ impl CallModule {
             });
         }
 
-        let locations = self
+        let mut locations = self
             .inner
             .server
             .locator
@@ -131,8 +142,22 @@ impl CallModule {
             return Err((anyhow!("User offline"), Some(rsip::StatusCode::NotFound)));
         }
 
-        let targets =
-            DialStrategy::Sequential(locations.iter().map(|loc| loc.clone().into()).collect());
+        if let Some(location_inspector) = self.inner.server.location_inspector.as_ref() {
+            for loc in locations.iter_mut() {
+                match location_inspector
+                    .inspect_location(loc.clone(), original)
+                    .await
+                {
+                    Ok(r) => *loc = r,
+                    Err(e) => {
+                        warn!(callee=%callee_uri, "failed to inspect location: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        let targets = DialStrategy::Sequential(locations.iter().map(|loc| loc.clone()).collect());
 
         Ok(Dialplan {
             targets,
@@ -157,10 +182,15 @@ impl CallModule {
             }
         };
 
+        let route_invite = Box::new(DefaultRouteInvite {
+            routing_state: self.inner.routing_state.clone(),
+            config: self.inner.config.clone(),
+        }) as Box<dyn RouteInvite>;
+
         let r = if let Some(resolver) = self.inner.server.call_router.as_ref() {
-            resolver.resolve(&tx.original).await
+            resolver.resolve(&tx.original, route_invite).await
         } else {
-            self.default_resolve(&tx.original).await
+            self.default_resolve(&tx.original, route_invite).await
         };
 
         let dialplan = match r {

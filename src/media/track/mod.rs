@@ -75,7 +75,6 @@ pub trait Track: Send + Sync {
     fn append_processor(&mut self, processor: Box<dyn Processor>) {
         self.processor_chain().append_processor(processor);
     }
-
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String>;
     async fn start(
         &self,

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     app::AppState,
-    call::TransactionCookie,
+    call::{LocationInspector, TransactionCookie},
     callrecord::CallRecordSender,
     config::ProxyConfig,
     proxy::{auth::AuthBackend, call::CallRouter},
@@ -15,7 +15,9 @@ use rsip::prelude::HeadersExt;
 use rsipstack::{
     EndpointBuilder,
     transaction::{
-        Endpoint, TransactionReceiver, endpoint::EndpointOption, transaction::Transaction,
+        Endpoint, TransactionReceiver,
+        endpoint::{EndpointOption, MessageInspector},
+        transaction::Transaction,
     },
     transport::{
         TcpListenerConnection, TransportLayer, WebSocketListenerConnection, udp::UdpConnection,
@@ -44,6 +46,7 @@ pub struct SipServerInner {
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
+    pub location_inspector: Arc<Option<Box<dyn LocationInspector>>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -63,6 +66,8 @@ pub struct SipServerBuilder {
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
+    message_inspector: Option<Box<dyn MessageInspector>>,
+    location_inspector: Option<Box<dyn LocationInspector>>,
 }
 
 impl SipServerBuilder {
@@ -76,6 +81,8 @@ impl SipServerBuilder {
             module_fns: HashMap::new(),
             locator: None,
             callrecord_sender: None,
+            message_inspector: None,
+            location_inspector: None,
         }
     }
 
@@ -98,7 +105,10 @@ impl SipServerBuilder {
         self.locator = Some(locator);
         self
     }
-
+    pub fn with_location_inspector(mut self, inspector: Box<dyn LocationInspector>) -> Self {
+        self.location_inspector = Some(inspector);
+        self
+    }
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
@@ -111,6 +121,11 @@ impl SipServerBuilder {
 
     pub fn with_callrecord_sender(mut self, callrecord_sender: Option<CallRecordSender>) -> Self {
         self.callrecord_sender = callrecord_sender;
+        self
+    }
+
+    pub fn with_message_inspector(mut self, inspector: Box<dyn MessageInspector>) -> Self {
+        self.message_inspector = Some(inspector);
         self
     }
 
@@ -208,14 +223,19 @@ impl SipServerBuilder {
             ..Default::default()
         };
 
-        let endpoint_builder = endpoint_builder
+        let mut endpoint_builder = endpoint_builder
             .with_cancel_token(cancel_token.clone())
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
+        if let Some(inspector) = self.message_inspector {
+            endpoint_builder = endpoint_builder.with_inspector(inspector);
+        }
+
         let endpoint = endpoint_builder.build();
 
         let call_router = self.call_router;
+        let location_inspector = self.location_inspector;
 
         let inner = Arc::new(SipServerInner {
             app_state,
@@ -227,6 +247,7 @@ impl SipServerBuilder {
             locator: Arc::new(locator),
             callrecord_sender: self.callrecord_sender,
             endpoint,
+            location_inspector: Arc::new(location_inspector),
         });
 
         let mut allow_methods = Vec::new();

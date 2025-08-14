@@ -41,6 +41,11 @@ pub enum SessionEvent {
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         initiator: Option<String>,
+        start_time: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        answer_time: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ringing_time: Option<String>,
     },
     AnswerMachineDetection {
         // Answer machine detection
@@ -101,9 +106,9 @@ pub enum SessionEvent {
     },
     OnInterrupt {
         subtitle: String,
-        position: u32, 
+        position: u32,
         total_duration: u32, // ms
-        current: u32, // current timestamp of total_duration
+        current: u32,        // current timestamp of total_duration
     },
     AsrFinal {
         #[serde(rename = "trackId")]
