@@ -7,7 +7,7 @@ use crate::{
         processor::ProcessorChain,
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
-    synthesis::{SynthesisClient, SynthesisOption},
+    synthesis::{SynthesisClient, SynthesisOption, TTSEvent, TTSSubtitle, bytes_size_to_duration},
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use futures::StreamExt;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -25,7 +25,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct TtsHandle {
     pub play_id: Option<String>,
@@ -173,6 +173,10 @@ impl Track for TtsTrack {
         let synthesize_done = Arc::new(AtomicBool::new(false));
         let synthesize_done_clone = synthesize_done.clone();
         let session_id = self.session_id.clone();
+        let subtitles = Arc::new(Mutex::new(Vec::<TTSSubtitle>::new()));
+        let subtitles_clone = subtitles.clone();
+        let total_audio_len = Arc::new(AtomicUsize::new(0));
+        let total_audio_len_clone = total_audio_len.clone();
         let command_loop = async move {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
@@ -196,6 +200,11 @@ impl Track for TtsTrack {
                 );
                 synthesize_done.store(false, Ordering::Relaxed);
 
+                {
+                    let mut subtitles = subtitles_clone.lock().await;
+                    subtitles.clear();
+                }
+
                 if use_cache {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
@@ -216,6 +225,18 @@ impl Track for TtsTrack {
                                         duration: 0,
                                     })
                                     .ok();
+                                {
+                                    let mut subtitles = subtitles_clone.lock().await;
+                                    let duration = bytes_size_to_duration(audio.len(), sample_rate);
+                                    total_audio_len_clone.store(audio.len(), Ordering::Relaxed);
+                                    subtitles.push(TTSSubtitle::new(
+                                        &text,
+                                        0,
+                                        duration,
+                                        0,
+                                        text.chars().count() as u32,
+                                    ));
+                                }
                                 continue;
                             }
                             Err(e) => {
@@ -229,15 +250,16 @@ impl Track for TtsTrack {
                 let start_time = Instant::now();
                 match client.synthesize(&text.to_string(), Some(option)).await {
                     Ok(mut stream) => {
-                        let mut total_audio_len = 0;
+                        total_audio_len_clone.store(0, Ordering::Relaxed);
                         let mut audio_chunks = Vec::new();
                         let mut first_chunk = true;
                         // Process each audio chunk as it arrives
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
-                                Ok(audio_chunk) => {
+                                Ok(TTSEvent::AudioChunk(audio_chunk)) => {
                                     // Process the audio chunk
-                                    total_audio_len += audio_chunk.len();
+                                    total_audio_len_clone
+                                        .fetch_add(audio_chunk.len(), Ordering::Relaxed);
 
                                     if first_chunk {
                                         first_chunk = false;
@@ -275,6 +297,12 @@ impl Track for TtsTrack {
                                         .await
                                         .extend(bytes_to_samples(&processed_chunk));
                                 }
+                                Ok(TTSEvent::Finished) => {
+                                    break;
+                                }
+                                Ok(TTSEvent::Subtitles(subtitles)) => {
+                                    subtitles_clone.lock().await.extend(subtitles);
+                                }
                                 Err(e) => {
                                     warn!(session_id, "Error in audio stream chunk: {:?}", e);
                                     event_sender
@@ -298,7 +326,7 @@ impl Track for TtsTrack {
                                 data: serde_json::json!({
                                         "speaker": speaker,
                                         "playId": play_id,
-                                        "length": total_audio_len,
+                                        "length": total_audio_len_clone.load(Ordering::Relaxed),
                                 }),
                                 duration: start_time.elapsed().as_millis() as u32,
                             })
@@ -307,7 +335,7 @@ impl Track for TtsTrack {
                         info!(
                             session_id,
                             "synthesize audio {} bytes -> {}ms {} with {}",
-                            total_audio_len,
+                            total_audio_len_clone.load(Ordering::Relaxed),
                             start_time.elapsed().as_millis(),
                             text,
                             client.provider()
@@ -353,11 +381,12 @@ impl Track for TtsTrack {
         let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let processor_chain = self.processor_chain.clone();
         let session_id = self.session_id.clone();
+        let buffer_clone = buffer.clone();
         let emit_loop = async move {
             let start_time = Instant::now();
             loop {
                 let packet = {
-                    let mut buffer = buffer.lock().await;
+                    let mut buffer = buffer_clone.lock().await;
                     if buffer.len() > max_pcm_chunk_size {
                         let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
                         Some(s16_data)
@@ -405,6 +434,30 @@ impl Track for TtsTrack {
                     info!(session_id, "emit loop done");
                 }
                 _ = token.cancelled() => {
+                    let total_size = total_audio_len.load(Ordering::Relaxed);
+                    let remaining_size = buffer.lock().await.len() * 2;
+                    debug!(session_id, "total_size: {} remaining_size: {}", total_size, remaining_size);
+                    let sended_size = total_size - remaining_size;
+                    let mut text = "".into();
+                    let mut position = 0;
+                    let mut current = bytes_size_to_duration(sended_size, sample_rate);
+                    let total_duration = bytes_size_to_duration(total_size, sample_rate);
+                    let subtitles = subtitles.lock().await;
+                    debug!("subtitles: {:?}", subtitles);
+                    for subtitle in subtitles.iter().rev() {
+                        if subtitle.begin_time <= current {
+                            text = subtitle.text.clone();
+                            position = subtitle.begin_index;
+                            current = subtitle.begin_time;
+                            break;
+                        }
+                    }
+                    let _ = event_sender_clone.send(SessionEvent::OnInterrupt {
+                        subtitle: text,
+                        position,
+                        total_duration,
+                        current,
+                    });
                 }
             }
             event_sender_clone

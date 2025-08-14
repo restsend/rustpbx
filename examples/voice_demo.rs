@@ -7,7 +7,7 @@ use futures::StreamExt;
 use rustpbx::llm::LlmContent;
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
-use rustpbx::synthesis::SynthesisClient;
+use rustpbx::synthesis::{SynthesisClient, TTSEvent};
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
 use rustpbx::{PcmBuf, Sample};
 use std::collections::VecDeque;
@@ -440,19 +440,28 @@ async fn main() -> Result<()> {
                                         tts_client.synthesize(&text, None).await
                                     {
                                         let mut total_bytes = 0;
-                                        while let Some(Ok(chunk)) = audio_stream.next().await {
-                                            total_bytes += chunk.len();
-                                            let audio_data: PcmBuf = bytes_to_samples(&chunk);
-                                            let final_audio = if sample_rate != output_sample_rate {
-                                                resample::resample_mono(
-                                                    &audio_data,
-                                                    sample_rate,
-                                                    output_sample_rate,
-                                                )
-                                            } else {
-                                                audio_data
-                                            };
-                                            output_buffer.push(&final_audio);
+                                        while let Some(Ok(event)) = audio_stream.next().await {
+                                            match event {
+                                                TTSEvent::AudioChunk(chunk) => {
+                                                    total_bytes += chunk.len();
+                                                    let audio_data: PcmBuf = bytes_to_samples(&chunk);
+                                                    let final_audio =
+                                                        if sample_rate != output_sample_rate {
+                                                            resample::resample_mono(
+                                                                &audio_data,
+                                                                sample_rate,
+                                                                output_sample_rate,
+                                                            )
+                                                        } else {
+                                                            audio_data
+                                                        };
+                                                    output_buffer.push(&final_audio);
+                                                }
+                                                TTSEvent::Finished => {
+                                                    break;
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                         info!(
                                             "TTS synthesis: {}ms ({}) bytes",

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::Stream;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, pin::Pin};
+use std::collections::HashMap;
 mod aliyun;
 mod tencent_cloud;
 mod voiceapi;
@@ -108,15 +108,57 @@ impl SynthesisOption {
     }
 }
 
+pub enum TTSEvent {
+    /// Raw audio data chunk
+    AudioChunk(Vec<u8>),
+    /// Progress information including completion status
+    Subtitles(Vec<TTSSubtitle>),
+    Finished,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct TTSSubtitle {
+    pub text: String,
+    pub begin_time: u32,
+    pub end_time: u32,
+    pub begin_index: u32,
+    end_index: u32,
+}
+
+impl TTSSubtitle {
+    pub fn new(
+        text: &str,
+        begin_time: u32,
+        end_time: u32,
+        begin_index: u32,
+        end_index: u32,
+    ) -> Self {
+        Self {
+            text: text.to_string(),
+            begin_time,
+            end_time,
+            begin_index,
+            end_index,
+        }
+    }
+}
+
+pub fn bytes_size_to_duration(bytes: usize, sample_rate: u32) -> u32 {
+    (500.0 * bytes as f32 / sample_rate as f32) as u32
+}
+
 #[async_trait]
 pub trait SynthesisClient: Send {
+    /// Returns the provider type for this synthesis client.
     fn provider(&self) -> SynthesisType;
-    /// Synthesize text to audio and return a stream of audio chunks
-    async fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
+
+    // break out of stream polling loop when res is Err or Progress is finished
+    async fn synthesize(
+        &self,
+        text: &str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>>;
+    ) -> Result<BoxStream<'_, Result<TTSEvent>>>;
 }
 
 impl Default for SynthesisOption {

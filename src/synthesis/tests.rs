@@ -1,3 +1,4 @@
+use crate::synthesis::TTSEvent;
 use crate::synthesis::{
     AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
     tencent_cloud::TencentCloudTtsClient,
@@ -49,20 +50,25 @@ async fn test_tencent_cloud_tts() {
     };
 
     let client = TencentCloudTtsClient::new(config);
-    let text = "Hello";
+    let text = "你好，我是秦始皇";
     match client.synthesize(text, None).await {
         Ok(mut stream) => {
             // Collect all chunks from the stream
             let mut total_size = 0;
             let mut chunks_count = 0;
             let mut collected_audio = Vec::new();
-
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
-                    Ok(chunk) => {
-                        total_size += chunk.len();
+                    Ok(TTSEvent::AudioChunk(audio)) => {
+                        total_size += audio.len();
                         chunks_count += 1;
-                        collected_audio.extend_from_slice(&chunk);
+                        collected_audio.extend_from_slice(&audio);
+                    }
+                    Ok(TTSEvent::Finished) => {
+                        break;
+                    }
+                    Ok(TTSEvent::Subtitles { .. }) => {
+                        // ignore progress
                     }
                     Err(e) => {
                         println!("Error in audio stream chunk: {:?}", e);
@@ -110,15 +116,23 @@ async fn test_aliyun_tts() {
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
 
-    let stream = client.synthesize("Hello", None).await;
+    let stream = client
+        .synthesize("Hello, how are you?", None)
+        .await;
     if let Ok(mut stream) = stream {
         let mut audio_collector = Vec::with_capacity(8096);
         let mut chunks_count = 0;
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(TTSEvent::AudioChunk(chunk)) => {
                     audio_collector.extend_from_slice(&chunk);
                     chunks_count += 1;
+                }
+                Ok(TTSEvent::Finished) => {
+                    break;
+                }
+                Ok(TTSEvent::Subtitles(subtitles)) => {
+                    // ignore progress
                 }
                 Err(e) => {
                     panic!("Error in audio stream chunk: {:?}", e);
