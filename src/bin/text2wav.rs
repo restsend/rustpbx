@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
-use rustpbx::synthesis::{SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient};
+use rustpbx::synthesis::{
+    SynthesisClient, SynthesisOption, TTSEvent, SynthesisType, TencentCloudTtsClient,
+};
 
 const SAMPLE_RATE: u32 = 16000;
 
@@ -232,13 +234,19 @@ async fn main() -> Result<()> {
                     let mut total_bytes = 0;
                     while let Some(chunk_result) = audio_stream.next().await {
                         match chunk_result {
-                            Ok(chunk) => {
-                                debug!("Received chunk of {} bytes", chunk.len());
-                                total_bytes += chunk.len();
-                                let samples: PcmBuf = bytes_to_samples(&chunk);
-                                for &sample in &samples {
-                                    writer.write_sample(sample)?;
+                            Ok(event) => match event {
+                                TTSEvent::AudioChunk(chunk) => {
+                                    debug!("Received chunk of {} bytes", chunk.len());
+                                    total_bytes += chunk.len();
+                                    let samples: PcmBuf = bytes_to_samples(&chunk);
+                                    for &sample in &samples {
+                                        writer.write_sample(sample)?;
+                                    }
                                 }
+                                TTSEvent::Finished => {
+                                    break;
+                                }
+                                _ => {}
                             }
                             Err(e) => {
                                 error!("Error in audio stream chunk: {:?}", e);

@@ -1,13 +1,14 @@
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
-use anyhow::{anyhow, Result};
+use crate::synthesis::{TTSEvent, TTSSubtitle};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::{stream, SinkExt, Stream, StreamExt};
+use futures::{SinkExt, StreamExt, stream::BoxStream};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
+    tungstenite::{Message, client::IntoClientRequest},
 };
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -19,18 +20,98 @@ pub struct AliyunTtsClient {
     option: SynthesisOption,
 }
 
-/// run-task command structure
 #[derive(Debug, Serialize)]
-struct RunTaskCommand {
+struct Command {
     header: CommandHeader,
-    payload: RunTaskPayload,
+    payload: CommandPayload,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum CommandPayload {
+    RunTask(RunTaskPayload),
+    ContinueTask(ContinueTaskPayload),
+    FinishTask(FinishTaskPayload),
+}
+
+impl Command {
+    fn run_task(option: &SynthesisOption, task_id: &str) -> Self {
+        let model = option
+            .extra
+            .as_ref()
+            .and_then(|e| e.get("model"))
+            .cloned()
+            .unwrap_or_else(|| "cosyvoice-v2".to_string());
+
+        let voice = option
+            .speaker
+            .clone()
+            .unwrap_or_else(|| "longyumi_v2".to_string());
+
+        let format = option.codec.as_deref().unwrap_or("pcm");
+
+        let sample_rate = option.samplerate.unwrap_or(16000) as u32;
+        let volume = (option.volume.unwrap_or(5) * 10) as u32; // Convert to 0 - 100 range
+        let rate = option.speed.unwrap_or(1.0);
+
+        Command {
+            header: CommandHeader {
+                action: "run-task".to_string(),
+                task_id: task_id.to_string(),
+                streaming: "duplex".to_string(),
+            },
+            payload: CommandPayload::RunTask(RunTaskPayload {
+                task_group: "audio".to_string(),
+                task: "tts".to_string(),
+                function: "SpeechSynthesizer".to_string(),
+                model,
+                parameters: RunTaskParameters {
+                    text_type: "PlainText".to_string(),
+                    voice,
+                    format: Some(format.to_string()),
+                    sample_rate: Some(sample_rate),
+                    volume: Some(volume),
+                    rate: Some(rate),
+                },
+                input: EmptyInput {},
+            }),
+        }
+    }
+
+    fn continue_task(task_id: &str, text: &str) -> Self {
+        Command {
+            header: CommandHeader {
+                action: "continue-task".to_string(),
+                task_id: task_id.to_string(),
+                streaming: "duplex".to_string(),
+            },
+            payload: CommandPayload::ContinueTask(ContinueTaskPayload {
+                input: PayloadInput {
+                    text: text.to_string(),
+                },
+            }),
+        }
+    }
+
+    fn finish_task(task_id: &str) -> Self {
+        Command {
+            header: CommandHeader {
+                action: "finish-task".to_string(),
+                task_id: task_id.to_string(),
+                streaming: "duplex".to_string(),
+            },
+            payload: CommandPayload::FinishTask(FinishTaskPayload {
+                input: EmptyInput {},
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct CommandHeader {
     action: String,
     task_id: String,
-    stream: String,
+    streaming: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,7 +121,7 @@ struct RunTaskPayload {
     function: String,
     model: String,
     parameters: RunTaskParameters,
-    input: Option<PayloadInput>,
+    input: EmptyInput,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,22 +136,16 @@ struct RunTaskParameters {
     volume: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rate: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pitch: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    enable_ssml: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContinueTaskPayload {
+    input: PayloadInput,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PayloadInput {
     text: String,
-}
-
-/// finish-task command structure
-#[derive(Debug, Serialize)]
-struct FinishTaskCommand {
-    header: CommandHeader,
-    payload: FinishTaskPayload,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,17 +158,28 @@ struct EmptyInput {}
 
 /// WebSocket event response structure
 #[derive(Debug, Deserialize)]
-struct WebSocketEvent {
-    header: WebSocketEventHeader,
+struct Event {
+    header: EventHeader,
+    payload: EventPayload,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
-struct WebSocketEventHeader {
+struct EventHeader {
     task_id: String,
     event: String,
     error_code: Option<String>,
     error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventPayload {
+    usage: Option<PayloadUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PayloadUsage {
+    characters: u32,
 }
 
 impl AliyunTtsClient {
@@ -116,76 +202,56 @@ impl AliyunTtsClient {
                 anyhow!("Aliyun API Key not configured, please set DASHSCOPE_API_KEY environment variable or specify secret_key in configuration")
             })
     }
+}
 
-    /// Create run-task command
-    fn create_run_task_command(
-        &self,
-        option: &SynthesisOption,
-        task_id: &str,
-        text: &str,
-    ) -> RunTaskCommand {
-        let model = option
-            .extra
-            .as_ref()
-            .and_then(|e| e.get("model"))
-            .cloned()
-            .unwrap_or_else(|| "cosyvoice-v2".to_string());
+struct AliyunTTSState {
+    task_id: String,
+    text: String,
+    sample_rate: u32,
+    last_size: u32,
+    current_size: u32,
+    last_usage: u32,
+}
 
-        let voice = option
-            .speaker
-            .clone()
-            .unwrap_or_else(|| "longyumi_v2".to_string());
-
-        let format = match option.codec.as_deref() {
-            Some("mp3") => "mp3",
-            Some("wav") => "wav",
-            _ => "pcm",
-        };
-
-        let sample_rate = option.samplerate.unwrap_or(16000) as u32;
-        let volume = (option.volume.unwrap_or(5) * 10) as u32; // Convert to 0 - 100 range
-        let rate = option.speed.unwrap_or(1.0);
-
-        RunTaskCommand {
-            header: CommandHeader {
-                action: "run-task".to_string(),
-                task_id: task_id.to_string(),
-                stream: "duplex".to_string(),
-            },
-            payload: RunTaskPayload {
-                task_group: "audio".to_string(),
-                task: "tts".to_string(),
-                function: "SpeechSynthesizer".to_string(),
-                model,
-                parameters: RunTaskParameters {
-                    text_type: "PlainText".to_string(),
-                    voice,
-                    format: Some(format.to_string()),
-                    sample_rate: Some(sample_rate),
-                    volume: Some(volume),
-                    rate: Some(rate),
-                    pitch: None,
-                    enable_ssml: None,
-                },
-                input: Some(PayloadInput {
-                    text: text.to_string(),
-                }),
-            },
+impl AliyunTTSState {
+    fn new(task_id: &str, text: &str, sample_rate: u32) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            text: text.to_string(),
+            sample_rate,
+            last_size: 0,
+            current_size: 0,
+            last_usage: 0,
         }
     }
 
-    /// Create finish-task command
-    fn create_finish_task_command(&self, task_id: &str) -> FinishTaskCommand {
-        FinishTaskCommand {
-            header: CommandHeader {
-                action: "finish-task".to_string(),
-                task_id: task_id.to_string(),
-                stream: "duplex".to_string(),
-            },
-            payload: FinishTaskPayload {
-                input: EmptyInput {},
-            },
-        }
+    fn size_to_time(&self, byte_size: u32) -> u32 {
+        (500.0 * byte_size as f32 / self.sample_rate as f32) as u32
+    }
+
+    fn usage_to_index(&self, usage: u32, default: u32) -> u32 {
+        self.text
+            .chars()
+            .enumerate()
+            .position(|(i, _)| i == usage as usize)
+            .unwrap_or(default as usize) as u32
+    }
+
+    fn move_forward(&mut self, current_usage: u32) -> Vec<TTSSubtitle> {
+        let subtitle = self.text[self.last_usage as usize..current_usage as usize].to_string();
+        let begin_index = self.usage_to_index(self.last_usage, 0);
+        let end_index = self.usage_to_index(current_usage, self.text.len() as u32);
+        let begin_time = self.size_to_time(self.last_size);
+        let end_time = self.size_to_time(self.current_size);
+        self.last_size = self.current_size;
+        self.last_usage = current_usage;
+        vec![TTSSubtitle::new(
+            &subtitle,
+            begin_time,
+            end_time,
+            begin_index,
+            end_index,
+        )]
     }
 }
 
@@ -195,11 +261,11 @@ impl SynthesisClient for AliyunTtsClient {
         SynthesisType::Aliyun
     }
 
-    async fn synthesize<'a>(
-        &'a self,
-        text: &'a str,
+    async fn synthesize(
+        &self,
+        text: &str,
         option: Option<SynthesisOption>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>> {
+    ) -> Result<BoxStream<Result<TTSEvent>>> {
         let option = self.option.merge_with(option);
         let api_key = self.get_api_key(&option)?;
         let task_id = Uuid::new_v4().to_string();
@@ -214,10 +280,8 @@ impl SynthesisClient for AliyunTtsClient {
         headers.insert("Authorization", format!("Bearer {}", api_key).parse()?);
         headers.insert("X-DashScope-DataInspection", "enable".parse()?);
 
-        // Establish WebSocket connection
         let (ws_stream, response) = connect_async(request).await?;
 
-        // Check connection status
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
             return Err(anyhow!(
                 "WebSocket connection failed: {}",
@@ -225,110 +289,108 @@ impl SynthesisClient for AliyunTtsClient {
             ));
         }
 
-        debug!("WebSocket connection established");
-
-        // Split read/write streams
         let (mut ws_sink, ws_stream) = ws_stream.split();
 
-        // Send run-task command
-        let run_task_cmd = self.create_run_task_command(&option, &task_id, text);
+        let run_task_cmd = Command::run_task(&option, &task_id);
         let run_task_json = serde_json::to_string(&run_task_cmd)?;
-        debug!("Sending run-task command: {}", run_task_json);
         ws_sink
             .send(Message::text(run_task_json))
             .await
             .map_err(|e| anyhow!("Failed to send run-task command: {}", e))?;
 
-        // Send finish-task command
-        let finish_task_cmd = self.create_finish_task_command(&task_id);
+        // text send here
+        let continue_task_cmd = Command::continue_task(&task_id, text);
+        let continue_task_json = serde_json::to_string(&continue_task_cmd)?;
+        ws_sink
+            .send(Message::text(continue_task_json))
+            .await
+            .map_err(|e| anyhow!("Failed to send continue-task command: {}", e))?;
+
+        // oneshot task
+        let finish_task_cmd = Command::finish_task(&task_id);
         let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
-        debug!("Sending finish-task command: {}", finish_task_json);
         ws_sink
             .send(Message::text(finish_task_json))
             .await
             .map_err(|e| anyhow!("Failed to send finish-task command: {}", e))?;
 
-        // Create audio data stream
-        let stream = Box::pin(stream::unfold(
-            (ws_stream, false),
-            |(mut ws_stream, finished)| async move {
-                if finished {
-                    return None;
-                }
-
-                match ws_stream.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        // Handle JSON event messages
-                        match serde_json::from_str::<WebSocketEvent>(&text) {
-                            Ok(event) => {
-                                debug!("Received event: {:?}", event);
-                                match event.header.event.as_str() {
-                                    "task-started" => {
-                                        debug!("Task started");
-                                        Some((Ok(Vec::new()), (ws_stream, false)))
-                                    }
-                                    "task-finished" => {
-                                        debug!("Task finished");
-                                        Some((Ok(Vec::new()), (ws_stream, true)))
-                                    }
-                                    "task-failed" => {
-                                        let error_code = event
-                                            .header
-                                            .error_code
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        let error_msg = event
-                                            .header
-                                            .error_message
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        let error_msg =
-                                            format!("Task failed: {} {}", error_code, error_msg);
-                                        warn!("Task failed: {}:{}", error_code, error_msg);
-                                        Some((
-                                            Err(anyhow!("Task failed: {}", error_msg)),
-                                            (ws_stream, true),
-                                        ))
-                                    }
-                                    "result-generated" => {
-                                        debug!("Result generated event");
-                                        Some((Ok(Vec::new()), (ws_stream, false)))
-                                    }
-                                    _ => {
-                                        debug!("Ignoring unknown event: {}", event.header.event);
-                                        Some((Ok(Vec::new()), (ws_stream, false)))
+        let sample_rate = option.samplerate.unwrap_or(16000) as u32;
+        let state = Arc::new(Mutex::new(AliyunTTSState::new(&task_id, text, sample_rate)));
+        let stream = ws_stream.filter_map(move |message| {
+            let state = state.clone();
+            async move {
+                let mut state = state.lock().unwrap();
+                match message {
+                    Ok(Message::Binary(data)) => {
+                        state.current_size += data.len() as u32;
+                        Some(Ok(TTSEvent::AudioChunk(data.to_vec())))
+                    }
+                    Ok(Message::Text(message)) => {
+                        if let Ok(event) = serde_json::from_str::<Event>(&message) {
+                            match event.header.event.as_str() {
+                                "task-started" => {
+                                    debug!("Aliyun TTS Task: {} started", state.task_id);
+                                    None
+                                }
+                                "result-generated" => {
+                                    if let Some(usage) = event.payload.usage {
+                                        Some(Ok(TTSEvent::Subtitles(
+                                            state.move_forward(usage.characters),
+                                        )))
+                                    } else {
+                                        None
                                     }
                                 }
+                                "task-failed" => {
+                                    let error_code = event
+                                        .header
+                                        .error_code
+                                        .unwrap_or_else(|| "Unknown error code".to_string());
+                                    let error_msg = event
+                                        .header
+                                        .error_message
+                                        .unwrap_or_else(|| "Unknown error message".to_string());
+                                    Some(Err(anyhow!(
+                                        "Aliyun TTS Task: {} failed: {}, {}",
+                                        state.task_id,
+                                        error_code,
+                                        error_msg
+                                    )))
+                                }
+                                "task-finished" => {
+                                    debug!("Aliyun TTS Task: {} finished", state.task_id);
+                                    Some(Ok(TTSEvent::Finished))
+                                }
+                                _ => {
+                                    warn!(
+                                        "Aliyun TTS Task: {} unknown event: {:?}",
+                                        state.task_id, event
+                                    );
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                warn!("Failed to parse event message: {}", e);
-                                Some((Ok(Vec::new()), (ws_stream, false)))
-                            }
+                        } else {
+                            Some(Err(anyhow!(
+                                "Aliyun TTS Task: {} failed to deserialize {}",
+                                state.task_id,
+                                message
+                            )))
                         }
                     }
-                    Some(Ok(Message::Binary(data))) => {
-                        // Audio data
-                        debug!("Received audio data: {} bytes", data.len());
-                        Some((Ok(data.to_vec()), (ws_stream, false)))
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        debug!("WebSocket connection closed");
-                        None
-                    }
-                    Some(Err(e)) => {
-                        warn!("WebSocket error: {:?}", e);
-                        Some((Err(anyhow!("WebSocket error: {}", e)), (ws_stream, true)))
-                    }
-                    None => {
-                        debug!("WebSocket stream ended");
-                        None
-                    }
-                    _ => {
-                        // Ignore other message types (ping/pong etc.)
-                        Some((Ok(Vec::new()), (ws_stream, false)))
-                    }
+                    Ok(Message::Close(_)) => Some(Err(anyhow!(
+                        "Aliyun TTS Task: {} websocket closed by remote",
+                        state.task_id
+                    ))),
+                    Err(e) => Some(Err(anyhow!(
+                        "Aliyun TTS Task: {} websocket error: {}",
+                        state.task_id,
+                        e
+                    ))),
+                    _ => None,
                 }
-            },
-        ));
+            }
+        });
 
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 }

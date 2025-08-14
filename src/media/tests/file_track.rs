@@ -36,7 +36,7 @@ impl Processor for CountingProcessor {
     }
 }
 
-async fn create_test_wav_file() -> Result<(String, TempDir)> {
+fn create_test_wav_file() -> Result<(String, TempDir)> {
     // Create a temporary WAV file for testing
     let temp_dir = tempfile::tempdir()?;
     let file_path = temp_dir.path().join("test.wav");
@@ -70,7 +70,7 @@ async fn create_test_wav_file() -> Result<(String, TempDir)> {
 #[tokio::test]
 async fn test_file_track_wav() -> Result<()> {
     // Create a test WAV file
-    let (test_file, _temp_dir) = create_test_wav_file().await?;
+    let (test_file, _temp_dir) = create_test_wav_file()?;
 
     // Create a FileTrack
     let track_id = "test_file_track".to_string();
