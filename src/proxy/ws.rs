@@ -4,7 +4,7 @@ use futures::{SinkExt, StreamExt};
 use rsip::SipMessage;
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
-    transport::{channel::ChannelConnection, SipAddr, SipConnection, TransportEvent},
+    transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
 };
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
@@ -124,11 +124,12 @@ pub async fn sip_ws_handler(
                     let message_text = sip_msg.to_string();
                     debug!(
                         addr = ?local_addr_clone,
-                        "Forwarding message to WebSocket: {}",
+                        "forwarding message to WebSocket: {}",
                         message_text.lines().next().unwrap_or("")
                     );
                     if let Err(e) = ws_sink.send(Message::Text(message_text.into())).await {
-                        error!("Error sending message to WebSocket: {}", e);
+                        warn!(
+                        addr = ?local_addr_clone,"error sending message to WebSocket: {}", e);
                         break;
                     }
                 }
