@@ -20,7 +20,11 @@ pub async fn sip_ws_handler(
     let (from_ws_tx, from_ws_rx) = mpsc::unbounded_channel();
     let (to_ws_tx, mut to_ws_rx) = mpsc::unbounded_channel();
 
-    let transport_type = rsip::transport::Transport::Ws;
+    let transport_type = if client_addr.is_secure {
+        rsip::transport::Transport::Wss
+    } else {
+        rsip::transport::Transport::Ws
+    };
     let local_addr = SipAddr {
         r#type: Some(transport_type),
         addr: client_addr.addr.clone().into(),

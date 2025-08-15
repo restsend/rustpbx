@@ -1,5 +1,5 @@
 use axum::extract::{ConnectInfo, FromRequestParts};
-use http::{request::Parts, StatusCode};
+use http::{StatusCode, request::Parts};
 use std::{
     fmt::{self, Formatter},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -7,11 +7,15 @@ use std::{
 
 pub struct ClientAddr {
     pub addr: SocketAddr,
+    pub is_secure: bool,
 }
 
 impl ClientAddr {
     pub fn new(addr: SocketAddr) -> Self {
-        ClientAddr { addr }
+        ClientAddr {
+            addr,
+            is_secure: false,
+        }
     }
     pub fn ip(&self) -> IpAddr {
         self.addr.ip()
@@ -25,12 +29,20 @@ where
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let is_secure = match parts.uri.scheme_str() {
+            Some("wss") | Some("https") => true,
+            _ => parts
+                .headers
+                .get("x-forwarded-proto")
+                .map_or(false, |v| v == "https"),
+        };
         let mut remote_addr = match parts.extensions.get::<ConnectInfo<SocketAddr>>() {
             Some(ConnectInfo(addr)) => addr.clone(),
             None => {
                 return Ok(ClientAddr {
                     addr: SocketAddr::from((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)),
-                })
+                    is_secure,
+                });
             }
         };
 
@@ -49,7 +61,10 @@ where
                 }
             }
         }
-        Ok(ClientAddr { addr: remote_addr })
+        Ok(ClientAddr {
+            addr: remote_addr,
+            is_secure,
+        })
     }
 }
 
