@@ -1,11 +1,11 @@
 use crate::{
+    AudioFrame, PcmBuf, Sample, Samples,
     event::create_event_sender,
     media::{
         jitter::JitterBuffer,
         processor::Processor,
-        track::{rtp::*, track_codec::TrackCodec, Track, TrackConfig},
+        track::{Track, TrackConfig, rtp::*, track_codec::TrackCodec},
     },
-    AudioFrame, PcmBuf, Sample, Samples,
 };
 use anyhow::Result;
 
@@ -324,8 +324,8 @@ async fn test_rtcp_packet_format() {
 }
 
 // Create a pair of connected UDP sockets for loopback testing
-async fn create_connected_sockets(
-) -> Result<(Arc<tokio::net::UdpSocket>, Arc<tokio::net::UdpSocket>)> {
+async fn create_connected_sockets()
+-> Result<(Arc<tokio::net::UdpSocket>, Arc<tokio::net::UdpSocket>)> {
     // Create receiver socket
     let receiver_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
     let receiver_addr = receiver_socket.local_addr()?;
@@ -508,7 +508,7 @@ async fn test_rtp_track_set_remote_description() -> Result<()> {
     let track_id = "test-remote-desc".to_string();
     let builder = RtpTrackBuilder::new(track_id.clone(), TrackConfig::default())
         .with_cancel_token(cancel_token.clone());
-    let mut track = builder.build().await?;
+    let track = builder.build().await?;
 
     // Create valid SDP for testing
     let test_sdp = r#"v=0

@@ -1,11 +1,8 @@
 use crate::TrackId;
-use crate::app::AppState;
-use crate::call::ActiveCall;
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::EventSender;
 use crate::media::stream::MediaStream;
-use crate::media::track::TrackConfig;
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
 use chrono::Utc;
@@ -19,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct Invitation {
@@ -110,12 +107,86 @@ impl Invitation {
     }
 }
 
-pub async fn sip_dialog_event_loop(
+fn on_dialog_terminated(
+    call_state: ActiveCallStateRef,
+    track_id: TrackId,
+    reason: TerminatedReason,
+    event_sender: EventSender,
+) {
+    let mut call_state_ref = match call_state.write() {
+        Ok(cs) => cs,
+        Err(_) => {
+            return;
+        }
+    };
+    call_state_ref.last_status_code = match &reason {
+        TerminatedReason::UacCancel => 487,
+        TerminatedReason::UacBye => 200,
+        TerminatedReason::UacBusy => 486,
+        TerminatedReason::UasBye => 200,
+        TerminatedReason::UasBusy => 486,
+        TerminatedReason::UasDecline => 603,
+        TerminatedReason::UacOther(code) => code
+            .clone()
+            .unwrap_or(rsip::StatusCode::ServerInternalError)
+            .code(),
+        TerminatedReason::UasOther(code) => code
+            .clone()
+            .unwrap_or(rsip::StatusCode::ServerInternalError)
+            .code(),
+        _ => 500, // Default to internal server error
+    };
+
+    if call_state_ref.hangup_reason.is_none() {
+        call_state_ref.hangup_reason.replace(match reason {
+            TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
+            TerminatedReason::UacBye | TerminatedReason::UacBusy => {
+                CallRecordHangupReason::ByCaller
+            }
+            TerminatedReason::UasBye | TerminatedReason::UasBusy => {
+                CallRecordHangupReason::ByCallee
+            }
+            TerminatedReason::UasDecline => CallRecordHangupReason::ByCallee,
+            TerminatedReason::UacOther(_) => CallRecordHangupReason::ByCaller,
+            TerminatedReason::UasOther(_) => CallRecordHangupReason::ByCallee,
+            _ => CallRecordHangupReason::BySystem,
+        });
+    };
+    let initiator = match reason {
+        TerminatedReason::UacCancel => "caller".to_string(),
+        TerminatedReason::UacBye | TerminatedReason::UacBusy => "caller".to_string(),
+        TerminatedReason::UasBye | TerminatedReason::UasBusy | TerminatedReason::UasDecline => {
+            "callee".to_string()
+        }
+        _ => "system".to_string(),
+    };
+    event_sender
+        .send(crate::event::SessionEvent::TrackEnd {
+            track_id: track_id.clone(),
+            timestamp: crate::get_timestamp(),
+            duration: call_state_ref
+                .answer_time
+                .map(|t| (Utc::now() - t).num_milliseconds())
+                .unwrap_or_default() as u64,
+            ssrc: call_state_ref.ssrc,
+        })
+        .ok();
+    event_sender
+        .send(crate::event::SessionEvent::Hangup {
+            timestamp: crate::get_timestamp(),
+            reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
+            initiator: Some(initiator),
+            start_time: call_state_ref.start_time.to_rfc3339(),
+            answer_time: call_state_ref.answer_time.map(|t| t.to_rfc3339()),
+            ringing_time: call_state_ref.ring_time.map(|t| t.to_rfc3339()),
+        })
+        .ok();
+}
+
+pub async fn client_dialog_event_loop(
     cancel_token: CancellationToken,
-    app_state: AppState,
     session_id: String,
     track_id: TrackId,
-    track_config: TrackConfig,
     event_sender: EventSender,
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
@@ -124,12 +195,12 @@ pub async fn sip_dialog_event_loop(
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
             DialogState::Trying(dialog_id) => {
-                info!(session_id, "dialog trying: {}", dialog_id);
+                info!(session_id, "client dialog trying: {}", dialog_id);
             }
             DialogState::Early(dialog_id, resp) => {
                 let body = resp.body();
                 let answer = String::from_utf8_lossy(body);
-                info!(session_id, track_id, %dialog_id,  "early answer: \n{}", answer);
+                info!(session_id, track_id, %dialog_id,  "client dialog early answer: \n{}", answer);
 
                 call_state
                     .write()
@@ -140,95 +211,18 @@ pub async fn sip_dialog_event_loop(
                 event_sender.send(crate::event::SessionEvent::Ringing {
                     track_id: track_id.clone(),
                     timestamp: crate::get_timestamp(),
-                    early_media: true,
+                    early_media: !answer.is_empty(),
                 })?;
 
                 if answer.is_empty() {
                     continue;
                 }
-
-                let mut rtp_track = match ActiveCall::create_rtp_track(
-                    cancel_token.child_token(),
-                    app_state.clone(),
-                    track_id.clone(),
-                    track_config.clone(),
-                    0,
-                )
-                .await
-                {
-                    Ok(track) => track,
-                    Err(_) => {
-                        continue;
-                    }
-                };
-                match rtp_track.set_remote_description(&answer) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        warn!(
-                            session_id,
-                            track_id,
-                            %dialog_id,
-                            "failed to set remote description: {}", e
-                        );
-                        continue;
-                    }
-                }
-                let caller_track = Box::new(rtp_track);
-                let mut option = call_state
-                    .read()
-                    .map(|cs| cs.option.clone())
-                    .unwrap_or_default()
-                    .unwrap_or_default();
-
-                //TODO: remove these options from the call option
-                option.asr = None;
-                option.vad = None;
-                option.denoise = None;
-
-                match ActiveCall::setup_track_with_stream(
-                    app_state.clone(),
-                    cancel_token.child_token(),
-                    media_stream.clone(),
-                    event_sender.clone(),
-                    &session_id,
-                    &option,
-                    caller_track,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        info!(
-                            session_id,
-                            track_id, "RTP track for early media setup completed"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            session_id,
-                            track_id,
-                            %dialog_id,
-                            "failed to setup track with stream: {}", e
-                        );
-                    }
-                }
+                media_stream
+                    .update_remote_description(&track_id, &answer.to_string())
+                    .await?;
             }
             DialogState::Calling(dialog_id) => {
-                info!(session_id, track_id, %dialog_id, "dialog calling");
-                call_state
-                    .write()
-                    .as_mut()
-                    .and_then(|cs| Ok(cs.ring_time.replace(Utc::now())))
-                    .ok();
-                match event_sender.send(crate::event::SessionEvent::Ringing {
-                    track_id: track_id.clone(),
-                    timestamp: crate::get_timestamp(),
-                    early_media: false,
-                }) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        warn!(session_id, track_id, %dialog_id, "failed to send ringing event: {}", e);
-                    }
-                }
+                info!(session_id, track_id, %dialog_id, "client dialog calling");
             }
             DialogState::Confirmed(dialog_id) => {
                 call_state
@@ -251,77 +245,14 @@ pub async fn sip_dialog_event_loop(
                     track_id,
                     ?dialog_id,
                     ?reason,
-                    "dialog terminated"
+                    "client dialog terminated"
                 );
-
-                let mut call_state_ref = match call_state.write() {
-                    Ok(cs) => cs,
-                    Err(_) => {
-                        break;
-                    }
-                };
-                call_state_ref.last_status_code = match &reason {
-                    TerminatedReason::UacCancel => 487,
-                    TerminatedReason::UacBye => 200,
-                    TerminatedReason::UacBusy => 486,
-                    TerminatedReason::UasBye => 200,
-                    TerminatedReason::UasBusy => 486,
-                    TerminatedReason::UasDecline => 603,
-                    TerminatedReason::UacOther(code) => code
-                        .clone()
-                        .unwrap_or(rsip::StatusCode::ServerInternalError)
-                        .code(),
-                    TerminatedReason::UasOther(code) => code
-                        .clone()
-                        .unwrap_or(rsip::StatusCode::ServerInternalError)
-                        .code(),
-                    _ => 500, // Default to internal server error
-                };
-
-                if call_state_ref.hangup_reason.is_none() {
-                    call_state_ref.hangup_reason.replace(match reason {
-                        TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
-                        TerminatedReason::UacBye | TerminatedReason::UacBusy => {
-                            CallRecordHangupReason::ByCaller
-                        }
-                        TerminatedReason::UasBye | TerminatedReason::UasBusy => {
-                            CallRecordHangupReason::ByCallee
-                        }
-                        TerminatedReason::UasDecline => CallRecordHangupReason::ByCallee,
-                        TerminatedReason::UacOther(_) => CallRecordHangupReason::ByCaller,
-                        TerminatedReason::UasOther(_) => CallRecordHangupReason::ByCallee,
-                        _ => CallRecordHangupReason::BySystem,
-                    });
-                };
-                let initiator = match reason {
-                    TerminatedReason::UacCancel => "caller".to_string(),
-                    TerminatedReason::UacBye | TerminatedReason::UacBusy => "caller".to_string(),
-                    TerminatedReason::UasBye
-                    | TerminatedReason::UasBusy
-                    | TerminatedReason::UasDecline => "callee".to_string(),
-                    _ => "system".to_string(),
-                };
-                event_sender
-                    .send(crate::event::SessionEvent::TrackEnd {
-                        track_id: track_id.clone(),
-                        timestamp: crate::get_timestamp(),
-                        duration: call_state_ref
-                            .answer_time
-                            .map(|t| (Utc::now() - t).num_milliseconds())
-                            .unwrap_or_default() as u64,
-                        ssrc: call_state_ref.ssrc,
-                    })
-                    .ok();
-                event_sender
-                    .send(crate::event::SessionEvent::Hangup {
-                        timestamp: crate::get_timestamp(),
-                        reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
-                        initiator: Some(initiator),
-                        start_time: call_state_ref.start_time.to_rfc3339(),
-                        answer_time: call_state_ref.answer_time.map(|t| t.to_rfc3339()),
-                        ringing_time: call_state_ref.ring_time.map(|t| t.to_rfc3339()),
-                    })
-                    .ok();
+                on_dialog_terminated(
+                    call_state.clone(),
+                    track_id.clone(),
+                    reason,
+                    event_sender.clone(),
+                );
                 cancel_token.cancel(); // Cancel the token to stop any ongoing tasks
                 return Ok(dialog_id);
             }
@@ -329,6 +260,75 @@ pub async fn sip_dialog_event_loop(
         }
     }
     Err(anyhow::anyhow!(
-        "sip_event_loop: dialog state receiver closed"
+        "client_dialog_event_loop: dialog state receiver closed"
+    ))
+}
+
+pub async fn server_dialog_event_loop(
+    cancel_token: CancellationToken,
+    session_id: String,
+    track_id: TrackId,
+    event_sender: EventSender,
+    mut dlg_state_receiver: DialogStateReceiver,
+    call_state: ActiveCallStateRef,
+) -> Result<DialogId> {
+    while let Some(event) = dlg_state_receiver.recv().await {
+        match event {
+            DialogState::Trying(dialog_id) => {
+                info!(session_id, "server dialog trying: {}", dialog_id);
+            }
+            DialogState::Early(dialog_id, resp) => {
+                let code = resp.status_code.code();
+                info!(session_id, track_id, %dialog_id, "server dialog calling");
+                call_state
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| {
+                        cs.ring_time.replace(Utc::now());
+                        cs.last_status_code = code;
+                        Ok(())
+                    })
+                    .ok();
+            }
+            DialogState::Calling(dialog_id) => {
+                info!(session_id, track_id, %dialog_id, "server dialog calling");
+            }
+            DialogState::Confirmed(dialog_id) => {
+                info!(session_id, track_id, %dialog_id, "server dialog confirmed");
+                call_state
+                    .write()
+                    .as_mut()
+                    .and_then(|cs| {
+                        if cs.dialog_id.is_none() {
+                            cs.dialog_id = Some(dialog_id.clone());
+                        }
+                        cs.answer_time.replace(Utc::now());
+                        cs.last_status_code = 200;
+                        Ok(())
+                    })
+                    .ok();
+            }
+            DialogState::Terminated(dialog_id, reason) => {
+                info!(
+                    session_id,
+                    track_id,
+                    ?dialog_id,
+                    ?reason,
+                    "server dialog terminated"
+                );
+                on_dialog_terminated(
+                    call_state.clone(),
+                    track_id.clone(),
+                    reason,
+                    event_sender.clone(),
+                );
+                cancel_token.cancel(); // Cancel the token to stop any ongoing tasks
+                return Ok(dialog_id);
+            }
+            _ => (),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "server_dialog_event_loop: dialog state receiver closed"
     ))
 }

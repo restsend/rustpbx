@@ -15,6 +15,7 @@ use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use tracing::{debug, info};
@@ -239,6 +240,12 @@ impl ProxyModule for AuthModule {
                         );
                         let headers = vec![Header::WwwAuthenticate(www_auth)];
                         tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
+                            .await
+                            .ok();
+                    }
+                    if tx.original.method == rsip::Method::Invite {
+                        // For INVITE, we need to consume the ACK to complete the transaction
+                        tokio::time::timeout(Duration::from_secs(2), tx.receive())
                             .await
                             .ok();
                     }

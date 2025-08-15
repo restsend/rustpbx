@@ -15,7 +15,7 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::time::sleep;
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::{
     api::{
@@ -194,13 +194,7 @@ impl WebrtcTrack {
         let cancel_token = self.cancel_token.clone();
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
         let peer_connection_clone = peer_connection.clone();
-        let track_id = self.track_id.clone();
-        peer_connection.on_ice_candidate(Box::new(
-            move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-                debug!(track_id, "ICE candidate received: {:?}", candidate);
-                Box::pin(async move {})
-            },
-        ));
+
         let cancel_token_clone = cancel_token.clone();
         let track_id = self.track_id.clone();
         peer_connection.on_peer_connection_state_change(Box::new(
@@ -411,7 +405,6 @@ impl Track for WebrtcTrack {
             packet_timestamp: packet.timestamp as u32,
             ..Default::default()
         };
-
         match local_track.write_sample(&sample).await {
             Ok(_) => {}
             Err(e) => {
