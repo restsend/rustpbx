@@ -141,11 +141,11 @@ impl TryFrom<&Transaction> for SipUser {
         };
         // Use rsipstack's via_received functionality to get destination
         let via_header = tx.original.via_header()?;
-        let destination_addr = SipConnection::parse_target_from_via(via_header)
+        let (via_transport, destination_addr) = SipConnection::parse_target_from_via(via_header)
             .map_err(|e| anyhow::anyhow!("failed to parse via header: {:?}", e))?;
 
         let destination = SipAddr {
-            r#type: via_header.trasnport().ok(),
+            r#type: Some(via_transport),
             addr: destination_addr,
         };
         let is_support_webrtc = destination
