@@ -255,7 +255,7 @@ impl CallModule {
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
-                warn!(%dialog_id, method=%tx.original.method, "dialog not found for message");
+                debug!(%dialog_id, method=%tx.original.method, "dialog not found for message");
                 return Ok(());
             }
         };

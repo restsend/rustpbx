@@ -169,29 +169,32 @@ pub struct RtpTrackBuilder {
     ssrc: u32,
     ice_connectivity_check: bool,
 }
-
-pub struct RtpTrack {
-    track_id: TrackId,
-    config: TrackConfig,
-    cancel_token: CancellationToken,
-    ssrc: u32,
-    ssrc_cname: String,
+pub struct RtpTrackInner {
+    dtmf_payload_type: u8,
+    payload_type: u8,
+    remote_description: Option<String>,
+    packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
+    stats: Arc<RtpTrackStats>,
     rtcp_mux: bool,
     remote_addr: Option<SipAddr>,
     remote_rtcp_addr: Option<SipAddr>,
+    enabled_codecs: Vec<CodecType>,
+}
+
+pub struct RtpTrack {
+    ssrc: u32,
+    ssrc_cname: String,
+    track_id: TrackId,
+    config: TrackConfig,
+    cancel_token: CancellationToken,
     processor_chain: ProcessorChain,
     rtp_socket: UdpConnection,
     rtcp_socket: UdpConnection,
     encoder: TrackCodec,
-    stats: Arc<RtpTrackStats>,
-    dtmf_payload_type: u8,
-    payload_type: u8,
-    remote_description: Option<String>,
     sequencer: Box<dyn Sequencer + Send + Sync>,
-    packetizer: Mutex<Option<Box<dyn Packetizer + Send + Sync>>>,
-    enabled_codecs: Vec<CodecType>,
     sendrecv: AtomicBool,
     ice_connectivity_check: bool,
+    inner: Arc<Mutex<RtpTrackInner>>,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -386,28 +389,31 @@ impl RtpTrackBuilder {
                 }
             }
         };
-        let track = RtpTrack {
-            track_id: self.track_id,
-            config: self.config,
-            cancel_token,
-            ssrc,
+        let inner = RtpTrackInner {
+            dtmf_payload_type: 101, // Default DTMF payload type
+            payload_type: 0,        // Will be set later based on remote description
+            remote_description: None,
+            packetizer: Mutex::new(None),
+            stats: Arc::new(RtpTrackStats::new()),
             rtcp_mux: self.rtcp_mux,
             remote_addr: None,
             remote_rtcp_addr: None,
+            enabled_codecs: self.enabled_codecs.clone(),
+        };
+        let track = RtpTrack {
+            ssrc,
+            ssrc_cname: self.ssrc_cname.clone(),
+            track_id: self.track_id,
+            config: self.config,
+            cancel_token,
             processor_chain,
             rtp_socket: rtp_socket.unwrap(),
             rtcp_socket: rtcp_socket.unwrap(),
             encoder: TrackCodec::new(),
-            stats: Arc::new(RtpTrackStats::new()),
-            dtmf_payload_type: 101,
-            payload_type: 0,
-            remote_description: None,
             sequencer: Box::new(new_random_sequencer()),
-            packetizer: Mutex::new(None),
-            enabled_codecs: self.enabled_codecs,
             sendrecv: AtomicBool::new(true),
-            ssrc_cname: self.ssrc_cname,
             ice_connectivity_check: self.ice_connectivity_check,
+            inner: Arc::new(Mutex::new(inner)),
         };
         Ok(track)
     }
@@ -423,11 +429,12 @@ impl RtpTrack {
     }
 
     pub fn remote_description(&self) -> Option<String> {
-        self.remote_description.clone()
+        self.inner.lock().unwrap().remote_description.clone()
     }
 
-    pub fn set_remote_description(&mut self, answer: &str) -> Result<()> {
-        if self.remote_description.is_some() {
+    pub fn set_remote_description(&self, answer: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.remote_description.is_some() {
             // if remote description is already set, don't set it again
             return Ok(());
         }
@@ -446,7 +453,7 @@ impl RtpTrack {
             return Err(anyhow::anyhow!("no rtp addr in answer SDP"));
         }
 
-        self.remote_description.replace(answer.to_string());
+        inner.remote_description.replace(answer.to_string());
 
         let remote_addr = SipAddr {
             addr: HostWithPort {
@@ -472,20 +479,21 @@ impl RtpTrack {
             "set remote description"
         );
 
-        self.payload_type = codec_type.payload_type();
-        self.enabled_codecs = vec![codec_type];
+        inner.payload_type = codec_type.payload_type();
+        inner.enabled_codecs = vec![codec_type];
 
-        self.remote_addr.replace(remote_addr);
-        self.remote_rtcp_addr.replace(remote_rtcp_addr);
-        self.rtcp_mux = peer_media.rtcp_mux;
+        inner.remote_addr.replace(remote_addr);
+        inner.remote_rtcp_addr.replace(remote_rtcp_addr);
+        inner.rtcp_mux = peer_media.rtcp_mux;
 
         let payloader = Box::<G7xxPayloader>::default();
-        self.packetizer
+        inner
+            .packetizer
             .lock()
             .unwrap()
             .replace(Box::new(new_packetizer(
                 RTP_OUTBOUND_MTU,
-                self.payload_type,
+                inner.payload_type,
                 self.ssrc,
                 payloader,
                 self.sequencer.clone(),
@@ -537,8 +545,8 @@ impl RtpTrack {
             protos: vec!["RTP".to_string(), "AVP".to_string()],
             formats: vec![],
         };
-
-        for codec in self.enabled_codecs.iter() {
+        let inner = self.inner.lock().unwrap();
+        for codec in inner.enabled_codecs.iter() {
             media
                 .media_name
                 .formats
@@ -550,7 +558,7 @@ impl RtpTrack {
         }
 
         // Add media-level attributes
-        if self.rtcp_mux {
+        if inner.rtcp_mux {
             media.attributes.push(Attribute {
                 key: ATTR_KEY_RTCPMUX.to_string(),
                 value: None,
@@ -601,9 +609,9 @@ impl RtpTrack {
             "D" => 15,
             _ => return Err(anyhow::anyhow!("Invalid DTMF digit")),
         };
-
+        let inner = self.inner.lock().unwrap();
         let socket = &self.rtp_socket;
-        let remote_addr = match self.remote_addr.as_ref() {
+        let remote_addr = match inner.remote_addr.as_ref() {
             Some(addr) => addr.clone(),
             None => return Err(anyhow::anyhow!("Remote address not set")),
         };
@@ -620,7 +628,8 @@ impl RtpTrack {
             (self.config.samplerate as f64 * self.config.ptime.as_secs_f64()) as u32;
 
         let now = crate::get_timestamp();
-        self.stats
+        inner
+            .stats
             .last_timestamp_update
             .store(now, Ordering::Relaxed);
 
@@ -642,12 +651,12 @@ impl RtpTrack {
             payload[2] = ((event_duration >> 8) & 0xFF) as u8;
             payload[3] = (event_duration & 0xFF) as u8;
 
-            let packets = match self.packetizer.lock().unwrap().as_mut() {
+            let packets = match inner.packetizer.lock().unwrap().as_mut() {
                 Some(p) => p.packetize(&Bytes::from_owner(payload), samples_per_packet)?,
                 None => return Err(anyhow::anyhow!("Packetizer not set")),
             };
             for mut packet in packets {
-                packet.header.payload_type = self.dtmf_payload_type;
+                packet.header.payload_type = inner.dtmf_payload_type;
                 packet.header.marker = false;
 
                 match packet.marshal() {
@@ -660,8 +669,9 @@ impl RtpTrack {
                         }
 
                         // Update counters for RTCP
-                        self.stats.packet_count.fetch_add(1, Ordering::Relaxed);
-                        self.stats
+                        inner.stats.packet_count.fetch_add(1, Ordering::Relaxed);
+                        inner
+                            .stats
                             .octet_count
                             .fetch_add(rtp_data.len() as u32, Ordering::Relaxed);
 
@@ -679,7 +689,8 @@ impl RtpTrack {
         }
 
         // After sending DTMF, update the timestamp to account for the DTMF duration
-        self.stats
+        inner
+            .stats
             .timestamp
             .fetch_add(samples_per_packet * num_packets, Ordering::Relaxed);
 
@@ -771,6 +782,7 @@ impl RtpTrack {
     }
 
     async fn recv_rtp_packets(
+        inner: Arc<Mutex<RtpTrackInner>>,
         ptime: Duration,
         rtp_socket: UdpConnection,
         track_id: TrackId,
@@ -778,12 +790,11 @@ impl RtpTrack {
         packet_sender: TrackPacketSender,
         _rtcp_socket: UdpConnection,
         ssrc: u32,
-        state: Arc<RtpTrackStats>,
     ) -> Result<()> {
         let mut buf = vec![0u8; RTP_MTU];
         let mut send_ticker = tokio::time::interval(ptime);
         let mut jitter = JitterBuffer::new();
-
+        let stats = inner.lock().unwrap().stats.clone();
         loop {
             select! {
                 Ok((n, _)) = rtp_socket.recv_raw(&mut buf) => {
@@ -821,7 +832,7 @@ impl RtpTrack {
                         // For RTCP: PT is the full second byte (200-207)
                         let rtcp_pt = buf[1]; // Full second byte for RTCP
                         if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
-                            if let Err(e) = Self::handle_rtcp_packet(&track_id, &buf, n, &state, ssrc).await
+                            if let Err(e) = Self::handle_rtcp_packet(&track_id, &buf, n, &stats, ssrc).await
                             {
                                 warn!(track_id, "Failed to handle RTCP packet: {:?}", e);
                             }
@@ -862,7 +873,7 @@ impl RtpTrack {
 
                     let seq_num = packet.header.sequence_number as u32;
                     let payload_len = packet.payload.len() as u32;
-                    state.update_receive_stats(seq_num, payload_len);
+                    stats.update_receive_stats(seq_num, payload_len);
 
                     let payload_type = packet.header.payload_type;
                     let payload = packet.payload.to_vec();
@@ -909,18 +920,18 @@ impl RtpTrack {
 
     // Send RTCP sender reports periodically
     async fn send_rtcp_reports(
+        inner: Arc<Mutex<RtpTrackInner>>,
         track_id: TrackId,
         token: CancellationToken,
-        state: Arc<RtpTrackStats>,
         rtcp_socket: &UdpConnection,
         ssrc: u32,
         ssrc_cname: String,
-        remote_rtcp_addr: Option<&SipAddr>,
     ) -> Result<()> {
         let mut interval = interval_at(
             Instant::now() + Duration::from_millis(RTCP_SR_INTERVAL_MS),
             Duration::from_millis(RTCP_SR_INTERVAL_MS),
         );
+        let stats = inner.lock().unwrap().stats.clone();
         loop {
             select! {
                 _ = token.cancelled() => {
@@ -929,9 +940,9 @@ impl RtpTrack {
                 }
                 _ = interval.tick() => {
                     // Generate RTCP Sender Report
-                    let packet_count = state.packet_count.load(Ordering::Relaxed);
-                    let octet_count = state.octet_count.load(Ordering::Relaxed);
-                    let rtp_timestamp = state.timestamp.load(Ordering::Relaxed);
+                    let packet_count = stats.packet_count.load(Ordering::Relaxed);
+                    let octet_count = stats.octet_count.load(Ordering::Relaxed);
+                    let rtp_timestamp = stats.timestamp.load(Ordering::Relaxed);
 
                     let mut pkts = vec![Box::new(SenderReport {
                         ssrc,
@@ -957,13 +968,13 @@ impl RtpTrack {
                             as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>);
                     }
 
-                    let received_packets = state.received_packets.load(Ordering::Relaxed);
-                    let lost_packets = state.lost_packets.load(Ordering::Relaxed);
-                    let highest_seq = state.highest_seq_num.load(Ordering::Relaxed);
-                    let jitter = state.jitter.load(Ordering::Relaxed);
+                    let received_packets = stats.received_packets.load(Ordering::Relaxed);
+                    let lost_packets = stats.lost_packets.load(Ordering::Relaxed);
+                    let highest_seq = stats.highest_seq_num.load(Ordering::Relaxed);
+                    let jitter = stats.jitter.load(Ordering::Relaxed);
 
                     if received_packets > 0 {
-                        let fraction_lost = state.get_fraction_lost();
+                        let fraction_lost = stats.get_fraction_lost();
 
                         let remote_ssrc = ssrc + 1;
                         let report = ReceptionReport {
@@ -972,7 +983,7 @@ impl RtpTrack {
                             total_lost: lost_packets,
                             last_sequence_number: highest_seq,
                             jitter,
-                            last_sender_report: (state.last_sr_timestamp.load(Ordering::Relaxed) >> 16) as u32,
+                            last_sender_report: (stats.last_sr_timestamp.load(Ordering::Relaxed) >> 16) as u32,
                             delay: 0,
                         };
 
@@ -986,10 +997,11 @@ impl RtpTrack {
                     }
 
                     let rtcp_data = webrtc::rtcp::packet::marshal(&pkts)?;
-                    match remote_rtcp_addr {
+                    let remote_rtcp_addr = inner.lock().unwrap().remote_rtcp_addr.clone();
+                    match remote_rtcp_addr{
                         Some(ref addr) => {
                             if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
-                                error!(track_id, "Failed to send RTCP report: {}", e);
+                                warn!(track_id, "Failed to send RTCP report: {}", e);
                             } else {
                                 debug!(
                                     track_id,
@@ -1008,6 +1020,24 @@ impl RtpTrack {
             }
         }
         Ok(())
+    }
+
+    async fn try_ice_connectivity_check(&self) {
+        let remote_addr = self.inner.lock().unwrap().remote_addr.clone();
+        let remote_rtcp_addr = self.inner.lock().unwrap().remote_rtcp_addr.clone();
+
+        if let Some(ref addr) = remote_addr {
+            Self::send_ice_connectivity_check(&self.rtp_socket, addr)
+                .await
+                .ok();
+            if let Some(ref rtcp_addr) = remote_rtcp_addr {
+                if rtcp_addr != addr {
+                    Self::send_ice_connectivity_check(&self.rtcp_socket, rtcp_addr)
+                        .await
+                        .ok();
+                }
+            }
+        }
     }
 }
 
@@ -1031,49 +1061,45 @@ impl Track for RtpTrack {
         self.local_description()
     }
 
+    async fn update_remote_description(&mut self, answer: &String) -> Result<()> {
+        self.set_remote_description(&answer).ok();
+
+        if self.ice_connectivity_check {
+            self.try_ice_connectivity_check().await;
+        }
+        Ok(())
+    }
+
     async fn start(
         &self,
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
         let track_id = self.track_id.clone();
-        let rtcp_addr = self.remote_rtcp_addr.clone();
         let rtcp_socket = self.rtcp_socket.clone();
         let ssrc = self.ssrc;
-        let state = self.stats.clone();
         let rtp_socket = self.rtp_socket.clone();
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
         let ssrc_cname = self.ssrc_cname.clone();
         let start_time = crate::get_timestamp();
-        let ice_connectivity_check = self.ice_connectivity_check;
-        let remote_addr = self.remote_addr.clone();
         let ptime = self.config.ptime;
+
+        if self.ice_connectivity_check {
+            self.try_ice_connectivity_check().await;
+        }
+
+        let inner = self.inner.clone();
 
         tokio::spawn(async move {
             // Send ICE connectivity check if enabled and remote address is available
-            if ice_connectivity_check {
-                if let Some(ref addr) = remote_addr {
-                    Self::send_ice_connectivity_check(&rtp_socket, addr)
-                        .await
-                        .ok();
-
-                    // Also send to RTCP address if different (non-mux scenario)
-                    if let Some(ref rtcp_addr) = rtcp_addr {
-                        if rtcp_addr != addr {
-                            Self::send_ice_connectivity_check(&rtcp_socket, rtcp_addr)
-                                .await
-                                .ok();
-                        }
-                    }
-                }
-            }
             select! {
                 _ = token.cancelled() => {
                 },
-                _ = Self::send_rtcp_reports(track_id.clone(), token.clone(), state.clone(), &rtcp_socket, ssrc, ssrc_cname, rtcp_addr.as_ref()) => {
+                _ = Self::send_rtcp_reports(inner.clone(),track_id.clone(), token.clone(), &rtcp_socket, ssrc, ssrc_cname) => {
                 }
                 _ = Self::recv_rtp_packets(
+                    inner.clone(),
                     ptime,
                     rtp_socket,
                     track_id.clone(),
@@ -1081,13 +1107,12 @@ impl Track for RtpTrack {
                     packet_sender,
                     rtcp_socket.clone(),
                     ssrc,
-                    state.clone()
                 ) => {
                 }
             };
-
+            let remote_rtcp_addr = inner.lock().unwrap().remote_rtcp_addr.clone();
             // send rtcp bye packet
-            match rtcp_addr {
+            match remote_rtcp_addr {
                 Some(ref addr) => {
                     let pkts = vec![Box::new(Goodbye {
                         sources: vec![ssrc],
@@ -1122,33 +1147,34 @@ impl Track for RtpTrack {
     }
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
+        let remote_addr = match self.inner.lock().unwrap().remote_addr.clone() {
+            Some(addr) => addr,
+            None => return Ok(()),
+        };
+        let stats = self.inner.lock().unwrap().stats.clone();
+        let payload_type = self.inner.lock().unwrap().payload_type;
+
         let socket = &self.rtp_socket;
-        let payload = self.encoder.encode(self.payload_type, packet.clone());
+        let payload = self.encoder.encode(payload_type, packet.clone());
         if payload.is_empty() {
             return Ok(());
         }
-        let remote_addr = match self.remote_addr.as_ref() {
-            Some(addr) => addr.clone(),
-            None => return Err(anyhow::anyhow!("Remote address not set")),
-        };
 
-        let clock_rate = match self.payload_type {
+        let clock_rate = match payload_type {
             9 => 8000,    // G.722 (RTP clock rate is 8000 even though sample rate is 16000)
             111 => 48000, // Opus
             _ => 8000,
         };
 
         let now = crate::get_timestamp();
-        let last_update = self.stats.last_timestamp_update.load(Ordering::Relaxed);
+        let last_update = stats.last_timestamp_update.load(Ordering::Relaxed);
         let skipped_packets = if last_update > 0 {
             (now - last_update) / clock_rate as u64
         } else {
             0
         };
 
-        self.stats
-            .last_timestamp_update
-            .store(now, Ordering::Relaxed);
+        stats.last_timestamp_update.store(now, Ordering::Relaxed);
 
         if skipped_packets > 0 {
             for _ in 0..skipped_packets {
@@ -1157,7 +1183,15 @@ impl Track for RtpTrack {
         }
 
         let samples_per_packet = (clock_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
-        let packets = match self.packetizer.lock().unwrap().as_mut() {
+        let packets = match self
+            .inner
+            .lock()
+            .unwrap()
+            .packetizer
+            .lock()
+            .unwrap()
+            .as_mut()
+        {
             Some(p) => {
                 if skipped_packets > 0 {
                     p.skip_samples((skipped_packets * samples_per_packet as u64) as u32);
@@ -1171,8 +1205,7 @@ impl Track for RtpTrack {
             match packet.marshal() {
                 Ok(ref rtp_data) => match socket.send_raw(rtp_data, &remote_addr).await {
                     Ok(_) => {
-                        self.stats
-                            .update_send_stats(rtp_data.len() as u32, samples_per_packet);
+                        stats.update_send_stats(rtp_data.len() as u32, samples_per_packet);
                     }
                     Err(e) => {
                         warn!("Failed to send RTP packet: {}", e);
@@ -1283,15 +1316,16 @@ a=rtpmap:9 G722/8000
 a=ssrc:1089147397 cname:61753255553b9c6f
 a=rtpmap:101 telephone-event/8000
 a=fmtp:101 0-16"#;
-        let mut rtp_track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+        let rtp_track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
             .build()
             .await
             .expect("Failed to build rtp track");
         rtp_track
             .set_remote_description(sdp)
             .expect("Failed to set remote description");
-        assert_eq!(rtp_track.payload_type, 9);
-        assert!(!rtp_track.rtcp_mux); // RTCP is on separate port
+        let inner = rtp_track.inner.lock().unwrap();
+        assert_eq!(inner.payload_type, 9);
+        assert!(!inner.rtcp_mux); // RTCP is on separate port
     }
 
     #[tokio::test]
@@ -1331,7 +1365,8 @@ a=rtcp-mux"#;
         // SSRC is randomly generated in build(), so we can't predict exact value
         assert_ne!(track.ssrc, 0); // Should not be zero
         assert_eq!(track.ssrc_cname, "test_session");
-        assert!(track.rtcp_mux);
+        let inner = track.inner.lock().unwrap();
+        assert!(inner.rtcp_mux);
     }
 
     #[tokio::test]
@@ -1363,7 +1398,7 @@ t=0 0
 m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
-        let mut track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+        let track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
             .build()
             .await
             .expect("Failed to build track");
@@ -1378,7 +1413,7 @@ a=rtpmap:0 PCMU/8000"#;
 
     #[tokio::test]
     async fn test_invalid_sdp() {
-        let mut track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+        let track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
             .build()
             .await
             .expect("Failed to build track");
@@ -1481,16 +1516,16 @@ t=0 0"#;
             .build()
             .await
             .expect("Failed to build track");
-
+        let inner = track.inner.lock().unwrap();
         // Verify stats are properly initialized
-        assert_eq!(track.stats.packet_count.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.octet_count.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.received_packets.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.lost_packets.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.highest_seq_num.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.jitter.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.last_sr_timestamp.load(Ordering::Relaxed), 0);
-        assert_eq!(track.stats.last_sr_ntp.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.packet_count.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.octet_count.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.received_packets.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.lost_packets.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.highest_seq_num.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.jitter.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.last_sr_timestamp.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.last_sr_ntp.load(Ordering::Relaxed), 0);
     }
 
     #[test]

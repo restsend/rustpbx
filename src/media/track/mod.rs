@@ -76,6 +76,10 @@ pub trait Track: Send + Sync {
         self.processor_chain().append_processor(processor);
     }
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String>;
+    #[allow(unused_variables)]
+    async fn update_remote_description(&mut self, answer: &String) -> Result<()> {
+        Ok(())
+    }
     async fn start(
         &self,
         event_sender: EventSender,
