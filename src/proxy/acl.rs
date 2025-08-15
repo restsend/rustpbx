@@ -226,7 +226,7 @@ impl ProxyModule for AclModule {
         _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         let via = tx.original.via_header()?;
-        let target =
+        let (_, target) =
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
         if self.is_allowed(&target.host.try_into()?) {
             return Ok(ProxyAction::Continue);
