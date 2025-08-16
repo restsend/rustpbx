@@ -13,10 +13,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rsip::prelude::HeadersExt;
 use rsipstack::{dialog::dialog::DialogState, transaction::transaction::Transaction};
-use std::{
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -156,12 +153,8 @@ impl B2bua {
                     .process_callee_loop(active_call.clone(), caller_contact, dialplan, &original)
                     .await
                 {
-                    Ok(_) => info!(session_id = self.session_id, "b2bua callee loop completed"),
-                    Err(e) => {
-                        warn!(
-                            session_id = self.session_id,
-                            "b2bua callee loop failed: {}", e
-                        );
+                    Ok(_) => {}
+                    Err(_) => {
                         dialog_ref.reject().ok();
                     }
                 }
@@ -200,70 +193,63 @@ impl B2bua {
             return Err(anyhow::anyhow!("Dialplan is empty"));
         }
 
-        let max_time = Duration::from_secs(dialplan.max_ring_time.max(60u32) as u64);
         let route_invite = dialplan.route_invite;
-
-        tokio::select! {
-            _ = self.cancel_token.cancelled() => {
-                info!(session_id=self.session_id, "b2bua process cancelled");
-                return Ok(());
-            },
-            _ = tokio::time::sleep(max_time) => {
-                warn!(session_id=self.session_id,"Max ring time reached, ending call");
-                return Err(anyhow::anyhow!("Max ring time reached"));
-            },
-            r = async {
-                match dialplan.targets {
-                    DialStrategy::Sequential(targets) => {
-                        for target in targets {
-                            match self.invite_callee(
+        let invite_callee_loop = async {
+            match dialplan.targets {
+                DialStrategy::Sequential(targets) => {
+                    for target in targets {
+                        match self
+                            .invite_callee(
                                 active_call.clone(),
                                 &caller_contact,
                                 target,
                                 original,
                                 &route_invite,
-                            ).await {
-                                Ok(_) => {
-                                    info!(session_id=self.session_id, "Callee invite succeeded");
-                                    return Ok(());
-                                }
-                                Err(e) => {
-                                    warn!(session_id=self.session_id, "Callee invite failed: {}", e);
-                                    return Err(e)
-                                }
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                info!(session_id = self.session_id, "Callee invite succeeded");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!(session_id = self.session_id, "Callee invite failed: {}", e);
+                                return Err(e);
                             }
                         }
-                        return Err(anyhow::anyhow!("All targets failed"));
                     }
-                    DialStrategy::Parallel(_targets) => {
-                        todo!("Parallel dialing not implemented yet");
-                    }
+                    return Err(anyhow::anyhow!("All targets failed"));
                 }
-            } => {
-                match r {
-                    Ok(_) => {
-                        info!(session_id=self.session_id, "Callee loop completed");
-                        let option = CallOption {
-                            recorder: if self.recorder {
-                                let recorder_file = active_call.app_state.get_recorder_file(&self.session_id);
-                                Some(RecorderOption::new(recorder_file))
-                            } else {
-                                None
-                            },
-                            ..CallOption::default()
-                        };
-                        let answer_command = Command::Accept { option } ;
-                        if let Err(e) = active_call.enqueue_command(answer_command).await {
-                            warn!(session_id=self.session_id, "Failed to enqueue answer command: {}", e);
-                        }
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        self.cancel_token.cancel();
-                        warn!(session_id=self.session_id, "Callee loop failed: {}", e);
-                        return Err(e);
-                    }
+                DialStrategy::Parallel(_targets) => {
+                    todo!("Parallel dialing not implemented yet");
                 }
+            }
+        };
+        match invite_callee_loop.await {
+            Ok(_) => {
+                info!(session_id = self.session_id, "Callee loop completed");
+                let option = CallOption {
+                    recorder: if self.recorder {
+                        let recorder_file =
+                            active_call.app_state.get_recorder_file(&self.session_id);
+                        Some(RecorderOption::new(recorder_file))
+                    } else {
+                        None
+                    },
+                    ..CallOption::default()
+                };
+                let answer_command = Command::Accept { option };
+                if let Err(e) = active_call.enqueue_command(answer_command).await {
+                    warn!(
+                        session_id = self.session_id,
+                        "Failed to enqueue answer command: {}", e
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                self.cancel_token.cancel();
+                return Err(e);
             }
         }
     }
@@ -411,6 +397,7 @@ impl B2bua {
                     refer_dlg_state_receiver,
                     call_state,
                     media_stream,
+                    active_call_ref.invitation.dialog_layer.clone(),
                 )
             );
             info!(
@@ -446,17 +433,6 @@ impl B2bua {
             session_id = self.session_id,
             "callee answered with SDP: \n{}", answer,
         );
-        call_state_ref
-            .write()
-            .as_mut()
-            .and_then(|cs| {
-                cs.dialog_id = Some(dialog_id);
-                cs.answer = Some(answer);
-                cs.answer_time = Some(Utc::now());
-                cs.last_status_code = 200;
-                Ok(())
-            })
-            .ok();
         Ok(())
     }
 }

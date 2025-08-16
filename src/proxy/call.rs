@@ -248,9 +248,6 @@ impl CallModule {
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
-        let dialog_id = DialogId::try_from(&tx.original).unwrap();
-        debug!(%dialog_id, "process_message: {}", tx.original);
-
         let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,

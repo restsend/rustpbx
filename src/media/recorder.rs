@@ -47,7 +47,7 @@ impl RecorderOption {
 impl Default for RecorderOption {
     fn default() -> Self {
         Self {
-            recorder_file: "./recordings.wav".to_string(),
+            recorder_file: "".to_string(),
             samplerate: 16000,
             ptime: Duration::from_millis(200),
         }
