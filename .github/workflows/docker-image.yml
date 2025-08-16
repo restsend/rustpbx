@@ -38,5 +38,5 @@ jobs:
         tag=$(date +%Y%m%d)
         if [[ "${{ github.event.head_commit.message }}" =~ \[latest\] ]]; then
           tag=latest
+          docker push ghcr.io/restsend/rustpbx:$tag
         fi
-        docker push ghcr.io/restsend/rustpbx:$tag

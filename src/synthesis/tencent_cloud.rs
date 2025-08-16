@@ -249,6 +249,7 @@ impl SynthesisClient for TencentCloudTtsClient {
     async fn synthesize(
         &self,
         text: &str,
+        _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<BoxStream<Result<TTSEvent>>> {
         // Use the new WebSocket streaming implementation

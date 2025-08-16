@@ -4,13 +4,13 @@ use dotenv::dotenv;
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
-use rustpbx::{version, PcmBuf};
+use rustpbx::{PcmBuf, version};
 use std::path::PathBuf;
 use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::synthesis::{
-    SynthesisClient, SynthesisOption, TTSEvent, SynthesisType, TencentCloudTtsClient,
+    SynthesisClient, SynthesisOption, SynthesisType, TTSEvent, TencentCloudTtsClient,
 };
 
 const SAMPLE_RATE: u32 = 16000;
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
 
-            match tts_client.synthesize(&segment.text, None).await {
+            match tts_client.synthesize(&segment.text, None, None).await {
                 Ok(mut audio_stream) => {
                     let mut total_bytes = 0;
                     while let Some(chunk_result) = audio_stream.next().await {
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
                                     break;
                                 }
                                 _ => {}
-                            }
+                            },
                             Err(e) => {
                                 error!("Error in audio stream chunk: {:?}", e);
                                 return Err(anyhow::anyhow!(

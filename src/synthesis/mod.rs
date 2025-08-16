@@ -126,12 +126,7 @@ pub struct TTSSubtitle {
 }
 
 impl TTSSubtitle {
-    pub fn new(
-        begin_time: u32,
-        end_time: u32,
-        begin_index: u32,
-        end_index: u32,
-    ) -> Self {
+    pub fn new(begin_time: u32, end_time: u32, begin_index: u32, end_index: u32) -> Self {
         Self {
             begin_time,
             end_time,
@@ -154,6 +149,7 @@ pub trait SynthesisClient: Send {
     async fn synthesize(
         &self,
         text: &str,
+        end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<BoxStream<'_, Result<TTSEvent>>>;
 }

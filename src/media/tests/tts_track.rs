@@ -1,14 +1,14 @@
 use crate::{
-    media::track::{
-        tts::{TtsCommand, TtsTrack},
-        Track,
-    },
-    synthesis::{SynthesisClient, SynthesisOption, TTSEvent, SynthesisType},
     Samples,
+    media::track::{
+        Track,
+        tts::{TtsCommand, TtsTrack},
+    },
+    synthesis::{SynthesisClient, SynthesisOption, SynthesisType, TTSEvent},
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::{stream::{self, BoxStream}, };
+use futures::stream::{self, BoxStream};
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
@@ -25,6 +25,7 @@ impl SynthesisClient for MockSynthesisClient {
     async fn synthesize(
         &self,
         _text: &str,
+        _end_of_stream: Option<bool>,
         _option: Option<SynthesisOption>,
     ) -> Result<BoxStream<Result<TTSEvent>>> {
         // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks

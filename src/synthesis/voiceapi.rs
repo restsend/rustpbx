@@ -145,6 +145,7 @@ impl SynthesisClient for VoiceApiTtsClient {
     async fn synthesize(
         &self,
         text: &str,
+        _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<BoxStream<Result<TTSEvent>>> {
         self.ws_synthesize(text, option).await

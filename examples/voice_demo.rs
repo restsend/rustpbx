@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
                 return Err(anyhow::anyhow!(
                     "Unsupported sample format: {:?}",
                     sample_format
-                ))
+                ));
             }
         });
 
@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!(
                 "Unsupported sample format: {:?}",
                 sample_format
-            ))
+            ));
         }
     });
 
@@ -437,14 +437,15 @@ async fn main() -> Result<()> {
                                     info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
                                     let st = Instant::now();
                                     if let Ok(mut audio_stream) =
-                                        tts_client.synthesize(&text, None).await
+                                        tts_client.synthesize(&text, None, None).await
                                     {
                                         let mut total_bytes = 0;
                                         while let Some(Ok(event)) = audio_stream.next().await {
                                             match event {
                                                 TTSEvent::AudioChunk(chunk) => {
                                                     total_bytes += chunk.len();
-                                                    let audio_data: PcmBuf = bytes_to_samples(&chunk);
+                                                    let audio_data: PcmBuf =
+                                                        bytes_to_samples(&chunk);
                                                     let final_audio =
                                                         if sample_rate != output_sample_rate {
                                                             resample::resample_mono(

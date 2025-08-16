@@ -50,8 +50,8 @@ async fn test_tencent_cloud_tts() {
     };
 
     let client = TencentCloudTtsClient::new(config);
-    let text = "你好，我是秦始皇";
-    match client.synthesize(text, None).await {
+    let text = "Hello, this is a test of Tencent Cloud TTS.";
+    match client.synthesize(text, None, None).await {
         Ok(mut stream) => {
             // Collect all chunks from the stream
             let mut total_size = 0;
@@ -116,7 +116,7 @@ async fn test_aliyun_tts() {
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
 
-    let stream = client.synthesize("Hello, how are you?", None).await;
+    let stream = client.synthesize("Hello, how are you?", None, None).await;
     if let Ok(mut stream) = stream {
         let mut audio_collector = Vec::with_capacity(8096);
         let mut chunks_count = 0;
