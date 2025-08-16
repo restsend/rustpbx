@@ -205,13 +205,10 @@ impl Track for TtsTrack {
                     option.speed.clone(),
                 );
                 synthesize_done.store(false, Ordering::Relaxed);
+                subtitles_clone.lock().await.clear();
+                let streaming = command.streaming.unwrap_or(false);
 
-                {
-                    let mut subtitles = subtitles_clone.lock().await;
-                    subtitles.clear();
-                }
-
-                if use_cache {
+                if !streaming && use_cache {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
@@ -253,7 +250,11 @@ impl Track for TtsTrack {
                 }
 
                 let start_time = Instant::now();
-                match client.synthesize(&text.to_string(), Some(option)).await {
+                let end_of_stream = command.end_of_stream.unwrap_or(false);
+                match client
+                    .synthesize(&text.to_string(), Some(end_of_stream), Some(option))
+                    .await
+                {
                     Ok(mut stream) => {
                         total_audio_len_clone.store(0, Ordering::Relaxed);
                         let mut audio_chunks = Vec::new();
@@ -322,38 +323,42 @@ impl Track for TtsTrack {
                                 }
                             }
                         }
-                        synthesize_done.store(true, Ordering::Relaxed);
-                        // Send metrics event after all chunks are received
-                        event_sender
-                            .send(SessionEvent::Metrics {
-                                timestamp: crate::get_timestamp(),
-                                key: format!("completed.tts.{}", client.provider()),
-                                data: serde_json::json!({
-                                        "speaker": speaker,
-                                        "playId": play_id,
-                                        "length": total_audio_len_clone.load(Ordering::Relaxed),
-                                }),
-                                duration: start_time.elapsed().as_millis() as u32,
-                            })
-                            .ok();
-
-                        info!(
-                            session_id,
-                            "synthesize audio {} bytes -> {}ms {} with {}",
-                            total_audio_len_clone.load(Ordering::Relaxed),
-                            start_time.elapsed().as_millis(),
-                            text,
-                            client.provider()
-                        );
-
-                        // Cache the complete audio if caching is enabled
-                        if use_cache && !audio_chunks.is_empty() {
-                            // Combine all chunks for caching
-                            let complete_audio: Vec<u8> =
-                                audio_chunks.into_iter().flatten().collect();
-                            cache::store_in_cache(&cache_key, &complete_audio)
-                                .await
+                        if end_of_stream || !streaming {
+                            synthesize_done.store(true, Ordering::Relaxed);
+                            // Send metrics event after all chunks are received
+                            event_sender
+                                .send(SessionEvent::Metrics {
+                                    timestamp: crate::get_timestamp(),
+                                    key: format!("completed.tts.{}", client.provider()),
+                                    data: serde_json::json!({
+                                            "speaker": speaker,
+                                            "playId": play_id,
+                                            "length": total_audio_len_clone.load(Ordering::Relaxed),
+                                    }),
+                                    duration: start_time.elapsed().as_millis() as u32,
+                                })
                                 .ok();
+
+                            info!(
+                                session_id,
+                                end_of_stream,
+                                streaming,
+                                "synthesize audio {} bytes -> {}ms {} with {}",
+                                total_audio_len_clone.load(Ordering::Relaxed),
+                                start_time.elapsed().as_millis(),
+                                text,
+                                client.provider()
+                            );
+
+                            // Cache the complete audio if caching is enabled
+                            if use_cache && !audio_chunks.is_empty() {
+                                // Combine all chunks for caching
+                                let complete_audio: Vec<u8> =
+                                    audio_chunks.into_iter().flatten().collect();
+                                cache::store_in_cache(&cache_key, &complete_audio)
+                                    .await
+                                    .ok();
+                            }
                         }
                     }
                     Err(e) => {
@@ -446,7 +451,7 @@ impl Track for TtsTrack {
                     let text = current_text.lock().await.take();
                     let mut position = None;
                     let current = bytes_size_to_duration(sended_size, sample_rate);
-                    let total_duration = bytes_size_to_duration(total_size, sample_rate);                    
+                    let total_duration = bytes_size_to_duration(total_size, sample_rate);
                     let subtitles = subtitles.lock().await;
                     for subtitle in subtitles.iter().rev() {
                         if subtitle.begin_time <= current {

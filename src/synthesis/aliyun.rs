@@ -262,6 +262,7 @@ impl SynthesisClient for AliyunTtsClient {
     async fn synthesize(
         &self,
         text: &str,
+        _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<BoxStream<Result<TTSEvent>>> {
         let option = self.option.merge_with(option);
