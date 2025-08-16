@@ -237,6 +237,13 @@ impl MediaStream {
     pub async fn start_recorder(&self) -> Result<()> {
         let recorder_option = self.recorder_option.lock().await.clone();
         if let Some(recorder_option) = recorder_option {
+            if recorder_option.recorder_file.is_empty() {
+                warn!(
+                    session_id = self.id,
+                    "recorder file is empty, skipping recorder start"
+                );
+                return Ok(());
+            }
             let recorder_receiver = match self.recorder_receiver.lock().await.take() {
                 Some(receiver) => receiver,
                 None => {

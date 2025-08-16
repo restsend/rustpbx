@@ -19,6 +19,37 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[derive(Clone)]
+pub struct DialogGuard {
+    dialog_layer: Arc<DialogLayer>,
+    dialog_id: DialogId,
+}
+impl DialogGuard {
+    pub fn new(dialog_layer: Arc<DialogLayer>, dialog_id: DialogId) -> Self {
+        Self {
+            dialog_layer,
+            dialog_id,
+        }
+    }
+    pub fn id(&self) -> &DialogId {
+        &self.dialog_id
+    }
+}
+impl Drop for DialogGuard {
+    fn drop(&mut self) {
+        info!(%self.dialog_id, "dialog guard dropped");
+        let dialog_layer = self.dialog_layer.clone();
+        match dialog_layer.get_dialog(&self.dialog_id) {
+            Some(dialog) => {
+                tokio::spawn(async move {
+                    dialog.hangup().await.ok();
+                    dialog_layer.remove_dialog(&dialog.id());
+                });
+            }
+            None => {}
+        }
+    }
+}
+#[derive(Clone)]
 pub struct Invitation {
     pub dialog_layer: Arc<DialogLayer>,
     pub pending_dialogs: Arc<Mutex<HashMap<String, PendingDialog>>>,
@@ -191,6 +222,7 @@ pub async fn client_dialog_event_loop(
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
     media_stream: Arc<MediaStream>,
+    dialog_layer: Arc<DialogLayer>,
 ) -> Result<DialogId> {
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
@@ -225,19 +257,19 @@ pub async fn client_dialog_event_loop(
                 info!(session_id, track_id, %dialog_id, "client dialog calling");
             }
             DialogState::Confirmed(dialog_id) => {
+                info!(session_id, track_id, %dialog_id, "dialog confirmed");
                 call_state
                     .write()
                     .as_mut()
                     .and_then(|cs| {
-                        if cs.dialog_id.is_none() {
-                            cs.dialog_id = Some(dialog_id.clone());
+                        if cs.dialog.is_none() {
+                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
                         }
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;
                         Ok(())
                     })
                     .ok();
-                info!(session_id, track_id, %dialog_id, "dialog confirmed");
             }
             DialogState::Terminated(dialog_id, reason) => {
                 info!(
@@ -271,6 +303,7 @@ pub async fn server_dialog_event_loop(
     event_sender: EventSender,
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
+    dialog_layer: Arc<DialogLayer>,
 ) -> Result<DialogId> {
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
@@ -299,8 +332,8 @@ pub async fn server_dialog_event_loop(
                     .write()
                     .as_mut()
                     .and_then(|cs| {
-                        if cs.dialog_id.is_none() {
-                            cs.dialog_id = Some(dialog_id.clone());
+                        if cs.dialog.is_none() {
+                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
                         }
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;

@@ -4,7 +4,7 @@ use crate::{
     app::AppState,
     call::{
         CommandReceiver, CommandSender,
-        sip::{Invitation, client_dialog_event_loop, server_dialog_event_loop},
+        sip::{DialogGuard, Invitation, client_dialog_event_loop, server_dialog_event_loop},
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
@@ -27,7 +27,7 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsipstack::dialog::{DialogId, invitation::InviteOption, server_dialog::ServerInviteDialog};
+use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -62,7 +62,7 @@ pub struct ActiveCallState {
     pub last_status_code: u16,
     pub option: Option<CallOption>,
     pub answer: Option<String>,
-    pub dialog_id: Option<DialogId>,
+    pub dialog: Option<DialogGuard>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
@@ -652,22 +652,15 @@ impl ActiveCall {
         self.media_stream
             .stop(Some(hangup_reason.to_string()), initiator);
 
-        let dialog_id = match self.call_state.write().as_mut() {
+        match self.call_state.write().as_mut() {
             Ok(call_state) => {
                 if call_state.hangup_reason.is_none() {
                     call_state.hangup_reason.replace(hangup_reason);
                 }
-                call_state.dialog_id.take()
+                call_state.dialog.take()
             }
             Err(_) => None,
         };
-
-        if let Some(dialog_id) = dialog_id {
-            self.invitation
-                .hangup(dialog_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to hangup: {}", e))?;
-        }
         self.cancel_token.cancel();
         Ok(())
     }
@@ -767,44 +760,12 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        {
-            let dialog_id = match self.call_state.write().as_mut() {
-                Ok(call_state) => call_state.dialog_id.take(),
-                Err(_) => None,
-            };
-            debug!(session_id = self.session_id, ?dialog_id, "call cleanup");
-            if let Some(dialog_id) = dialog_id {
-                match self.invitation.hangup(dialog_id).await {
-                    Ok(_) => {}
-                    Err(e) => warn!(session_id = self.session_id, "failed to hangup call: {}", e),
-                }
-            }
-        }
-
-        {
-            let refer_dialog_id = self
-                .call_state
-                .write()
+        self.call_state.write().as_mut().ok().map(|cs| {
+            cs.dialog.take();
+            cs.refer_callstate
                 .as_mut()
-                .ok()
-                .map(|cs| {
-                    cs.refer_callstate
-                        .as_mut()
-                        .map(|rcs| rcs.write().as_mut().ok().map(|rcs| rcs.dialog_id.take()))
-                })
-                .flatten()
-                .flatten()
-                .flatten();
-            if let Some(dialog_id) = refer_dialog_id {
-                match self.invitation.hangup(dialog_id).await {
-                    Ok(_) => {}
-                    Err(e) => warn!(
-                        session_id = self.session_id,
-                        "failed to hangup refer call: {}", e
-                    ),
-                }
-            }
-        }
+                .map(|rcs| rcs.write().as_mut().ok().map(|rcs| rcs.dialog.take()))
+        });
 
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
@@ -1257,7 +1218,7 @@ impl ActiveCall {
         let media_stream = self.media_stream.clone();
         let call_state = call_state_ref.clone();
         let track_id_clone = track_id.clone();
-
+        let dialog_layer = self.invitation.dialog_layer.clone();
         tokio::spawn(async move {
             client_dialog_event_loop(
                 cancel_token,
@@ -1267,6 +1228,7 @@ impl ActiveCall {
                 dlg_state_receiver,
                 call_state,
                 media_stream,
+                dialog_layer,
             )
             .await
             .ok();
@@ -1298,7 +1260,12 @@ impl ActiveCall {
             .write()
             .as_mut()
             .and_then(|cs| {
-                cs.dialog_id = Some(dialog_id);
+                if cs.dialog.is_none() {
+                    Some(DialogGuard::new(
+                        self.invitation.dialog_layer.clone(),
+                        dialog_id,
+                    ));
+                }
                 cs.option.as_mut().map(|o| o.offer = offer);
                 cs.answer = Some(answer);
                 cs.answer_time = Some(Utc::now());
@@ -1413,12 +1380,16 @@ impl ActiveCall {
                 return Err(anyhow::anyhow!("error creating track: {}", e));
             }
         }
-
+        let dialog_layer = self.invitation.dialog_layer.clone();
         tokio::spawn(async move {
             let forward_dlg_state_loop = async {
                 tokio::select! {
-                    _ = token.cancelled() => {}
-                    _ = pending_token_clone.cancelled() => {}
+                    _ = token.cancelled() => {
+                        info!(session_id, "call cancelled" );
+                    }
+                    _ = pending_token_clone.cancelled() => {
+                        info!(session_id, "pending token cancelled" );
+                    }
                     _ = async {
                         while let Some(state) = state_receiver.recv().await {
                             if let Err(_) = dlg_state_sender.send(state) {
@@ -1433,11 +1404,12 @@ impl ActiveCall {
                 forward_dlg_state_loop,
                 server_dialog_event_loop(
                     cancel_token,
-                    session_id,
+                    session_id.clone(),
                     track_id,
                     event_sender,
                     dlg_state_receiver,
                     call_state,
+                    dialog_layer,
                 )
             )
         });
@@ -1483,9 +1455,9 @@ impl ActiveCallState {
             let rc = rc.read().unwrap();
             if rc.start_time != Utc::now() {
                 let call_id = rc
-                    .dialog_id
+                    .dialog
                     .as_ref()
-                    .map(|d| d.to_string())
+                    .map(|d| d.id().to_string())
                     .unwrap_or_default();
                 Some(Box::new(rc.build_callrecord(
                     app_state.clone(),
