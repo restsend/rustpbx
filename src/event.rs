@@ -102,13 +102,11 @@ pub enum SessionEvent {
         #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        position: u64, // current playback position at the time of interruption
-    },
-    OnInterrupt {
-        subtitle: String,
-        position: u32,
-        total_duration: u32, // ms
-        current: u32,        // current timestamp of total_duration
+        subtitle: Option<String>, // current tts text
+        position: Option<u32>, // word index in subtitle
+        #[serde(rename = "totalDuration")]
+        total_duration: u32, // whole tts duration
+        current: u32,          // elapsed time since start of tts
     },
     AsrFinal {
         #[serde(rename = "trackId")]

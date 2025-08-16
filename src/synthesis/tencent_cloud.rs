@@ -39,7 +39,6 @@ struct WebSocketResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Subtitle {
-    text: String,
     begin_time: u32,
     end_time: u32,
     begin_index: u32,
@@ -49,7 +48,6 @@ struct Subtitle {
 impl From<&Subtitle> for TTSSubtitle {
     fn from(subtitle: &Subtitle) -> Self {
         TTSSubtitle::new(
-            &subtitle.text,
             subtitle.begin_time,
             subtitle.end_time,
             subtitle.begin_index,
@@ -197,9 +195,10 @@ impl TencentCloudTtsClient {
 
                             if response.code != 0 {
                                 return Some(Err(anyhow!(
-                                    "Tencent TTS faild, Session: {}, error: {}",
+                                    "Tencent TTS faild, Session: {}, error: {}, text: {}",
                                     session_id,
-                                    response.message
+                                    response.message,
+                                    text
                                 )));
                             }
 

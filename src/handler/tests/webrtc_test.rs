@@ -562,11 +562,12 @@ async fn test_tts_interrupt_with_config(tts_config: SynthesisOption, text: &str)
                         .await
                         .unwrap();
                 }
-                SessionEvent::OnInterrupt {
+                SessionEvent::Interruption {
                     subtitle,
                     position,
                     total_duration,
                     current,
+                    ..
                 } => {
                     interrupted_clone.store(true, Ordering::Relaxed);
                     info!(

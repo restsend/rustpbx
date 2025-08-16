@@ -119,23 +119,20 @@ pub enum TTSEvent {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct TTSSubtitle {
-    pub text: String,
     pub begin_time: u32,
     pub end_time: u32,
     pub begin_index: u32,
-    end_index: u32,
+    pub end_index: u32,
 }
 
 impl TTSSubtitle {
     pub fn new(
-        text: &str,
         begin_time: u32,
         end_time: u32,
         begin_index: u32,
         end_index: u32,
     ) -> Self {
         Self {
-            text: text.to_string(),
             begin_time,
             end_time,
             begin_index,
