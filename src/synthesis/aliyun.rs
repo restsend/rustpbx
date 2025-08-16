@@ -233,12 +233,11 @@ impl AliyunTTSState {
         self.text
             .chars()
             .enumerate()
-            .position(|(i, _)| i == usage as usize)
+            .position(|(i, _)| i >= usage as usize)
             .unwrap_or(default as usize) as u32
     }
 
     fn move_forward(&mut self, current_usage: u32) -> Vec<TTSSubtitle> {
-        let subtitle = self.text[self.last_usage as usize..current_usage as usize].to_string();
         let begin_index = self.usage_to_index(self.last_usage, 0);
         let end_index = self.usage_to_index(current_usage, self.text.len() as u32);
         let begin_time = self.size_to_time(self.last_size);
@@ -246,7 +245,6 @@ impl AliyunTTSState {
         self.last_size = self.current_size;
         self.last_usage = current_usage;
         vec![TTSSubtitle::new(
-            &subtitle,
             begin_time,
             end_time,
             begin_index,

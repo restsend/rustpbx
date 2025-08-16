@@ -173,6 +173,8 @@ impl Track for TtsTrack {
         let synthesize_done = Arc::new(AtomicBool::new(false));
         let synthesize_done_clone = synthesize_done.clone();
         let session_id = self.session_id.clone();
+        let current_text = Arc::new(Mutex::new(None));
+        let current_text_clone = current_text.clone();
         let subtitles = Arc::new(Mutex::new(Vec::<TTSSubtitle>::new()));
         let subtitles_clone = subtitles.clone();
         let total_audio_len = Arc::new(AtomicUsize::new(0));
@@ -181,6 +183,10 @@ impl Track for TtsTrack {
             let mut last_play_id = None;
             while let Some(command) = command_rx.recv().await {
                 let text = command.text;
+                {
+                    let mut current_text = current_text_clone.lock().await;
+                    *current_text = Some(text.clone());
+                }
                 let play_id = command.play_id;
                 let mut option = command.option;
                 if option.speaker.is_none() {
@@ -230,7 +236,6 @@ impl Track for TtsTrack {
                                     let duration = bytes_size_to_duration(audio.len(), sample_rate);
                                     total_audio_len_clone.store(audio.len(), Ordering::Relaxed);
                                     subtitles.push(TTSSubtitle::new(
-                                        &text,
                                         0,
                                         duration,
                                         0,
@@ -438,26 +443,26 @@ impl Track for TtsTrack {
                     let remaining_size = buffer.lock().await.len() * 2;
                     debug!(session_id, "total_size: {} remaining_size: {}", total_size, remaining_size);
                     let sended_size = total_size - remaining_size;
-                    let mut text = "".into();
-                    let mut position = 0;
-                    let mut current = bytes_size_to_duration(sended_size, sample_rate);
-                    let total_duration = bytes_size_to_duration(total_size, sample_rate);
+                    let text = current_text.lock().await.take();
+                    let mut position = None;
+                    let current = bytes_size_to_duration(sended_size, sample_rate);
+                    let total_duration = bytes_size_to_duration(total_size, sample_rate);                    
                     let subtitles = subtitles.lock().await;
-                    debug!("subtitles: {:?}", subtitles);
                     for subtitle in subtitles.iter().rev() {
                         if subtitle.begin_time <= current {
-                            text = subtitle.text.clone();
-                            position = subtitle.begin_index;
-                            current = subtitle.begin_time;
+                            position = Some(subtitle.begin_index);
                             break;
                         }
                     }
-                    let _ = event_sender_clone.send(SessionEvent::OnInterrupt {
+                    let event = SessionEvent::Interruption {
+                        track_id: track_id.clone(),
+                        timestamp: crate::get_timestamp(),
                         subtitle: text,
                         position,
                         total_duration,
                         current,
-                    });
+                    };
+                    let _ = event_sender_clone.send(event);
                 }
             }
             event_sender_clone
