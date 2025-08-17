@@ -21,8 +21,8 @@ use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaPassOption {
-    pub url: String,
-    pub packet_size: usize,
+    pub url: String, // websocket server url
+    pub packet_size: usize, // data will buffer in memory until `packet_size` or `FLUSH_TIMEOUT` is reached
 }
 
 impl MediaPassOption {
