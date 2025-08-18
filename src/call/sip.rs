@@ -257,7 +257,7 @@ pub async fn client_dialog_event_loop(
                 info!(session_id, track_id, %dialog_id, "client dialog calling");
             }
             DialogState::Confirmed(dialog_id) => {
-                info!(session_id, track_id, %dialog_id, "dialog confirmed");
+                info!(session_id, track_id, %dialog_id, "client dialog confirmed");
                 call_state
                     .write()
                     .as_mut()

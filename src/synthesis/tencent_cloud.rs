@@ -1,4 +1,6 @@
-use crate::synthesis::{TTSEvent, TTSSubtitle};
+use std::sync::Mutex;
+
+use crate::synthesis::{Subtitle, SynthesisEvent, SynthesisEventReceiver, SynthesisEventSender};
 
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
 use anyhow::{Result, anyhow};
@@ -7,11 +9,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, stream::BoxStream};
 use ring::hmac;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{client::IntoClientRequest, protocol::Message},
 };
-use tracing::debug;
+use tracing::{debug, info, warn};
 use urlencoding;
 use uuid;
 
@@ -33,21 +36,21 @@ struct WebSocketResponse {
 
 #[derive(Debug, Deserialize)]
 struct WebSocketResult {
-    subtitles: Option<Vec<Subtitle>>,
+    subtitles: Option<Vec<TencentSubtitle>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Subtitle {
+struct TencentSubtitle {
     begin_time: u32,
     end_time: u32,
     begin_index: u32,
     end_index: u32,
 }
 
-impl From<&Subtitle> for TTSSubtitle {
-    fn from(subtitle: &Subtitle) -> Self {
-        TTSSubtitle::new(
+impl From<&TencentSubtitle> for Subtitle {
+    fn from(subtitle: &TencentSubtitle) -> Self {
+        Subtitle::new(
             subtitle.begin_time,
             subtitle.end_time,
             subtitle.begin_index,
@@ -59,6 +62,8 @@ impl From<&Subtitle> for TTSSubtitle {
 #[derive(Debug)]
 pub struct TencentCloudTtsClient {
     option: SynthesisOption,
+    tx: SynthesisEventSender,
+    rx: Mutex<Option<SynthesisEventReceiver>>,
 }
 
 impl TencentCloudTtsClient {
@@ -68,7 +73,12 @@ impl TencentCloudTtsClient {
     }
 
     pub fn new(option: SynthesisOption) -> Self {
-        Self { option }
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            option,
+            tx,
+            rx: Mutex::new(Some(rx)),
+        }
     }
 
     // Build with specific configuration
@@ -157,23 +167,29 @@ impl TencentCloudTtsClient {
     }
 
     // Internal function to synthesize text to audio using WebSocket
-    async fn synthesize_text_stream(
-        &self,
-        text: &str,
-        option: Option<SynthesisOption>,
-    ) -> Result<BoxStream<'_, Result<TTSEvent>>> {
+    async fn synthesize_text(&self, text: &str, option: Option<SynthesisOption>) -> Result<()> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let url = self.generate_websocket_url(text, &session_id, option)?;
-        debug!("connecting to WebSocket URL: {}", url);
+        debug!(session_id, text, "connecting to WebSocket URL: {}", url);
 
         // Create a request with custom headers
         let request = url.into_client_request()?;
 
         // Connect to WebSocket with custom configuration
-        let (ws_stream, resp) = connect_async_with_config(request, None, false).await?;
+        let (mut ws_stream, resp) = connect_async_with_config(request, None, false).await?;
         match resp.status() {
             reqwest::StatusCode::SWITCHING_PROTOCOLS => (),
             _ => {
+                info!(
+                    session_id,
+                    text,
+                    "WebSocket connection failed: {}",
+                    resp.status()
+                );
+                self.tx.send(Err(anyhow!(
+                    "Failed to establish WebSocket connection: {}",
+                    resp.status()
+                )))?;
                 return Err(anyhow::anyhow!(
                     "WebSocket connection failed: {}",
                     resp.status()
@@ -181,63 +197,76 @@ impl TencentCloudTtsClient {
             }
         }
 
-        let stream = ws_stream.filter_map(move |message| {
+        while let Some(message) = ws_stream.next().await {
             let session_id = session_id.clone();
-            async move {
-                match message {
-                    Ok(Message::Binary(data)) => Some(Ok(TTSEvent::AudioChunk(data.to_vec()))),
-                    Ok(Message::Text(text)) => {
-                        if let Ok(response) = serde_json::from_str::<WebSocketResponse>(&text) {
-                            debug!(
-                                "Tencent TTS session: {}, response: {:?}",
-                                session_id, response
-                            );
-
-                            if response.code != 0 {
-                                return Some(Err(anyhow!(
-                                    "Tencent TTS faild, Session: {}, error: {}, text: {}",
-                                    session_id,
-                                    response.message,
-                                    text
-                                )));
-                            }
-
-                            if response.r#final == 1 {
-                                return Some(Ok(TTSEvent::Finished));
-                            }
-
-                            if let Some(subtitles) = response.result.subtitles {
-                                let subtitles: Vec<TTSSubtitle> =
-                                    subtitles.iter().map(Into::into).collect();
-                                return Some(Ok(TTSEvent::Subtitles(subtitles)));
-                            }
-
-                            None
-                        } else {
-                            Some(Err(anyhow!(
-                                "TTS Session: {} failed to deserialize {}",
+            match message {
+                Ok(Message::Binary(data)) => {
+                    self.tx
+                        .send(Ok(SynthesisEvent::AudioChunk(data.to_vec())))?;
+                }
+                Ok(Message::Text(text)) => {
+                    if let Ok(response) = serde_json::from_str::<WebSocketResponse>(&text) {
+                        if response.code != 0 {
+                            info!(
                                 session_id,
-                                text
-                            )))
+                                code = response.code,
+                                "Failed Tencent TTS response: {:?}",
+                                response
+                            );
+                            self.tx.send(Err(anyhow!(
+                                "Tencent TTS failed, Session: {}, code: {}, message: {}",
+                                session_id,
+                                response.code,
+                                response.message
+                            )))?;
+                            break;
                         }
+
+                        if response.r#final == 1 {
+                            break;
+                        }
+
+                        if let Some(subtitles) = response.result.subtitles {
+                            let subtitles: Vec<Subtitle> =
+                                subtitles.iter().map(Into::into).collect();
+                            self.tx.send(Ok(SynthesisEvent::Subtitles(subtitles)))?;
+                        }
+                    } else {
+                        warn!(session_id, " failed to deserialize response: {}", text);
+                        self.tx.send(Err(anyhow!(
+                            "Tencent TTS session: {} failed to deserialize response: {}",
+                            session_id,
+                            text
+                        )))?;
+                        break;
                     }
-                    Ok(Message::Close(_)) => {
-                        return Some(Err(anyhow!(
-                            "Tencent TTS session: {} closed by remote",
-                            session_id
-                        )));
-                    }
-                    Err(e) => Some(Err(anyhow!(
+                }
+                Ok(Message::Close(_)) => {
+                    debug!(session_id, "websocket closed by remote");
+                    self.tx.send(Err(anyhow!(
+                        "Tencent TTS session: {} closed by remote",
+                        session_id
+                    )))?;
+                    break;
+                }
+                Err(e) => {
+                    self.tx.send(Err(anyhow!(
+                        "Tencent TTS session: {} websocket error: {}",
+                        session_id,
+                        e
+                    )))?;
+                    warn!(session_id, "websocket error: {}", e);
+                    return Err(anyhow!(
                         "Tencent TTS websocket error, Session: {}, error: {}",
                         session_id,
                         e
-                    ))),
-                    _ => None,
+                    ));
                 }
+                _ => {}
             }
-        });
-
-        Ok(Box::pin(stream))
+        }
+        self.tx.send(Ok(SynthesisEvent::Finished))?;
+        Ok(())
     }
 }
 
@@ -246,13 +275,24 @@ impl SynthesisClient for TencentCloudTtsClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::TencentCloud
     }
+    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+        let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
+            anyhow!("TencentCloudTtsClient: Receiver already taken, cannot start new stream")
+        })?;
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(event) => Some((event, rx)),
+                None => None,
+            }
+        })))
+    }
     async fn synthesize(
         &self,
         text: &str,
+        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
-    ) -> Result<BoxStream<Result<TTSEvent>>> {
-        // Use the new WebSocket streaming implementation
-        self.synthesize_text_stream(text, option).await
+    ) -> Result<()> {
+        self.synthesize_text(text, option).await
     }
 }

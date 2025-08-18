@@ -10,7 +10,7 @@ use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::synthesis::{
-    SynthesisClient, SynthesisOption, SynthesisType, TTSEvent, TencentCloudTtsClient,
+    SynthesisClient, SynthesisEvent, SynthesisOption, SynthesisType, TencentCloudTtsClient,
 };
 
 const SAMPLE_RATE: u32 = 16000;
@@ -228,42 +228,34 @@ async fn main() -> Result<()> {
         // Generate speech for the segment text
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
-
-            match tts_client.synthesize(&segment.text, None, None).await {
-                Ok(mut audio_stream) => {
-                    let mut total_bytes = 0;
-                    while let Some(chunk_result) = audio_stream.next().await {
-                        match chunk_result {
-                            Ok(event) => match event {
-                                TTSEvent::AudioChunk(chunk) => {
-                                    debug!("Received chunk of {} bytes", chunk.len());
-                                    total_bytes += chunk.len();
-                                    let samples: PcmBuf = bytes_to_samples(&chunk);
-                                    for &sample in &samples {
-                                        writer.write_sample(sample)?;
-                                    }
-                                }
-                                TTSEvent::Finished => {
-                                    break;
-                                }
-                                _ => {}
-                            },
-                            Err(e) => {
-                                error!("Error in audio stream chunk: {:?}", e);
-                                return Err(anyhow::anyhow!(
-                                    "Failed to process audio chunk: {}",
-                                    e
-                                ));
+            let mut audio_stream = tts_client.start().await?;
+            tts_client
+                .synthesize(&segment.text, None, None, None)
+                .await?;
+            let mut total_bytes = 0;
+            while let Some(chunk_result) = audio_stream.next().await {
+                match chunk_result {
+                    Ok(event) => match event {
+                        SynthesisEvent::AudioChunk(chunk) => {
+                            debug!("Received chunk of {} bytes", chunk.len());
+                            total_bytes += chunk.len();
+                            let samples: PcmBuf = bytes_to_samples(&chunk);
+                            for &sample in &samples {
+                                writer.write_sample(sample)?;
                             }
                         }
+                        SynthesisEvent::Finished => {
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        error!("Error in audio stream chunk: {:?}", e);
+                        return Err(anyhow::anyhow!("Failed to process audio chunk: {}", e));
                     }
-                    debug!("Received total of {} bytes of audio data", total_bytes);
-                }
-                Err(e) => {
-                    error!("Failed to synthesize text: {}", e);
-                    return Err(anyhow::anyhow!("Failed to synthesize text: {}", e));
                 }
             }
+            debug!("Received total of {} bytes of audio data", total_bytes);
         }
     }
 

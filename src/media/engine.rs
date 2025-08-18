@@ -3,12 +3,13 @@ use super::{
     denoiser::NoiseReducer,
     processor::Processor,
     track::{
-        tts::{TtsHandle, TtsTrack},
         Track,
+        tts::{SynthesisHandle, TtsTrack},
     },
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
+    TrackId,
     call::{CallOption, EouOption},
     event::EventSender,
     synthesis::{
@@ -19,7 +20,6 @@ use crate::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
         TranscriptionOption, TranscriptionType, VoiceApiAsrClientBuilder,
     },
-    TrackId,
 };
 use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -235,9 +235,9 @@ impl StreamEngine {
         ssrc: u32,
         play_id: Option<String>,
         tts_option: &SynthesisOption,
-    ) -> Result<(TtsHandle, Box<dyn Track>)> {
+    ) -> Result<(SynthesisHandle, Box<dyn Track>)> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let new_handle = TtsHandle::new(tx, play_id);
+        let new_handle = SynthesisHandle::new(tx, play_id);
         let tts_client = engine.create_tts_client(tts_option).await?;
         let tts_track = TtsTrack::new(track_id, session_id, rx, tts_client)
             .with_ssrc(ssrc)

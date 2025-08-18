@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 mod aliyun;
 mod tencent_cloud;
 mod voiceapi;
@@ -10,6 +11,20 @@ mod voiceapi;
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
+
+#[derive(Clone, Default)]
+pub struct SynthesisCommand {
+    pub text: String,
+    pub speaker: Option<String>,
+    pub play_id: Option<String>,
+    pub streaming: Option<bool>,
+    pub end_of_stream: Option<bool>,
+    pub option: SynthesisOption,
+}
+pub type SynthesisCommandSender = mpsc::UnboundedSender<SynthesisCommand>;
+pub type SynthesisCommandReceiver = mpsc::UnboundedReceiver<SynthesisCommand>;
+pub type SynthesisEventSender = mpsc::UnboundedSender<Result<SynthesisEvent>>;
+pub type SynthesisEventReceiver = mpsc::UnboundedReceiver<Result<SynthesisEvent>>;
 
 #[derive(Debug, Clone, Serialize, Hash, Eq, PartialEq)]
 pub enum SynthesisType {
@@ -108,24 +123,24 @@ impl SynthesisOption {
     }
 }
 
-pub enum TTSEvent {
+#[derive(Debug)]
+pub enum SynthesisEvent {
     /// Raw audio data chunk
     AudioChunk(Vec<u8>),
     /// Progress information including completion status
-    Subtitles(Vec<TTSSubtitle>),
+    Subtitles(Vec<Subtitle>),
     Finished,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct TTSSubtitle {
+#[derive(Debug, Clone)]
+pub struct Subtitle {
     pub begin_time: u32,
     pub end_time: u32,
     pub begin_index: u32,
     pub end_index: u32,
 }
 
-impl TTSSubtitle {
+impl Subtitle {
     pub fn new(begin_time: u32, end_time: u32, begin_index: u32, end_index: u32) -> Self {
         Self {
             begin_time,
@@ -141,17 +156,18 @@ pub fn bytes_size_to_duration(bytes: usize, sample_rate: u32) -> u32 {
 }
 
 #[async_trait]
-pub trait SynthesisClient: Send {
+pub trait SynthesisClient: Send + Sync {
     /// Returns the provider type for this synthesis client.
     fn provider(&self) -> SynthesisType;
-
+    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>>;
     // break out of stream polling loop when res is Err or Progress is finished
     async fn synthesize(
         &self,
         text: &str,
+        streaming: Option<bool>,
         end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
-    ) -> Result<BoxStream<'_, Result<TTSEvent>>>;
+    ) -> Result<()>;
 }
 
 impl Default for SynthesisOption {
