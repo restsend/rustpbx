@@ -809,11 +809,11 @@ function mainApp() {
                     if (this.config.asr.appId) asrConfig.appId = this.config.asr.appId;
                     if (this.config.asr.secretId) asrConfig.secretId = this.config.asr.secretId;
                     if (this.config.asr.secretKey) asrConfig.secretKey = this.config.asr.secretKey;
-                    if (this.config.asr.model) asrConfig.model = this.config.asr.model;
+                    if (this.config.asr.model) asrConfig.modelType = this.config.asr.model;
                     if (this.config.asr.language) asrConfig.language = this.config.asr.language;
                 } else if (this.config.asr.provider === 'voiceapi') {
                     if (this.config.asr.endpoint) asrConfig.endpoint = this.config.asr.endpoint;
-                    if (this.config.asr.model) asrConfig.model = this.config.asr.model;
+                    if (this.config.asr.model) asrConfig.modelType = this.config.asr.model;
                     if (this.config.asr.language) asrConfig.language = this.config.asr.language;
                 }
 
