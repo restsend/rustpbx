@@ -1,16 +1,15 @@
 use crate::media::{
+    codecs::bytes_to_samples,
     media_pass::{MediaPassOption, MediaPassProcessor},
     processor::Processor,
 };
 use crate::{AudioFrame, Samples};
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 use tokio::net::TcpListener;
 use tokio::time::Duration;
@@ -25,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 struct TestWebSocketServer {
     addr: SocketAddr,
-    received_data_size: Arc<AtomicUsize>,
+    received_data: Arc<Mutex<BytesMut>>,
     received_headers: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -34,15 +33,15 @@ impl TestWebSocketServer {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
-        let received_data_size = Arc::new(AtomicUsize::new(0));
+        let received_data = Arc::new(Mutex::new(BytesMut::new()));
         let received_headers = Arc::new(Mutex::new(HashMap::new()));
 
-        let received_data_size_clone = received_data_size.clone();
+        let received_data_clone = received_data.clone();
         let headers_clone = received_headers.clone();
 
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let received_data_size_clone = received_data_size_clone.clone();
+                let received_data_clone = received_data_clone.clone();
                 let headers_clone = headers_clone.clone();
 
                 tokio::spawn(async move {
@@ -61,8 +60,8 @@ impl TestWebSocketServer {
                         while let Some(msg) = ws_receiver.next().await {
                             match msg {
                                 Ok(Message::Binary(data)) => {
-                                    received_data_size_clone
-                                        .fetch_add(data.len(), Ordering::Relaxed);
+                                    let mut received_data = received_data_clone.lock().unwrap();
+                                    received_data.extend_from_slice(&data);
                                 }
                                 Ok(Message::Close(_)) => break,
                                 Err(_) => break,
@@ -76,13 +75,13 @@ impl TestWebSocketServer {
 
         Ok(Self {
             addr,
-            received_data_size,
+            received_data,
             received_headers,
         })
     }
 
-    fn get_received_data_size(&self) -> usize {
-        self.received_data_size.load(Ordering::Relaxed)
+    fn get_received_data(&self) -> Bytes {
+        self.received_data.lock().unwrap().clone().freeze()
     }
 
     fn get_received_headers(&self) -> HashMap<String, String> {
@@ -121,10 +120,12 @@ async fn test_real_audio_file_processing() -> anyhow::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert_eq!(
-        all_samples.len() * 2,
-        server.get_received_data_size(),
-        "Should have received audio data"
+    let received_data = server.get_received_data();
+    let received_sample = bytes_to_samples(&received_data);
+
+    assert!(
+        vectors_equal_hash(&received_sample, &all_samples),
+        "received audio data is not equal to sent audio data"
     );
 
     let headers = server.get_received_headers();
@@ -141,4 +142,21 @@ async fn test_real_audio_file_processing() -> anyhow::Result<()> {
     assert_eq!(headers.get("x-content-type").unwrap(), "audio/pcm");
 
     Ok(())
+}
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+fn vectors_equal_hash<T: Hash>(vec1: &[T], vec2: &[T]) -> bool {
+    if vec1.len() != vec2.len() {
+        return false;
+    }
+
+    let mut hasher1 = DefaultHasher::new();
+    let mut hasher2 = DefaultHasher::new();
+
+    vec1.hash(&mut hasher1);
+    vec2.hash(&mut hasher2);
+
+    hasher1.finish() == hasher2.finish()
 }
