@@ -1,11 +1,12 @@
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
-use crate::synthesis::{TTSEvent, TTSSubtitle};
+use crate::synthesis::{Subtitle, SynthesisEvent, SynthesisEventReceiver, SynthesisEventSender};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt, stream::BoxStream};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -17,6 +18,8 @@ use uuid::Uuid;
 /// https://help.aliyun.com/zh/model-studio/cosyvoice-websocket-api
 #[derive(Debug)]
 pub struct AliyunTtsClient {
+    tx: SynthesisEventSender,
+    rx: Mutex<Option<SynthesisEventReceiver>>,
     option: SynthesisOption,
 }
 
@@ -189,7 +192,12 @@ impl AliyunTtsClient {
     }
 
     pub fn new(option: SynthesisOption) -> Self {
-        Self { option }
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            option,
+            tx,
+            rx: Mutex::new(Some(rx)),
+        }
     }
 
     /// Get API Key from configuration or environment
@@ -237,19 +245,14 @@ impl AliyunTTSState {
             .unwrap_or(default as usize) as u32
     }
 
-    fn move_forward(&mut self, current_usage: u32) -> Vec<TTSSubtitle> {
+    fn move_forward(&mut self, current_usage: u32) -> Vec<Subtitle> {
         let begin_index = self.usage_to_index(self.last_usage, 0);
         let end_index = self.usage_to_index(current_usage, self.text.len() as u32);
         let begin_time = self.size_to_time(self.last_size);
         let end_time = self.size_to_time(self.current_size);
         self.last_size = self.current_size;
         self.last_usage = current_usage;
-        vec![TTSSubtitle::new(
-            begin_time,
-            end_time,
-            begin_index,
-            end_index,
-        )]
+        vec![Subtitle::new(begin_time, end_time, begin_index, end_index)]
     }
 }
 
@@ -259,12 +262,25 @@ impl SynthesisClient for AliyunTtsClient {
         SynthesisType::Aliyun
     }
 
+    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+        let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
+            anyhow!("AliyunTtsClient: Receiver already taken, cannot start new stream")
+        })?;
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(event) => Some((event, rx)),
+                None => None,
+            }
+        })))
+    }
+
     async fn synthesize(
         &self,
         text: &str,
+        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
-    ) -> Result<BoxStream<Result<TTSEvent>>> {
+    ) -> Result<()> {
         let option = self.option.merge_with(option);
         let api_key = self.get_api_key(&option)?;
         let task_id = Uuid::new_v4().to_string();
@@ -282,13 +298,17 @@ impl SynthesisClient for AliyunTtsClient {
         let (ws_stream, response) = connect_async(request).await?;
 
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            self.tx.send(Err(anyhow!(
+                "Failed to establish WebSocket connection: {}",
+                response.status()
+            )))?;
             return Err(anyhow!(
                 "WebSocket connection failed: {}",
                 response.status()
             ));
         }
 
-        let (mut ws_sink, ws_stream) = ws_stream.split();
+        let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
         let run_task_cmd = Command::run_task(&option, &task_id);
         let run_task_json = serde_json::to_string(&run_task_cmd)?;
@@ -314,82 +334,93 @@ impl SynthesisClient for AliyunTtsClient {
             .map_err(|e| anyhow!("Failed to send finish-task command: {}", e))?;
 
         let sample_rate = option.samplerate.unwrap_or(16000) as u32;
-        let state = Arc::new(Mutex::new(AliyunTTSState::new(&task_id, text, sample_rate)));
-        let stream = ws_stream.filter_map(move |message| {
-            let state = state.clone();
-            async move {
-                let mut state = state.lock().unwrap();
-                match message {
-                    Ok(Message::Binary(data)) => {
-                        state.current_size += data.len() as u32;
-                        Some(Ok(TTSEvent::AudioChunk(data.to_vec())))
-                    }
-                    Ok(Message::Text(message)) => {
-                        if let Ok(event) = serde_json::from_str::<Event>(&message) {
-                            match event.header.event.as_str() {
-                                "task-started" => {
-                                    debug!("Aliyun TTS Task: {} started", state.task_id);
-                                    None
-                                }
-                                "result-generated" => {
-                                    if let Some(usage) = event.payload.usage {
-                                        Some(Ok(TTSEvent::Subtitles(
-                                            state.move_forward(usage.characters),
-                                        )))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                "task-failed" => {
-                                    let error_code = event
-                                        .header
-                                        .error_code
-                                        .unwrap_or_else(|| "Unknown error code".to_string());
-                                    let error_msg = event
-                                        .header
-                                        .error_message
-                                        .unwrap_or_else(|| "Unknown error message".to_string());
-                                    Some(Err(anyhow!(
-                                        "Aliyun TTS Task: {} failed: {}, {}",
-                                        state.task_id,
-                                        error_code,
-                                        error_msg
-                                    )))
-                                }
-                                "task-finished" => {
-                                    debug!("Aliyun TTS Task: {} finished", state.task_id);
-                                    Some(Ok(TTSEvent::Finished))
-                                }
-                                _ => {
-                                    warn!(
-                                        "Aliyun TTS Task: {} unknown event: {:?}",
-                                        state.task_id, event
-                                    );
-                                    None
+        let mut state = AliyunTTSState::new(&task_id, text, sample_rate);
+
+        while let Some(message) = ws_stream.next().await {
+            match message {
+                Ok(Message::Binary(data)) => {
+                    state.current_size += data.len() as u32;
+                    self.tx
+                        .send(Ok(SynthesisEvent::AudioChunk(data.to_vec())))?;
+                }
+                Ok(Message::Text(text)) => {
+                    if let Ok(event) = serde_json::from_str::<Event>(&text) {
+                        match event.header.event.as_str() {
+                            "task-started" => {
+                                debug!("Aliyun TTS Task: {} started", state.task_id);
+                            }
+                            "result-generated" => {
+                                if let Some(usage) = event.payload.usage {
+                                    self.tx.send(Ok(SynthesisEvent::Subtitles(
+                                        state.move_forward(usage.characters),
+                                    )))?;
                                 }
                             }
-                        } else {
-                            Some(Err(anyhow!(
-                                "Aliyun TTS Task: {} failed to deserialize {}",
-                                state.task_id,
-                                message
-                            )))
+                            "task-finished" => {
+                                debug!("Aliyun TTS Task: {} finished", state.task_id);
+                                break;
+                            }
+                            "task-failed" => {
+                                let error_code = event
+                                    .header
+                                    .error_code
+                                    .unwrap_or_else(|| "Unknown error code".to_string());
+                                let error_msg = event
+                                    .header
+                                    .error_message
+                                    .unwrap_or_else(|| "Unknown error message".to_string());
+                                self.tx.send(Err(anyhow!(
+                                    "Aliyun TTS Task: {} failed: {}, {}",
+                                    state.task_id,
+                                    error_code,
+                                    error_msg
+                                )))?;
+                                break;
+                            }
+                            _ => {
+                                warn!(
+                                    "Aliyun TTS Task: {} unknown event: {:?}",
+                                    state.task_id, event
+                                );
+                            }
                         }
+                    } else {
+                        self.tx.send(Err(anyhow!(
+                            "Aliyun TTS Task: {} failed to deserialize event: {}",
+                            state.task_id,
+                            text
+                        )))?;
+                        break;
                     }
-                    Ok(Message::Close(_)) => Some(Err(anyhow!(
+                }
+                Ok(Message::Close(_)) => {
+                    debug!(
                         "Aliyun TTS Task: {} websocket closed by remote",
                         state.task_id
-                    ))),
-                    Err(e) => Some(Err(anyhow!(
+                    );
+                    self.tx.send(Err(anyhow!(
+                        "Aliyun TTS Task: {} websocket closed by remote",
+                        state.task_id
+                    )))?;
+                    break;
+                }
+                Err(e) => {
+                    warn!("Aliyun TTS Task: {} websocket error: {}", state.task_id, e);
+                    self.tx.send(Err(anyhow!(
                         "Aliyun TTS Task: {} websocket error: {}",
                         state.task_id,
                         e
-                    ))),
-                    _ => None,
+                    )))?;
+                    return Err(anyhow!(
+                        "Aliyun TTS Task: {} websocket error: {}",
+                        state.task_id,
+                        e
+                    ));
                 }
+                _ => {}
             }
-        });
-
-        Ok(Box::pin(stream))
+        }
+        self.tx.send(Ok(SynthesisEvent::Finished))?;
+        Ok(())
     }
 }

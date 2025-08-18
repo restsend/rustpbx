@@ -1,10 +1,9 @@
 use crate::{
     Samples,
-    media::track::{
-        Track,
-        tts::{TtsCommand, TtsTrack},
+    media::track::{Track, tts::TtsTrack},
+    synthesis::{
+        SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,
     },
-    synthesis::{SynthesisClient, SynthesisOption, SynthesisType, TTSEvent},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,45 +21,37 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn synthesize(
-        &self,
-        _text: &str,
-        _end_of_stream: Option<bool>,
-        _option: Option<SynthesisOption>,
-    ) -> Result<BoxStream<Result<TTSEvent>>> {
-        // Generate 1 second of sine wave at 440Hz, 16kHz sample rate, but split into chunks
+    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+        // Generate a simple sine wave audio sample for testing
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
         let duration_seconds = 1.0;
         let num_samples = (sample_rate as f64 * duration_seconds) as usize;
 
-        // Split into 4 chunks (250ms each)
-        let chunk_size = num_samples / 4;
-        let mut chunks = Vec::new();
+        // Generate PCM audio data (16-bit)
+        let mut audio_data = Vec::with_capacity(num_samples * 2);
+        for i in 0..num_samples {
+            let t = i as f64 / sample_rate as f64;
+            let amplitude = 16384.0; // Half of 16-bit range (32768/2)
+            let sample = (amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()) as i16;
 
-        for chunk_idx in 0..4 {
-            let start = chunk_idx * chunk_size;
-            let end = start + chunk_size;
-
-            // Generate PCM audio data for this chunk (16-bit)
-            let mut chunk_data = Vec::with_capacity(chunk_size * 2);
-            for i in start..end {
-                let t = i as f64 / sample_rate as f64;
-                let amplitude = 16384.0; // Half of 16-bit range (32768/2)
-                let sample =
-                    (amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()) as i16;
-
-                // Convert to bytes (little endian)
-                chunk_data.push((sample & 0xFF) as u8);
-                chunk_data.push(((sample >> 8) & 0xFF) as u8);
-            }
-
-            chunks.push(Ok(TTSEvent::AudioChunk(chunk_data)));
+            // Convert to bytes (little endian)
+            audio_data.push((sample & 0xFF) as u8);
+            audio_data.push(((sample >> 8) & 0xFF) as u8);
         }
 
-        // Create a stream from the chunks
-        let stream = stream::iter(chunks);
+        // Create a stream that emits this audio data
+        let stream = stream::iter(vec![Ok(SynthesisEvent::AudioChunk(audio_data))]);
         Ok(Box::pin(stream))
+    }
+    async fn synthesize(
+        &self,
+        _text: &str,
+        _streaming: Option<bool>,
+        _end_of_stream: Option<bool>,
+        _option: Option<SynthesisOption>,
+    ) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -87,13 +78,13 @@ async fn test_tts_track_basic() -> Result<()> {
     tts_track.start(event_tx, packet_tx).await?;
 
     // Send a TTS command
-    command_tx.send(TtsCommand {
+    command_tx.send(SynthesisCommand {
         text: "Test speech synthesis".to_string(),
         ..Default::default()
     })?;
 
     // Wait for at least one audio frame
-    let timeout = Duration::from_secs(5);
+    let timeout = Duration::from_secs(3);
     let result = tokio::time::timeout(timeout, packet_rx.recv()).await;
 
     // Assert that we received a frame
@@ -147,7 +138,7 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
 
     // Send multiple TTS commands
     for i in 1..=3 {
-        command_tx.send(TtsCommand {
+        command_tx.send(SynthesisCommand {
             text: format!("Test speech synthesis {}", i),
             play_id: Some(format!("test-{}", i)),
             ..Default::default()
@@ -219,7 +210,7 @@ async fn test_tts_track_configuration() -> Result<()> {
     tts_track.start(event_tx, packet_tx).await?;
 
     // Send a TTS command
-    command_tx.send(TtsCommand {
+    command_tx.send(SynthesisCommand {
         text: "Test with custom configuration".to_string(),
         speaker: Some("test-speaker".to_string()),
         play_id: Some("config-test".to_string()),

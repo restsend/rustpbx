@@ -17,12 +17,12 @@ use crate::{
             Track, TrackConfig,
             file::FileTrack,
             rtp::{RtpTrack, RtpTrackBuilder},
-            tts::{TtsCommand, TtsHandle},
+            tts::SynthesisHandle,
             webrtc::WebrtcTrack,
             websocket::{WebsocketBytesReceiver, WebsocketTrack},
         },
     },
-    synthesis::SynthesisOption,
+    synthesis::{SynthesisCommand, SynthesisOption},
     useragent::invitation::PendingDialog,
 };
 use anyhow::Result;
@@ -78,7 +78,7 @@ pub struct ActiveCall {
     pub session_id: String,
     pub media_stream: Arc<MediaStream>,
     pub track_config: TrackConfig,
-    pub tts_handle: Mutex<Option<TtsHandle>>,
+    pub tts_handle: Mutex<Option<SynthesisHandle>>,
     pub auto_hangup: Arc<Mutex<Option<(u32, CallRecordHangupReason)>>>,
     pub wait_input_timeout: Arc<Mutex<Option<u32>>>,
     pub event_sender: EventSender,
@@ -519,7 +519,7 @@ impl ActiveCall {
             Some(s) => Some(s),
             None => tts_option.speaker.clone(),
         };
-        let mut play_command = TtsCommand {
+        let mut play_command = SynthesisCommand {
             text,
             speaker,
             play_id: play_id.clone(),
@@ -533,7 +533,7 @@ impl ActiveCall {
             text = %play_command.text,
             speaker = ?play_command.speaker,
             auto_hangup = ?auto_hangup,
-            "new tts command"
+            "new synthesis command"
         );
 
         let ssrc = rand::random::<u32>();
@@ -1181,14 +1181,21 @@ impl ActiveCall {
         )
         .await?;
 
+        let offer = rtp_track.local_description().ok();
         let call_option = call_state_ref
-            .read()
-            .as_ref()
-            .and_then(|cs| Ok(cs.option.clone()))
-            .unwrap_or_default()
+            .write()
+            .as_mut()
+            .ok()
+            .map(|cs| {
+                cs.option.as_mut().map(|o| {
+                    o.offer = offer.clone();
+                });
+                cs.start_time = Utc::now();
+                cs.option.clone()
+            })
+            .flatten()
             .unwrap_or_default();
 
-        let offer = rtp_track.local_description().ok();
         invite_option.offer = offer.clone().map(|s| s.into());
 
         Self::setup_track_with_stream(
@@ -1254,24 +1261,6 @@ impl ActiveCall {
         self.media_stream
             .update_remote_description(&track_id, &answer)
             .await
-            .ok();
-
-        call_state_ref
-            .write()
-            .as_mut()
-            .and_then(|cs| {
-                if cs.dialog.is_none() {
-                    Some(DialogGuard::new(
-                        self.invitation.dialog_layer.clone(),
-                        dialog_id,
-                    ));
-                }
-                cs.option.as_mut().map(|o| o.offer = offer);
-                cs.answer = Some(answer);
-                cs.answer_time = Some(Utc::now());
-                cs.last_status_code = 200;
-                Ok(())
-            })
             .ok();
         Ok(())
     }

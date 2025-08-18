@@ -1,4 +1,4 @@
-use crate::synthesis::TTSEvent;
+use crate::synthesis::SynthesisEvent;
 use crate::synthesis::{
     AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
     tencent_cloud::TencentCloudTtsClient,
@@ -51,38 +51,36 @@ async fn test_tencent_cloud_tts() {
 
     let client = TencentCloudTtsClient::new(config);
     let text = "Hello, this is a test of Tencent Cloud TTS.";
-    match client.synthesize(text, None, None).await {
-        Ok(mut stream) => {
-            // Collect all chunks from the stream
-            let mut total_size = 0;
-            let mut chunks_count = 0;
-            let mut collected_audio = Vec::new();
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(TTSEvent::AudioChunk(audio)) => {
-                        total_size += audio.len();
-                        chunks_count += 1;
-                        collected_audio.extend_from_slice(&audio);
-                    }
-                    Ok(TTSEvent::Finished) => {
-                        break;
-                    }
-                    Ok(TTSEvent::Subtitles { .. }) => {
-                        // ignore progress
-                    }
-                    Err(e) => {
-                        println!("Error in audio stream chunk: {:?}", e);
-                        break;
-                    }
-                }
+    let mut stream = client.start().await.expect("Failed to start TTS stream");
+    client
+        .synthesize(text, None, None, None)
+        .await
+        .expect("Failed to synthesize text");
+    // Collect all chunks from the stream
+    let mut total_size = 0;
+    let mut chunks_count = 0;
+    let mut collected_audio = Vec::new();
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(SynthesisEvent::AudioChunk(audio)) => {
+                total_size += audio.len();
+                chunks_count += 1;
+                collected_audio.extend_from_slice(&audio);
             }
-            println!("Total audio size: {} bytes", total_size);
-            println!("Total chunks: {}", chunks_count);
+            Ok(SynthesisEvent::Finished) => {
+                break;
+            }
+            Ok(SynthesisEvent::Subtitles { .. }) => {
+                // ignore progress
+            }
+            Err(e) => {
+                println!("Error in audio stream chunk: {:?}", e);
+                break;
+            }
         }
-        Err(e) => {
-            panic!("TTS synthesis error: {:?}", e);
-        }
-    };
+    }
+    println!("Total audio size: {} bytes", total_size);
+    println!("Total chunks: {}", chunks_count);
 }
 
 #[tokio::test]
@@ -115,34 +113,36 @@ async fn test_aliyun_tts() {
 
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
+    let mut stream = client
+        .start()
+        .await
+        .expect("Failed to start Aliyun TTS stream");
 
-    let stream = client.synthesize("Hello, how are you?", None, None).await;
-    if let Ok(mut stream) = stream {
-        let mut audio_collector = Vec::with_capacity(8096);
-        let mut chunks_count = 0;
-        while let Some(res) = stream.next().await {
-            match res {
-                Ok(TTSEvent::AudioChunk(chunk)) => {
-                    audio_collector.extend_from_slice(&chunk);
-                    chunks_count += 1;
-                }
-                Ok(TTSEvent::Finished) => {
-                    break;
-                }
-                Ok(TTSEvent::Subtitles(_subtitles)) => {
-                    // ignore progress
-                }
-                Err(e) => {
-                    panic!("Error in audio stream chunk: {:?}", e);
-                }
+    client
+        .synthesize("Hello, how are you?", None, None, None)
+        .await
+        .expect("Failed to synthesize text");
+    let mut audio_collector = Vec::with_capacity(8096);
+    let mut chunks_count = 0;
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(SynthesisEvent::AudioChunk(chunk)) => {
+                audio_collector.extend_from_slice(&chunk);
+                chunks_count += 1;
+            }
+            Ok(SynthesisEvent::Finished) => {
+                break;
+            }
+            Ok(SynthesisEvent::Subtitles(_subtitles)) => {
+                // ignore progress
+            }
+            Err(e) => {
+                panic!("Error in audio stream chunk: {:?}", e);
             }
         }
-        println!("Total audio size: {} bytes", audio_collector.len());
-        println!("Total chunks: {}", chunks_count);
-        // save_audio_to_files(&audio_collector, 16000, "test_aliyun_tts").unwrap();
-    } else {
-        panic!("Error in audio stream: {:?}", stream.err());
     }
+    println!("Total audio size: {} bytes", audio_collector.len());
+    println!("Total chunks: {}", chunks_count);
 }
 
 /// Save PCM audio data to files for testing

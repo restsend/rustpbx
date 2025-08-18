@@ -7,7 +7,7 @@ use futures::StreamExt;
 use rustpbx::llm::LlmContent;
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
-use rustpbx::synthesis::{SynthesisClient, TTSEvent};
+use rustpbx::synthesis::{SynthesisClient, SynthesisEvent};
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
 use rustpbx::{PcmBuf, Sample};
 use std::collections::VecDeque;
@@ -436,43 +436,44 @@ async fn main() -> Result<()> {
                                 if let Ok(LlmContent::Final(text)) = content {
                                     info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
                                     let st = Instant::now();
-                                    if let Ok(mut audio_stream) =
-                                        tts_client.synthesize(&text, None, None).await
-                                    {
-                                        let mut total_bytes = 0;
-                                        while let Some(Ok(event)) = audio_stream.next().await {
-                                            match event {
-                                                TTSEvent::AudioChunk(chunk) => {
-                                                    total_bytes += chunk.len();
-                                                    let audio_data: PcmBuf =
-                                                        bytes_to_samples(&chunk);
-                                                    let final_audio =
-                                                        if sample_rate != output_sample_rate {
-                                                            resample::resample_mono(
-                                                                &audio_data,
-                                                                sample_rate,
-                                                                output_sample_rate,
-                                                            )
-                                                        } else {
-                                                            audio_data
-                                                        };
-                                                    output_buffer.push(&final_audio);
-                                                }
-                                                TTSEvent::Finished => {
-                                                    break;
-                                                }
-                                                _ => {}
+                                    let mut audio_stream = tts_client
+                                        .start()
+                                        .await
+                                        .expect("Failed to start TTS stream");
+                                    tts_client
+                                        .synthesize(&text, None, None, None)
+                                        .await
+                                        .expect("Failed to synthesize text");
+
+                                    let mut total_bytes = 0;
+                                    while let Some(Ok(event)) = audio_stream.next().await {
+                                        match event {
+                                            SynthesisEvent::AudioChunk(chunk) => {
+                                                total_bytes += chunk.len();
+                                                let audio_data: PcmBuf = bytes_to_samples(&chunk);
+                                                let final_audio =
+                                                    if sample_rate != output_sample_rate {
+                                                        resample::resample_mono(
+                                                            &audio_data,
+                                                            sample_rate,
+                                                            output_sample_rate,
+                                                        )
+                                                    } else {
+                                                        audio_data
+                                                    };
+                                                output_buffer.push(&final_audio);
                                             }
+                                            SynthesisEvent::Finished => {
+                                                break;
+                                            }
+                                            _ => {}
                                         }
-                                        info!(
-                                            "TTS synthesis: {}ms ({}) bytes",
-                                            st.elapsed().as_millis(),
-                                            total_bytes
-                                        );
-                                    } else {
-                                        error!("Error synthesizing TTS");
-                                        break;
                                     }
+                                    info!(
+                                        "TTS synthesis: {}ms ({}) bytes",
+                                        st.elapsed().as_millis(),
+                                        total_bytes
+                                    );
                                 } else if let Err(e) = content {
                                     error!("Error generating LLM response: {}", e);
                                     break;
