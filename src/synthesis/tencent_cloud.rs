@@ -213,12 +213,12 @@ impl TencentCloudTtsClient {
                                 "Failed Tencent TTS response: {:?}",
                                 response
                             );
-                            self.tx.send(Err(anyhow!(
-                                "Tencent TTS failed, Session: {}, code: {}, message: {}",
-                                session_id,
-                                response.code,
-                                response.message
-                            )))?;
+                            match self.tx.send(Err(anyhow!("{}", response.message))) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(session_id, "Failed to send error: {}", e);
+                                }
+                            }
                             break;
                         }
 

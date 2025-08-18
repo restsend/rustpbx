@@ -64,16 +64,6 @@ impl SynthesisHandle {
             command_tx,
         }
     }
-
-    pub fn new_empty() -> Self {
-        // Create an unbounded channel and discard the receiver
-        let (tx, _) = mpsc::unbounded_channel();
-        Self {
-            play_id: None,
-            command_tx: tx,
-        }
-    }
-
     pub fn try_send(
         &self,
         cmd: SynthesisCommand,
@@ -200,25 +190,24 @@ impl Track for TtsTrack {
         let event_sender_clone = event_sender.clone();
         let client_ref = client.clone();
         let command_loop = async move {
-            let mut last_play_id = None;
             while let Some(mut command) = command_rx.recv().await {
                 let text = command.text;
                 let play_id = command.play_id;
                 if command.option.speaker.is_none() {
                     command.option.speaker = command.speaker;
                 }
-                if play_id != last_play_id || play_id.is_none() {
-                    last_play_id = play_id.clone();
-                    buffer_ref.lock().await.clear();
-                }
-                let cache_key = cache::generate_cache_key(
-                    &format!("tts:{}{}", provider, text),
-                    sample_rate,
-                    command.option.speaker.as_ref(),
-                    command.option.speed.clone(),
-                );
-                synthesize_done_ref.store(false, Ordering::Relaxed);
                 let streaming = command.streaming.unwrap_or(false);
+                let cache_key = if streaming && use_cache {
+                    Some(cache::generate_cache_key(
+                        &format!("tts:{}{}", provider, text),
+                        sample_rate,
+                        command.option.speaker.as_ref(),
+                        command.option.speed.clone(),
+                    ))
+                } else {
+                    None
+                };
+                synthesize_done_ref.store(false, Ordering::Relaxed);
 
                 status_ref
                     .write()
@@ -233,12 +222,12 @@ impl Track for TtsTrack {
                         }
                         status.play_id = play_id.clone();
                         status.speaker = command.option.speaker.clone();
-                        status.cache_key = Some(cache_key.clone());
+                        status.cache_key = cache_key.clone();
                         Ok(())
                     })
                     .ok();
 
-                if !streaming && use_cache {
+                if let Some(cache_key) = cache_key {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
@@ -264,7 +253,7 @@ impl Track for TtsTrack {
                                     .write()
                                     .as_mut()
                                     .and_then(|status| {
-                                        status.total_audio_len += audio.len();
+                                        status.total_audio_len = audio.len();
                                         status.subtitles.push(Subtitle::new(
                                             0,
                                             duration,
@@ -373,7 +362,11 @@ impl Track for TtsTrack {
                             .extend(bytes_to_samples(&processed_chunk));
                     }
                     Ok(SynthesisEvent::Finished) => {
-                        break;
+                        info!(
+                            session_id,
+                            "synthesis finished, total audio length: {} bytes",
+                            status_ref.read().unwrap().total_audio_len
+                        );
                     }
                     Ok(SynthesisEvent::Subtitles(subtitles)) => {
                         status_ref
@@ -386,7 +379,7 @@ impl Track for TtsTrack {
                             .ok();
                     }
                     Err(e) => {
-                        warn!(session_id, "Error in audio stream chunk: {:?}", e);
+                        warn!(session_id, "Error in audio stream chunk: {}", e);
                         event_sender_clone
                             .send(SessionEvent::Error {
                                 timestamp: crate::get_timestamp(),
@@ -429,11 +422,9 @@ impl Track for TtsTrack {
                 "synthesize audio completed",
             );
 
-            // Cache the complete audio if caching is enabled
             if use_cache && !audio_chunks.is_empty() {
-                // Combine all chunks for caching
-                let complete_audio: Vec<u8> = audio_chunks.into_iter().flatten().collect();
                 if let Some(ref cache_key) = status.cache_key {
+                    let complete_audio: Vec<u8> = audio_chunks.into_iter().flatten().collect();
                     cache::store_in_cache(cache_key, &complete_audio).await.ok();
                 }
             }
@@ -509,7 +500,6 @@ impl Track for TtsTrack {
                 }
                 _ = token.cancelled() => {
                     let remaining_size = {buffer.lock().await.len() * 2};
-
                     let status = match status.write() {
                         Ok(status) => status.clone(),
                         Err(e) => {

@@ -533,6 +533,8 @@ impl ActiveCall {
             text = %play_command.text,
             speaker = ?play_command.speaker,
             auto_hangup = ?auto_hangup,
+            ?play_id,
+            streaming,
             "new synthesis command"
         );
 
@@ -674,6 +676,7 @@ impl ActiveCall {
         if let Some(moh) = refer_option.as_ref().and_then(|o| o.moh.clone()) {
             self.do_play(moh, None, None).await?;
         }
+        self.tts_handle.lock().await.take();
         let token = self.cancel_token.child_token();
         let session_id = self.session_id.clone();
         let track_id = self.track_config.server_side_track_id.clone();
