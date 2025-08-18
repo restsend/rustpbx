@@ -138,11 +138,33 @@ impl TryFrom<&String> for CodecType {
         }
     }
 }
+#[cfg(target_endian = "little")]
+pub fn samples_to_bytes(samples: &[Sample]) -> Vec<u8> {
+    unsafe {
+        std::slice::from_raw_parts(
+            samples.as_ptr() as *const u8,
+            samples.len() * std::mem::size_of::<Sample>(),
+        )
+        .to_vec()
+    }
+}
 
+#[cfg(target_endian = "big")]
 pub fn samples_to_bytes(samples: &[Sample]) -> Vec<u8> {
     samples.iter().flat_map(|s| s.to_le_bytes()).collect()
 }
 
+#[cfg(target_endian = "little")]
+pub fn bytes_to_samples(u8_data: &[u8]) -> PcmBuf {
+    unsafe {
+        std::slice::from_raw_parts(
+            u8_data.as_ptr() as *const Sample,
+            u8_data.len() / std::mem::size_of::<Sample>(),
+        )
+        .to_vec()
+    }
+}
+#[cfg(target_endian = "big")]
 pub fn bytes_to_samples(u8_data: &[u8]) -> PcmBuf {
     u8_data
         .chunks(2)

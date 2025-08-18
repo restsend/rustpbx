@@ -1,21 +1,18 @@
 use super::{TranscriptionClient, TranscriptionOption};
 use crate::{
+    Sample, TrackId,
     event::{EventSender, SessionEvent},
     media::codecs,
-    Sample, TrackId,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{
-    future::Future,
-    pin::Pin
-};
+use std::{future::Future, pin::Pin};
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -225,7 +222,8 @@ impl AliyunAsrClient {
                                         .header
                                         .error_message
                                         .expect("mising error message");
-                                    let error = format!("Error from ASR service: {} ({})", code, message);
+                                    let error =
+                                        format!("Error from ASR service: {} ({})", code, message);
                                     warn!("{}", error);
                                     return Err(anyhow!(error));
                                 }
