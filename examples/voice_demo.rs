@@ -424,6 +424,7 @@ async fn main() -> Result<()> {
         }
     };
 
+    let cancel_token_clone = cancel_token.clone();
     let transcription_loop = async move {
         while let Ok(event) = event_receiver.recv().await {
             match event {
@@ -437,11 +438,11 @@ async fn main() -> Result<()> {
                                     info!("LLM response: {}ms {}", st.elapsed().as_millis(), text);
                                     let st = Instant::now();
                                     let mut audio_stream = tts_client
-                                        .start()
+                                        .start(cancel_token_clone.clone())
                                         .await
                                         .expect("Failed to start TTS stream");
                                     tts_client
-                                        .synthesize(&text, None, None, None)
+                                        .synthesize(&text, None, None)
                                         .await
                                         .expect("Failed to synthesize text");
 

@@ -12,6 +12,7 @@ use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 // A mock synthesis client that returns a predefined audio sample
 struct MockSynthesisClient;
@@ -21,7 +22,7 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         // Generate a simple sine wave audio sample for testing
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
@@ -47,7 +48,6 @@ impl SynthesisClient for MockSynthesisClient {
     async fn synthesize(
         &self,
         _text: &str,
-        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
