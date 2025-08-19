@@ -824,7 +824,7 @@ function mainApp() {
                 };
 
                 // Add provider-specific TTS configuration
-                if (this.config.tts.provider === 'tencent') {
+                if (this.config.tts.provider === 'tencent' || this.config.tts.provider === 'tencent_streaming') {
                     if (this.config.tts.appId) ttsConfig.appId = this.config.tts.appId;
                     if (this.config.tts.secretId) ttsConfig.secretId = this.config.tts.secretId;
                     if (this.config.tts.secretKey) ttsConfig.secretKey = this.config.tts.secretKey;

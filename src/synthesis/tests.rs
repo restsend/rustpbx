@@ -1,4 +1,5 @@
 use crate::synthesis::SynthesisEvent;
+use crate::synthesis::tencent_cloud_streaming::TencentCloudStreamingTtsClient;
 use crate::synthesis::{
     AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
     tencent_cloud::TencentCloudTtsClient,
@@ -10,6 +11,7 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use tokio_util::sync::CancellationToken;
 
 fn get_tencent_credentials() -> Option<(String, String, String)> {
     dotenv().ok();
@@ -51,9 +53,12 @@ async fn test_tencent_cloud_tts() {
 
     let client = TencentCloudTtsClient::new(config);
     let text = "Hello, this is a test of Tencent Cloud TTS.";
-    let mut stream = client.start().await.expect("Failed to start TTS stream");
+    let mut stream = client
+        .start(CancellationToken::new())
+        .await
+        .expect("Failed to start TTS stream");
     client
-        .synthesize(text, None, None, None)
+        .synthesize(text, None, None)
         .await
         .expect("Failed to synthesize text");
     // Collect all chunks from the stream
@@ -114,14 +119,15 @@ async fn test_aliyun_tts() {
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
     let mut stream = client
-        .start()
+        .start(CancellationToken::new())
         .await
         .expect("Failed to start Aliyun TTS stream");
 
     client
-        .synthesize("Hello, how are you?", None, None, None)
+        .synthesize("Hello, how are you?", None, None)
         .await
         .expect("Failed to synthesize text");
+
     let mut audio_collector = Vec::with_capacity(8096);
     let mut chunks_count = 0;
     while let Some(res) = stream.next().await {
@@ -143,6 +149,79 @@ async fn test_aliyun_tts() {
     }
     println!("Total audio size: {} bytes", audio_collector.len());
     println!("Total chunks: {}", chunks_count);
+}
+
+#[tokio::test]
+async fn test_tencent_cloud_streaming_tts() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::level_filters::LevelFilter::DEBUG)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+        .ok();
+
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider()).ok();
+
+    let (secret_id, secret_key, app_id) = match get_tencent_credentials() {
+        Some(creds) => creds,
+        None => {
+            println!(
+                "Skipping test_tencent_cloud_streaming_tts: No credentials found in .env file"
+            );
+            return;
+        }
+    };
+
+    let config = SynthesisOption {
+        secret_id: Some(secret_id),
+        secret_key: Some(secret_key),
+        app_id: Some(app_id),
+        speaker: Some("101001".to_string()), // Standard female voice
+        volume: Some(0),                     // Medium volume
+        speed: Some(0.0),                    // Normal speed
+        codec: Some("pcm".to_string()),      // PCM format for easy verification
+        ..Default::default()
+    };
+
+    let client = TencentCloudStreamingTtsClient::new(config);
+    let mut stream = client
+        .start(CancellationToken::new())
+        .await
+        .expect("Failed to start TTS stream");
+    for _ in 0..5 {
+        client
+            .synthesize("how are you?", None, None)
+            .await
+            .expect("Failed to send text");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    client
+        .synthesize(".", Some(true), None)
+        .await
+        .expect("Failed to send finish message");
+
+    let mut collected_audio = Vec::new();
+    let mut finished = false;
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(SynthesisEvent::AudioChunk(audio)) => {
+                collected_audio.extend_from_slice(&audio);
+            }
+            Ok(SynthesisEvent::Finished) => {
+                finished = true;
+                break;
+            }
+            Ok(SynthesisEvent::Subtitles { .. }) => {
+                // ignore progress
+            }
+            Err(e) => {
+                panic!("Error in audio stream chunk: {:?}", e);
+            }
+        }
+    }
+    assert!(finished);
+    assert!(collected_audio.len() > 0);
 }
 
 /// Save PCM audio data to files for testing

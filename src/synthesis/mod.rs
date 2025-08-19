@@ -4,12 +4,15 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 mod aliyun;
 mod tencent_cloud;
+mod tencent_cloud_streaming;
 mod voiceapi;
 
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
+pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Clone, Default)]
@@ -30,6 +33,8 @@ pub type SynthesisEventReceiver = mpsc::UnboundedReceiver<Result<SynthesisEvent>
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,
+    #[serde(rename = "tencent_streaming")]
+    TencentCloudStreaming,
     #[serde(rename = "voiceapi")]
     VoiceApi,
     #[serde(rename = "aliyun")]
@@ -42,6 +47,7 @@ impl std::fmt::Display for SynthesisType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SynthesisType::TencentCloud => write!(f, "tencent"),
+            SynthesisType::TencentCloudStreaming => write!(f, "tencent_streaming"),
             SynthesisType::VoiceApi => write!(f, "voiceapi"),
             SynthesisType::Aliyun => write!(f, "aliyun"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
@@ -59,6 +65,7 @@ impl<'de> Deserialize<'de> for SynthesisType {
             "tencent" => Ok(SynthesisType::TencentCloud),
             "voiceapi" => Ok(SynthesisType::VoiceApi),
             "aliyun" => Ok(SynthesisType::Aliyun),
+            "tencent_streaming" => Ok(SynthesisType::TencentCloudStreaming),
             _ => Ok(SynthesisType::Other(value)),
         }
     }
@@ -159,12 +166,14 @@ pub fn bytes_size_to_duration(bytes: usize, sample_rate: u32) -> u32 {
 pub trait SynthesisClient: Send + Sync {
     /// Returns the provider type for this synthesis client.
     fn provider(&self) -> SynthesisType;
-    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>>;
+    async fn start(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>>;
     // break out of stream polling loop when res is Err or Progress is finished
     async fn synthesize(
         &self,
         text: &str,
-        streaming: Option<bool>,
         end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()>;
@@ -239,6 +248,10 @@ pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn Synthe
     match provider {
         SynthesisType::TencentCloud => {
             let client = TencentCloudTtsClient::new(option);
+            Ok(Box::new(client))
+        }
+        SynthesisType::TencentCloudStreaming => {
+            let client = TencentCloudStreamingTtsClient::new(option);
             Ok(Box::new(client))
         }
         SynthesisType::VoiceApi => {
