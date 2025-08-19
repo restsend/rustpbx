@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt, stream::BoxStream};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -262,7 +263,7 @@ impl SynthesisClient for AliyunTtsClient {
         SynthesisType::Aliyun
     }
 
-    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("AliyunTtsClient: Receiver already taken, cannot start new stream")
         })?;
@@ -277,7 +278,6 @@ impl SynthesisClient for AliyunTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {

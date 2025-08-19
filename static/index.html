@@ -139,12 +139,32 @@
                                 <select id="ttsProvider" x-model="config.tts.provider"
                                     class="border p-2 rounded w-full">
                                     <option value="tencent">Tencent Cloud</option>
+                                    <option value="tencent_streaming">Tencent Cloud Streaming</option>
                                     <option value="voiceapi">Voice API</option>
                                 </select>
                             </div>
 
                             <div x-show="config.tts.provider === 'tencent'" class="border-t pt-3 space-y-2">
                                 <p class="text-xs text-gray-600 mb-2">Tencent Cloud 配置</p>
+                                <div>
+                                    <label for="ttsAppId" class="text-sm">App ID</label>
+                                    <input type="text" id="ttsAppId" x-model="config.tts.appId"
+                                        placeholder="Enter Tencent App ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="ttsSecretId" class="text-sm">Secret ID</label>
+                                    <input type="text" id="ttsSecretId" x-model="config.tts.secretId"
+                                        placeholder="Enter Tencent Secret ID" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="ttsSecretKey" class="text-sm">Secret Key</label>
+                                    <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
+                                        placeholder="Enter Tencent Secret Key" class="border p-2 rounded w-full">
+                                </div>
+                            </div>
+
+                            <div x-show="config.tts.provider === 'tencent_streaming'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Tencent Cloud Streaming 配置</p>
                                 <div>
                                     <label for="ttsAppId" class="text-sm">App ID</label>
                                     <input type="text" id="ttsAppId" x-model="config.tts.appId"
@@ -176,8 +196,8 @@
                                     <label for="ttsSpeaker" class="text-sm">Speaker</label>
                                     <select id="ttsSpeaker" x-model="config.tts.speaker"
                                         class="border p-2 rounded w-full">
-                                        <option value="601003">Female</option>
-                                        <option value="601004">Male</option>
+                                        <option value="101001">Female</option>
+                                        <option value="100510000">Male</option>
                                     </select>
                                 </div>
                                 <div>

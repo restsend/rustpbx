@@ -172,7 +172,7 @@ impl Track for TtsTrack {
             .ok_or(anyhow!("Synthesis client not found"))?;
         let client = Arc::new(client);
         let client_ref = client.clone();
-        let mut stream = client_ref.start().await?;
+        let mut stream = client_ref.start(self.cancel_token.clone()).await?;
         let status = Arc::new(RwLock::new(SynthesisStatus {
             play_id: None,
             speaker: None,
@@ -276,7 +276,6 @@ impl Track for TtsTrack {
                 match client_ref
                     .synthesize(
                         &text,
-                        command.streaming,
                         command.end_of_stream,
                         Some(command.option),
                     )

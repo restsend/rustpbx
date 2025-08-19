@@ -6,6 +6,7 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use regex::Regex;
 use rustpbx::{PcmBuf, version};
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
@@ -228,10 +229,8 @@ async fn main() -> Result<()> {
         // Generate speech for the segment text
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
-            let mut audio_stream = tts_client.start().await?;
-            tts_client
-                .synthesize(&segment.text, None, None, None)
-                .await?;
+            let mut audio_stream = tts_client.start(CancellationToken::new()).await?;
+            tts_client.synthesize(&segment.text, None, None).await?;
             let mut total_bytes = 0;
             while let Some(chunk_result) = audio_stream.next().await {
                 match chunk_result {
