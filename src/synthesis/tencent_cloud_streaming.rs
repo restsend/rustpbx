@@ -298,7 +298,7 @@ impl SynthesisClient for TencentCloudStreamingTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _end_of_stream: Option<bool>,
+        end_of_stream: Option<bool>,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
         let mut sender = self.tx.lock().unwrap();
@@ -311,7 +311,7 @@ impl SynthesisClient for TencentCloudStreamingTtsClient {
             sender.send(text.to_string())?;
         }
 
-        if let Some(true) = _end_of_stream {
+        if let Some(true) = end_of_stream {
             *sender = None;
         }
 

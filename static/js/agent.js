@@ -420,6 +420,14 @@ function mainApp() {
             const processTtsSegment = (content) => {
                 ttsBuffer += content;
 
+                if (this.config.tts.provider == 'tencent_streaming') {
+                    if (firstSegmentUsage === undefined) {
+                        firstSegmentUsage = `TTFS: ${(new Date() - startTime)} ms`
+                    }
+                    this.sendTtsRequest(content, undefined, playId, firstSegmentUsage);
+                    firstSegmentUsage = '';
+                    return;
+                }
                 // Check if the buffer contains any punctuation
                 // Matching for periods, question marks, exclamation marks, colons, semicolons
                 const punctuationRegex = /([,，。.!?！？;；、\n])\s/g;
@@ -497,8 +505,11 @@ function mainApp() {
                     const processStream = ({ done, value }) => {
                         if (done) {
                             let duration = new Date() - start;
+                            if (this.config.tts.provider == 'tencent_streaming') {
+                                this.sendTtsRequest("", autoHangup, playId, undefined, true);
+                            }
                             // When stream is complete, send any remaining text in the buffer
-                            if (ttsBuffer.trim().length > 0) {
+                            if (ttsBuffer.trim().length > 0 && this.config.tts.provider != 'tencent_streaming') {
                                 this.sendTtsRequest(ttsBuffer, autoHangup, playId);
                             }
                             this.logEvent('LLM', `${duration} ms`, { llmResponse: fullLlmResponse });
@@ -562,7 +573,7 @@ function mainApp() {
                     this.addLogEntry('error', `LLM API error: ${error.message}`);
 
                     // If there was already some response, send that for TTS
-                    if (fullLlmResponse) {
+                    if (fullLlmResponse && this.config.tts.provider != 'tencent_streaming') {
                         this.sendTtsRequest(fullLlmResponse, autoHangup, playId, '');
                     }
                 });
@@ -576,8 +587,8 @@ function mainApp() {
             this.endCall();
         },
         // Send TTS request to the WebSocket
-        sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined) {
-            if (!text || text.trim() === '') {
+        sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined, endOfStream = false) {
+            if ((!text || text.trim() === '') && !endOfStream) {
                 this.addLogEntry('warning', 'Cannot send empty text to TTS');
                 return;
             }
@@ -590,7 +601,8 @@ function mainApp() {
                     command: 'tts',
                     text: text,
                     autoHangup,
-                    playId
+                    playId,
+                    endOfStream
                 };
 
                 this.ws.send(JSON.stringify(ttsCommand));

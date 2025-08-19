@@ -274,11 +274,7 @@ impl Track for TtsTrack {
                 }
 
                 match client_ref
-                    .synthesize(
-                        &text,
-                        command.end_of_stream,
-                        Some(command.option),
-                    )
+                    .synthesize(&text, command.end_of_stream, Some(command.option))
                     .await
                 {
                     Ok(_) => {}
