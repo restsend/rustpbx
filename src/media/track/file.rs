@@ -6,7 +6,7 @@ use crate::media::{
     track::{Track, TrackConfig, TrackPacketSender},
 };
 use crate::{AudioFrame, PcmBuf, Samples, TrackId};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hound::WavReader;
 use reqwest::Client;
@@ -107,17 +107,29 @@ impl WavAudioReader {
             hound::SampleFormat::Int => match spec.bits_per_sample {
                 16 => {
                     for sample in wav_reader.samples::<i16>() {
-                        all_samples.push(sample.unwrap_or(0));
+                        if let Ok(s) = sample {
+                            all_samples.push(s);
+                        } else {
+                            break;
+                        }
                     }
                 }
                 8 => {
                     for sample in wav_reader.samples::<i8>() {
-                        all_samples.push(sample.unwrap_or(0) as i16);
+                        if let Ok(s) = sample {
+                            all_samples.push((s as i16) * 256); // Convert 8-bit to 16-bit
+                        } else {
+                            break;
+                        }
                     }
                 }
                 24 | 32 => {
                     for sample in wav_reader.samples::<i32>() {
-                        all_samples.push((sample.unwrap_or(0) >> 16) as i16);
+                        if let Ok(s) = sample {
+                            all_samples.push((s >> 16) as i16); // Convert 24/32-bit to 16-bit
+                        } else {
+                            break;
+                        }
                     }
                 }
                 _ => {
@@ -129,7 +141,11 @@ impl WavAudioReader {
             },
             hound::SampleFormat::Float => {
                 for sample in wav_reader.samples::<f32>() {
-                    all_samples.push((sample.unwrap_or(0.0) * 32767.0) as i16);
+                    if let Ok(s) = sample {
+                        all_samples.push((s * 32767.0) as i16); // Convert float to 16-bit
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -732,6 +748,28 @@ mod tests {
     use crate::media::cache::ensure_cache_dir;
     use tokio::sync::{broadcast, mpsc};
 
+    #[tokio::test]
+    async fn test_wav_reader() -> Result<()> {
+        let file_path = "fixtures/sample.wav";
+        let file = File::open(file_path)?;
+        let mut reader = WavAudioReader::from_file(file, 16000)?;
+        let mut total_samples = 0;
+        let mut total_duration_ms = 0.0;
+        let mut chunk_count = 0;
+        while let Some((chunk, chunk_sample_rate)) = reader.read_chunk(20)? {
+            total_samples += chunk.len();
+            chunk_count += 1;
+            let chunk_duration_ms = (chunk.len() as f64 / chunk_sample_rate as f64) * 1000.0;
+            total_duration_ms += chunk_duration_ms;
+        }
+
+        let duration_seconds = total_duration_ms / 1000.0;
+        println!("Total chunks: {}", chunk_count);
+        println!("Actual samples: {}", total_samples);
+        println!("Actual duration: {:.2} seconds", duration_seconds);
+        assert_eq!(format!("{:.2}", duration_seconds), "7.51");
+        Ok(())
+    }
     #[tokio::test]
     async fn test_wav_file_track() -> Result<()> {
         println!("Starting WAV file track test");

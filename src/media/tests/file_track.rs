@@ -1,16 +1,15 @@
-use anyhow::Result;
-use tempfile::TempDir;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
-use tokio::time::Duration;
-
 use crate::event::SessionEvent;
 use crate::media::processor::Processor;
 use crate::media::stream::MuteProcessor;
-use crate::media::track::file::FileTrack;
 use crate::media::track::Track;
+use crate::media::track::file::FileTrack;
 use crate::{AudioFrame, Samples};
+use anyhow::Result;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tempfile::TempDir;
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::Duration;
 
 // Simple test processor that counts frames
 struct CountingProcessor {
@@ -136,7 +135,9 @@ async fn test_file_track_wav() -> Result<()> {
     // For this test, let's just skip asserting on received packets
     // if we've had some troubleshooting issues
     if received_packets == 0 {
-        println!("Warning: No packets received. This would normally fail the test but we're skipping for now.");
+        println!(
+            "Warning: No packets received. This would normally fail the test but we're skipping for now."
+        );
         // Skip stopping and returning early to avoid panic
         return Ok(());
     }
@@ -176,7 +177,6 @@ async fn test_file_track_wav() -> Result<()> {
     Ok(())
 }
 
-
 #[tokio::test]
 async fn test_mute_and_unmute() -> Result<()> {
     let test_file = "fixtures/noise_gating_zh_16k.wav".to_string();
@@ -198,7 +198,6 @@ async fn test_mute_and_unmute() -> Result<()> {
 
     file_track.start(event_sender, packet_sender).await?;
     MuteProcessor::mute_track(&mut file_track);
-
 
     let timeout = tokio::time::sleep(Duration::from_secs(3));
     tokio::pin!(timeout);
