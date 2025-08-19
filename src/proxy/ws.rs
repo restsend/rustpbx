@@ -1,14 +1,14 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use rsip::SipMessage;
+use rsip::{SipMessage, prelude::HeadersExt};
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
 };
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub async fn sip_ws_handler(
     token: CancellationToken,
@@ -40,15 +40,15 @@ pub async fn sip_ws_handler(
     {
         Ok(conn) => conn,
         Err(e) => {
-            error!("Failed to create channel connection: {:?}", e);
+            warn!(addr = %local_addr, "failed to create channel connection: {}", e);
             return;
         }
     };
 
     let sip_connection = SipConnection::Channel(connection.clone());
     info!(
-        addr = ?local_addr,
-        "Created WebSocket channel connection"
+        addr = %local_addr,
+        "created WebSocket channel connection"
     );
 
     endpoint_ref
@@ -61,41 +61,45 @@ pub async fn sip_ws_handler(
     let read_from_websocket_loop = async move {
         while let Some(Ok(message)) = ws_read.next().await {
             match message {
-                Message::Text(text) => match SipMessage::try_from(text.as_str()) {
-                    Ok(sip_msg) => {
-                        debug!(
-                            addr = ?local_addr_clone,
-                            "WebSocket received SIP message: {}",
-                            sip_msg.to_string().lines().next().unwrap_or("")
-                        );
-                        let msg = match SipConnection::update_msg_received(
-                            sip_msg,
-                            client_addr.addr,
-                            transport_type,
-                        ) {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                error!("Error updating SIP via: {:?}", e);
-                                continue;
+                Message::Text(text) => {
+                    let text = text.to_string();
+                    match SipMessage::try_from(text.as_str()) {
+                        Ok(sip_msg) => {
+                            debug!(
+                                addr = %local_addr_clone,
+                                cseq = sip_msg.cseq_header().ok().map(|c| c.to_string()).unwrap_or_default(),
+                                "WebSocket received: {}",
+                                text.lines().next().unwrap_or("")
+                            );
+                            let msg = match SipConnection::update_msg_received(
+                                sip_msg,
+                                client_addr.addr,
+                                transport_type,
+                            ) {
+                                Ok(msg) => msg,
+                                Err(e) => {
+                                    warn!(addr = %local_addr_clone, "error updating SIP via: {}", e);
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
+                                msg,
+                                sip_connection_clone.clone(),
+                                local_addr_clone.clone(),
+                            )) {
+                                warn!(addr = %local_addr_clone, "error forwarding message to transport: {}", e);
+                                break;
                             }
-                        };
-                        if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
-                            msg,
-                            sip_connection_clone.clone(),
-                            local_addr_clone.clone(),
-                        )) {
-                            error!("Error forwarding message to transport: {:?}", e);
-                            break;
+                        }
+                        Err(e) => {
+                            warn!(addr = %local_addr_clone, "error parsing SIP message from WebSocket: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Error parsing SIP message from WebSocket: {}", e);
-                    }
-                },
+                }
                 Message::Binary(bin) => match SipMessage::try_from(bin) {
                     Ok(sip_msg) => {
                         debug!(
-                            addr = ?local_addr_clone,
+                            addr = %local_addr_clone,
                             "WebSocket received binary SIP message: {}",
                             sip_msg.to_string().lines().next().unwrap_or("")
                         );
@@ -104,16 +108,16 @@ pub async fn sip_ws_handler(
                             sip_connection_clone.clone(),
                             local_addr_clone.clone(),
                         )) {
-                            error!("Error forwarding binary message to transport: {:?}", e);
+                            warn!(addr = %local_addr_clone, "error forwarding binary message to transport: {:?}", e);
                             break;
                         }
                     }
                     Err(e) => {
-                        warn!("Error parsing binary SIP message from WebSocket: {}", e);
+                        warn!(addr = %local_addr_clone, "error parsing binary SIP message from WebSocket: {}", e);
                     }
                 },
                 Message::Close(_) => {
-                    info!("WebSocket connection closed by client");
+                    info!(addr = %local_addr_clone, "WebSocket connection closed by client");
                     break;
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
@@ -126,20 +130,22 @@ pub async fn sip_ws_handler(
             match event {
                 TransportEvent::Incoming(sip_msg, _, _) => {
                     let message_text = sip_msg.to_string();
+                    let cseq = sip_msg.cseq_header().ok();
                     debug!(
-                        addr = ?local_addr_clone,
-                        "forwarding message to WebSocket: {}",
+                        addr = %local_addr_clone,
+                        cseq = cseq.map(|c| c.to_string()),
+                        "ws forwarding {}",
                         message_text.lines().next().unwrap_or("")
                     );
                     if let Err(e) = ws_sink.send(Message::Text(message_text.into())).await {
                         warn!(
-                        addr = ?local_addr_clone,"error sending message to WebSocket: {}", e);
+                        addr = %local_addr_clone, "error sending message to WebSocket: {}", e);
                         break;
                     }
                 }
                 TransportEvent::New(_) => {}
                 TransportEvent::Closed(_) => {
-                    info!("Transport connection closed");
+                    info!(addr = %local_addr_clone, "transport connection closed");
                     break;
                 }
             }
@@ -148,20 +154,12 @@ pub async fn sip_ws_handler(
 
     select! {
         _ = token.cancelled() => {
-            info!("WebSocket connection cancelled");
+            info!(addr = %local_addr, "WebSocket connection cancelled");
         }
-        _ = read_from_websocket_loop => {
-            info!(
-                addr = ?local_addr,
-                "WebSocket connection read task finished");
-        }
-        _ = write_to_websocket_loop => {
-            info!(
-                addr = ?local_addr,
-                "WebSocket connection write task finished");
-        }
+        _ = read_from_websocket_loop => {}
+        _ = write_to_websocket_loop => {}
     }
     ws_token.cancel();
     endpoint_ref.transport_layer.del_connection(&local_addr);
-    info!("WebSocket connection handler exiting");
+    info!(addr = %local_addr, "WebSocket connection handler exiting");
 }
