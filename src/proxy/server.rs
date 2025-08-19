@@ -8,7 +8,10 @@ use crate::{
     call::{LocationInspector, TransactionCookie},
     callrecord::CallRecordSender,
     config::ProxyConfig,
-    proxy::{auth::AuthBackend, call::CallRouter},
+    proxy::{
+        auth::AuthBackend,
+        call::{CallRouter, DialplanInspector},
+    },
 };
 use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
@@ -43,6 +46,7 @@ pub struct SipServerInner {
     pub user_backend: Arc<Box<dyn UserBackend>>,
     pub auth_backend: Arc<Option<Box<dyn AuthBackend>>>,
     pub call_router: Arc<Option<Box<dyn CallRouter>>>,
+    pub dialplan_inspector: Arc<Option<Box<dyn DialplanInspector>>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
@@ -68,6 +72,7 @@ pub struct SipServerBuilder {
     callrecord_sender: Option<CallRecordSender>,
     message_inspector: Option<Box<dyn MessageInspector>>,
     location_inspector: Option<Box<dyn LocationInspector>>,
+    dialplan_inspector: Option<Box<dyn DialplanInspector>>,
 }
 
 impl SipServerBuilder {
@@ -83,6 +88,7 @@ impl SipServerBuilder {
             callrecord_sender: None,
             message_inspector: None,
             location_inspector: None,
+            dialplan_inspector: None,
         }
     }
 
@@ -98,6 +104,14 @@ impl SipServerBuilder {
 
     pub fn with_call_router(mut self, call_router: Box<dyn CallRouter>) -> Self {
         self.call_router = Some(call_router);
+        self
+    }
+
+    pub fn with_dialplan_inspector(
+        mut self,
+        dialplan_inspector: Box<dyn DialplanInspector>,
+    ) -> Self {
+        self.dialplan_inspector = Some(dialplan_inspector);
         self
     }
 
@@ -236,6 +250,7 @@ impl SipServerBuilder {
 
         let call_router = self.call_router;
         let location_inspector = self.location_inspector;
+        let dialplan_inspector = self.dialplan_inspector;
 
         let inner = Arc::new(SipServerInner {
             app_state,
@@ -248,6 +263,7 @@ impl SipServerBuilder {
             callrecord_sender: self.callrecord_sender,
             endpoint,
             location_inspector: Arc::new(location_inspector),
+            dialplan_inspector: Arc::new(dialplan_inspector),
         });
 
         let mut allow_methods = Vec::new();

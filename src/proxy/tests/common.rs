@@ -64,6 +64,7 @@ pub async fn create_test_server_with_config(
         callrecord_sender: None,
         endpoint,
         location_inspector: Arc::new(None),
+        dialplan_inspector: Arc::new(None),
     });
 
     // Add test users
