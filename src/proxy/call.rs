@@ -31,6 +31,14 @@ pub trait CallRouter: Send + Sync {
         route_invite: Box<dyn RouteInvite>,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
+
+#[async_trait]
+pub trait DialplanInspector: Send + Sync {
+    async fn inspect_dialplan(&self, dialplan: Dialplan, _original: &rsip::Request) -> Dialplan {
+        dialplan
+    }
+}
+
 pub struct DefaultRouteInvite {
     pub routing_state: Arc<crate::proxy::routing::RoutingState>,
     pub config: Arc<ProxyConfig>,
@@ -201,6 +209,12 @@ impl CallModule {
                 }
                 return Err(e);
             }
+        };
+
+        let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
+            inspector.inspect_dialplan(dialplan, &tx.original).await
+        } else {
+            dialplan
         };
 
         let cancel_token = CancellationToken::new();
