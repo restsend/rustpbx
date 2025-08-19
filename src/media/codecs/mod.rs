@@ -99,6 +99,7 @@ impl CodecType {
             CodecType::PCMU => 0,
             CodecType::PCMA => 8,
             CodecType::G722 => 9,
+            #[cfg(feature = "opus")]
             CodecType::Opus => 111, // Dynamic payload type
             CodecType::TelephoneEvent => 101,
         }

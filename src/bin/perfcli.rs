@@ -6,7 +6,7 @@ use rustpbx::{
     call::{CallOption, Command},
     event::SessionEvent,
     media::{
-        codecs::{g722::G722Encoder, resample::resample_mono, CodecType, Encoder},
+        codecs::{CodecType, Encoder, g722::G722Encoder, resample::resample_mono},
         negotiate::strip_ipv6_candidates,
         track::{file::read_wav_file, webrtc::WebrtcTrack},
         vad::VADOption,
@@ -15,8 +15,8 @@ use rustpbx::{
 };
 use std::{
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -29,7 +29,7 @@ use webrtc::{
     peer_connection::{
         configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
     },
-    rtp_transceiver::{rtp_receiver::RTCRtpReceiver, RTCRtpTransceiver},
+    rtp_transceiver::{RTCRtpTransceiver, rtp_receiver::RTCRtpReceiver},
     track::{
         track_local::track_local_static_sample::TrackLocalStaticSample, track_remote::TrackRemote,
     },
@@ -349,6 +349,7 @@ async fn main() -> Result<()> {
     });
     let codec = match cli.codec.as_str() {
         "g722" => CodecType::G722,
+        #[cfg(feature = "opus")]
         "opus" => CodecType::Opus,
         "pcmu" => CodecType::PCMU,
         _ => return Err(anyhow::anyhow!("Invalid codec type")),
