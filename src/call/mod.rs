@@ -277,6 +277,7 @@ pub struct Dialplan {
     pub targets: DialStrategy,
     pub max_ring_time: u32,
     pub route_invite: Option<Box<dyn RouteInvite>>,
+    pub extras: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl Dialplan {
@@ -294,6 +295,7 @@ impl Default for Dialplan {
             targets: DialStrategy::Sequential(vec![]),
             max_ring_time: 60,
             route_invite: None,
+            extras: None,
         }
     }
 }

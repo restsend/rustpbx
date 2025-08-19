@@ -5,6 +5,26 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 #[serde(rename_all = "camelCase")]
+pub struct Attendee {
+    pub username: String,
+    pub realm: String,
+    pub source: String,
+}
+
+impl From<&String> for Attendee {
+    fn from(source: &String) -> Self {
+        let uri = rsip::Uri::try_from(source.as_str()).unwrap_or_default();
+        Self {
+            username: uri.user().unwrap_or_default().to_string(),
+            realm: uri.host().to_string(),
+            source: source.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event")]
+#[serde(rename_all = "camelCase")]
 pub enum SessionEvent {
     Incoming {
         #[serde(rename = "trackId")]
@@ -42,10 +62,15 @@ pub enum SessionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         initiator: Option<String>,
         start_time: String,
+        hangup_time: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         answer_time: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ringing_time: Option<String>,
+        from: Option<Attendee>,
+        to: Option<Attendee>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extra: Option<HashMap<String, serde_json::Value>>,
     },
     AnswerMachineDetection {
         // Answer machine detection
@@ -103,10 +128,10 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
         subtitle: Option<String>, // current tts text
-        position: Option<u32>, // word index in subtitle
+        position: Option<u32>,    // word index in subtitle
         #[serde(rename = "totalDuration")]
         total_duration: u32, // whole tts duration
-        current: u32,          // elapsed time since start of tts
+        current: u32,             // elapsed time since start of tts
     },
     AsrFinal {
         #[serde(rename = "trackId")]

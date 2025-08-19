@@ -202,16 +202,8 @@ fn on_dialog_terminated(
             ssrc: call_state_ref.ssrc,
         })
         .ok();
-    event_sender
-        .send(crate::event::SessionEvent::Hangup {
-            timestamp: crate::get_timestamp(),
-            reason: Some(format!("{:?}", call_state_ref.hangup_reason)),
-            initiator: Some(initiator),
-            start_time: call_state_ref.start_time.to_rfc3339(),
-            answer_time: call_state_ref.answer_time.map(|t| t.to_rfc3339()),
-            ringing_time: call_state_ref.ring_time.map(|t| t.to_rfc3339()),
-        })
-        .ok();
+    let hangup_event = call_state_ref.build_hangup_event(Some(initiator));
+    event_sender.send(hangup_event).ok();
 }
 
 pub async fn client_dialog_event_loop(
