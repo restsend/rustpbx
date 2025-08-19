@@ -413,8 +413,9 @@ impl ActiveCall {
     }
 
     async fn do_invite(&self, option: CallOption) -> Result<()> {
-        let _ = self.invite_or_accept(option, "invite".to_string()).await?;
-        Ok(())
+        self.invite_or_accept(option, "invite".to_string())
+            .await
+            .map(|_| ())
     }
 
     async fn do_accept(&self, mut option: CallOption) -> Result<()> {
@@ -944,14 +945,33 @@ impl ActiveCall {
                         _ => return Err(anyhow::anyhow!("call option not found")),
                     };
 
-                return self
+                match self
                     .create_outgoing_sip_track(
                         self.cancel_token.clone(),
                         self.call_state.clone(),
                         &self.session_id,
                         invite_option,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(answer) => {
+                        self.event_sender
+                            .send(SessionEvent::Answer {
+                                timestamp: crate::get_timestamp(),
+                                track_id: self.session_id.clone(),
+                                sdp: answer,
+                            })
+                            .ok();
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(
+                            session_id = self.session_id,
+                            "failed to create sip track: {}", e
+                        );
+                        return Err(e);
+                    }
+                }
             }
             ActiveCallType::B2bua => {
                 match self.invitation.get_pending_call(&self.session_id).await {
@@ -1170,7 +1190,7 @@ impl ActiveCall {
         call_state_ref: ActiveCallStateRef,
         track_id: &String,
         mut invite_option: InviteOption,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let ssrc = call_state_ref
             .read()
             .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1265,7 +1285,7 @@ impl ActiveCall {
             .update_remote_description(&track_id, &answer)
             .await
             .ok();
-        Ok(())
+        Ok(answer)
     }
 
     /// Detect if SDP is WebRTC format
