@@ -1,9 +1,6 @@
-use std::sync::Mutex;
-
-use crate::synthesis::{Subtitle, SynthesisEvent};
-
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
-use anyhow::{Result, anyhow};
+use crate::synthesis::{Subtitle, SynthesisEvent};
+use anyhow::Result;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{
@@ -12,7 +9,7 @@ use futures::{
 };
 use ring::hmac;
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, select, sync::mpsc};
+use tokio::{net::TcpStream, sync::Mutex};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{client::IntoClientRequest, protocol::Message},
@@ -94,28 +91,28 @@ pub struct TencentCloudStreamingTtsClient {
     option: SynthesisOption,
     session_id: String,
     message_id: String,
-    tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    sink: Mutex<Option<WSSink>>,
 }
 
 impl TencentCloudStreamingTtsClient {
     pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-        let client = Self::new(option.clone()); // TODO: replace with a real token
+        let client = Self::new(option.clone());
         Ok(Box::new(client))
     }
 
     pub fn new(option: SynthesisOption) -> Self {
         Self {
             option,
-            session_id: String::new(),
-            message_id: String::new(),
-            tx: Mutex::new(None),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            sink: Mutex::new(None),
         }
     }
 
-    async fn connect(&self) -> Result<(WSSink, WSStream)> {
+    async fn connect(&self) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         let url = self.generate_websocket_url();
         let request = url.into_client_request()?;
-        let (mut ws_stream, _resp) = connect_async(request).await?;
+        let (mut ws_stream, _) = connect_async(request).await?;
         while let Some(message) = ws_stream.next().await {
             if let Ok(Message::Text(text)) = message {
                 let response = serde_json::from_str::<WebSocketResponse>(&text)?;
@@ -125,7 +122,7 @@ impl TencentCloudStreamingTtsClient {
             }
         }
 
-        Ok(ws_stream.split())
+        Ok(ws_stream)
     }
 
     fn generate_websocket_url(&self) -> String {
@@ -234,38 +231,6 @@ fn event_stream(ws_stream: WSStream) -> BoxStream<'static, Result<SynthesisEvent
     Box::pin(stream)
 }
 
-async fn text_sending_task(
-    mut text_rc: mpsc::UnboundedReceiver<String>,
-    session_id: String,
-    message_id: String,
-    mut ws_sink: WSSink,
-    token: CancellationToken,
-) -> Result<()> {
-    loop {
-        select! {
-            text = text_rc.recv() => {
-                match text {
-                    Some(text) => {
-                        let request = WebSocketRequest::synthesis_action(&session_id, &message_id, &text);
-                        let data = serde_json::to_string(&request).unwrap();
-                        ws_sink.send(Message::Text(data.into())).await?;
-                    }
-                    None => {
-                        let request = WebSocketRequest::complete_action(&session_id, &message_id);
-                        let data = serde_json::to_string(&request).unwrap();
-                        ws_sink.send(Message::Text(data.into())).await?;
-                        break;
-                    }
-                }
-            }
-            _ = token.cancelled() => {
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl SynthesisClient for TencentCloudStreamingTtsClient {
     fn provider(&self) -> SynthesisType {
@@ -276,23 +241,10 @@ impl SynthesisClient for TencentCloudStreamingTtsClient {
         &self,
         _cancel_token: CancellationToken,
     ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
-        let (ws_sink, ws_stream) = self.connect().await?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        {
-            let mut txx = self.tx.lock().unwrap();
-            *txx = Some(tx);
-        }
-        let session_id = self.session_id.clone();
-        let message_id = self.message_id.clone();
-        tokio::spawn(text_sending_task(
-            rx,
-            session_id,
-            message_id,
-            ws_sink,
-            CancellationToken::new(),
-        ));
-        let stream = event_stream(ws_stream);
-        Ok(stream)
+        let stream = self.connect().await?;
+        let (ws_sink, ws_stream) = stream.split();
+        *self.sink.lock().await = Some(ws_sink);
+        Ok(event_stream(ws_stream))
     }
 
     async fn synthesize(
@@ -301,20 +253,27 @@ impl SynthesisClient for TencentCloudStreamingTtsClient {
         end_of_stream: Option<bool>,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
-        let mut sender = self.tx.lock().unwrap();
+        match self.sink.lock().await.as_mut() {
+            Some(sink) => {
+                if !text.is_empty() {
+                    let request = WebSocketRequest::synthesis_action(
+                        &self.session_id,
+                        &self.message_id,
+                        &text,
+                    );
+                    let data = serde_json::to_string(&request)?;
+                    sink.send(Message::Text(data.into())).await?;
+                }
 
-        if !text.is_empty() {
-            let sender = sender
-                .as_ref()
-                .ok_or_else(|| anyhow!("Tencent Cloud Streaming tts: should call start first"))?;
-
-            sender.send(text.to_string())?;
+                if let Some(true) = end_of_stream {
+                    let request =
+                        WebSocketRequest::complete_action(&self.session_id, &self.message_id);
+                    let data = serde_json::to_string(&request)?;
+                    sink.send(Message::Text(data.into())).await?;
+                }
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("should call start first")),
         }
-
-        if let Some(true) = end_of_stream {
-            *sender = None;
-        }
-
-        Ok(())
     }
 }
