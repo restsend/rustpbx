@@ -101,6 +101,7 @@ impl ActiveCall {
         track_config: TrackConfig,
         audio_receiver: Option<WebsocketBytesReceiver>,
         dump_events: bool,
+        extras: Option<HashMap<String, serde_json::Value>>,
     ) -> Self {
         let event_sender = crate::event::create_event_sender();
         let cmd_sender = tokio::sync::broadcast::Sender::<Command>::new(32);
@@ -111,6 +112,7 @@ impl ActiveCall {
         let call_state = Arc::new(RwLock::new(ActiveCallState {
             start_time: Utc::now(),
             ssrc: rand::random::<u32>(),
+            extras,
             ..Default::default()
         }));
         Self {
@@ -1430,6 +1432,25 @@ impl ActiveCall {
 }
 
 impl ActiveCallState {
+    pub fn build_hangup_event(&self, initiator: Option<String>) -> crate::event::SessionEvent {
+        let from = self.option.as_ref().and_then(|o| o.caller.as_ref());
+        let to = self.option.as_ref().and_then(|o| o.callee.as_ref());
+        let extra = self.extras.clone();
+
+        crate::event::SessionEvent::Hangup {
+            timestamp: crate::get_timestamp(),
+            reason: Some(format!("{:?}", self.hangup_reason)),
+            initiator,
+            start_time: self.start_time.to_rfc3339(),
+            answer_time: self.answer_time.map(|t| t.to_rfc3339()),
+            ringing_time: self.ring_time.map(|t| t.to_rfc3339()),
+            hangup_time: Utc::now().to_rfc3339(),
+            extra,
+            from: from.map(|f| f.into()),
+            to: to.map(|f| f.into()),
+        }
+    }
+
     pub fn build_callrecord(
         &self,
         app_state: AppState,

@@ -88,7 +88,8 @@ pub async fn call_handler(
             app_state.clone(),
             track_config,
             Some(audio_receiver),
-            dump_events
+            dump_events,
+            None, // No extra data for now
         ));
         
         let recv_from_ws_loop = async {

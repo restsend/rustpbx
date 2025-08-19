@@ -70,6 +70,7 @@ mod wait_input_timeout_tests {
             TrackConfig::default(),
             None,
             false,
+            None,
         )))
     }
 

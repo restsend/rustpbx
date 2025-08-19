@@ -136,6 +136,7 @@ impl B2bua {
             TrackConfig::default(),
             None,
             self.dump_events,
+            dialplan.extras.clone(),
         ));
 
         let active_calls = {
