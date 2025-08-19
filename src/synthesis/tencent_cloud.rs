@@ -14,6 +14,7 @@ use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{client::IntoClientRequest, protocol::Message},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use urlencoding;
 use uuid;
@@ -275,7 +276,7 @@ impl SynthesisClient for TencentCloudTtsClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::TencentCloud
     }
-    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("TencentCloudTtsClient: Receiver already taken, cannot start new stream")
         })?;
@@ -289,7 +290,6 @@ impl SynthesisClient for TencentCloudTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {

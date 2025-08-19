@@ -12,6 +12,7 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 /// https://github.com/ruzhila/voiceapi
 /// A simple and clean voice transcription/synthesis API with sherpa-onnx
@@ -162,7 +163,7 @@ impl SynthesisClient for VoiceApiTtsClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::VoiceApi
     }
-    async fn start(&self) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("VoiceApiTtsClient: Receiver already taken, cannot start new stream")
         })?;
@@ -176,7 +177,6 @@ impl SynthesisClient for VoiceApiTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _streaming: Option<bool>,
         _end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
