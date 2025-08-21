@@ -10,6 +10,7 @@ use object_store::{
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::{
     collections::HashMap, future::Future, path::Path, pin::Pin, str::FromStr, sync::Arc,
     time::Instant,
@@ -70,35 +71,26 @@ impl<'a> CallRecordEvent<'a> {
         }
     }
 }
-
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub option: Option<CallOption>,
     pub call_id: String,
     pub start_time: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ring_time: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_time: Option<DateTime<Utc>>,
     pub end_time: DateTime<Utc>,
     pub caller: String,
     pub callee: String,
     pub status_code: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub offer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hangup_reason: Option<CallRecordHangupReason>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recorder: Vec<CallRecordMedia>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub extras: Option<HashMap<String, serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dump_event_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub refer_callrecord: Option<Box<CallRecord>>,
 }
 

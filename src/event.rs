@@ -1,5 +1,6 @@
 use crate::PcmBuf;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,13 +22,15 @@ impl From<&String> for Attendee {
         }
     }
 }
-
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event")]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    tag = "event",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SessionEvent {
     Incoming {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         caller: String,
@@ -35,64 +38,48 @@ pub enum SessionEvent {
         sdp: String,
     },
     Answer {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         sdp: String,
     },
     Reject {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<u32>,
     },
     Ringing {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        #[serde(rename = "earlyMedia")]
         early_media: bool,
     },
     Hangup {
         timestamp: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         initiator: Option<String>,
         start_time: String,
         hangup_time: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         answer_time: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         ringing_time: Option<String>,
         from: Option<Attendee>,
         to: Option<Attendee>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         extra: Option<HashMap<String, serde_json::Value>>,
     },
     AnswerMachineDetection {
         // Answer machine detection
         timestamp: u64,
-        #[serde(rename = "startTime")]
         start_time: u64,
-        #[serde(rename = "endTime")]
         end_time: u64,
         text: String,
     },
     Speaking {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        #[serde(rename = "startTime")]
         start_time: u64,
     },
     Silence {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
-        #[serde(rename = "startTime")]
         start_time: u64,
         duration: u64,
         #[serde(skip)]
@@ -100,62 +87,46 @@ pub enum SessionEvent {
     },
     ///End of Utterance
     Eou {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         completed: bool,
     },
     Dtmf {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         digit: String,
     },
     TrackStart {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
     },
     TrackEnd {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         duration: u64,
         ssrc: u32,
     },
     Interruption {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         subtitle: Option<String>, // current tts text
         position: Option<u32>,    // word index in subtitle
-        #[serde(rename = "totalDuration")]
-        total_duration: u32, // whole tts duration
+        total_duration: u32,      // whole tts duration
         current: u32,             // elapsed time since start of tts
     },
     AsrFinal {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         index: u32,
-        #[serde(rename = "startTime")]
-        #[serde(skip_serializing_if = "Option::is_none")]
         start_time: Option<u64>,
-        #[serde(rename = "endTime")]
-        #[serde(skip_serializing_if = "Option::is_none")]
         end_time: Option<u64>,
         text: String,
     },
     AsrDelta {
-        #[serde(rename = "trackId")]
         track_id: String,
         index: u32,
         timestamp: u64,
-        #[serde(rename = "startTime")]
-        #[serde(skip_serializing_if = "Option::is_none")]
         start_time: Option<u64>,
-        #[serde(rename = "endTime")]
-        #[serde(skip_serializing_if = "Option::is_none")]
         end_time: Option<u64>,
         text: String,
     },
@@ -166,12 +137,10 @@ pub enum SessionEvent {
         data: serde_json::Value,
     },
     Error {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         sender: String,
         error: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<u32>,
     },
     AddHistory {
@@ -181,14 +150,12 @@ pub enum SessionEvent {
         text: String,
     },
     Other {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         sender: String,
         extra: Option<HashMap<String, String>>,
     },
     Binary {
-        #[serde(rename = "trackId")]
         track_id: String,
         timestamp: u64,
         data: Vec<u8>,
