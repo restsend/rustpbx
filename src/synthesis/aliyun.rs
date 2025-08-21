@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt, stream::BoxStream};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use tokio_util::sync::CancellationToken;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
@@ -128,17 +129,14 @@ struct RunTaskPayload {
     input: EmptyInput,
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Serialize)]
 struct RunTaskParameters {
     text_type: String,
     voice: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     sample_rate: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     volume: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     rate: Option<f32>,
 }
 

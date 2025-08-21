@@ -3,6 +3,7 @@ use crate::media::processor::Processor;
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::any::Any;
 use std::cell::RefCell;
 use tokio_util::sync::CancellationToken;
@@ -15,6 +16,7 @@ mod tests;
 #[cfg(feature = "vad_webrtc")]
 mod webrtc;
 
+#[skip_serializing_none]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -29,13 +31,9 @@ pub struct VADOption {
     pub voice_threshold: f32,
     pub max_buffer_duration_secs: u64,
     /// Timeout duration for silence (in ms), None means disable this feature
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub silence_timeout: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_id: Option<String>,
 }
 
