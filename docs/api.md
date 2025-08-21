@@ -480,6 +480,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "timeout": 5000
   }
 }
+```
 
 ## WebSocket Events
 
