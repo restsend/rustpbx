@@ -197,7 +197,7 @@ impl Track for TtsTrack {
                     command.option.speaker = command.speaker;
                 }
                 let streaming = command.streaming.unwrap_or(false);
-                let cache_key = if streaming && use_cache {
+                let cache_key = if !streaming && use_cache {
                     Some(cache::generate_cache_key(
                         &format!("tts:{}{}", provider, text),
                         sample_rate,

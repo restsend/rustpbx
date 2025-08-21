@@ -202,6 +202,7 @@ pub enum Command {
         streaming: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         /// If end_of_stream is true, it means the input text is finished
+        #[serde(rename = "endOfStream")]
         end_of_stream: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         option: Option<SynthesisOption>,
