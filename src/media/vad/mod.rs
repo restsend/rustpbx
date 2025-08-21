@@ -62,17 +62,14 @@ impl Default for VADOption {
 }
 
 #[derive(Clone, Debug, Serialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum VadType {
-    #[serde(rename = "webrtc")]
     #[cfg(feature = "vad_webrtc")]
     WebRTC,
-    #[serde(rename = "silero")]
     #[cfg(feature = "vad_silero")]
     Silero,
-    #[serde(rename = "ten")]
     #[cfg(feature = "vad_ten")]
     Ten,
-    #[serde(rename = "other")]
     Other(String),
 }
 
