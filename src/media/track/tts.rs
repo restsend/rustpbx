@@ -362,6 +362,7 @@ impl Track for TtsTrack {
                             "synthesis finished, total audio length: {} bytes",
                             status_ref.read().unwrap().total_audio_len
                         );
+                        break;
                     }
                     Ok(SynthesisEvent::Subtitles(subtitles)) => {
                         status_ref
@@ -384,6 +385,7 @@ impl Track for TtsTrack {
                                 code: None,
                             })
                             .ok();
+                        break;
                     }
                 }
             }
