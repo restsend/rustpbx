@@ -165,8 +165,11 @@ pub struct EouOption {
 
 // WebSocket Commands
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(tag = "command")]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    tag = "command",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Command {
     Invite {
         option: CallOption,
@@ -188,11 +191,9 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "playId")]
         /// If the play_id is the same, it will not interrupt the previous playback
         play_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "autoHangup")]
         /// If auto_hangup is true, it means the call will be hung up automatically after the TTS playback is finished
         auto_hangup: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,16 +207,13 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none")]
         option: Option<SynthesisOption>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "waitInputTimeout")]
         wait_input_timeout: Option<u32>,
     },
     Play {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "autoHangup")]
         auto_hangup: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "waitInputTimeout")]
         wait_input_timeout: Option<u32>,
     },
     Interrupt {},
@@ -234,11 +232,9 @@ pub enum Command {
         options: Option<ReferOption>,
     },
     Mute {
-        #[serde(rename = "trackId")]
         track_id: Option<String>,
     },
     Unmute {
-        #[serde(rename = "trackId")]
         track_id: Option<String>,
     },
     History {
