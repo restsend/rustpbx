@@ -180,6 +180,7 @@ pub enum Command {
     },
     Ringing {
         recorder: bool,
+        #[serde(rename = "earlyMedia")]
         early_media: bool,
         ringtone: Option<String>,
     },
