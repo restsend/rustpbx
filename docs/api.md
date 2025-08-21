@@ -169,55 +169,98 @@ sequenceDiagram
 
 ## WebSocket Commands
 
-Commands are sent as JSON messages through the WebSocket connection. All timestamps are in milliseconds.
+Commands are sent as JSON messages through the WebSocket connection. All timestamps are in milliseconds. Each command follows a common structure with the `command` field indicating the operation type.
 
-### Invite Command
-**Purpose:** Initiates a new call or accepts an incoming call.
+### Core Call Management Commands
+
+#### Invite Command
+**Purpose:** Initiates a new outbound call.
 
 **Fields:**
-- `command` (string): Always "invite" or "accept"
-- `option` (object): Call configuration options
-  - `caller` (string, optional): Caller phone number
-  - `callee` (string, optional): Callee phone number  
-  - `offer` (string, optional): SDP offer for WebRTC calls
-  - `codec` (string, optional): Audio codec (pcmu, pcma, g722, pcm)
-  - `asr` (object, optional): ASR configuration
-  - `tts` (object, optional): TTS configuration
+- `command` (string): Always "invite"
+- `option` (CallOption): Call configuration parameters
 
 ```json
 {
   "command": "invite",
   "option": {
-    "caller": "1234567890",
-    "callee": "0987654321",
+    "caller": "sip:alice@example.com",
+    "callee": "sip:bob@example.com",
     "offer": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n...",
     "codec": "g722",
+    "denoise": true,
     "asr": {
-      "provider": "tencent"
+      "provider": "tencent",
+      "secretId": "your_secret_id",
+      "secretKey": "your_secret_key"
     },
     "tts": {
-      "provider": "tencent"
+      "provider": "tencent",
+      "speaker": "xiaoyan"
     }
   }
 }
 ```
 
-### Accept Command
+#### Accept Command
 **Purpose:** Accepts an incoming call.
+
+**Fields:**
+- `command` (string): Always "accept"
+- `option` (CallOption): Call configuration parameters
 
 ```json
 {
   "command": "accept",
   "option": {
-    "caller": "1234567890",
-    "callee": "0987654321",
-    "offer": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n...",
-    "codec": "g722"
+    "caller": "sip:alice@example.com",
+    "callee": "sip:bob@example.com",
+    "codec": "g722",
+    "recorder": {
+      "enable": true,
+      "format": "wav"
+    }
   }
 }
 ```
 
-### TTS Command
+#### Reject Command
+**Purpose:** Rejects an incoming call.
+
+**Fields:**
+- `command` (string): Always "reject"
+- `reason` (string): Reason for rejection
+- `code` (number, optional): SIP response code
+
+```json
+{
+  "command": "reject",
+  "reason": "Busy",
+  "code": 486
+}
+```
+
+#### Ringing Command
+**Purpose:** Sends ringing response for incoming call.
+
+**Fields:**
+- `command` (string): Always "ringing"
+- `recorder` (boolean): Enable call recording during ringing
+- `earlyMedia` (boolean): Enable early media during ringing
+- `ringtone` (string, optional): Custom ringtone URL
+
+```json
+{
+  "command": "ringing",
+  "recorder": false,
+  "earlyMedia": true,
+  "ringtone": "http://example.com/ringtone.wav"
+}
+```
+
+### Media Control Commands
+
+#### TTS Command
 **Purpose:** Converts text to speech and plays audio.
 
 **Fields:**
@@ -228,41 +271,130 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 - `autoHangup` (boolean, optional): **If true, the call will be automatically hung up after TTS playback is finished.**
 - `streaming` (boolean, optional): **If true, indicates streaming text input (like LLM streaming output).**
 - `endOfStream` (boolean, optional): **If true, indicates the input text is finished (used with streaming).**
-- `option` (object, optional): TTS provider specific options
+- `waitInputTimeout` (number, optional): Maximum time to wait for user input in seconds
+- `option` (SynthesisOption, optional): TTS provider specific options
 
 ```json
 {
   "command": "tts",
   "text": "Hello, this is a test message",
-  "speaker": "speaker_name",
+  "speaker": "xiaoyan",
   "playId": "unique_play_id",
   "autoHangup": false,
   "streaming": false,
   "endOfStream": false,
+  "waitInputTimeout": 30,
   "option": {
     "provider": "tencent",
-    "voice": "xiaoyan"
+    "speaker": "xiaoyan",
+    "volume": 5,
+    "speed": 1.0
   }
 }
 ```
 
-### Play Command
+#### Play Command
 **Purpose:** Plays audio from a URL.
 
 **Fields:**
 - `command` (string): Always "play"
-- `url` (string): URL of audio file to play
+- `url` (string): URL of audio file to play (supports HTTP/HTTPS URLs)
 - `autoHangup` (boolean, optional): **If true, the call will be automatically hung up after playback is finished.**
+- `waitInputTimeout` (number, optional): Maximum time to wait for user input in seconds
 
 ```json
 {
   "command": "play",
   "url": "http://example.com/audio.mp3",
-  "autoHangup": false
+  "autoHangup": false,
+  "waitInputTimeout": 30
 }
 ```
 
-### Hangup Command
+#### Interrupt Command
+**Purpose:** Interrupts current TTS or audio playback.
+
+```json
+{
+  "command": "interrupt"
+}
+```
+
+#### Pause Command
+**Purpose:** Pauses current playback.
+
+```json
+{
+  "command": "pause"
+}
+```
+
+#### Resume Command
+**Purpose:** Resumes paused playback.
+
+```json
+{
+  "command": "resume"
+}
+```
+
+### Call Transfer Commands
+
+#### Refer Command
+**Purpose:** Transfers the call to another party (SIP REFER).
+
+**Fields:**
+- `command` (string): Always "refer"
+- `caller` (string): Caller identity for the transfer
+- `callee` (string): Address of Record (AOR) of the transfer target (e.g., sip:bob@example.com)
+- `options` (ReferOption, optional): Transfer configuration
+
+```json
+{
+  "command": "refer",
+  "caller": "sip:alice@example.com",
+  "callee": "sip:charlie@example.com",
+  "options": {
+    "timeout": 30,
+    "autoHangup": true,
+    "moh": "http://example.com/hold_music.wav"
+  }
+}
+```
+
+### Audio Track Control Commands
+
+#### Mute Command
+**Purpose:** Mutes a specific audio track.
+
+**Fields:**
+- `command` (string): Always "mute"
+- `trackId` (string, optional): Track ID to mute (if not specified, mutes all tracks)
+
+```json
+{
+  "command": "mute",
+  "trackId": "track-123"
+}
+```
+
+#### Unmute Command
+**Purpose:** Unmutes a specific audio track.
+
+**Fields:**
+- `command` (string): Always "unmute"
+- `trackId` (string, optional): Track ID to unmute (if not specified, unmutes all tracks)
+
+```json
+{
+  "command": "unmute",
+  "trackId": "track-123"
+}
+```
+
+### Session Management Commands
+
+#### Hangup Command
 **Purpose:** Ends the call.
 
 **Fields:**
@@ -278,313 +410,422 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 }
 ```
 
-### Interrupt Command
-**Purpose:** Interrupts current TTS or audio playback.
-
-```json
-{
-  "command": "interrupt"
-}
-```
-
-### Pause Command
-**Purpose:** Pauses current playback (not implemented in current version).
-
-```json
-{
-  "command": "pause"
-}
-```
-
-### Resume Command
-**Purpose:** Resumes paused playback (not implemented in current version).
-
-```json
-{
-  "command": "resume"
-}
-```
-
-### Candidate Command (WebRTC)
-**Purpose:** Sends ICE candidates for WebRTC connection.
+#### History Command
+**Purpose:** Adds a conversation history entry.
 
 **Fields:**
-- `command` (string): Always "candidate"
-- `candidates` (array): Array of ICE candidate strings
+- `command` (string): Always "history"
+- `speaker` (string): Speaker identifier
+- `text` (string): Conversation text
 
 ```json
 {
-  "command": "candidate",
-  "candidates": [
-    "candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host"
-  ]
+  "command": "history",
+  "speaker": "user",
+  "text": "Hello, I need help with my account"
 }
 ```
+
+### CallOption Object Structure
+
+The `CallOption` object is used in `invite` and `accept` commands and contains the following fields:
+
+```json
+{
+  "denoise": true,
+  "offer": "SDP offer string",
+  "callee": "sip:callee@example.com",
+  "caller": "sip:caller@example.com",
+  "recorder": {
+    "enable": true,
+    "format": "wav",
+    "path": "/path/to/recording"
+  },
+  "asr": {
+    "provider": "tencent",
+    "secretId": "your_secret_id",
+    "secretKey": "your_secret_key",
+    "region": "ap-beijing",
+    "model": "16k_zh"
+  },
+  "vad": {
+    "enable": true,
+    "aggressiveness": 2
+  },
+  "tts": {
+    "provider": "tencent",
+    "secretId": "your_secret_id",
+    "secretKey": "your_secret_key",
+    "speaker": "xiaoyan"
+  },
+  "handshakeTimeout": "30s",
+  "enableIpv6": false,
+  "sip": {
+    "username": "user",
+    "password": "password",
+    "realm": "example.com",
+    "headers": {
+      "X-Custom-Header": "value"
+    }
+  },
+  "extra": {
+    "custom_field": "custom_value"
+  },
+  "codec": "g722",
+  "eou": {
+    "type": "tencent",
+    "endpoint": "https://api.example.com",
+    "secretKey": "your_secret_key",
+    "secretId": "your_secret_id",
+    "timeout": 5000
+  }
+}
 
 ## WebSocket Events
 
-Events are received as JSON messages from the server. All timestamps are in milliseconds.
+Events are received as JSON messages from the server. All timestamps are in milliseconds. Each event contains an `event` field that indicates the event type, and most events include a `trackId` field to identify the associated audio track.
 
-### Incoming Event
+### Call Lifecycle Events
+
+#### Incoming Event
 **Triggered when:** An incoming call is received (SIP calls only).
 
 **Fields:**
 - `event` (string): Always "incoming"
 - `trackId` (string): **Unique identifier for the audio track. Used to identify which track generated this event.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `caller` (string): Caller phone number
-- `callee` (string): Callee phone number
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `caller` (string): Caller's SIP URI or phone number
+- `callee` (string): Callee's SIP URI or phone number
 - `sdp` (string): SDP offer from the caller
 
 ```json
 {
   "event": "incoming",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
-  "caller": "1234567890",
-  "callee": "0987654321",
+  "caller": "sip:alice@example.com",
+  "callee": "sip:bob@example.com",
   "sdp": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n..."
 }
 ```
 
-### Answer Event
+#### Answer Event
 **Triggered when:** Call is answered and SDP negotiation is complete.
 
 **Fields:**
 - `event` (string): Always "answer"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `sdp` (string): SDP answer from the server
 
 ```json
 {
   "event": "answer",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
   "sdp": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n..."
 }
 ```
 
-### Ringing Event
+#### Reject Event
+**Triggered when:** Call is rejected.
+
+**Fields:**
+- `event` (string): Always "reject"
+- `trackId` (string): **Unique identifier for the audio track.**
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `reason` (string): Reason for rejection
+- `code` (number, optional): SIP response code
+
+```json
+{
+  "event": "reject",
+  "trackId": "track-abc123",
+  "timestamp": 1640995200000,
+  "reason": "Busy",
+  "code": 486
+}
+```
+
+#### Ringing Event
 **Triggered when:** Call is ringing (SIP calls only).
 
 **Fields:**
 - `event` (string): Always "ringing"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `earlyMedia` (boolean): Whether early media is available
 
 ```json
 {
   "event": "ringing",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
   "earlyMedia": false
 }
 ```
 
-### Hangup Event
+#### Hangup Event
 **Triggered when:** Call is ended.
 
 **Fields:**
 - `event` (string): Always "hangup"
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `reason` (string, optional): Reason for hangup
-- `initiator` (string, optional): Who initiated the hangup
+- `initiator` (string, optional): Who initiated the hangup (user, system, etc.)
+- `startTime` (string): ISO 8601 timestamp when call started
+- `hangupTime` (string): ISO 8601 timestamp when call ended
+- `answerTime` (string, optional): ISO 8601 timestamp when call was answered
+- `ringingTime` (string, optional): ISO 8601 timestamp when call started ringing
+- `from` (Attendee, optional): Information about the caller
+- `to` (Attendee, optional): Information about the callee
+- `extra` (object, optional): Additional call metadata
 
 ```json
 {
   "event": "hangup",
   "timestamp": 1640995200000,
   "reason": "user_requested",
-  "initiator": "user"
+  "initiator": "user",
+  "startTime": "2024-01-01T12:00:00Z",
+  "hangupTime": "2024-01-01T12:05:30Z",
+  "answerTime": "2024-01-01T12:00:05Z",
+  "ringingTime": "2024-01-01T12:00:02Z",
+  "from": {
+    "username": "alice",
+    "realm": "example.com",
+    "source": "sip:alice@example.com"
+  },
+  "to": {
+    "username": "bob",
+    "realm": "example.com", 
+    "source": "sip:bob@example.com"
+  },
+  "extra": {
+    "call_quality": "good",
+    "network_type": "wifi"
+  }
 }
 ```
 
-### Speaking Event
-**Triggered when:** Voice activity detection detects speech.
+### Voice Activity Detection Events
+
+#### Speaking Event
+**Triggered when:** Voice activity detection detects speech start.
 
 **Fields:**
 - `event` (string): Always "speaking"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `startTime` (number): When speech started in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `startTime` (number): When speech started in milliseconds since Unix epoch
 
 ```json
 {
   "event": "speaking",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
   "startTime": 1640995200000
 }
 ```
 
-### Silence Event
+#### Silence Event
 **Triggered when:** Voice activity detection detects silence.
 
 **Fields:**
 - `event` (string): Always "silence"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `startTime` (number): When silence started in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `startTime` (number): When silence started in milliseconds since Unix epoch
 - `duration` (number): Duration of silence in milliseconds
 
 ```json
 {
   "event": "silence",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
-  "startTime": 1640995200000,
+  "startTime": 1640995195000,
   "duration": 5000
 }
 ```
 
-### ASR Final Event
+### AI and Speech Processing Events
+
+#### Answer Machine Detection Event
+**Triggered when:** Answer machine detection algorithm identifies automated response.
+
+**Fields:**
+- `event` (string): Always "answerMachineDetection"
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `startTime` (number): Detection window start time in milliseconds since Unix epoch
+- `endTime` (number): Detection window end time in milliseconds since Unix epoch
+- `text` (string): Detected automated message text
+
+```json
+{
+  "event": "answerMachineDetection",
+  "timestamp": 1640995200000,
+  "startTime": 1640995200000,
+  "endTime": 1640995205000,
+  "text": "Hello, you have reached ABC Company. Please leave a message..."
+}
+```
+
+#### End of Utterance (EOU) Event
+**Triggered when:** End of utterance detection identifies when user has finished speaking.
+
+**Fields:**
+- `event` (string): Always "eou"
+- `trackId` (string): **Unique identifier for the audio track.**
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `completed` (boolean): Whether the utterance was completed normally
+
+```json
+{
+  "event": "eou",
+  "trackId": "track-abc123",
+  "timestamp": 1640995200000,
+  "completed": true
+}
+```
+
+#### ASR Final Event
 **Triggered when:** ASR provides final transcription result.
 
 **Fields:**
 - `event` (string): Always "asrFinal"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `index` (number): ASR result index
-- `startTime` (number, optional): Start time of speech in milliseconds
-- `endTime` (number, optional): End time of speech in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `index` (number): ASR result sequence number
+- `startTime` (number, optional): Start time of speech in milliseconds since Unix epoch
+- `endTime` (number, optional): End time of speech in milliseconds since Unix epoch
 - `text` (string): Final transcribed text
 
 ```json
 {
   "event": "asrFinal",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
   "index": 1,
   "startTime": 1640995200000,
-  "endTime": 1640995210000,
-  "text": "Hello, how can I help you?"
+  "endTime": 1640995205000,
+  "text": "Hello, how can I help you today?"
 }
 ```
 
-### ASR Delta Event
-**Triggered when:** ASR provides partial transcription result.
+#### ASR Delta Event
+**Triggered when:** ASR provides partial transcription result (streaming mode).
 
 **Fields:**
 - `event` (string): Always "asrDelta"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `index` (number): ASR result index
-- `timestamp` (number): Event timestamp in milliseconds
-- `startTime` (number, optional): Start time of speech in milliseconds
-- `endTime` (number, optional): End time of speech in milliseconds
+- `index` (number): ASR result sequence number
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `startTime` (number, optional): Start time of speech in milliseconds since Unix epoch
+- `endTime` (number, optional): End time of speech in milliseconds since Unix epoch
 - `text` (string): Partial transcribed text
 
 ```json
 {
   "event": "asrDelta",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "index": 1,
   "timestamp": 1640995200000,
   "startTime": 1640995200000,
-  "endTime": 1640995210000,
-  "text": "Hello"
+  "endTime": 1640995203000,
+  "text": "Hello, how can"
 }
 ```
 
-### DTMF Event
-**Triggered when:** DTMF tone is detected.
+### Audio Track Events
 
-**Fields:**
-- `event` (string): Always "dtmf"
-- `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `digit` (string): DTMF digit (0-9, *, #, A-D)
-
-```json
-{
-  "event": "dtmf",
-  "trackId": "track-123",
-  "timestamp": 1640995200000,
-  "digit": "1"
-}
-```
-
-### Track Start Event
+#### Track Start Event
 **Triggered when:** Audio track starts (TTS, file playback, etc.).
 
 **Fields:**
 - `event` (string): Always "trackStart"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 
 ```json
 {
   "event": "trackStart",
-  "trackId": "track-123",
+  "trackId": "track-tts-456",
   "timestamp": 1640995200000
 }
 ```
 
-### Track End Event
+#### Track End Event
 **Triggered when:** Audio track ends (TTS finished, file playback finished, etc.).
 
 **Fields:**
 - `event` (string): Always "trackEnd"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `duration` (number): Duration of track in milliseconds
+- `ssrc` (number): RTP Synchronization Source identifier
 
 ```json
 {
   "event": "trackEnd",
-  "trackId": "track-123",
-  "timestamp": 1640995200000,
-  "duration": 30000
+  "trackId": "track-tts-456",
+  "timestamp": 1640995230000,
+  "duration": 30000,
+  "ssrc": 1234567890
 }
 ```
 
-### Interruption Event
-**Triggered when:** Current playback is interrupted.
+#### Interruption Event
+**Triggered when:** Current playback is interrupted by user input or another command.
 
 **Fields:**
 - `event` (string): Always "interruption"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `position` (number): Current playback position in milliseconds when interrupted
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `subtitle` (string, optional): Current TTS text being played when interrupted
+- `position` (number, optional): Word index position in the subtitle when interrupted
+- `totalDuration` (number): Total duration of the TTS content in milliseconds
+- `current` (number): Elapsed time since start of TTS when interrupted in milliseconds
 
 ```json
 {
   "event": "interruption",
-  "trackId": "track-123",
-  "timestamp": 1640995200000,
-  "position": 15000
+  "trackId": "track-tts-456",
+  "timestamp": 1640995215000,
+  "subtitle": "Hello, this is a long message that was interrupted",
+  "position": 5,
+  "totalDuration": 30000,
+  "current": 15000
 }
 ```
 
-### Error Event
-**Triggered when:** An error occurs during processing.
+### User Input Events
+
+#### DTMF Event
+**Triggered when:** DTMF tone is detected.
 
 **Fields:**
-- `event` (string): Always "error"
+- `event` (string): Always "dtmf"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `sender` (string): Component that generated the error (asr, tts, etc.)
-- `error` (string): Error message
-- `code` (number, optional): Error code
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `digit` (string): DTMF digit (0-9, *, #, A-D)
 
 ```json
 {
-  "event": "error",
-  "trackId": "track-123",
+  "event": "dtmf",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
-  "sender": "asr",
-  "error": "Connection timeout",
-  "code": 408
+  "digit": "1"
 }
 ```
 
-### Metrics Event
+### System Events
+
+#### Metrics Event
 **Triggered when:** Performance metrics are available.
 
 **Fields:**
 - `event` (string): Always "metrics"
-- `timestamp` (number): Event timestamp in milliseconds
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `key` (string): Metric key (e.g., "ttfb.asr.tencent", "completed.asr.tencent")
 - `duration` (number): Duration in milliseconds
 - `data` (object): Additional metric data
@@ -596,28 +837,112 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "key": "ttfb.asr.tencent",
   "duration": 150,
   "data": {
-    "index": 1
+    "index": 1,
+    "provider": "tencent",
+    "model": "16k_zh"
   }
 }
 ```
 
-### Binary Event (Audio Data)
+#### Error Event
+**Triggered when:** An error occurs during processing.
+
+**Fields:**
+- `event` (string): Always "error"
+- `trackId` (string): **Unique identifier for the audio track.**
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `sender` (string): Component that generated the error (asr, tts, media, etc.)
+- `error` (string): Error message description
+- `code` (number, optional): Error code
+
+```json
+{
+  "event": "error",
+  "trackId": "track-abc123",
+  "timestamp": 1640995200000,
+  "sender": "asr",
+  "error": "Connection timeout to ASR service",
+  "code": 408
+}
+```
+
+#### Add History Event
+**Triggered when:** A conversation history entry is added.
+
+**Fields:**
+- `event` (string): Always "addHistory"
+- `sender` (string, optional): Component that added the history entry
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `speaker` (string): Speaker identifier (user, assistant, system, etc.)
+- `text` (string): Conversation text
+
+```json
+{
+  "event": "addHistory",
+  "sender": "system",
+  "timestamp": 1640995200000,
+  "speaker": "user",
+  "text": "Hello, I need help with my account"
+}
+```
+
+#### Binary Event (Audio Data)
 **Triggered when:** Binary audio data is sent (WebSocket calls only).
 
 **Fields:**
 - `event` (string): Always "binary"
 - `trackId` (string): **Unique identifier for the audio track.**
-- `timestamp` (number): Event timestamp in milliseconds
-- `data` (array): Binary audio data
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `data` (array): Binary audio data bytes
 
 ```json
 {
   "event": "binary",
-  "trackId": "track-123",
+  "trackId": "track-abc123",
   "timestamp": 1640995200000,
-  "data": [/* binary audio data */]
+  "data": [/* binary audio data array */]
 }
 ```
+
+#### Other Event
+**Triggered when:** Custom or extension events are generated.
+
+**Fields:**
+- `event` (string): Always "other"
+- `trackId` (string): **Unique identifier for the audio track.**
+- `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `sender` (string): Component that generated the event
+- `extra` (object, optional): Additional event data as key-value pairs
+
+```json
+{
+  "event": "other",
+  "trackId": "track-abc123",
+  "timestamp": 1640995200000,
+  "sender": "custom_plugin",
+  "extra": {
+    "custom_field": "custom_value",
+    "plugin_version": "1.0.0"
+  }
+}
+```
+
+### Attendee Object Structure
+
+The `Attendee` object appears in call events and contains participant information:
+
+```json
+{
+  "username": "alice",
+  "realm": "example.com",
+  "source": "sip:alice@example.com"
+}
+```
+
+**Fields:**
+- `username` (string): Username portion of the SIP URI
+- `realm` (string): Domain/realm portion of the SIP URI  
+- `source` (string): Full SIP URI or phone number
 
 ## REST API Endpoints
 
