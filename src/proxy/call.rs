@@ -204,9 +204,12 @@ impl CallModule {
         let dialplan = match r {
             Ok(dialplan) => dialplan,
             Err((e, code)) => {
-                if let Some(code) = code {
-                    tx.reply(code).await.ok();
-                }
+                let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
+                let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
+                warn!(%code, "failed to resolve dialplan: {}", reason_phrase);
+                tx.reply_with(code, vec![reason_phrase.into()], None)
+                    .await
+                    .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
                 return Err(e);
             }
         };
@@ -328,7 +331,10 @@ impl ProxyModule for CallModule {
                     if tx.last_response.is_none() {
                         tx.reply_with(
                             rsip::StatusCode::ServerInternalError,
-                            vec![rsip::Header::ErrorInfo(e.to_string().into())],
+                            vec![rsip::Header::Other(
+                                "Reason".into(),
+                                format!("SIP ;cause=500 ;text=\"{}\"", e.to_string()),
+                            )],
                             None,
                         )
                         .await
