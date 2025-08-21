@@ -7,15 +7,15 @@ use axum::{
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::{env, time::Instant};
 use tracing::{error, info};
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IceServer {
     urls: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     credential: Option<String>,
 }
 

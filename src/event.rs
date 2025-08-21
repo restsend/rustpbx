@@ -1,5 +1,6 @@
 use crate::PcmBuf;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +22,7 @@ impl From<&String> for Attendee {
         }
     }
 }
-
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "event",
@@ -45,7 +46,6 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
         reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<u32>,
     },
     Ringing {
@@ -55,19 +55,14 @@ pub enum SessionEvent {
     },
     Hangup {
         timestamp: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         initiator: Option<String>,
         start_time: String,
         hangup_time: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         answer_time: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         ringing_time: Option<String>,
         from: Option<Attendee>,
         to: Option<Attendee>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         extra: Option<HashMap<String, serde_json::Value>>,
     },
     AnswerMachineDetection {
@@ -123,9 +118,7 @@ pub enum SessionEvent {
         track_id: String,
         timestamp: u64,
         index: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
         start_time: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         end_time: Option<u64>,
         text: String,
     },
@@ -133,9 +126,7 @@ pub enum SessionEvent {
         track_id: String,
         index: u32,
         timestamp: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
         start_time: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         end_time: Option<u64>,
         text: String,
     },
@@ -150,7 +141,6 @@ pub enum SessionEvent {
         timestamp: u64,
         sender: String,
         error: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<u32>,
     },
     AddHistory {
