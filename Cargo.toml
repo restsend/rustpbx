@@ -94,6 +94,7 @@ sea-orm-migration = "1.1.14"
 object_store = { version = "0.12.1", features = ["aws", "azure", "gcp"] }
 humantime = "2"
 ndarray = "0.16.1"
+serde_with = "3.14.0"
 
 
 [dev-dependencies]
