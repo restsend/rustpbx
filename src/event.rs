@@ -22,6 +22,7 @@ impl From<&String> for Attendee {
         }
     }
 }
+
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
