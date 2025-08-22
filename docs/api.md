@@ -764,6 +764,7 @@ Events are received as JSON messages from the server. All timestamps are in mill
 - `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `duration` (number): Duration of track in milliseconds
 - `ssrc` (number): RTP Synchronization Source identifier
+- `playId` (string, optional): The playid of `TTS` command
 
 ```json
 {
@@ -771,7 +772,8 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "trackId": "track-tts-456",
   "timestamp": 1640995230000,
   "duration": 30000,
-  "ssrc": 1234567890
+  "ssrc": 1234567890,
+  "playId": "llm-001",
 }
 ```
 
