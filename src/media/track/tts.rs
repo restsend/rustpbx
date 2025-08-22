@@ -16,7 +16,10 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicIsize, Ordering},
+    },
     time::Instant,
 };
 use tokio::{
@@ -182,6 +185,9 @@ impl Track for TtsTrack {
         let client_ref = client.clone();
         let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel();
         let buffer_tx_ref = buffer_tx.clone();
+        let synthesis_tasks = Arc::new(AtomicIsize::new(0));
+        let synthesis_tasks_ref = synthesis_tasks.clone();
+
         let command_loop = async move {
             while let Some(mut command) = command_rx.recv().await {
                 let text = command.text;
@@ -267,13 +273,22 @@ impl Track for TtsTrack {
                         _ => {}
                     }
                 }
-                info!(session_id, text, "synthesizing");
+                info!(
+                    session_id,
+                    text,
+                    end_of_stream = command.end_of_stream,
+                    play_id,
+                    tasks = synthesis_tasks_ref.load(Ordering::SeqCst),
+                    "synthesizing"
+                );
+                synthesis_tasks_ref.fetch_add(1, Ordering::SeqCst);
                 match client_ref
                     .synthesize(&text, command.end_of_stream, Some(command.option))
                     .await
                 {
                     Ok(_) => {}
                     Err(e) => {
+                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         warn!(session_id, "error synthesizing text: {}", e);
                         event_sender_clone
                             .send(SessionEvent::Error {
@@ -295,6 +310,8 @@ impl Track for TtsTrack {
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
         let buffer_tx_ref = buffer_tx.clone();
+        let synthesis_tasks_ref = synthesis_tasks.clone();
+
         let receive_result_loop = async move {
             let mut audio_chunks = Vec::new();
             let mut first_chunk = true;
@@ -354,6 +371,7 @@ impl Track for TtsTrack {
                         end_of_stream,
                         cache_key,
                     }) => {
+                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         let status = match status_ref.read() {
                             Ok(status) => status.clone(),
                             Err(e) => {
@@ -404,6 +422,7 @@ impl Track for TtsTrack {
                             .ok();
                     }
                     Err(e) => {
+                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         warn!(session_id, "Error in audio stream chunk: {}", e);
                         event_sender_clone
                             .send(SessionEvent::Error {
@@ -449,7 +468,7 @@ impl Track for TtsTrack {
                                         sample_rate,
                                     }
                                 } else {
-                                    if is_recv_finished {
+                                    if is_recv_finished && synthesis_tasks.load(Ordering::SeqCst) <= 0 {
                                         break;
                                     }
                                     AudioFrame {
