@@ -733,10 +733,6 @@ impl RtpTrack {
 
         for packet in packets {
             if let Some(sr) = packet.as_any().downcast_ref::<SenderReport>() {
-                debug!(
-                    track_id,
-                    "Received RTCP Sender Report from SSRC: {}", sr.ssrc
-                );
                 stats.store_sr_info(sr.rtp_time as u64, sr.ntp_time);
                 info!(
                     track_id,
@@ -774,7 +770,11 @@ impl RtpTrack {
                     }
                 }
             } else {
-                debug!(track_id, "Received other RTCP packet type");
+                debug!(
+                    track_id,
+                    packet_type = %packet.header().packet_type,
+                    "Received other RTCP packet type"
+                );
             }
         }
 

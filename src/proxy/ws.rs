@@ -136,7 +136,7 @@ pub async fn sip_ws_handler(
                     let cseq = sip_msg.cseq_header().ok();
                     debug!(
                         addr = %local_addr_clone,
-                        cseq = cseq.map(|c| c.to_string()),
+                        cseq = cseq.map(|c| c.value()).unwrap_or_default(),
                         "ws forwarding {}",
                         message_text.lines().next().unwrap_or("")
                     );
