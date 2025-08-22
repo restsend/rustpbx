@@ -1,7 +1,10 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use rsip::{SipMessage, prelude::HeadersExt};
+use rsip::{
+    SipMessage,
+    prelude::{HeadersExt, UntypedHeader},
+};
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},
@@ -67,7 +70,7 @@ pub async fn sip_ws_handler(
                         Ok(sip_msg) => {
                             debug!(
                                 addr = %local_addr_clone,
-                                cseq = sip_msg.cseq_header().ok().map(|c| c.to_string()).unwrap_or_default(),
+                                cseq = sip_msg.cseq_header().ok().map(|c| c.value()).unwrap_or_default(),
                                 "WebSocket received: {}",
                                 text.lines().next().unwrap_or("")
                             );
@@ -117,7 +120,7 @@ pub async fn sip_ws_handler(
                     }
                 },
                 Message::Close(_) => {
-                    info!(addr = %local_addr_clone, "WebSocket connection closed by client");
+                    debug!(addr = %local_addr_clone, "WebSocket connection closed by client");
                     break;
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
