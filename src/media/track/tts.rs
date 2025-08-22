@@ -276,11 +276,11 @@ impl Track for TtsTrack {
                 info!(
                     session_id,
                     text,
-                    eos = command.end_of_stream,
-                    streaming = command.streaming,
                     play_id,
                     tasks = synthesis_tasks_ref.load(Ordering::SeqCst),
-                    "synthesizing"
+                    "synthesizing eos: {}, streaming: {}",
+                    command.end_of_stream.unwrap_or_default(),
+                    command.streaming.unwrap_or_default(),
                 );
                 synthesis_tasks_ref.fetch_add(1, Ordering::SeqCst);
                 match client_ref
