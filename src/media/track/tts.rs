@@ -28,7 +28,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Clone)]
 struct SynthesisStatus {
@@ -276,7 +276,8 @@ impl Track for TtsTrack {
                 info!(
                     session_id,
                     text,
-                    end_of_stream = command.end_of_stream,
+                    eos = command.end_of_stream,
+                    streaming = command.streaming,
                     play_id,
                     tasks = synthesis_tasks_ref.load(Ordering::SeqCst),
                     "synthesizing"
@@ -451,6 +452,7 @@ impl Track for TtsTrack {
         let session_id = self.session_id.clone();
         let remaining_size = Arc::new(Mutex::new(0usize));
         let remaining_size_ref = Arc::new(Mutex::new(0usize));
+        let synthesis_tasks_ref = synthesis_tasks.clone();
         let emit_loop = async move {
             let mut ptimer =
                 tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
@@ -468,7 +470,7 @@ impl Track for TtsTrack {
                                         sample_rate,
                                     }
                                 } else {
-                                    if is_recv_finished && synthesis_tasks.load(Ordering::SeqCst) <= 0 {
+                                    if is_recv_finished && synthesis_tasks_ref.load(Ordering::SeqCst) <= 0 {
                                         break;
                                     }
                                     AudioFrame {
@@ -536,7 +538,6 @@ impl Track for TtsTrack {
                         }
                     };
                     let total_size = status.total_audio_len;
-                    debug!(session_id, "total_size: {} remaining_size: {}", total_size, remaining_size);
                     let sended_size = total_size - remaining_size;
                     let mut position = None;
                     let current = bytes_size_to_duration(sended_size, sample_rate);
@@ -561,7 +562,13 @@ impl Track for TtsTrack {
             }
 
             let duration = crate::get_timestamp() - start_time;
-            info!(session_id, track_id, duration, "tts track ended");
+            info!(
+                session_id,
+                track_id,
+                duration,
+                tasks = synthesis_tasks.load(Ordering::SeqCst),
+                "tts track ended"
+            );
             let play_id = match status.read() {
                 Ok(status) => status.play_id.clone(),
                 Err(_) => None,

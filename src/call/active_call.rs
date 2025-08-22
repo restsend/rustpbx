@@ -537,7 +537,9 @@ impl ActiveCall {
             speaker = ?play_command.speaker,
             auto_hangup = ?auto_hangup,
             ?play_id,
-            streaming,
+            streaming=play_command.streaming,
+            eos=play_command.end_of_stream,
+            wit=wait_input_timeout,
             "new synthesis command"
         );
 
