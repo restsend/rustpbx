@@ -537,6 +537,7 @@ impl Track for FileTrack {
                             timestamp: crate::get_timestamp(),
                             duration: crate::get_timestamp() - start_time,
                             ssrc,
+                            play_id: Some(path),
                         })
                         .ok();
                     return Err(e);
@@ -577,6 +578,7 @@ impl Track for FileTrack {
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
                     ssrc,
+                    play_id: Some(path),
                 })
                 .ok();
             Ok::<(), anyhow::Error>(())

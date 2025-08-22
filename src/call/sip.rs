@@ -200,6 +200,7 @@ fn on_dialog_terminated(
                 .map(|t| (Utc::now() - t).num_milliseconds())
                 .unwrap_or_default() as u64,
             ssrc: call_state_ref.ssrc,
+            play_id: None,
         })
         .ok();
     let hangup_event = call_state_ref.build_hangup_event(Some(initiator));

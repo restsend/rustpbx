@@ -105,6 +105,7 @@ mod wait_input_timeout_tests {
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
+            play_id: None,
         })?;
 
         // Wait for the Silence event with more generous timeout
@@ -158,6 +159,7 @@ mod wait_input_timeout_tests {
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
+            play_id: None,
         })?;
 
         let serve_handle = {
@@ -220,6 +222,7 @@ mod wait_input_timeout_tests {
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
+            play_id: None,
         })?;
 
         let serve_handle = {
@@ -283,6 +286,7 @@ mod wait_input_timeout_tests {
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
+            play_id: None,
         })?;
 
         let serve_handle = {

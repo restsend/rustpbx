@@ -200,7 +200,10 @@ fn event_stream(ws_stream: WSStream) -> BoxStream<'static, Result<SynthesisEvent
             Ok(Message::Text(text)) => {
                 let response = serde_json::from_str::<WebSocketResponse>(&text).unwrap();
                 if response.r#final == 1 {
-                    return Some(Ok(SynthesisEvent::Finished));
+                    return Some(Ok(SynthesisEvent::Finished {
+                        end_of_stream: Some(true),
+                        cache_key: None,
+                    }));
                 }
 
                 if response.code != 0 {

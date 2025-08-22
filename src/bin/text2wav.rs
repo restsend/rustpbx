@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
                                 writer.write_sample(sample)?;
                             }
                         }
-                        SynthesisEvent::Finished => {
+                        SynthesisEvent::Finished { .. } => {
                             break;
                         }
                         _ => {}

@@ -168,7 +168,13 @@ impl TencentCloudTtsClient {
     }
 
     // Internal function to synthesize text to audio using WebSocket
-    async fn synthesize_text(&self, text: &str, option: Option<SynthesisOption>) -> Result<()> {
+    async fn synthesize_text(
+        &self,
+        text: &str,
+        end_of_stream: Option<bool>,
+        option: Option<SynthesisOption>,
+    ) -> Result<()> {
+        let cache_key = option.as_ref().map(|opt| opt.cache_key.clone()).flatten();
         let session_id = uuid::Uuid::new_v4().to_string();
         let url = self.generate_websocket_url(text, &session_id, option)?;
         debug!(session_id, text, "connecting to WebSocket URL: {}", url);
@@ -266,7 +272,10 @@ impl TencentCloudTtsClient {
                 _ => {}
             }
         }
-        self.tx.send(Ok(SynthesisEvent::Finished))?;
+        self.tx.send(Ok(SynthesisEvent::Finished {
+            end_of_stream,
+            cache_key,
+        }))?;
         Ok(())
     }
 }
@@ -276,7 +285,10 @@ impl SynthesisClient for TencentCloudTtsClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::TencentCloud
     }
-    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(
+        &self,
+        _cancel_token: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("TencentCloudTtsClient: Receiver already taken, cannot start new stream")
         })?;
@@ -290,9 +302,9 @@ impl SynthesisClient for TencentCloudTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _end_of_stream: Option<bool>,
+        end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
-        self.synthesize_text(text, option).await
+        self.synthesize_text(text, end_of_stream, option).await
     }
 }

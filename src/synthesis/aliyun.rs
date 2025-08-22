@@ -279,9 +279,10 @@ impl SynthesisClient for AliyunTtsClient {
     async fn synthesize(
         &self,
         text: &str,
-        _end_of_stream: Option<bool>,
+        end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
+        let cache_key = option.as_ref().map(|opt| opt.cache_key.clone()).flatten();
         let option = self.option.merge_with(option);
         let api_key = self.get_api_key(&option)?;
         let task_id = Uuid::new_v4().to_string();
@@ -421,7 +422,10 @@ impl SynthesisClient for AliyunTtsClient {
                 _ => {}
             }
         }
-        self.tx.send(Ok(SynthesisEvent::Finished))?;
+        self.tx.send(Ok(SynthesisEvent::Finished {
+            end_of_stream,
+            cache_key,
+        }))?;
         Ok(())
     }
 }

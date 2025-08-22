@@ -72,7 +72,7 @@ async fn test_tencent_cloud_tts() {
                 chunks_count += 1;
                 collected_audio.extend_from_slice(&audio);
             }
-            Ok(SynthesisEvent::Finished) => {
+            Ok(SynthesisEvent::Finished { .. }) => {
                 break;
             }
             Ok(SynthesisEvent::Subtitles { .. }) => {
@@ -136,7 +136,7 @@ async fn test_aliyun_tts() {
                 audio_collector.extend_from_slice(&chunk);
                 chunks_count += 1;
             }
-            Ok(SynthesisEvent::Finished) => {
+            Ok(SynthesisEvent::Finished { .. }) => {
                 break;
             }
             Ok(SynthesisEvent::Subtitles(_subtitles)) => {
@@ -208,7 +208,7 @@ async fn test_tencent_cloud_streaming_tts() {
             Ok(SynthesisEvent::AudioChunk(audio)) => {
                 collected_audio.extend_from_slice(&audio);
             }
-            Ok(SynthesisEvent::Finished) => {
+            Ok(SynthesisEvent::Finished { .. }) => {
                 finished = true;
                 break;
             }

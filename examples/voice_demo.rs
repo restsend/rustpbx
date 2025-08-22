@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
                                                     };
                                                 output_buffer.push(&final_audio);
                                             }
-                                            SynthesisEvent::Finished => {
+                                            SynthesisEvent::Finished { .. } => {
                                                 break;
                                             }
                                             _ => {}

@@ -92,6 +92,7 @@ pub struct SynthesisOption {
     pub emotion: Option<String>,
     pub endpoint: Option<String>,
     pub extra: Option<HashMap<String, String>>,
+    pub cache_key: Option<String>,
 }
 
 impl SynthesisOption {
@@ -136,7 +137,10 @@ pub enum SynthesisEvent {
     AudioChunk(Vec<u8>),
     /// Progress information including completion status
     Subtitles(Vec<Subtitle>),
-    Finished,
+    Finished {
+        end_of_stream: Option<bool>,
+        cache_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +199,7 @@ impl Default for SynthesisOption {
             emotion: None,
             endpoint: None,
             extra: None,
+            cache_key: None,
         }
     }
 }
