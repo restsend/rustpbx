@@ -16,10 +16,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::{
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, RwLock},
     time::Instant,
 };
 use tokio::{
@@ -37,7 +34,6 @@ struct SynthesisStatus {
     total_audio_len: usize,
     full_text: String,
     subtitles: Vec<Subtitle>,
-    cache_key: Option<String>,
 }
 
 pub struct SynthesisHandle {
@@ -158,7 +154,6 @@ impl Track for TtsTrack {
             .take()
             .ok_or(anyhow!("Command receiver not found"))?;
 
-        let buffer = Arc::new(Mutex::new(Vec::new()));
         let sample_rate = self.config.samplerate;
         let use_cache = self.use_cache;
         let track_id = self.track_id.clone();
@@ -179,16 +174,14 @@ impl Track for TtsTrack {
             total_audio_len: 0,
             full_text: String::new(),
             subtitles: Vec::new(),
-            cache_key: None,
         }));
         let status_ref = status.clone();
-        let buffer_ref = buffer.clone();
         let provider = client.provider();
         let client = client.clone();
-        let synthesize_done = Arc::new(AtomicBool::new(false));
-        let synthesize_done_ref = synthesize_done.clone();
         let event_sender_clone = event_sender.clone();
         let client_ref = client.clone();
+        let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel();
+        let buffer_tx_ref = buffer_tx.clone();
         let command_loop = async move {
             while let Some(mut command) = command_rx.recv().await {
                 let text = command.text;
@@ -207,7 +200,7 @@ impl Track for TtsTrack {
                 } else {
                     None
                 };
-                synthesize_done_ref.store(false, Ordering::Relaxed);
+                command.option.cache_key = cache_key.clone();
 
                 status_ref
                     .write()
@@ -222,7 +215,6 @@ impl Track for TtsTrack {
                         }
                         status.play_id = play_id.clone();
                         status.speaker = command.option.speaker.clone();
-                        status.cache_key = cache_key.clone();
                         Ok(())
                     })
                     .ok();
@@ -231,9 +223,12 @@ impl Track for TtsTrack {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
                             Ok(audio) => {
-                                info!(session_id, "using cached audio for {}", cache_key);
-                                buffer_ref.lock().await.extend(bytes_to_samples(&audio));
-                                synthesize_done_ref.store(true, Ordering::Relaxed);
+                                info!(session_id, text, "using cached audio for {}", cache_key);
+                                buffer_tx_ref.send(Some(bytes_to_samples(&audio))).ok();
+                                if command.end_of_stream.unwrap_or_default() {
+                                    buffer_tx_ref.send(None).ok();
+                                }
+
                                 event_sender_clone
                                     .send(SessionEvent::Metrics {
                                         timestamp: crate::get_timestamp(),
@@ -272,7 +267,7 @@ impl Track for TtsTrack {
                         _ => {}
                     }
                 }
-
+                info!(session_id, text, "synthesizing");
                 match client_ref
                     .synthesize(&text, command.end_of_stream, Some(command.option))
                     .await
@@ -295,13 +290,11 @@ impl Track for TtsTrack {
             }
         };
         let status_ref = status.clone();
-        let buffer_ref = buffer.clone();
         let provider = client.provider();
-        let synthesize_done_ref = synthesize_done.clone();
         let session_id = self.session_id.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
-
+        let buffer_tx_ref = buffer_tx.clone();
         let receive_result_loop = async move {
             let mut audio_chunks = Vec::new();
             let mut first_chunk = true;
@@ -316,23 +309,23 @@ impl Track for TtsTrack {
                             .as_mut()
                             .and_then(|status| {
                                 status.total_audio_len += audio_chunk.len();
-
-                                if first_chunk {
-                                    first_chunk = false;
-                                    // Send metrics event after the first chunk
-                                    event_sender_clone
-                                        .send(SessionEvent::Metrics {
-                                            timestamp: crate::get_timestamp(),
-                                            key: format!("ttfb.tts.{}", provider),
-                                            data: serde_json::json!({
-                                                    "speaker": status.speaker,
-                                                    "playId": status.play_id,
-                                                    "length": audio_chunk.len(),
-                                            }),
-                                            duration: start_time.elapsed().as_millis() as u32,
-                                        })
-                                        .ok();
+                                if !first_chunk {
+                                    return Ok(());
                                 }
+                                first_chunk = false;
+                                // Send metrics event after the first chunk
+                                event_sender_clone
+                                    .send(SessionEvent::Metrics {
+                                        timestamp: crate::get_timestamp(),
+                                        key: format!("ttfb.tts.{}", provider),
+                                        data: serde_json::json!({
+                                                "speaker": status.speaker,
+                                                "playId": status.play_id,
+                                                "length": audio_chunk.len(),
+                                        }),
+                                        duration: start_time.elapsed().as_millis() as u32,
+                                    })
+                                    .ok();
                                 Ok(())
                             })
                             .ok();
@@ -349,20 +342,56 @@ impl Track for TtsTrack {
 
                         // Store the processed chunk for caching later if needed
                         audio_chunks.push(processed_chunk.clone());
-
-                        // Convert to s16 and add to buffer immediately for streaming playback
-                        buffer_ref
-                            .lock()
-                            .await
-                            .extend(bytes_to_samples(&processed_chunk));
+                        match buffer_tx_ref.send(Some(bytes_to_samples(&processed_chunk))) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(session_id, "error sending cached audio: {}", e);
+                                continue;
+                            }
+                        }
                     }
-                    Ok(SynthesisEvent::Finished) => {
+                    Ok(SynthesisEvent::Finished {
+                        end_of_stream,
+                        cache_key,
+                    }) => {
+                        let status = match status_ref.read() {
+                            Ok(status) => status.clone(),
+                            Err(e) => {
+                                warn!(session_id, "error reading synthesis status: {}", e);
+                                return;
+                            }
+                        };
+                        // Send metrics event after all chunks are received
+                        event_sender_clone
+                            .send(SessionEvent::Metrics {
+                                timestamp: crate::get_timestamp(),
+                                key: format!("completed.tts.{}", provider),
+                                data: serde_json::json!({
+                                        "speaker": status.speaker,
+                                        "playId": status.play_id,
+                                        "length": status.total_audio_len,
+                                }),
+                                duration: start_time.elapsed().as_millis() as u32,
+                            })
+                            .ok();
+
                         info!(
                             session_id,
-                            "synthesis finished, total audio length: {} bytes",
-                            status_ref.read().unwrap().total_audio_len
+                            %provider,
+                            audio_len = status.total_audio_len,
+                            elapsed = start_time.elapsed().as_millis(),
+                            text = status.full_text,
+                            "synthesize audio completed",
                         );
-                        break;
+                        let complete_audio = audio_chunks.drain(..).flatten().collect::<Vec<_>>();
+                        if use_cache && !complete_audio.is_empty() {
+                            if let Some(ref cache_key) = cache_key {
+                                cache::store_in_cache(cache_key, &complete_audio).await.ok();
+                            }
+                        }
+                        if end_of_stream.unwrap_or_default() {
+                            buffer_tx_ref.send(None).ok();
+                        }
                     }
                     Ok(SynthesisEvent::Subtitles(subtitles)) => {
                         status_ref
@@ -385,47 +414,11 @@ impl Track for TtsTrack {
                                 code: None,
                             })
                             .ok();
-                        break;
+                        audio_chunks.drain(..);
+                        buffer_tx_ref.send(None).ok();
                     }
                 }
             }
-            let status = match status_ref.read() {
-                Ok(status) => status.clone(),
-                Err(e) => {
-                    warn!(session_id, "error reading synthesis status: {}", e);
-                    return;
-                }
-            };
-            // Send metrics event after all chunks are received
-            event_sender_clone
-                .send(SessionEvent::Metrics {
-                    timestamp: crate::get_timestamp(),
-                    key: format!("completed.tts.{}", provider),
-                    data: serde_json::json!({
-                            "speaker": status.speaker,
-                            "playId": status.play_id,
-                            "length": status.total_audio_len,
-                    }),
-                    duration: start_time.elapsed().as_millis() as u32,
-                })
-                .ok();
-
-            info!(
-                session_id,
-                %provider,
-                audio_len = status.total_audio_len,
-                elapsed = start_time.elapsed().as_millis(),
-                text = status.full_text,
-                "synthesize audio completed",
-            );
-
-            if use_cache && !audio_chunks.is_empty() {
-                if let Some(ref cache_key) = status.cache_key {
-                    let complete_audio: Vec<u8> = audio_chunks.into_iter().flatten().collect();
-                    cache::store_in_cache(cache_key, &complete_audio).await.ok();
-                }
-            }
-            synthesize_done_ref.store(true, Ordering::Relaxed);
         };
         let sample_rate = self.config.samplerate;
         let track_id = self.track_id.clone();
@@ -433,70 +426,89 @@ impl Track for TtsTrack {
         let max_pcm_chunk_size = sample_rate as usize * packet_duration_ms as usize / 1000;
         info!(
             session_id = self.session_id,
-            "track started with sample_rate: {} packet_duration_ms: {} max_pcm_chunk_size: {}",
-            sample_rate,
-            packet_duration_ms,
-            max_pcm_chunk_size
+            track_id, sample_rate, packet_duration_ms, max_pcm_chunk_size, "tts track started"
         );
-        let mut ptimer = tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
         let processor_chain = self.processor_chain.clone();
         let session_id = self.session_id.clone();
-        let buffer_ref = buffer.clone();
-
+        let remaining_size = Arc::new(Mutex::new(0usize));
+        let remaining_size_ref = Arc::new(Mutex::new(0usize));
         let emit_loop = async move {
-            let start_time = Instant::now();
+            let mut ptimer =
+                tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
+            let mut buffer = Vec::new();
+            let mut is_recv_finished = false;
             loop {
-                let packet = {
-                    let mut buffer = buffer_ref.lock().await;
-                    if buffer.len() > max_pcm_chunk_size {
-                        let s16_data = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
-                        Some(s16_data)
-                    } else {
-                        if synthesize_done.load(Ordering::Relaxed) {
-                            break;
-                        } else {
-                            None
+                select! {
+                        _ = ptimer.tick() => {
+                                let mut packet = if buffer.len() >= max_pcm_chunk_size {
+                                    let packet_samples = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
+                                    AudioFrame {
+                                        track_id: track_id.clone(),
+                                        samples: Samples::PCM { samples: packet_samples },
+                                        timestamp: crate::get_timestamp(),
+                                        sample_rate,
+                                    }
+                                } else {
+                                    if is_recv_finished {
+                                        break;
+                                    }
+                                    AudioFrame {
+                                        track_id: track_id.clone(),
+                                        samples: Samples::PCM { samples: Vec::new() },
+                                        timestamp: crate::get_timestamp(),
+                                        sample_rate,
+                                    }
+                                };
+                                *remaining_size_ref.lock().await = buffer.len();
+                                // Process the frame with processor chain
+                                if let Err(e) = processor_chain.process_frame(&mut packet) {
+                                    warn!(track_id, session_id, "error processing frame: {}", e);
+                                }
+                                // Send the packet
+                                match packet_sender.send(packet) {
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        break; /* Track has been closed */
+                                    }
+                                }
                         }
-                    }
-                };
-                if let Some(packet) = packet {
-                    let mut packet = AudioFrame {
-                        track_id: track_id.clone(),
-                        samples: Samples::PCM { samples: packet },
-                        timestamp: crate::get_timestamp(),
-                        sample_rate,
-                    };
-                    // Process the frame with processor chain
-                    if let Err(e) = processor_chain.process_frame(&mut packet) {
-                        warn!(track_id, "error processing frame: {}", e);
-                    }
-                    // Send the packet
-                    packet_sender.send(packet).ok();
+                        chunk = buffer_rx.recv() => {
+                            match chunk {
+                                Some(Some(mut samples)) => {
+                                    is_recv_finished = false;
+                                    buffer.append(&mut samples);
+                                }
+                                Some(None) => {
+                                    is_recv_finished = true;
+                                }
+                                None => {
+                                    // Channel closed
+                                    break;
+                                }
+                            }
+                        }
                 }
-                ptimer.tick().await;
             }
-            info!(
-                session_id,
-                "emit done {} ms",
-                start_time.elapsed().as_millis()
-            );
         };
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
-        let start_time = crate::get_timestamp();
         let session_id = self.session_id.clone();
         let ssrc = self.ssrc;
         let event_sender_clone = event_sender.clone();
         tokio::spawn(async move {
+            let start_time = crate::get_timestamp();
             select! {
-                _ = async {tokio::join!(command_loop, receive_result_loop);} => {
-                    info!(session_id, "command loop done");
+                _ = command_loop => {
+                    info!(session_id, "command loop completed");
+                }
+                _ = receive_result_loop => {
+                    info!(session_id, "receive result loop completed");
                 }
                 _ = emit_loop => {
                     info!(session_id, "emit loop completed");
                 }
                 _ = token.cancelled() => {
-                    let remaining_size = {buffer.lock().await.len() * 2};
+                    let remaining_size = {*remaining_size.lock().await * 2};
                     let status = match status.write() {
                         Ok(status) => status.clone(),
                         Err(e) => {
@@ -518,6 +530,7 @@ impl Track for TtsTrack {
                     }
                     let event = SessionEvent::Interruption {
                         track_id: track_id.clone(),
+                        play_id: status.play_id.clone(),
                         timestamp: crate::get_timestamp(),
                         subtitle: Some(status.full_text),
                         position,
@@ -527,16 +540,23 @@ impl Track for TtsTrack {
                    event_sender_clone.send(event).ok();
                 }
             }
+
+            let duration = crate::get_timestamp() - start_time;
+            info!(session_id, track_id, duration, "tts track ended");
+            let play_id = match status.read() {
+                Ok(status) => status.play_id.clone(),
+                Err(_) => None,
+            };
             event_sender_clone
                 .send(SessionEvent::TrackEnd {
                     track_id,
                     timestamp: crate::get_timestamp(),
-                    duration: crate::get_timestamp() - start_time,
+                    duration,
                     ssrc,
+                    play_id,
                 })
                 .ok();
         });
-
         Ok(())
     }
 

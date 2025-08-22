@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -109,8 +109,7 @@ pub async fn retrieve_from_cache(key: &str) -> Result<Vec<u8>> {
     }
 
     let data = tokio::fs::read(&path).await?;
-
-    debug!("Retrieved file from cache with key: {}", key);
+    debug!(key, size = data.len(), "retrieved file from cache");
     Ok(data)
 }
 

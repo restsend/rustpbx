@@ -144,6 +144,7 @@ impl Track for WebsocketTrack {
                     timestamp: crate::get_timestamp(),
                     duration: crate::get_timestamp() - start_time,
                     ssrc,
+                    play_id: None,
                 })
                 .ok();
         });

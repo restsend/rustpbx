@@ -105,10 +105,12 @@ pub enum SessionEvent {
         timestamp: u64,
         duration: u64,
         ssrc: u32,
+        play_id: Option<String>,
     },
     Interruption {
         track_id: String,
         timestamp: u64,
+        play_id: Option<String>,
         subtitle: Option<String>, // current tts text
         position: Option<u32>,    // word index in subtitle
         total_duration: u32,      // whole tts duration

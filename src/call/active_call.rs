@@ -554,10 +554,6 @@ impl ActiveCall {
             match tts_handle.try_send(play_command) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    warn!(
-                        session_id = self.session_id,
-                        "error sending tts command: {}", e
-                    );
                     play_command = e.0;
                 }
             }
