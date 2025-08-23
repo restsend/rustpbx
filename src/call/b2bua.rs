@@ -210,11 +210,9 @@ impl B2bua {
                             .await
                         {
                             Ok(_) => {
-                                info!(session_id = self.session_id, "Callee invite succeeded");
                                 return Ok(());
                             }
                             Err(e) => {
-                                warn!(session_id = self.session_id, "Callee invite failed: {}", e);
                                 return Err(e);
                             }
                         }
@@ -401,22 +399,27 @@ impl B2bua {
                     active_call_ref.invitation.dialog_layer.clone(),
                 )
             );
-            info!(
-                session_id = session_id,
-                "b2bua callee completed with: {:?}", r
-            );
+            info!(session_id, "b2bua callee completed with: {:?}", r);
         });
 
-        let (dialog_id, answer) = active_call
+        let caller = invite_option.caller.clone();
+        let callee = invite_option.callee.clone();
+        let (dialog_id, answer) = match active_call
             .invitation
             .invite(invite_option, dlg_state_sender)
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        {
+            Ok((id, ans)) => (id, ans),
+            Err(e) => {
+                warn!(session_id = self.session_id, %caller, %callee, "callee invite failed: {}", e);
+                return Err(anyhow::anyhow!("{}", e));
+            }
+        };
 
         let answer = match answer {
             Some(answer) => String::from_utf8_lossy(&answer).to_string(),
             None => {
-                warn!(session_id = self.session_id, "no answer received");
+                warn!(session_id = self.session_id, %caller, %callee, "no answer received");
                 return Err(anyhow::anyhow!(
                     "no answer received for dialog: {}",
                     dialog_id
@@ -432,8 +435,10 @@ impl B2bua {
 
         info!(
             session_id = self.session_id,
-            "callee answered with SDP: \n{}", answer,
-        );
+            %caller,
+            %callee,
+            answer,
+            "callee answered with SDP");
         Ok(())
     }
 }
