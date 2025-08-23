@@ -7,12 +7,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 mod aliyun;
 mod tencent_cloud;
-mod tencent_cloud_streaming;
 mod voiceapi;
 
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
-pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
+// pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Clone, Default)]
@@ -33,8 +32,6 @@ pub type SynthesisEventReceiver = mpsc::UnboundedReceiver<Result<SynthesisEvent>
 pub enum SynthesisType {
     #[serde(rename = "tencent")]
     TencentCloud,
-    #[serde(rename = "tencent_streaming")]
-    TencentCloudStreaming,
     #[serde(rename = "voiceapi")]
     VoiceApi,
     #[serde(rename = "aliyun")]
@@ -47,7 +44,6 @@ impl std::fmt::Display for SynthesisType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SynthesisType::TencentCloud => write!(f, "tencent"),
-            SynthesisType::TencentCloudStreaming => write!(f, "tencent_streaming"),
             SynthesisType::VoiceApi => write!(f, "voiceapi"),
             SynthesisType::Aliyun => write!(f, "aliyun"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
@@ -65,7 +61,6 @@ impl<'de> Deserialize<'de> for SynthesisType {
             "tencent" => Ok(SynthesisType::TencentCloud),
             "voiceapi" => Ok(SynthesisType::VoiceApi),
             "aliyun" => Ok(SynthesisType::Aliyun),
-            "tencent_streaming" => Ok(SynthesisType::TencentCloudStreaming),
             _ => Ok(SynthesisType::Other(value)),
         }
     }
@@ -253,10 +248,6 @@ pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn Synthe
     match provider {
         SynthesisType::TencentCloud => {
             let client = TencentCloudTtsClient::new(option);
-            Ok(Box::new(client))
-        }
-        SynthesisType::TencentCloudStreaming => {
-            let client = TencentCloudStreamingTtsClient::new(option);
             Ok(Box::new(client))
         }
         SynthesisType::VoiceApi => {
