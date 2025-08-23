@@ -389,7 +389,8 @@ impl ActiveCall {
             session_id = self.session_id,
             call_type = ?self.call_type,
             sender,
-            "caller with option: {:?}", option
+            ?option,
+            "caller with option"
         );
 
         match self.setup_caller_track(option.clone()).await {
@@ -470,7 +471,11 @@ impl ActiveCall {
             };
             debug!(
                 session_id = self.session_id,
-                ringtone, recorder, early_media, "do_ringing with option: {:?}", option
+                ringtone,
+                recorder,
+                early_media,
+                ?option,
+                "do_ringing with optio"
             );
             let _ = self.invite_or_accept(option, "accept".to_string()).await?;
         }
@@ -534,13 +539,13 @@ impl ActiveCall {
         info!(
             session_id = self.session_id,
             text = %play_command.text,
-            speaker = ?play_command.speaker,
-            auto_hangup = ?auto_hangup,
-            ?play_id,
-            streaming=play_command.streaming,
-            eos=play_command.end_of_stream,
-            wit=wait_input_timeout,
-            "new synthesis command"
+            speaker = play_command.speaker.as_deref(),
+            auto_hangup = auto_hangup.unwrap_or_default(),
+            play_id = play_command.play_id.as_deref(),
+            streaming = play_command.streaming,
+            eos = play_command.end_of_stream,
+            wit = wait_input_timeout,
+            "new synthesis"
         );
 
         let ssrc = rand::random::<u32>();
