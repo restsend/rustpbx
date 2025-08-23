@@ -16,10 +16,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::{
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicIsize, Ordering},
-    },
+    sync::{Arc, RwLock},
     time::Instant,
 };
 use tokio::{
@@ -185,12 +182,16 @@ impl Track for TtsTrack {
         let client_ref = client.clone();
         let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel();
         let buffer_tx_ref = buffer_tx.clone();
-        let synthesis_tasks = Arc::new(AtomicIsize::new(0));
-        let synthesis_tasks_ref = synthesis_tasks.clone();
 
         let command_loop = async move {
             while let Some(mut command) = command_rx.recv().await {
                 let text = command.text;
+                if text.is_empty() {
+                    if command.end_of_stream.unwrap_or_default() {
+                        buffer_tx_ref.send(None).ok();
+                    }
+                    continue;
+                }
                 let play_id = command.play_id;
                 if command.option.speaker.is_none() {
                     command.option.speaker = command.speaker;
@@ -224,7 +225,6 @@ impl Track for TtsTrack {
                         Ok(())
                     })
                     .ok();
-
                 if let Some(cache_key) = cache_key {
                     match cache::is_cached(&cache_key).await {
                         Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
@@ -277,19 +277,16 @@ impl Track for TtsTrack {
                     session_id,
                     text,
                     play_id,
-                    tasks = synthesis_tasks_ref.load(Ordering::SeqCst),
                     "synthesizing eos: {}, streaming: {}",
                     command.end_of_stream.unwrap_or_default(),
                     command.streaming.unwrap_or_default(),
                 );
-                synthesis_tasks_ref.fetch_add(1, Ordering::SeqCst);
                 match client_ref
                     .synthesize(&text, command.end_of_stream, Some(command.option))
                     .await
                 {
                     Ok(_) => {}
                     Err(e) => {
-                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         warn!(session_id, "error synthesizing text: {}", e);
                         event_sender_clone
                             .send(SessionEvent::Error {
@@ -311,7 +308,6 @@ impl Track for TtsTrack {
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
         let buffer_tx_ref = buffer_tx.clone();
-        let synthesis_tasks_ref = synthesis_tasks.clone();
 
         let receive_result_loop = async move {
             let mut audio_chunks = Vec::new();
@@ -372,7 +368,6 @@ impl Track for TtsTrack {
                         end_of_stream,
                         cache_key,
                     }) => {
-                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         let status = match status_ref.read() {
                             Ok(status) => status.clone(),
                             Err(e) => {
@@ -423,7 +418,6 @@ impl Track for TtsTrack {
                             .ok();
                     }
                     Err(e) => {
-                        synthesis_tasks_ref.fetch_sub(1, Ordering::SeqCst);
                         warn!(session_id, "Error in audio stream chunk: {}", e);
                         event_sender_clone
                             .send(SessionEvent::Error {
@@ -452,7 +446,6 @@ impl Track for TtsTrack {
         let session_id = self.session_id.clone();
         let remaining_size = Arc::new(Mutex::new(0usize));
         let remaining_size_ref = Arc::new(Mutex::new(0usize));
-        let synthesis_tasks_ref = synthesis_tasks.clone();
         let emit_loop = async move {
             let mut ptimer =
                 tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
@@ -470,7 +463,7 @@ impl Track for TtsTrack {
                                         sample_rate,
                                     }
                                 } else {
-                                    if is_recv_finished && synthesis_tasks_ref.load(Ordering::SeqCst) <= 0 {
+                                    if is_recv_finished {
                                         break;
                                     }
                                     AudioFrame {
@@ -562,13 +555,7 @@ impl Track for TtsTrack {
             }
 
             let duration = crate::get_timestamp() - start_time;
-            info!(
-                session_id,
-                track_id,
-                duration,
-                tasks = synthesis_tasks.load(Ordering::SeqCst),
-                "tts track ended"
-            );
+            info!(session_id, track_id, duration, "tts track ended");
             let play_id = match status.read() {
                 Ok(status) => status.play_id.clone(),
                 Err(_) => None,
