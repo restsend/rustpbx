@@ -14,7 +14,7 @@ use crate::{
     event::EventSender,
     synthesis::{
         AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
-        TencentCloudStreamingTtsClient, TencentCloudTtsClient, VoiceApiTtsClient,
+         TencentCloudTtsClient, VoiceApiTtsClient,
     },
     transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
@@ -96,10 +96,6 @@ impl Default for StreamEngine {
         );
         engine.register_tts(SynthesisType::Aliyun, AliyunTtsClient::create);
         engine.register_tts(SynthesisType::TencentCloud, TencentCloudTtsClient::create);
-        engine.register_tts(
-            SynthesisType::TencentCloudStreaming,
-            TencentCloudStreamingTtsClient::create,
-        );
         engine.register_tts(SynthesisType::VoiceApi, VoiceApiTtsClient::create);
         engine
     }
