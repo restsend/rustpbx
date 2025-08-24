@@ -57,7 +57,7 @@ async fn test_tencent_cloud_tts() {
         .await
         .expect("Failed to start TTS stream");
     client
-        .synthesize(text, None, None)
+        .synthesize(text, Some(true), None)
         .await
         .expect("Failed to synthesize text");
     // Collect all chunks from the stream
@@ -123,7 +123,7 @@ async fn test_aliyun_tts() {
         .expect("Failed to start Aliyun TTS stream");
 
     client
-        .synthesize("Hello, how are you?", None, None)
+        .synthesize("Hello, how are you?", Some(true), None)
         .await
         .expect("Failed to synthesize text");
 
@@ -138,7 +138,7 @@ async fn test_aliyun_tts() {
             Ok(SynthesisEvent::Finished { .. }) => {
                 break;
             }
-            Ok(SynthesisEvent::Subtitles(_subtitles)) => {
+            Ok(SynthesisEvent::Subtitles { .. }) => {
                 // ignore progress
             }
             Err(e) => {
