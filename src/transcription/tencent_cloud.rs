@@ -334,7 +334,7 @@ impl TencentCloudAsrClient {
                                             end_time: Some(begin_time + result.end_time as u64),
                                         }
                                     };
-                                    event_sender.send(event).ok();
+                                    event_sender.send(event).ok()?;
 
                                     let diff_time =
                                         crate::get_timestamp() - start_time.load(Ordering::Relaxed);
