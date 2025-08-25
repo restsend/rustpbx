@@ -106,7 +106,7 @@ mod tests {
         let event_sender = crate::event::create_event_sender();
         let stream = MediaStreamBuilder::new(event_sender).build();
         let track = Box::new(TestTrack::new("test1".to_string()));
-        stream.update_track(track).await;
+        stream.update_track(track, None).await;
     }
 
     #[tokio::test]
@@ -117,7 +117,7 @@ mod tests {
             .build();
         let track_id = "test1".to_string();
         stream
-            .update_track(Box::new(TestTrack::new(track_id.clone())))
+            .update_track(Box::new(TestTrack::new(track_id.clone())), None)
             .await;
         stream.remove_track(&track_id).await;
     }
@@ -131,7 +131,7 @@ async fn test_media_stream_basic() -> Result<()> {
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));
 
-    stream.update_track(track).await;
+    stream.update_track(track, None).await;
 
     // Start the stream
     let handle = tokio::spawn(async move {
@@ -157,7 +157,7 @@ async fn test_media_stream_events() -> Result<()> {
     // Add a test track
     let track = Box::new(TestTrack::new("test1".to_string()));
 
-    stream.update_track(track).await;
+    stream.update_track(track, None).await;
 
     // Start the stream
     let handle = tokio::spawn(async move {
@@ -187,8 +187,8 @@ async fn test_stream_forward_packets() -> Result<()> {
     let track2_id = track2.id().clone();
 
     // Add tracks to the stream
-    stream.update_track(Box::new(track1)).await;
-    stream.update_track(Box::new(track2)).await;
+    stream.update_track(Box::new(track1), None).await;
+    stream.update_track(Box::new(track2), None).await;
     let packet_sender = stream.packet_sender.clone();
 
     // Start the stream in a background task
@@ -245,8 +245,8 @@ async fn test_stream_recorder() -> Result<()> {
     let track2_id = track2.id().clone();
 
     // Add tracks to the stream
-    stream.update_track(track1).await;
-    stream.update_track(track2).await;
+    stream.update_track(track1, None).await;
+    stream.update_track(track2, None).await;
 
     // Clone the stream for the background task
     let stream_clone = stream.clone();
@@ -307,8 +307,8 @@ async fn test_stream_forward_payload_conversion() -> Result<()> {
     let track2 = TestTrack::new("track2".to_string()); // This will send RTP
 
     // Add tracks to the stream
-    stream.update_track(Box::new(track1)).await;
-    stream.update_track(Box::new(track2)).await;
+    stream.update_track(Box::new(track1), None).await;
+    stream.update_track(Box::new(track2), None).await;
 
     // Start the stream in a background task
     let stream_clone = stream.clone();
