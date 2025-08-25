@@ -572,14 +572,14 @@ impl ActiveCall {
             self.session_id.clone(),
             self.track_config.server_side_track_id.clone(),
             ssrc,
-            play_id,
+            play_id.clone(),
             &tts_option,
         )
         .await?;
 
         new_handle.try_send(play_command)?;
         *self.tts_handle.lock().await = Some(new_handle);
-        self.media_stream.update_track(tts_track).await;
+        self.media_stream.update_track(tts_track, play_id).await;
         Ok(())
     }
 
@@ -598,7 +598,7 @@ impl ActiveCall {
 
         let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
             .with_ssrc(ssrc)
-            .with_path(url)
+            .with_path(url.clone())
             .with_cancel_token(self.cancel_token.child_token());
         match auto_hangup {
             Some(true) => {
@@ -607,7 +607,9 @@ impl ActiveCall {
             _ => *self.auto_hangup.lock().await = None,
         }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
-        self.media_stream.update_track(Box::new(file_track)).await;
+        self.media_stream
+            .update_track(Box::new(file_track), Some(url))
+            .await;
         Ok(())
     }
 
@@ -1085,7 +1087,7 @@ impl ActiveCall {
             track.append_processor(processor);
         }
 
-        media_stream.update_track(track).await;
+        media_stream.update_track(track, None).await;
         Ok(())
     }
 

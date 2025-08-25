@@ -156,7 +156,7 @@ impl MediaStream {
         }
         Ok(())
     }
-    pub async fn update_track(&self, mut track: Box<dyn Track>) {
+    pub async fn update_track(&self, mut track: Box<dyn Track>, play_id: Option<String>) {
         self.remove_track(track.id()).await;
         if self.recorder_option.lock().await.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
@@ -175,6 +175,7 @@ impl MediaStream {
                     .send(SessionEvent::TrackStart {
                         track_id,
                         timestamp: crate::get_timestamp(),
+                        play_id,
                     })
                     .ok();
             }
@@ -182,6 +183,7 @@ impl MediaStream {
                 warn!(
                     session_id = self.id,
                     track_id = track.id(),
+                    play_id = play_id.as_deref(),
                     "Failed to start track: {}",
                     e
                 );

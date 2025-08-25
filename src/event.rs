@@ -100,6 +100,7 @@ pub enum SessionEvent {
     TrackStart {
         track_id: String,
         timestamp: u64,
+        play_id: Option<String>,
     },
     TrackEnd {
         track_id: String,

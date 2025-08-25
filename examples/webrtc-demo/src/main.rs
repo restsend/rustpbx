@@ -1,14 +1,14 @@
 use anyhow::Result;
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post},
-    Json, Router,
 };
 use rustpbx::media::{
     stream::MediaStreamBuilder,
-    track::{file::FileTrack, webrtc::WebrtcTrack, TrackConfig},
+    track::{TrackConfig, file::FileTrack, webrtc::WebrtcTrack},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,7 +21,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
-use tracing::{error, info, warn, Level};
+use tracing::{Level, error, info, warn};
 use uuid::Uuid;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
@@ -141,8 +141,10 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
             let file_track_id = format!("file-{}", Uuid::new_v4());
             let file_track = FileTrack::new(file_track_id.clone()).with_path(sample_path_str);
             local_desc = Some(answer);
-            media_stream.update_track(Box::new(webrtc_track)).await;
-            media_stream.update_track(Box::new(file_track)).await;
+            media_stream
+                .update_track(Box::new(webrtc_track), None)
+                .await;
+            media_stream.update_track(Box::new(file_track), None).await;
             tokio::spawn(async move {
                 if let Err(e) = media_stream.serve().await {
                     error!("Media stream error: {}", e);

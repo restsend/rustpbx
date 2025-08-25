@@ -298,7 +298,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 
 **Fields:**
 - `command` (string): Always "play"
-- `url` (string): URL of audio file to play (supports HTTP/HTTPS URLs)
+- `url` (string): **URL of audio file to play (supports HTTP/HTTPS URLs). This URL will be returned as playId in the trackEnd event.**
 - `autoHangup` (boolean, optional): **If true, the call will be automatically hung up after playback is finished.**
 - `waitInputTimeout` (number, optional): Maximum time to wait for user input in seconds
 
@@ -746,12 +746,14 @@ Events are received as JSON messages from the server. All timestamps are in mill
 - `event` (string): Always "trackStart"
 - `trackId` (string): **Unique identifier for the audio track.**
 - `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `playId` (string, optional): **For TTS command, this is the playId from the TTS command. For Play command, this is the URL from the Play command.**
 
 ```json
 {
   "event": "trackStart",
   "trackId": "track-tts-456",
-  "timestamp": 1640995200000
+  "timestamp": 1640995200000,
+  "playId": "llm-001"
 }
 ```
 
@@ -764,7 +766,7 @@ Events are received as JSON messages from the server. All timestamps are in mill
 - `timestamp` (number): Event timestamp in milliseconds since Unix epoch
 - `duration` (number): Duration of track in milliseconds
 - `ssrc` (number): RTP Synchronization Source identifier
-- `playId` (string, optional): The playid of `TTS` command
+- `playId` (string, optional): **For TTS command, this is the playId from the TTS command. For Play command, this is the URL from the Play command.**
 
 ```json
 {
@@ -773,7 +775,7 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "timestamp": 1640995230000,
   "duration": 30000,
   "ssrc": 1234567890,
-  "playId": "llm-001",
+  "playId": "llm-001"
 }
 ```
 
@@ -784,6 +786,7 @@ Events are received as JSON messages from the server. All timestamps are in mill
 - `event` (string): Always "interruption"
 - `trackId` (string): **Unique identifier for the audio track.**
 - `timestamp` (number): Event timestamp in milliseconds since Unix epoch
+- `playId` (string, optional): **For TTS command, this is the playId from the TTS command. For Play command, this is the URL from the Play command.**
 - `subtitle` (string, optional): Current TTS text being played when interrupted
 - `position` (number, optional): Word index position in the subtitle when interrupted
 - `totalDuration` (number): Total duration of the TTS content in milliseconds
@@ -794,6 +797,7 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "event": "interruption",
   "trackId": "track-tts-456",
   "timestamp": 1640995215000,
+  "playId": "llm-001",
   "subtitle": "Hello, this is a long message that was interrupted",
   "position": 5,
   "totalDuration": 30000,
@@ -1050,5 +1054,5 @@ WebSocket connections may be closed with specific close codes indicating the rea
 - TTS (Text-to-Speech) supports streaming synthesis
 - **All timestamps are in milliseconds**
 - **trackId is used to identify which audio track generated an event**
-- **playId prevents interruption of previous TTS playback when the same ID is used**
+- **playId prevents interruption of previous TTS playback when the same ID is used. For TTS commands, playId is the specified identifier; for Play commands, playId is the URL**
 - **autoHangup automatically ends the call after TTS/playback completion** 
