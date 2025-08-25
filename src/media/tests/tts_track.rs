@@ -1,19 +1,20 @@
 use crate::{
     Samples,
+    event::SessionEvent,
     media::track::{Track, tts::TtsTrack},
     synthesis::{
-        SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,
+        Subtitle, SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,
     },
 };
 use anyhow::Result;
+use async_stream::stream;
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-
 // A mock synthesis client that returns a predefined audio sample
 struct MockSynthesisClient;
 
@@ -22,7 +23,10 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn start(&self, _cancel_token: CancellationToken) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(
+        &self,
+        _cancel_token: CancellationToken,
+    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
         // Generate a simple sine wave audio sample for testing
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
@@ -41,8 +45,14 @@ impl SynthesisClient for MockSynthesisClient {
             audio_data.push(((sample >> 8) & 0xFF) as u8);
         }
 
-        // Create a stream that emits this audio data
-        let stream = stream::iter(vec![Ok(SynthesisEvent::AudioChunk(audio_data))]);
+        // let stream = stream::once(future::ready(Ok(SynthesisEvent::AudioChunk(audio_data))))
+        //     .chain(stream::pending());
+
+        let stream = stream! {
+            yield Ok(SynthesisEvent::AudioChunk(audio_data));
+            yield Ok(SynthesisEvent::Subtitles(vec![Subtitle::new(0, 1000, 0, 10)]));
+            std::future::pending().await
+        };
         Ok(Box::pin(stream))
     }
     async fn synthesize(
@@ -237,5 +247,52 @@ async fn test_tts_track_configuration() -> Result<()> {
     // Stop the track
     tts_track.stop().await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_tts_track_interrupt() -> Result<()> {
+    // Create a command channel
+    let (_, command_rx) = mpsc::unbounded_channel();
+
+    // Create a TtsTrack with our mock client
+    let track_id = "test-track".to_string();
+    let client = MockSynthesisClient;
+    let tts_track = TtsTrack::new(
+        track_id.clone(),
+        "test_session".to_string(),
+        command_rx,
+        Box::new(client),
+    );
+
+    let cancel_token = CancellationToken::new();
+    let tts_track = tts_track.with_cancel_token(cancel_token.clone());
+    // Create channels for the test
+    let (event_tx, mut event_rx) = broadcast::channel(16);
+    let (packet_tx, _) = mpsc::unbounded_channel();
+
+    // Start the track
+    tts_track.start(event_tx, packet_tx).await?;
+
+    // Wait for at least one audio frame
+    let timeout = tokio::time::sleep(Duration::from_millis(100));
+    tokio::pin!(timeout);
+    cancel_token.cancel();
+    let mut interrupted = false;
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                break;
+            }
+            event = event_rx.recv() => {
+                if let Ok(event) = event && let SessionEvent::Interruption { .. } = event {
+                    interrupted = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(interrupted, "Track was not interrupted");
     Ok(())
 }
