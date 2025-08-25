@@ -71,8 +71,8 @@ pub async fn sip_ws_handler(
                             debug!(
                                 addr = %local_addr_clone,
                                 cseq = sip_msg.cseq_header().ok().map(|c| c.value()).unwrap_or_default(),
-                                "WebSocket received: {}",
-                                text.lines().next().unwrap_or("")
+                                "WebSocket received: \n{}",
+                                text
                             );
                             let msg = match SipConnection::update_msg_received(
                                 sip_msg,
@@ -103,8 +103,8 @@ pub async fn sip_ws_handler(
                     Ok(sip_msg) => {
                         debug!(
                             addr = %local_addr_clone,
-                            "WebSocket received binary SIP message: {}",
-                            sip_msg.to_string().lines().next().unwrap_or("")
+                            "WebSocket received binary SIP message: \n{}",
+                            sip_msg.to_string()
                         );
                         if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
                             sip_msg,
@@ -137,8 +137,8 @@ pub async fn sip_ws_handler(
                     debug!(
                         addr = %local_addr_clone,
                         cseq = cseq.map(|c| c.value()).unwrap_or_default(),
-                        "ws forwarding {}",
-                        message_text.lines().next().unwrap_or("")
+                        "ws forwarding \n{}",
+                        message_text
                     );
                     if let Err(e) = ws_sink.send(Message::Text(message_text.into())).await {
                         warn!(
