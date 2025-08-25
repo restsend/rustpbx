@@ -223,11 +223,12 @@ impl CallModule {
         let cancel_token = CancellationToken::new();
         let media_capabilities = vec![];
 
-        let session_id = format!(
-            "b2bua-{}-{}",
-            rand::random::<u32>(),
-            DialogId::try_from(&tx.original).map_err(|e| anyhow!("Invalid dialog ID: {}", e))?
-        );
+        let dialog_id =
+            DialogId::try_from(&tx.original).map_err(|e| anyhow!("Invalid dialog ID: {}", e))?;
+        let session_id = dialplan
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("b2bua-{}-{}", rand::random::<u32>(), dialog_id));
 
         let app_state = self.inner.server.app_state.clone();
         let b2bua = B2buaBuilder::new(app_state.clone(), cookie, session_id)
