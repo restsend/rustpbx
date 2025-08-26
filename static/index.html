@@ -139,9 +139,13 @@
                                 <select id="ttsProvider" x-model="config.tts.provider"
                                     class="border p-2 rounded w-full">
                                     <option value="tencent">Tencent Cloud</option>
-                                    <option value="tencent_streaming">Tencent Cloud Streaming</option>
-                                    <option value="voiceapi">Voice API</option>
+                                    <option value="aliyun">Aliyun</option>
                                 </select>
+                            </div>
+
+                            <div class="flex items-center mb-4">
+                                <input type="checkbox" id="ttsStreaming" x-model="config.tts.streaming" class="mr-2">
+                                <label for="ttsStreaming" class="font-medium">Enable Streaming Mode</label>
                             </div>
 
                             <div x-show="config.tts.provider === 'tencent'" class="border-t pt-3 space-y-2">
@@ -161,33 +165,15 @@
                                     <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
                                         placeholder="Enter Tencent Secret Key" class="border p-2 rounded w-full">
                                 </div>
+
                             </div>
 
-                            <div x-show="config.tts.provider === 'tencent_streaming'" class="border-t pt-3 space-y-2">
-                                <p class="text-xs text-gray-600 mb-2">Tencent Cloud Streaming 配置</p>
+                            <div x-show="config.tts.provider === 'aliyun'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Aliyun 配置</p>
                                 <div>
-                                    <label for="ttsAppId" class="text-sm">App ID</label>
-                                    <input type="text" id="ttsAppId" x-model="config.tts.appId"
-                                        placeholder="Enter Tencent App ID" class="border p-2 rounded w-full">
-                                </div>
-                                <div>
-                                    <label for="ttsSecretId" class="text-sm">Secret ID</label>
-                                    <input type="text" id="ttsSecretId" x-model="config.tts.secretId"
-                                        placeholder="Enter Tencent Secret ID" class="border p-2 rounded w-full">
-                                </div>
-                                <div>
-                                    <label for="ttsSecretKey" class="text-sm">Secret Key</label>
-                                    <input type="password" id="ttsSecretKey" x-model="config.tts.secretKey"
-                                        placeholder="Enter Tencent Secret Key" class="border p-2 rounded w-full">
-                                </div>
-                            </div>
-
-                            <div x-show="config.tts.provider === 'voiceapi'" class="border-t pt-3 space-y-2">
-                                <p class="text-xs text-gray-600 mb-2">Voice API 配置</p>
-                                <div>
-                                    <label for="ttsEndpoint" class="text-sm">Endpoint</label>
-                                    <input type="text" id="ttsEndpoint" x-model="config.tts.endpoint"
-                                        placeholder="http://localhost:8000" class="border p-2 rounded w-full">
+                                    <label for="ttsApiKey" class="text-sm">API Key</label>
+                                    <input type="password" id="ttsApiKey" x-model="config.tts.apiKey"
+                                        placeholder="Enter Aliyun API Key" class="border p-2 rounded w-full">
                                 </div>
                             </div>
 
@@ -196,8 +182,8 @@
                                     <label for="ttsSpeaker" class="text-sm">Speaker</label>
                                     <select id="ttsSpeaker" x-model="config.tts.speaker"
                                         class="border p-2 rounded w-full">
-                                        <option value="101001">Female</option>
-                                        <option value="100510000">Male</option>
+                                        <option value="female">Female</option>
+                                        <option value="male">Male</option>
                                     </select>
                                 </div>
                                 <div>
@@ -222,7 +208,7 @@
                                 <select id="asrProvider" x-model="config.asr.provider"
                                     class="border p-2 rounded w-full">
                                     <option value="tencent">Tencent Cloud</option>
-                                    <option value="voiceapi">Voice API</option>
+                                    <option value="aliyun">Aliyun</option>
                                 </select>
                             </div>
 
@@ -248,33 +234,34 @@
                                     <input type="text" id="asrModel" x-model="config.asr.model"
                                         placeholder="e.g. 16k_zh" class="border p-2 rounded w-full">
                                 </div>
+                            </div>
+
+                            <div x-show="config.asr.provider === 'aliyun'" class="border-t pt-3 space-y-2">
+                                <p class="text-xs text-gray-600 mb-2">Aliyun 配置</p>
+                                <div>
+                                    <label for="asrApiKey" class="text-sm">API Key</label>
+                                    <input type="password" id="asrApiKey" x-model="config.asr.apiKey"
+                                        placeholder="Enter Aliyun API Key" class="border p-2 rounded w-full">
+                                </div>
+                                <div>
+                                    <label for="asrModel" class="text-sm">Model</label>
+                                    <input type="text" id="asrModel" x-model="config.asr.model"
+                                        placeholder="e.g. paraformer-realtime-v2" class="border p-2 rounded w-full">
+                                </div>
                                 <div>
                                     <label for="asrLanguage" class="text-sm">Language</label>
                                     <select id="asrLanguage" x-model="config.asr.language"
                                         class="border p-2 rounded w-full">
-                                        <option value="zh-cn">中文 (简体)</option>
-                                        <option value="en-us">English (US)</option>
-                                        <option value="zh-tw">中文 (繁体)</option>
+                                        <option value="">None</option>
+                                        <option value="zh">中文</option>
+                                        <option value="en">English</option>
+                                        <option value="ja">日本語</option>
+                                        <option value="yue">粵語</option>
+                                        <option value="ko">한국어</option>
+                                        <option value="de">Deutsch</option>
+                                        <option value="fr">Français</option>
+                                        <option value="ru">Русский</option>
                                     </select>
-                                </div>
-                            </div>
-
-                            <div x-show="config.asr.provider === 'voiceapi'" class="border-t pt-3 space-y-2">
-                                <p class="text-xs text-gray-600 mb-2">Voice API 配置</p>
-                                <div>
-                                    <label for="asrEndpoint" class="text-sm">Endpoint</label>
-                                    <input type="text" id="asrEndpoint" x-model="config.asr.endpoint"
-                                        placeholder="http://localhost:8000" class="border p-2 rounded w-full">
-                                </div>
-                                <div>
-                                    <label for="asrModelVoiceapi" class="text-sm">Model</label>
-                                    <input type="text" id="asrModelVoiceapi" x-model="config.asr.model"
-                                        placeholder="e.g. whisper-large-v3" class="border p-2 rounded w-full">
-                                </div>
-                                <div>
-                                    <label for="asrLanguageVoiceapi" class="text-sm">Language</label>
-                                    <input type="text" id="asrLanguageVoiceapi" x-model="config.asr.language"
-                                        placeholder="zh" class="border p-2 rounded w-full">
                                 </div>
                             </div>
 
