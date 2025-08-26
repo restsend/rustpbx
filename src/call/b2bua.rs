@@ -195,6 +195,12 @@ impl B2bua {
         }
 
         let route_invite = dialplan.route_invite;
+        let caller = dialplan.caller.clone().or_else(|| {
+            original
+                .from_header()
+                .ok()
+                .and_then(|f| f.uri().ok().map(|u| u))
+        });
         let invite_callee_loop = async {
             match dialplan.targets {
                 DialStrategy::Sequential(targets) => {
@@ -202,6 +208,7 @@ impl B2bua {
                         match self
                             .invite_callee(
                                 active_call.clone(),
+                                caller,
                                 &caller_contact,
                                 target,
                                 original,
@@ -256,6 +263,7 @@ impl B2bua {
     async fn invite_callee(
         &self,
         active_call: ActiveCallRef,
+        caller: Option<rsip::Uri>,
         caller_contact: &rsip::typed::Contact,
         target: Location,
         original: &rsip::Request,
@@ -274,10 +282,7 @@ impl B2bua {
 
         let offer = rtp_track.local_description().ok().unwrap_or_default();
         let mut call_option = CallOption::default();
-        call_option.caller = original
-            .from_header()
-            .and_then(|f| f.uri().map(|u| u.to_string()))
-            .ok();
+        call_option.caller = caller.map(|u| u.to_string());
         call_option.callee = Some(target.aor.to_string());
 
         let mut invite_option = call_option.build_invite_option()?;
