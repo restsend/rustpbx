@@ -423,11 +423,10 @@ impl AliyunAsrClientBuilder {
             .unwrap_or("paraformer-realtime-v2".to_string());
         let sample_rate = self.option.samplerate.unwrap_or(16000);
         let mut language_hints = Vec::new();
-        // only paraformer-realtime-v2 supports language hints
-        if model_type == "paraformer-realtime-v2"
-            && let Some(language) = self.option.language.clone()
-        {
-            language_hints.push(language);
+        if model_type == "paraformer-realtime-v2" {
+            if let Some(language) = self.option.language.clone() {
+                language_hints.push(language);
+            }
         }
         let client = AliyunAsrClient {
             option: self.option,
