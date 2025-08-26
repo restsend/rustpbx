@@ -349,7 +349,11 @@ impl ActiveCall {
 
     fn build_record_option(&self, option: &CallOption) -> Option<RecorderOption> {
         if let Some(recorder_option) = &option.recorder {
-            let recorder_file = self.app_state.get_recorder_file(&self.session_id);
+            let recorder_file = if recorder_option.recorder_file.is_empty() {
+                self.app_state.get_recorder_file(&self.session_id)
+            } else {
+                recorder_option.recorder_file.clone()
+            };
             info!(
                 session_id = self.session_id,
                 recorder_file, "created recording file"
