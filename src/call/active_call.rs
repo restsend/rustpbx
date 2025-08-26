@@ -43,6 +43,8 @@ pub struct CallParams {
     pub id: Option<String>,
     #[serde(rename = "dump")]
     pub dump_events: Option<bool>,
+    #[serde(rename = "ping")]
+    pub ping_interval: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
