@@ -1,6 +1,6 @@
 use crate::{
     config::RouteResult,
-    media::{recorder::RecorderOption, vad::VADOption},
+    media::{recorder::RecorderOption, track::media_pass::MediaPassOption, vad::VADOption},
     synthesis::SynthesisOption,
     transcription::TranscriptionOption,
 };
@@ -49,6 +49,7 @@ pub struct CallOption {
     pub vad: Option<VADOption>,
     pub asr: Option<TranscriptionOption>,
     pub tts: Option<SynthesisOption>,
+    pub media_pass: Option<MediaPassOption>,
     pub handshake_timeout: Option<String>,
     pub enable_ipv6: Option<bool>,
     pub sip: Option<SipOption>,
@@ -68,6 +69,7 @@ impl Default for CallOption {
             asr: None,
             vad: None,
             tts: None,
+            media_pass: None,
             handshake_timeout: None,
             enable_ipv6: None,
             sip: None,
