@@ -243,6 +243,7 @@ pub enum DialStrategy {
 
 pub struct Dialplan {
     pub session_id: Option<String>,
+    pub caller: Option<rsip::Uri>,
     pub targets: DialStrategy,
     pub max_ring_time: u32,
     pub route_invite: Option<Box<dyn RouteInvite>>,
@@ -262,6 +263,7 @@ impl Default for Dialplan {
     fn default() -> Self {
         Self {
             session_id: None,
+            caller: None,
             targets: DialStrategy::Sequential(vec![]),
             max_ring_time: 60,
             route_invite: None,
