@@ -31,7 +31,12 @@ pub struct RunTaskCommand {
 }
 
 impl RunTaskCommand {
-    pub fn new(task_id: String, model: String, sample_rate: u32) -> Self {
+    pub fn new(
+        task_id: String,
+        sample_rate: u32,
+        model: String,
+        language_hints: Vec<String>,
+    ) -> Self {
         Self {
             header: CommandHeader {
                 action: "run-task".to_string(),
@@ -47,6 +52,7 @@ impl RunTaskCommand {
                 parameters: RunTaskCommandParameters {
                     format: "pcm".to_string(),
                     sample_rate,
+                    language_hints,
                 },
             },
         }
@@ -95,6 +101,8 @@ pub struct RunTaskPayload {
 pub struct RunTaskCommandParameters {
     pub format: String,
     pub sample_rate: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub language_hints: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,10 +202,11 @@ impl AliyunAsrClient {
         token: CancellationToken,
         model: String,
         sample_rate: u32,
+        language_hints: Vec<String>,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::get_timestamp();
-        let start_msg = RunTaskCommand::new(track_id.clone(), model, sample_rate);
+        let start_msg = RunTaskCommand::new(track_id.clone(), sample_rate, model, language_hints);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -413,6 +422,13 @@ impl AliyunAsrClientBuilder {
             .clone()
             .unwrap_or("paraformer-realtime-v2".to_string());
         let sample_rate = self.option.samplerate.unwrap_or(16000);
+        let mut language_hints = Vec::new();
+        // only paraformer-realtime-v2 supports language hints
+        if model_type == "paraformer-realtime-v2"
+            && let Some(language) = self.option.language.clone()
+        {
+            language_hints.push(language);
+        }
         let client = AliyunAsrClient {
             option: self.option,
             audio_tx,
@@ -423,7 +439,6 @@ impl AliyunAsrClientBuilder {
         let token = self.token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
         let track_id = voice_id.clone();
-
         info!(
             "start track_id: {} voice_id: {} config: {:?}",
             track_id, voice_id, client.option
@@ -438,6 +453,7 @@ impl AliyunAsrClientBuilder {
                 token,
                 model_type,
                 sample_rate,
+                language_hints,
             )
             .await
             {
