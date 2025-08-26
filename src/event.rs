@@ -164,6 +164,10 @@ pub enum SessionEvent {
         timestamp: u64,
         data: Vec<u8>,
     },
+    Ping {
+        timestamp: u64,
+        payload: Option<String>,
+    },
 }
 
 pub type EventSender = tokio::sync::broadcast::Sender<SessionEvent>;

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::{Duration}};
 use super::middleware::clientaddr::ClientAddr;
 use crate::{
     app::{AppState},
@@ -10,6 +10,7 @@ use crate::{
 use axum::{extract::{ ws::Message, Query, State, WebSocketUpgrade}, response::{IntoResponse, Response}, routing::get, Json, Router
 };
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
@@ -64,6 +65,7 @@ pub async fn call_handler(
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let dump_events = params.dump_events.unwrap_or(true);
+    let ping_interval = params.ping_interval.unwrap_or(20);
     let useragent = match app_state.useragent.clone() {
         Some(ua) => ua,
         None => {
@@ -130,6 +132,12 @@ pub async fn call_handler(
                             break;
                         }
                     }
+                    SessionEvent::Ping { timestamp, payload }=>{
+                        let payload = payload.unwrap_or_else(|| timestamp.to_string());
+                        if let Err(_) =ws_sender.send(Message::Ping(payload.into())).await {
+                            break;
+                        }
+                    }
                     _ => {
                         match serde_json::to_string(&event) {
                             Ok(message) => {
@@ -147,6 +155,22 @@ pub async fn call_handler(
             }
         };
 
+        let send_ping_loop = async {
+            if ping_interval == 0 {
+                active_call.cancel_token.cancelled().await;
+                return;
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(ping_interval.into()));
+            loop {
+                ticker.tick().await;
+                let payload = Utc::now().to_rfc3339();
+                let event = SessionEvent::Ping { timestamp: crate::get_timestamp(), payload:Some(payload)};
+                if let Err(_) = active_call.event_sender.send(event) {
+                    break;
+                }
+            }
+        };
+
         let active_calls = {
             let mut calls = app_state.active_calls.lock().await;
             calls.insert(session_id.clone(), active_call.clone());
@@ -158,6 +182,7 @@ pub async fn call_handler(
             active_call.serve(),
             async {
                 select!{
+                    _ = send_ping_loop => {},
                     _ = cancel_token.cancelled() => {},
                     _ = send_to_ws_loop => { cancel_token.cancel() },
                     _ = recv_from_ws_loop => {
