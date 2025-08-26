@@ -285,9 +285,12 @@ async fn test_tts_track_interrupt() -> Result<()> {
                 break;
             }
             event = event_rx.recv() => {
-                if let Ok(event) = event && let SessionEvent::Interruption { .. } = event {
-                    interrupted = true;
-                    break;
+                match event {
+                    Ok(SessionEvent::Interruption { .. }) => {
+                        interrupted = true;
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
