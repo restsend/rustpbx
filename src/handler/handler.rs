@@ -160,7 +160,10 @@ pub async fn call_handler(
                 select!{
                     _ = cancel_token.cancelled() => {},
                     _ = send_to_ws_loop => { cancel_token.cancel() },
-                    _ = recv_from_ws_loop => { cancel_token.cancel() },
+                    _ = recv_from_ws_loop => {
+                        info!(session_id, %client_ip, "WebSocket closed by client");
+                        cancel_token.cancel()
+                    },
                 }
             }, 
         };
