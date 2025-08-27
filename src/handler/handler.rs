@@ -134,7 +134,7 @@ pub async fn call_handler(
                     }
                     SessionEvent::Ping { timestamp, payload }=>{
                         let payload = payload.unwrap_or_else(|| timestamp.to_string());
-                        if let Err(_) =ws_sender.send(Message::Ping(payload.into())).await {
+                        if let Err(_) = ws_sender.send(Message::Ping(payload.into())).await {
                             break;
                         }
                     }
