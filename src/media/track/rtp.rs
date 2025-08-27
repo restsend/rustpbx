@@ -743,11 +743,6 @@ impl RtpTrack {
                     "Received SR"
                 );
             } else if let Some(rr) = packet.as_any().downcast_ref::<ReceiverReport>() {
-                debug!(
-                    track_id,
-                    "Received RTCP Receiver Report from SSRC: {}", rr.ssrc
-                );
-
                 for report in &rr.reports {
                     if report.ssrc == ssrc {
                         let packet_loss = report.fraction_lost;
@@ -1002,16 +997,6 @@ impl RtpTrack {
                         Some(ref addr) => {
                             if let Err(e) = rtcp_socket.send_raw(&rtcp_data, addr).await {
                                 warn!(track_id, "Failed to send RTCP report: {}", e);
-                            } else {
-                                debug!(
-                                    track_id,
-                                    sent_packets = packet_count,
-                                    sent_octets = octet_count,
-                                    recv_packets = received_packets,
-                                    lost_packets = lost_packets,
-                                    "Sent RTCP SR+RR -> {}",
-                                    addr
-                                );
                             }
                         }
                         None => {}
