@@ -210,6 +210,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
             assert_eq!(webhook_req.body["event"], "invite");
             assert!(webhook_req.body["caller"].as_str().unwrap().contains("bob"));
             assert!(webhook_req.body["callee"].as_str().unwrap().contains("alice"));
+            assert!(webhook_req.body["headers"].as_array().unwrap().iter().any(|h| h.as_str().unwrap().contains("application/sdp")));
             assert!(webhook_req.headers.contains_key("content-type"));
             assert!(webhook_req.headers.contains_key("x-test-header"));
 
