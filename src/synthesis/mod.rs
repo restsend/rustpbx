@@ -119,6 +119,24 @@ impl SynthesisOption {
                 if option.endpoint.is_some() {
                     merged.endpoint = option.endpoint;
                 }
+                if option.provider.is_some() {
+                    merged.provider = option.provider;
+                }
+                if option.app_id.is_some() {
+                    merged.app_id = option.app_id;
+                }
+                if option.secret_id.is_some() {
+                    merged.secret_id = option.secret_id;
+                }
+                if option.secret_key.is_some() {
+                    merged.secret_key = option.secret_key;
+                }
+                if option.cache_key.is_some() {
+                    merged.cache_key = option.cache_key;
+                }
+                if option.extra.is_some() {
+                    merged.extra = option.extra;
+                }
             }
             None => {}
         }
