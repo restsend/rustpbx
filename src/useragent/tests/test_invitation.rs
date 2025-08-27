@@ -111,10 +111,9 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let webhook_addr = listener.local_addr()?;
     let webhook_url = format!("http://127.0.0.1:{}/webhook", webhook_addr.port());
-    drop(listener);
 
     tokio::spawn(async move {
-        warp::serve(webhook_route).run(webhook_addr).await;
+        warp::serve(webhook_route).incoming(listener).run().await;
     });
 
     // Wait for webhook server to start
