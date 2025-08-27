@@ -348,6 +348,21 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 - `caller` (string): Caller identity for the transfer
 - `callee` (string): Address of Record (AOR) of the transfer target (e.g., sip:bob@example.com)
 - `options` (ReferOption, optional): Transfer configuration
+  - `denoise` (boolean, optional): Enable noise reduction
+  - `timeout` (number, optional): Transfer timeout in seconds
+  - `moh` (string, optional): Music on hold URL to play during transfer
+  - `asr` (TranscriptionOption, optional): Automatic Speech Recognition configuration
+    - `provider` (string): ASR provider (e.g., "tencent", "aliyun", "openai")
+    - `secretId` (string): Provider secret ID
+    - `secretKey` (string): Provider secret key
+    - `region` (string, optional): Provider region
+    - `model` (string, optional): ASR model to use
+  - `autoHangup` (boolean, optional): Automatically hang up after transfer completion
+  - `sip` (SipOption, optional): SIP configuration
+    - `username` (string): SIP username
+    - `password` (string): SIP password
+    - `realm` (string): SIP realm/domain
+    - `headers` (object, optional): Additional SIP headers
 
 ```json
 {
@@ -355,9 +370,25 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
   "caller": "sip:alice@example.com",
   "callee": "sip:charlie@example.com",
   "options": {
+    "denoise": true,
     "timeout": 30,
+    "moh": "http://example.com/hold_music.wav",
+    "asr": {
+      "provider": "tencent",
+      "secretId": "your_secret_id",
+      "secretKey": "your_secret_key",
+      "region": "ap-beijing",
+      "model": "16k_zh"
+    },
     "autoHangup": true,
-    "moh": "http://example.com/hold_music.wav"
+    "sip": {
+      "username": "transfer_user",
+      "password": "transfer_password",
+      "realm": "example.com",
+      "headers": {
+        "X-Transfer-Source": "pbx"
+      }
+    }
   }
 }
 ```
@@ -481,6 +512,42 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   }
 }
 ```
+
+### ReferOption Object Structure
+
+The `ReferOption` object is used in the `refer` command and contains the following fields:
+
+```json
+{
+  "denoise": true,
+  "timeout": 30,
+  "moh": "http://example.com/hold_music.wav",
+  "asr": {
+    "provider": "tencent",
+    "secretId": "your_secret_id",
+    "secretKey": "your_secret_key",
+    "region": "ap-beijing",
+    "model": "16k_zh"
+  },
+  "autoHangup": true,
+  "sip": {
+    "username": "transfer_user",
+    "password": "transfer_password",
+    "realm": "example.com",
+    "headers": {
+      "X-Transfer-Source": "pbx"
+    }
+  }
+}
+```
+
+**Fields:**
+- `denoise` (boolean, optional): Enable noise reduction during transfer
+- `timeout` (number, optional): Transfer timeout in seconds
+- `moh` (string, optional): Music on hold URL to play during transfer
+- `asr` (TranscriptionOption, optional): Automatic Speech Recognition configuration
+- `autoHangup` (boolean, optional): Automatically hang up after transfer completion
+- `sip` (SipOption, optional): SIP configuration for the transfer
 
 ## WebSocket Events
 

@@ -225,7 +225,6 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
                 tungstenite::Message::Text(text) => text.to_string(),
                 tungstenite::Message::Binary(bin) => String::from_utf8_lossy(&bin).to_string(),
                 _ => {
-                    error!(id, "Received non-text/binary message: {:?}", msg);
                     continue;
                 }
             };

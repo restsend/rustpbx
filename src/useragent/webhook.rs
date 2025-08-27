@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
-use rsip::prelude::HeadersExt;
+use rsip::prelude::{HasHeaders, HeadersExt};
 use rsipstack::dialog::server_dialog::ServerInviteDialog;
 use serde_json::json;
 use std::time::Instant;
@@ -45,6 +45,12 @@ impl InvitationHandler for WebhookInvitationHandler {
         let invite_request = dialog.initial_request();
         let caller = invite_request.from_header()?.uri()?.to_string();
         let callee = invite_request.to_header()?.uri()?.to_string();
+        let headers = invite_request
+            .headers()
+            .clone()
+            .into_iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>();
 
         let payload = json!({
             "dialog_id": dialog_id,
@@ -52,6 +58,7 @@ impl InvitationHandler for WebhookInvitationHandler {
             "caller": caller,
             "callee": callee,
             "event": "invite",
+            "headers": headers,
             "offer": String::from_utf8_lossy(&invite_request.body()),
         });
 
