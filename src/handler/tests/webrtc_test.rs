@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::{select, time};
-use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::{self, Message};
 use tracing::{error, info};
 use uuid::Uuid;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -225,7 +225,11 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
                     break;
                 }
             };
-            let event: SessionEvent = serde_json::from_str(&msg.to_string())?;
+            let event = if let Message::Text(text) = msg {
+                serde_json::from_str(&text)?
+            } else {
+                continue;
+            };
             match event {
                 SessionEvent::Answer { sdp, .. } => {
                     info!("Received answer: {}", sdp);

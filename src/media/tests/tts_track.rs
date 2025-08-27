@@ -1,7 +1,10 @@
 use crate::{
     Samples,
     event::SessionEvent,
-    media::track::{Track, tts::TtsTrack},
+    media::track::{
+        Track,
+        tts::{self, TtsTrack},
+    },
     synthesis::{
         Subtitle, SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,
     },
@@ -15,6 +18,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 // A mock synthesis client that returns a predefined audio sample
 struct MockSynthesisClient;
 
@@ -253,7 +257,7 @@ async fn test_tts_track_configuration() -> Result<()> {
 #[tokio::test]
 async fn test_tts_track_interrupt() -> Result<()> {
     // Create a command channel
-    let (_, command_rx) = mpsc::unbounded_channel();
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
 
     // Create a TtsTrack with our mock client
     let track_id = "test-track".to_string();
@@ -290,12 +294,21 @@ async fn test_tts_track_interrupt() -> Result<()> {
                         interrupted = true;
                         break;
                     }
+                    Ok(SessionEvent::TrackEnd { .. }) => {
+                        break;
+                    }
+                    Err(e) => {
+                        debug!("event error: {:?}", e);
+                        break;
+                    }
                     _ => {}
+
                 }
             }
         }
-    }
+    }   
 
+    drop(command_tx);
     assert!(interrupted, "Track was not interrupted");
     Ok(())
 }
