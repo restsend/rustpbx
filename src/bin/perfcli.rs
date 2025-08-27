@@ -8,6 +8,7 @@ use rustpbx::{
     media::{
         codecs::{CodecType, Encoder, g722::G722Encoder, resample::resample_mono},
         negotiate::strip_ipv6_candidates,
+        recorder::RecorderOption,
         track::{file::read_wav_file, webrtc::WebrtcTrack},
         vad::VADOption,
     },
@@ -84,6 +85,9 @@ struct Cli {
     /// Denoising
     #[clap(long, help = "Denoising", default_value = "true")]
     denoise: Option<bool>,
+
+    #[clap(long, help = "Denoising", default_value = "true")]
+    recorder: Option<bool>,
 }
 
 async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
@@ -199,6 +203,11 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
         } else {
             None
         },
+        recorder: if cli.recorder.unwrap_or(false) {
+            Some(RecorderOption::default())
+        } else {
+            None
+        },
         ..Default::default()
     };
 
@@ -212,8 +221,21 @@ async fn serve_client(codec: CodecType, cli: Cli, id: u32, state: Arc<AppState>)
     // Wait for transcription event
     let recv_event_loop = async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            let event: SessionEvent =
-                serde_json::from_str(&msg.to_string()).expect("Failed to parse event");
+            let msg = match msg {
+                tungstenite::Message::Text(text) => text.to_string(),
+                tungstenite::Message::Binary(bin) => String::from_utf8_lossy(&bin).to_string(),
+                _ => {
+                    error!(id, "Received non-text/binary message: {:?}", msg);
+                    continue;
+                }
+            };
+            let event: SessionEvent = match serde_json::from_str(&msg) {
+                Ok(event) => event,
+                Err(e) => {
+                    error!(id, "Failed to parse event: {}, msg: {}", e, msg);
+                    continue;
+                }
+            };
             match event {
                 SessionEvent::Answer { sdp, .. } => {
                     info!(id, "Received answer: {}", sdp);
