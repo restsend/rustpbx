@@ -1,10 +1,7 @@
 use crate::{
     Samples,
     event::SessionEvent,
-    media::track::{
-        Track,
-        tts::{self, TtsTrack},
-    },
+    media::track::{Track, tts::TtsTrack},
     synthesis::{
         Subtitle, SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,
     },
@@ -48,9 +45,6 @@ impl SynthesisClient for MockSynthesisClient {
             audio_data.push((sample & 0xFF) as u8);
             audio_data.push(((sample >> 8) & 0xFF) as u8);
         }
-
-        // let stream = stream::once(future::ready(Ok(SynthesisEvent::AudioChunk(audio_data))))
-        //     .chain(stream::pending());
 
         let stream = stream! {
             yield Ok(SynthesisEvent::AudioChunk(audio_data));
@@ -306,7 +300,7 @@ async fn test_tts_track_interrupt() -> Result<()> {
                 }
             }
         }
-    }   
+    }
 
     drop(command_tx);
     assert!(interrupted, "Track was not interrupted");
