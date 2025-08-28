@@ -467,11 +467,11 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   "offer": "SDP offer string",
   "callee": "sip:callee@example.com",
   "caller": "sip:caller@example.com",
-  "recorder": {
-    "enable": true,
-    "format": "wav",
-    "path": "/path/to/recording"
-  },
+    "recorder": {
+      "recorderFile": "/path/to/recording.wav",
+      "samplerate": 16000,
+      "ptime": 20
+    },
   "asr": {
     "provider": "tencent",
     "secretId": "your_secret_id",

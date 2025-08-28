@@ -31,6 +31,7 @@ use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDia
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -354,7 +355,13 @@ impl ActiveCall {
             let recorder_file = if recorder_option.recorder_file.is_empty() {
                 self.app_state.get_recorder_file(&self.session_id)
             } else {
-                recorder_option.recorder_file.clone()
+                let p = Path::new(&recorder_option.recorder_file);
+                p.is_absolute()
+                    .then(|| recorder_option.recorder_file.clone())
+                    .unwrap_or_else(|| {
+                        self.app_state
+                            .get_recorder_file(&recorder_option.recorder_file)
+                    })
             };
             info!(
                 session_id = self.session_id,

@@ -81,10 +81,15 @@ impl AppStateInner {
                 }
             }
         }
-        root.join(session_id)
-            .with_extension("wav")
-            .to_string_lossy()
-            .to_string()
+        let recorder_file = root.join(session_id);
+        if recorder_file.extension().is_none() {
+            recorder_file
+                .with_extension("wav")
+                .to_string_lossy()
+                .to_string()
+        } else {
+            recorder_file.to_string_lossy().to_string()
+        }
     }
 }
 
