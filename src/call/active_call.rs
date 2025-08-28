@@ -16,6 +16,7 @@ use crate::{
         track::{
             Track, TrackConfig,
             file::FileTrack,
+            media_pass::MediaPassTrack,
             rtp::{RtpTrack, RtpTrackBuilder},
             tts::SynthesisHandle,
             webrtc::WebrtcTrack,
@@ -392,12 +393,20 @@ impl ActiveCall {
 
     async fn invite_or_accept(&self, mut option: CallOption, sender: String) -> Result<CallOption> {
         option.check_default();
-        match self.build_record_option(&option) {
-            Some(opt) => {
-                self.media_stream.update_recorder_option(opt).await;
-            }
-            None => {}
+        if let Some(opt) = self.build_record_option(&option) {
+            self.media_stream.update_recorder_option(opt).await;
         }
+
+        if let Some(opt) = &option.media_pass {
+            let track_id = self.track_config.server_side_track_id.clone();
+            let cancel_token = self.cancel_token.child_token();
+            let ssrc = rand::random::<u32>();
+            let media_pass_track = MediaPassTrack::new(ssrc, track_id, cancel_token, opt.clone());
+            self.media_stream
+                .update_track(Box::new(media_pass_track), None)
+                .await;
+        }
+
         info!(
             session_id = self.session_id,
             call_type = ?self.call_type,
