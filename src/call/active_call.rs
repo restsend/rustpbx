@@ -549,6 +549,7 @@ impl ActiveCall {
             Some(s) => Some(s),
             None => tts_option.speaker.clone(),
         };
+
         let mut play_command = SynthesisCommand {
             text,
             speaker,
@@ -557,9 +558,9 @@ impl ActiveCall {
             end_of_stream,
             option,
         };
-
         info!(
             session_id = self.session_id,
+            provider = ?play_command.option.provider,
             text = %play_command.text,
             speaker = play_command.speaker.as_deref(),
             auto_hangup = auto_hangup.unwrap_or_default(),

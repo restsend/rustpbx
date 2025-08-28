@@ -346,6 +346,7 @@ impl ProxyModule for CallModule {
             }
             rsip::Method::Options
             | rsip::Method::Ack
+            | rsip::Method::Update
             | rsip::Method::Cancel
             | rsip::Method::Bye => {
                 if let Err(e) = self.process_message(tx).await {
