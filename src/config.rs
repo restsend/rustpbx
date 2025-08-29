@@ -8,6 +8,7 @@ use clap::Parser;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 
 const USER_AGENT: &str = "rustpbx";
 
@@ -47,15 +48,9 @@ pub struct Config {
     #[serde(default = "default_config_media_cache_path")]
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
-    pub ice_servers: Option<Vec<IceServerItem>>,
+    pub restsend_token: Option<String>,
+    pub ice_servers: Option<Vec<RTCIceServer>>,
     pub ami: Option<AmiConfig>,
-}
-
-#[derive(Debug, Deserialize, Default, Serialize)]
-pub struct IceServerItem {
-    pub urls: Vec<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -367,6 +362,7 @@ impl Default for Config {
             media_cache_path: default_config_media_cache_path(),
             callrecord: None,
             llmproxy: None,
+            restsend_token: None,
             ice_servers: None,
             ami: Some(AmiConfig::default()),
         }
@@ -392,6 +388,13 @@ mod tests {
         let mut prxconfig = ProxyConfig::default();
         let mut trunks = HashMap::new();
         let mut routes = Vec::new();
+        let mut ice_servers = Vec::new();
+        ice_servers.push(RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            username: "user".to_string(),
+            ..Default::default()
+        });
+
         routes.push(crate::proxy::routing::RouteRule {
             name: "default".to_string(),
             description: None,
@@ -432,6 +435,7 @@ mod tests {
         );
         prxconfig.trunks = trunks;
         config.proxy = Some(prxconfig);
+        config.ice_servers = Some(ice_servers);
         let config_str = toml::to_string(&config).unwrap();
         println!("{}", config_str);
     }
