@@ -26,24 +26,22 @@ function mainApp() {
                 samplerate: 16000,
             },
             asr: {
-                provider: 'tencent', // 'tencent' or 'aliyun'
+                provider: 'tencent', // 'tencent' or 'voiceapi'
                 appId: '',
                 secretId: '',
                 secretKey: '',
-                apiKey: '', // secretKey for aliyun
                 model: '',
-                language: '', // only paraformer-realtime-v2 supports language hints
+                language: 'zh-cn',
+                endpoint: '',
                 inactivityTimeout: 35000 // 35 seconds timeout for ASR inactivity
             },
             tts: {
-                provider: 'tencent', // 'tencent' or 'aliyun'
-                streaming: true,
+                provider: 'tencent', // 'tencent' or 'voiceapi'
                 appId: '',
                 secretId: '',
                 secretKey: '',
-                apiKey: '', // secretKey for aliyun
                 endpoint: '',
-                speaker: 'female',
+                speaker: '601003', // '301030'
                 speed: 1.0,
                 volume: 5,
                 greeting: "Hello, how can I help you today?"
@@ -261,7 +259,7 @@ function mainApp() {
             try {
                 switch (event.event) {
                     case 'hangup':
-                        //this.handleHangup(event)
+                        this.handleHangup(event)
                         break
                     case 'trackStart':
                         this.handleTrackStart(event)
@@ -333,9 +331,9 @@ function mainApp() {
             this.addLogEntry('info', `Call is ringing`);
         },
         handleHangup(event) {
-            // this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
-            // this.stopAsrInactivityMonitor();
-            // this.endCall();
+            this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
+            this.stopAsrInactivityMonitor();
+            this.endCall();
         },
         handleTrackStart(event) {
             //this.addLogEntry('info', `track start`)
@@ -422,7 +420,7 @@ function mainApp() {
             const processTtsSegment = (content) => {
                 ttsBuffer += content;
 
-                if (this.config.tts.streaming) {
+                if (this.config.tts.provider == 'tencent_streaming') {
                     if (firstSegmentUsage === undefined) {
                         firstSegmentUsage = `TTFS: ${(new Date() - startTime)} ms`
                     }
@@ -507,9 +505,12 @@ function mainApp() {
                     const processStream = ({ done, value }) => {
                         if (done) {
                             let duration = new Date() - start;
-                            if (ttsBuffer.trim().length > 0 && !this.config.tts.streaming) {
-                                // When stream is complete, send any remaining text in the buffer
-                                this.sendTtsRequest(ttsBuffer, false, playId);
+                            if (this.config.tts.provider == 'tencent_streaming') {
+                                this.sendTtsRequest("", autoHangup, playId, undefined, true);
+                            }
+                            // When stream is complete, send any remaining text in the buffer
+                            if (ttsBuffer.trim().length > 0 && this.config.tts.provider != 'tencent_streaming') {
+                                this.sendTtsRequest(ttsBuffer, autoHangup, playId);
                             }
                             this.logEvent('LLM', `${duration} ms`, { llmResponse: fullLlmResponse });
                             return;
@@ -539,7 +540,7 @@ function mainApp() {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
-                                                //this.doHangup();
+                                                this.doHangup();
                                             }
                                         });
                                     }
@@ -572,18 +573,18 @@ function mainApp() {
                     this.addLogEntry('error', `LLM API error: ${error.message}`);
 
                     // If there was already some response, send that for TTS
-                    if (fullLlmResponse && !this.config.tts.streaming) {
-                        this.sendTtsRequest(fullLlmResponse, false, playId, '');
+                    if (fullLlmResponse && this.config.tts.provider != 'tencent_streaming') {
+                        this.sendTtsRequest(fullLlmResponse, autoHangup, playId, '');
                     }
                 });
         },
         doHangup() {
-            // this.addLogEntry('info', 'Hanging up the call');
-            // // Send hangup command to WebSocket
-            // if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            //     this.ws.send(JSON.stringify({ command: 'hangup' }));
-            // }
-            // this.endCall();
+            this.addLogEntry('info', 'Hanging up the call');
+            // Send hangup command to WebSocket
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ command: 'hangup' }));
+            }
+            this.endCall();
         },
         // Send TTS request to the WebSocket
         sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined, endOfStream = false) {
@@ -601,8 +602,7 @@ function mainApp() {
                     text: text,
                     autoHangup,
                     playId,
-                    endOfStream,
-                    streaming: this.config.tts.streaming
+                    endOfStream
                 };
 
                 this.ws.send(JSON.stringify(ttsCommand));
@@ -821,33 +821,30 @@ function mainApp() {
                     if (this.config.asr.appId) asrConfig.appId = this.config.asr.appId;
                     if (this.config.asr.secretId) asrConfig.secretId = this.config.asr.secretId;
                     if (this.config.asr.secretKey) asrConfig.secretKey = this.config.asr.secretKey;
-                } else if (this.config.asr.provider === 'aliyun') {
-                    if (this.config.asr.apiKey) asrConfig.secretKey = this.config.asr.apiKey;
+                    if (this.config.asr.model) asrConfig.modelType = this.config.asr.model;
+                    if (this.config.asr.language) asrConfig.language = this.config.asr.language;
+                } else if (this.config.asr.provider === 'voiceapi') {
+                    if (this.config.asr.endpoint) asrConfig.endpoint = this.config.asr.endpoint;
+                    if (this.config.asr.model) asrConfig.modelType = this.config.asr.model;
                     if (this.config.asr.language) asrConfig.language = this.config.asr.language;
                 }
-
-                if (this.config.asr.model) asrConfig.modelType = this.config.asr.model;
 
                 // Build TTS configuration
                 let ttsConfig = {
                     provider: this.config.tts.provider,
+                    speaker: this.config.tts.speaker || '601003'
                 };
 
                 // Add provider-specific TTS configuration
-                if (this.config.tts.provider === 'tencent') {
+                if (this.config.tts.provider === 'tencent' || this.config.tts.provider === 'tencent_streaming') {
                     if (this.config.tts.appId) ttsConfig.appId = this.config.tts.appId;
                     if (this.config.tts.secretId) ttsConfig.secretId = this.config.tts.secretId;
                     if (this.config.tts.secretKey) ttsConfig.secretKey = this.config.tts.secretKey;
-                    ttsConfig.speaker = this.config.tts.speaker === 'female' ? "501004" : "501005";
-                } else if (this.config.tts.provider === 'aliyun') {
-                    if (this.config.tts.secretKey) ttsConfig.secretKey = this.config.tts.apiKey;
-                    ttsConfig.speaker = this.config.tts.speaker === 'female' ? "longyingda" : "longyingcui";
+                    if (this.config.tts.speed) ttsConfig.speed = this.config.tts.speed;
+                    if (this.config.tts.volume) ttsConfig.volume = this.config.tts.volume;
+                } else if (this.config.tts.provider === 'voiceapi') {
+                    if (this.config.tts.endpoint) ttsConfig.endpoint = this.config.tts.endpoint;
                 }
-
-                // when provider is aliyun, secretKey is API key
-                if (this.config.tts.speed) ttsConfig.speed = this.config.tts.speed;
-                if (this.config.tts.volume) ttsConfig.volume = this.config.tts.volume;
-
 
                 const invite = {
                     command: 'invite',
