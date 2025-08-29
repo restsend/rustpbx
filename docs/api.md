@@ -477,7 +477,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "secretId": "your_secret_id",
     "secretKey": "your_secret_key",
     "region": "ap-beijing",
-    "model": "16k_zh"
+    "modelType": "16k_zh"
   },
   "vad": {
     "enable": true,

@@ -184,7 +184,7 @@ impl ActiveCall {
                         info!(session_id = self.session_id, "call serve done");
                     }
                     _ = self.cancel_token.cancelled() => {
-                        info!(session_id = self.session_id, "call cancelled");
+                        info!(session_id = self.session_id, "call cancelled - cleaning up resources");
                     }
                 }
             }
@@ -1168,10 +1168,12 @@ impl ActiveCall {
                 call_state.option.clone().unwrap_or_default(),
             )
         };
+
         let mut webrtc_track = WebrtcTrack::new(
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.track_config.clone(),
+            self.app_state.config.ice_servers.clone(),
         )
         .with_ssrc(ssrc);
 
@@ -1345,6 +1347,7 @@ impl ActiveCall {
                 self.cancel_token.clone(),
                 self.session_id.clone(),
                 self.track_config.clone(),
+                self.app_state.config.ice_servers.clone(),
             )
             .with_ssrc(ssrc);
             Box::new(webrtc_track) as Box<dyn Track>

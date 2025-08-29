@@ -261,7 +261,7 @@ function mainApp() {
             try {
                 switch (event.event) {
                     case 'hangup':
-                        this.handleHangup(event)
+                        //this.handleHangup(event)
                         break
                     case 'trackStart':
                         this.handleTrackStart(event)
@@ -333,9 +333,9 @@ function mainApp() {
             this.addLogEntry('info', `Call is ringing`);
         },
         handleHangup(event) {
-            this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
-            this.stopAsrInactivityMonitor();
-            this.endCall();
+            // this.addLogEntry('info', `Call hungup: ${event.reason || 'No reason'}`);
+            // this.stopAsrInactivityMonitor();
+            // this.endCall();
         },
         handleTrackStart(event) {
             //this.addLogEntry('info', `track start`)
@@ -509,7 +509,7 @@ function mainApp() {
                             let duration = new Date() - start;
                             if (ttsBuffer.trim().length > 0 && !this.config.tts.streaming) {
                                 // When stream is complete, send any remaining text in the buffer
-                                this.sendTtsRequest(ttsBuffer, autoHangup, playId);
+                                this.sendTtsRequest(ttsBuffer, false, playId);
                             }
                             this.logEvent('LLM', `${duration} ms`, { llmResponse: fullLlmResponse });
                             return;
@@ -539,7 +539,7 @@ function mainApp() {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
-                                                this.doHangup();
+                                                //this.doHangup();
                                             }
                                         });
                                     }
@@ -573,17 +573,17 @@ function mainApp() {
 
                     // If there was already some response, send that for TTS
                     if (fullLlmResponse && !this.config.tts.streaming) {
-                        this.sendTtsRequest(fullLlmResponse, autoHangup, playId, '');
+                        this.sendTtsRequest(fullLlmResponse, false, playId, '');
                     }
                 });
         },
         doHangup() {
-            this.addLogEntry('info', 'Hanging up the call');
-            // Send hangup command to WebSocket
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ command: 'hangup' }));
-            }
-            this.endCall();
+            // this.addLogEntry('info', 'Hanging up the call');
+            // // Send hangup command to WebSocket
+            // if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            //     this.ws.send(JSON.stringify({ command: 'hangup' }));
+            // }
+            // this.endCall();
         },
         // Send TTS request to the WebSocket
         sendTtsRequest(text, autoHangup, playId, firstSegmentUsage = undefined, endOfStream = false) {

@@ -118,6 +118,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
         cancel_token.child_token(),
         track_id.clone(),
         TrackConfig::default(),
+        None,
     );
     let sample_path = state.root_dir.join(offer.media_path);
     let sample_path_str = sample_path.to_string_lossy().to_string();

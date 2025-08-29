@@ -15,8 +15,7 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::time::sleep;
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use tracing::{debug, error, info, warn};
 use webrtc::{
     api::{
         APIBuilder,
@@ -35,6 +34,10 @@ use webrtc::{
         rtp_receiver::RTCRtpReceiver,
     },
     track::{track_local::TrackLocal, track_remote::TrackRemote},
+};
+use webrtc::{
+    peer_connection::RTCPeerConnection,
+    track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -55,6 +58,8 @@ pub struct WebrtcTrack {
     encoder: TrackCodec,
     pub prefered_codec: Option<CodecType>,
     ssrc: u32,
+    pub peer_connection: Option<Arc<RTCPeerConnection>>,
+    pub ice_servers: Option<Vec<RTCIceServer>>,
 }
 
 impl WebrtcTrack {
@@ -145,18 +150,12 @@ impl WebrtcTrack {
         Ok(media_engine)
     }
 
-    pub async fn get_ice_servers() -> Vec<RTCIceServer> {
-        let mut servers = vec![];
-        if let Ok(server) = std::env::var("STUN_SERVER") {
-            servers.push(RTCIceServer {
-                urls: vec![server],
-                ..Default::default()
-            });
-        }
-        servers
-    }
-
-    pub fn new(cancel_token: CancellationToken, id: TrackId, track_config: TrackConfig) -> Self {
+    pub fn new(
+        cancel_token: CancellationToken,
+        id: TrackId,
+        track_config: TrackConfig,
+        ice_servers: Option<Vec<RTCIceServer>>,
+    ) -> Self {
         let processor_chain = ProcessorChain::new(track_config.samplerate);
         Self {
             track_id: id,
@@ -168,6 +167,8 @@ impl WebrtcTrack {
             encoder: TrackCodec::new(),
             prefered_codec: None,
             ssrc: 0,
+            peer_connection: None,
+            ice_servers,
         }
     }
     pub fn with_ssrc(mut self, ssrc: u32) -> Self {
@@ -185,27 +186,38 @@ impl WebrtcTrack {
     ) -> Result<RTCSessionDescription> {
         let media_engine = Self::get_media_engine(self.prefered_codec)?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
-
+        let ice_servers = self.ice_servers.clone().unwrap_or_else(|| {
+            vec![RTCIceServer {
+                urls: vec!["stun:restsend.com:3478".to_string()],
+                ..Default::default()
+            }]
+        });
         let config = RTCConfiguration {
-            ice_servers: Self::get_ice_servers().await,
+            ice_servers,
             ..Default::default()
         };
 
         let cancel_token = self.cancel_token.clone();
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        self.peer_connection = Some(peer_connection.clone());
         let peer_connection_clone = peer_connection.clone();
 
         let cancel_token_clone = cancel_token.clone();
         let track_id = self.track_id.clone();
         peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                info!(track_id, "peer connection state changed: {}", s);
+                debug!(track_id, "peer connection state changed: {}", s);
                 let cancel_token = cancel_token.clone();
                 let peer_connection_clone = peer_connection_clone.clone();
+                let track_id_clone = track_id.clone();
                 Box::pin(async move {
                     match s {
                         RTCPeerConnectionState::Connected => {}
                         RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed => {
+                            info!(
+                                track_id = track_id_clone,
+                                "peer connection is {}, try to close", s
+                            );
                             cancel_token.cancel();
                             peer_connection_clone.close().await.ok();
                         }
