@@ -40,7 +40,10 @@ pub(crate) async fn get_iceservers(
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(client) => client,
         Err(e) => {
-            warn!("failed to create HTTP client: {}", e);
+            warn!(
+                user_id,
+                %client_ip,
+                "failed to create HTTP client: {}", e);
             return Json(default_ice_servers).into_response();
         }
     };
@@ -48,33 +51,52 @@ pub(crate) async fn get_iceservers(
     let response = match client.get(&url).send().await {
         Ok(response) => response,
         Err(e) => {
-            warn!("alloc ice servers failed: {}", e);
+            warn!(
+                user_id,
+                %client_ip,
+                "alloc ice servers failed: {}", e
+            );
             return Json(default_ice_servers).into_response();
         }
     };
 
     if !response.status().is_success() {
         warn!(
+                user_id,
+                %client_ip,
             "ice servers request failed with status: {}",
             response.status()
         );
         return Json(default_ice_servers).into_response();
     }
-
-    // Parse the response JSON
-    match response.json::<Vec<RTCIceServer>>().await {
+    let body = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                user_id,
+                %client_ip, "read ice servers response body failed: {}", e
+            );
+            return Json(default_ice_servers).into_response();
+        }
+    };
+    match serde_json::from_slice::<Vec<RTCIceServer>>(&body) {
         Ok(ice_servers) => {
             info!(
-                "get ice servers - duration: {:?}, count: {}, userId: {}, clientIP: {}",
-                start_time.elapsed(),
-                ice_servers.len(),
                 user_id,
-                client_ip
-            );
+                %client_ip,
+                "get ice servers - duration: {:?} len: {}",
+                start_time.elapsed(),
+                ice_servers.len());
             Json(ice_servers).into_response()
         }
         Err(e) => {
-            warn!("decode ice servers failed: {}", e);
+            warn!(
+                user_id,
+                %client_ip,
+                body = String::from_utf8_lossy(&body).to_string(),
+                "decode ice servers failed: {}",
+                e,
+            );
             Json(default_ice_servers).into_response()
         }
     }
