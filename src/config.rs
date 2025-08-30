@@ -394,6 +394,14 @@ mod tests {
             username: "user".to_string(),
             ..Default::default()
         });
+        ice_servers.push(RTCIceServer {
+            urls: vec![
+                "stun:restsend.com:3478".to_string(),
+                "turn:stun.l.google.com:1112?transport=TCP".to_string(),
+            ],
+            username: "user".to_string(),
+            ..Default::default()
+        });
 
         routes.push(crate::proxy::routing::RouteRule {
             name: "default".to_string(),
