@@ -8,7 +8,6 @@ use clap::Parser;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 
 const USER_AGENT: &str = "rustpbx";
 
@@ -49,8 +48,15 @@ pub struct Config {
     pub media_cache_path: String,
     pub llmproxy: Option<String>,
     pub restsend_token: Option<String>,
-    pub ice_servers: Option<Vec<RTCIceServer>>,
+    pub ice_servers: Option<Vec<IceServer>>,
     pub ami: Option<AmiConfig>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -389,17 +395,17 @@ mod tests {
         let mut trunks = HashMap::new();
         let mut routes = Vec::new();
         let mut ice_servers = Vec::new();
-        ice_servers.push(RTCIceServer {
+        ice_servers.push(IceServer {
             urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            username: "user".to_string(),
+            username: Some("user".to_string()),
             ..Default::default()
         });
-        ice_servers.push(RTCIceServer {
+        ice_servers.push(IceServer {
             urls: vec![
                 "stun:restsend.com:3478".to_string(),
                 "turn:stun.l.google.com:1112?transport=TCP".to_string(),
             ],
-            username: "user".to_string(),
+            username: Some("user".to_string()),
             ..Default::default()
         });
 

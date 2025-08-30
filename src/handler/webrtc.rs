@@ -1,5 +1,5 @@
 use super::middleware::clientaddr::ClientAddr;
-use crate::app::AppState;
+use crate::{app::AppState, config::IceServer};
 use axum::{
     Json,
     extract::State,
@@ -8,7 +8,6 @@ use axum::{
 use reqwest;
 use std::time::Instant;
 use tracing::{info, warn};
-use webrtc::ice_transport::ice_server::RTCIceServer;
 
 pub(crate) async fn get_iceservers(
     client_ip: ClientAddr,
@@ -19,8 +18,8 @@ pub(crate) async fn get_iceservers(
         return Json(ice_servers).into_response();
     }
     if state.config.restsend_token.is_none() {
-        return Json(vec![RTCIceServer {
-            urls: vec!["stun:restsend.com:3478".to_string()],
+        return Json(vec![IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
             ..Default::default()
         }])
         .into_response();
@@ -79,7 +78,7 @@ pub(crate) async fn get_iceservers(
             return Json(default_ice_servers).into_response();
         }
     };
-    match serde_json::from_slice::<Vec<RTCIceServer>>(&body) {
+    match serde_json::from_slice::<Vec<IceServer>>(&body) {
         Ok(ice_servers) => {
             info!(
                 user_id,

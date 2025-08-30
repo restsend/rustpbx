@@ -1,6 +1,7 @@
 use super::track_codec::TrackCodec;
 use crate::{
     AudioFrame,
+    config::IceServer,
     event::{EventSender, SessionEvent},
     media::{
         codecs::CodecType,
@@ -59,7 +60,7 @@ pub struct WebrtcTrack {
     pub prefered_codec: Option<CodecType>,
     ssrc: u32,
     pub peer_connection: Option<Arc<RTCPeerConnection>>,
-    pub ice_servers: Option<Vec<RTCIceServer>>,
+    pub ice_servers: Option<Vec<IceServer>>,
 }
 
 impl WebrtcTrack {
@@ -154,7 +155,7 @@ impl WebrtcTrack {
         cancel_token: CancellationToken,
         id: TrackId,
         track_config: TrackConfig,
-        ice_servers: Option<Vec<RTCIceServer>>,
+        ice_servers: Option<Vec<IceServer>>,
     ) -> Self {
         let processor_chain = ProcessorChain::new(track_config.samplerate);
         Self {
@@ -186,12 +187,22 @@ impl WebrtcTrack {
     ) -> Result<RTCSessionDescription> {
         let media_engine = Self::get_media_engine(self.prefered_codec)?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
-        let ice_servers = self.ice_servers.clone().unwrap_or_else(|| {
+        let ice_servers = if let Some(ice_servers) = &self.ice_servers {
+            ice_servers
+                .iter()
+                .map(|s| RTCIceServer {
+                    urls: s.urls.clone(),
+                    username: s.username.clone().unwrap_or_default(),
+                    credential: s.credential.clone().unwrap_or_default(),
+                    ..Default::default()
+                })
+                .collect()
+        } else {
             vec![RTCIceServer {
-                urls: vec!["stun:restsend.com:3478".to_string()],
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
                 ..Default::default()
             }]
-        });
+        };
         let config = RTCConfiguration {
             ice_servers,
             ..Default::default()
