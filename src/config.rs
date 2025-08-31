@@ -55,7 +55,9 @@ pub struct Config {
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct IceServer {
     pub urls: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
 }
 
