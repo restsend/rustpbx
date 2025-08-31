@@ -17,19 +17,19 @@ pub(crate) async fn get_iceservers(
     if let Some(ice_servers) = default_ice_servers {
         return Json(ice_servers).into_response();
     }
+    let mut ice_servers = vec![IceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        ..Default::default()
+    }];
     if state.config.restsend_token.is_none() {
-        return Json(vec![IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            ..Default::default()
-        }])
-        .into_response();
+        return Json(ice_servers).into_response();
     }
     let rs_token = state.config.restsend_token.as_deref().unwrap_or_else(|| "");
     let start_time = Instant::now();
     let user_id = ""; // TODO: Get user ID from state if needed
     let timeout = std::time::Duration::from_secs(5);
     let url = format!(
-        "https://restsend.com/api/iceservers?token={}&user={}&client={}",
+        "https://restsend.com/api/iceservers?token={}&user={}&client={}&turn_only=true",
         rs_token,
         user_id,
         client_ip.ip().to_string()
@@ -43,7 +43,7 @@ pub(crate) async fn get_iceservers(
                 user_id,
                 %client_ip,
                 "failed to create HTTP client: {}", e);
-            return Json(default_ice_servers).into_response();
+            return Json(ice_servers).into_response();
         }
     };
 
@@ -55,7 +55,7 @@ pub(crate) async fn get_iceservers(
                 %client_ip,
                 "alloc ice servers failed: {}", e
             );
-            return Json(default_ice_servers).into_response();
+            return Json(ice_servers).into_response();
         }
     };
 
@@ -66,7 +66,7 @@ pub(crate) async fn get_iceservers(
             "ice servers request failed with status: {}",
             response.status()
         );
-        return Json(default_ice_servers).into_response();
+        return Json(ice_servers).into_response();
     }
     let body = match response.bytes().await {
         Ok(b) => b,
@@ -75,17 +75,18 @@ pub(crate) async fn get_iceservers(
                 user_id,
                 %client_ip, "read ice servers response body failed: {}", e
             );
-            return Json(default_ice_servers).into_response();
+            return Json(ice_servers).into_response();
         }
     };
     match serde_json::from_slice::<Vec<IceServer>>(&body) {
-        Ok(ice_servers) => {
+        Ok(trun_servers) => {
             info!(
                 user_id,
                 %client_ip,
                 "get ice servers - duration: {:?} len: {}",
                 start_time.elapsed(),
-                ice_servers.len());
+                trun_servers.len());
+            ice_servers.extend(trun_servers);
             Json(ice_servers).into_response()
         }
         Err(e) => {
@@ -96,7 +97,7 @@ pub(crate) async fn get_iceservers(
                 "decode ice servers failed: {}",
                 e,
             );
-            Json(default_ice_servers).into_response()
+            Json(ice_servers).into_response()
         }
     }
 }
