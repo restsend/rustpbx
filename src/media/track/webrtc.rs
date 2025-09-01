@@ -224,7 +224,9 @@ impl WebrtcTrack {
                 Box::pin(async move {
                     match s {
                         RTCPeerConnectionState::Connected => {}
-                        RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed => {
+                        RTCPeerConnectionState::Disconnected
+                        | RTCPeerConnectionState::Closed
+                        | RTCPeerConnectionState::Failed => {
                             info!(
                                 track_id = track_id_clone,
                                 "peer connection is {}, try to close", s
