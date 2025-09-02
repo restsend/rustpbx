@@ -539,12 +539,11 @@ impl ActiveCall {
     ) -> Result<()> {
         let tts_option = match self.call_state.read() {
             Ok(ref call_state) => match call_state.option.clone().unwrap_or_default().tts {
-                Some(opt) => opt,
+                Some(opt) => opt.merge_with(option),
                 None => return Ok(()),
             },
             Err(_) => return Err(anyhow::anyhow!("failed to read call state")),
         };
-        let option = tts_option.merge_with(option);
         let speaker = match speaker {
             Some(s) => Some(s),
             None => tts_option.speaker.clone(),
@@ -556,7 +555,7 @@ impl ActiveCall {
             play_id: play_id.clone(),
             streaming,
             end_of_stream,
-            option,
+            option: tts_option,
         };
         info!(
             session_id = self.session_id,
@@ -566,8 +565,8 @@ impl ActiveCall {
             auto_hangup = auto_hangup.unwrap_or_default(),
             play_id = play_command.play_id.as_deref(),
             streaming = play_command.streaming,
-            eos = play_command.end_of_stream,
-            wit = wait_input_timeout,
+            eos = play_command.end_of_stream.unwrap_or_default(),
+            wit = wait_input_timeout.unwrap_or_default(),
             "new synthesis"
         );
 
@@ -596,7 +595,7 @@ impl ActiveCall {
             self.track_config.server_side_track_id.clone(),
             ssrc,
             play_id.clone(),
-            &tts_option,
+            &play_command.option,
         )
         .await?;
 
