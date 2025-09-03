@@ -297,6 +297,9 @@ impl Track for TtsTrack {
                                 code: None,
                             })
                             .ok();
+                        if command.end_of_stream.unwrap_or_default() {
+                            buffer_tx_ref.send(None).ok();
+                        }
                         continue;
                     }
                 }
