@@ -147,7 +147,7 @@ docker run -d \
   --env-file .env \
   -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/recordings:/tmp/recorders \
-  docker.io/library/rustpbx:latest \
+  ghcr.io/restsend/rustpbx:latest \
   --conf /app/config.toml
 ```
 
