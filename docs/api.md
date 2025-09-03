@@ -167,6 +167,116 @@ sequenceDiagram
 - **Usage:** Traditional telephony integration
 - **Advantages:** Standard telephony protocol, PBX integration
 
+## MediaPass Feature
+
+MediaPass allows for bidirectional audio streaming between RustPBX and an external WebSocket server. This feature enables another side to receive and send audio streams during a call.
+
+### MediaPass Configuration
+
+The `mediaPass` option in `CallOption` configures the WebSocket connection for audio streaming:
+
+```json
+{
+  "mediaPass": {
+    "url": "ws://localhost:9090/media",
+    "inputSampleRate": 16000,
+    "outputSampleRate": 16000,
+    "packetSize": 2560
+  }
+}
+```
+
+**MediaPass Fields:**
+- `url` (string): WebSocket URL to connect to for media streaming
+- `inputSampleRate` (number): Sample rate of audio received from the WebSocket server (also the sample rate of the track)
+- `outputSampleRate` (number): Sample rate of audio sent to the WebSocket server
+- `packetSize` (number, optional): Packet size sent to WebSocket server, default is 2560 bytes
+
+### MediaPass Example Usage
+
+#### Example 1: Basic MediaPass Setup
+
+```json
+{
+  "command": "invite",
+  "option": {
+    "caller": "sip:alice@example.com",
+    "callee": "sip:bob@example.com",
+    "codec": "g722",
+    "mediaPass": {
+      "url": "ws://ai-server.example.com:9090/audio",
+      "inputSampleRate": 16000,
+      "outputSampleRate": 16000,
+      "packetSize": 1280
+    },
+    "asr": {
+      "provider": "tencent",
+      "secretId": "your_secret_id",
+      "secretKey": "your_secret_key"
+    }
+  }
+}
+```
+
+#### Example 2: MediaPass with AI Voice Processing
+
+```json
+{
+  "command": "accept",
+  "option": {
+    "caller": "sip:caller@example.com",
+    "callee": "sip:agent@example.com",
+    "codec": "pcmu",
+    "denoise": true,
+    "mediaPass": {
+      "url": "ws://ai-voice-processor.example.com:8090/stream",
+      "inputSampleRate": 8000,
+      "outputSampleRate": 16000,
+      "packetSize": 2560
+    },
+    "vad": {
+      "type": "webrtc",
+      "samplerate": 16000,
+      "speechPadding": 250,
+      "silencePadding": 100,
+      "voiceThreshold": 0.5
+    },
+    "recorder": {
+      "recorderFile": "/recordings/call_with_ai.wav",
+      "samplerate": 16000,
+      "ptime": 200
+    }
+  }
+}
+```
+
+### MediaPass WebSocket Protocol
+
+The external WebSocket server should handle binary audio data in PCM format:
+
+1. **Receiving Audio:** RustPBX sends PCM audio data as binary WebSocket messages at the configured `outputSampleRate`
+2. **Sending Audio:** The WebSocket server can send PCM audio data back to RustPBX at the configured `inputSampleRate`
+3. **Audio Format:** Raw PCM data, signed 16-bit little-endian
+4. **Packet Size:** Configurable via `packetSize` parameter (default: 2560 bytes)
+
+### MediaPass Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant RustPBX
+    participant AI_Server
+    participant Callee
+
+    Caller->>RustPBX: Audio Stream
+    RustPBX->>AI_Server: PCM Audio (WebSocket)
+    AI_Server->>AI_Server: Process Audio (ASR/AI/TTS)
+    AI_Server->>RustPBX: Processed Audio (WebSocket)
+    RustPBX->>Callee: Processed Audio Stream
+    
+    Note over Caller,Callee: Bidirectional AI-enhanced communication
+```
+
 ## WebSocket Commands
 
 Commands are sent as JSON messages through the WebSocket connection. All timestamps are in milliseconds. Each command follows a common structure with the `command` field indicating the operation type.
@@ -467,11 +577,11 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   "offer": "SDP offer string",
   "callee": "sip:callee@example.com",
   "caller": "sip:caller@example.com",
-    "recorder": {
-      "recorderFile": "/path/to/recording.wav",
-      "samplerate": 16000,
-      "ptime": 20
-    },
+  "recorder": {
+    "recorderFile": "/path/to/recording.wav",
+    "samplerate": 16000,
+    "ptime": 200
+  },
   "asr": {
     "provider": "tencent",
     "secretId": "your_secret_id",
@@ -480,14 +590,29 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "modelType": "16k_zh"
   },
   "vad": {
-    "enable": true,
-    "aggressiveness": 2
+    "type": "webrtc",
+    "samplerate": 16000,
+    "speechPadding": 250,
+    "silencePadding": 100,
+    "ratio": 0.5,
+    "voiceThreshold": 0.5,
+    "maxBufferDurationSecs": 50,
+    "silenceTimeout": null,
+    "endpoint": null,
+    "secretKey": null,
+    "secretId": null
   },
   "tts": {
     "provider": "tencent",
     "secretId": "your_secret_id",
     "secretKey": "your_secret_key",
     "speaker": "xiaoyan"
+  },
+  "mediaPass": {
+    "url": "ws://localhost:9090/media",
+    "inputSampleRate": 16000,
+    "outputSampleRate": 16000,
+    "packetSize": 2560
   },
   "handshakeTimeout": "30s",
   "enableIpv6": false,
@@ -1122,4 +1247,4 @@ WebSocket connections may be closed with specific close codes indicating the rea
 - **All timestamps are in milliseconds**
 - **trackId is used to identify which audio track generated an event**
 - **playId prevents interruption of previous TTS playback when the same ID is used. For TTS commands, playId is the specified identifier; for Play commands, playId is the URL**
-- **autoHangup automatically ends the call after TTS/playback completion** 
+- **autoHangup automatically ends the call after TTS/playback completion**
