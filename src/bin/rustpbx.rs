@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
         env_filter = env_filter.add_directive(level.into());
     }
 
+    let _guard_holder;
     if let Some(ref log_file) = config.log_file {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
             .open(log_file)
             .expect("Failed to open log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
-        std::mem::forget(guard);
+        _guard_holder = guard;
 
         let file_layer = tracing_subscriber::fmt::layer()
             .with_timer(LocalTime::rfc_3339())
@@ -78,16 +79,31 @@ async fn main() -> Result<()> {
             .with(env_filter)
             .with(fmt_layer)
             .init();
-    }
+    };
 
     let state_builder = AppStateBuilder::new().with_config(config);
     let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
+
+    #[cfg(unix)]
+    let sigterm = async {
+        use tokio::signal::unix::SignalKind;
+        tokio::signal::unix::signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
 
     info!("starting rustpbx on {}", state.config.http_addr);
     select! {
         _ = rustpbx::app::run(state, sip_server) => {}
         _ = tokio::signal::ctrl_c() => {
             info!("received CTRL+C, shutting down");
+        }
+        _ = sigterm => {
+            info!("received SIGTERM, shutting down");
         }
     }
     Ok(())
