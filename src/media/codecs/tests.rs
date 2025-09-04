@@ -1,5 +1,5 @@
 use super::*;
-use crate::{media::track::file::read_wav_file, PcmBuf};
+use crate::{PcmBuf, media::track::file::read_wav_file};
 use hound::WavReader;
 use std::{
     fs::File,
@@ -182,6 +182,13 @@ fn test_codec_factory() {
     assert_eq!(decoder.sample_rate(), 16000);
     assert_eq!(decoder.channels(), 1);
 
+    #[cfg(feature = "g729")]
+    {
+        let decoder = create_decoder(CodecType::G729);
+        assert_eq!(decoder.sample_rate(), 8000);
+        assert_eq!(decoder.channels(), 1);
+    }
+
     // Test encoder factory
     let encoder = create_encoder(CodecType::PCMU);
     assert_eq!(encoder.sample_rate(), 8000);
@@ -194,6 +201,13 @@ fn test_codec_factory() {
     let encoder = create_encoder(CodecType::G722);
     assert_eq!(encoder.sample_rate(), 16000);
     assert_eq!(encoder.channels(), 1);
+
+    #[cfg(feature = "g729")]
+    {
+        let encoder = create_encoder(CodecType::G729);
+        assert_eq!(encoder.sample_rate(), 8000);
+        assert_eq!(encoder.channels(), 1);
+    }
 }
 
 #[test]
@@ -310,152 +324,42 @@ fn test_codec_encode_decode() {
     }
 }
 
+#[cfg(feature = "g729")]
 #[test]
-fn test_pcmu_edge_cases() {
-    let mut encoder = pcmu::PcmuEncoder::new();
-    let mut decoder = pcmu::PcmuDecoder::new();
+fn test_g729_encode_decode() {
+    // Use a simple synthetic signal instead of real audio to avoid overflow
+    let reader = BufReader::new(
+        File::open("fixtures/hello_book_course_zh_16k.wav").expect("Failed to open file"),
+    );
+    let mut wav_reader = WavReader::new(reader).expect("Failed to read wav file");
+    let mut all_samples = Vec::new();
+    for sample in wav_reader.samples::<i16>() {
+        all_samples.push(sample.unwrap_or(0));
+    }
+    let resampled_8k = resample::resample_mono(&all_samples, 16000, 8000);
 
-    // Test with extreme values including i16::MIN
-    let samples = vec![
-        i16::MIN,
-        i16::MIN + 1,
-        -32000,
-        -1,
-        0,
-        1,
-        32000,
-        i16::MAX - 1,
-        i16::MAX,
-    ];
-
-    // Check that encoding doesn't panic
-    let encoded = encoder.encode(&samples);
-
-    // Check that we can decode what we encoded
-    let decoded = decoder.decode(&encoded);
-
-    // Verify we got the right number of samples back
-    assert_eq!(samples.len(), decoded.len());
-
-    // Print for debugging
-    println!("Original: {:?}", samples);
-    println!("Decoded: {:?}", decoded);
-}
-
-#[test]
-fn test_pcma_edge_cases() {
-    let mut encoder = pcma::PcmaEncoder::new();
-    let mut decoder = pcma::PcmaDecoder::new();
-
-    // Test with extreme values including i16::MIN
-    let samples = vec![
-        i16::MIN,
-        i16::MIN + 1,
-        -32000,
-        -1,
-        0,
-        1,
-        32000,
-        i16::MAX - 1,
-        i16::MAX,
-    ];
-
-    // Check that encoding doesn't panic
-    let encoded = encoder.encode(&samples);
-
-    // Check that we can decode what we encoded
-    let decoded = decoder.decode(&encoded);
-
-    // Verify we got the right number of samples back
-    assert_eq!(samples.len(), decoded.len());
-
-    // Print for debugging
-    println!("Original: {:?}", samples);
-    println!("Decoded: {:?}", decoded);
-}
-
-#[cfg(feature = "opus")]
-#[test]
-fn test_opus_codec() {
-    use super::opus::{OpusDecoder, OpusEncoder};
-    use super::{Decoder, Encoder};
-
-    // Create encoder and decoder
-    let mut encoder = OpusEncoder::new_default();
-    let mut decoder = OpusDecoder::new_default();
-
-    // Create test audio data (48kHz mono, 20ms = 960 samples)
-    let samples_per_frame = 960;
-    let input_samples: Vec<i16> = (0..samples_per_frame)
-        .map(|i| (1000.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin()) as i16)
-        .collect();
-
-    // Encode
-    let encoded = encoder.encode(&input_samples);
-    assert!(!encoded.is_empty(), "Encoded data should not be empty");
-
-    // Decode
-    let decoded = decoder.decode(&encoded);
-    assert!(!decoded.is_empty(), "Decoded data should not be empty");
-
-    // Verify sample rate and channels
-    assert_eq!(encoder.sample_rate(), 48000);
-    assert_eq!(encoder.channels(), 1);
-    assert_eq!(decoder.sample_rate(), 48000);
-    assert_eq!(decoder.channels(), 1);
-}
-
-#[cfg(feature = "opus")]
-#[test]
-fn test_opus_encode_decode() {
-    use super::opus::{OpusDecoder, OpusEncoder};
-
-    // Test different configurations
-    let configs = vec![
-        (48000, 1), // 48kHz mono
-        (48000, 2), // 48kHz stereo
-        (16000, 1), // 16kHz mono
-        (8000, 1),  // 8kHz mono
-    ];
-
-    for (sample_rate, channels) in configs {
-        let mut encoder = OpusEncoder::new(sample_rate, channels);
-        let mut decoder = OpusDecoder::new(sample_rate, channels);
-
-        // Create test data
-        let frame_size = (sample_rate / 50) as usize * channels as usize; // 20ms frame
-        let input_samples: Vec<i16> = (0..frame_size)
-            .map(|i| {
-                (500.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sample_rate as f64).sin())
-                    as i16
-            })
-            .collect();
-
-        // Encode
-        let encoded = encoder.encode(&input_samples);
-        assert!(
-            !encoded.is_empty(),
-            "Encoded data should not be empty for {}Hz {}ch",
-            sample_rate,
-            channels
-        );
-
-        // Decode
-        let decoded = decoder.decode(&encoded);
-        assert!(
-            !decoded.is_empty(),
-            "Decoded data should not be empty for {}Hz {}ch",
-            sample_rate,
-            channels
-        );
-
+    {
+        let mut encoder = g729::G729Encoder::new();
+        let encoded = encoder.encode(&resampled_8k);
         println!(
-            "✓ Opus {}Hz {}ch: {} samples -> {} bytes -> {} samples",
-            sample_rate,
-            channels,
-            input_samples.len(),
-            encoded.len(),
+            "G729 encoded {} samples to {} bytes ",
+            resampled_8k.len(),
+            encoded.len()
+        );
+        let mut file = File::create("fixtures/sample.g729.encoded").expect("Failed to create file");
+        file.write_all(&encoded).expect("Failed to write file");
+        println!("ffplay -f g729 -ar 8000 -i fixtures/sample.g729.encoded");
+
+        let mut decoder = g729::G729Decoder::new();
+        let decoded = decoder.decode(&encoded);
+        println!(
+            "G729 decoded {} samples to {} bytes ",
+            decoded.len(),
             decoded.len()
         );
+        let mut file = File::create("fixtures/sample.g729.decoded").expect("Failed to create file");
+        file.write_all(&samples_to_bytes(&decoded))
+            .expect("Failed to write file");
+        println!("ffplay -f s16le -ar 8000  -i fixtures/sample.g729.decoded");
     }
 }

@@ -15,7 +15,8 @@ vad_webrtc = ["webrtc-vad"]
 vad_silero = ["ort", "ort-sys"]
 vad_ten = ["ort", "ort-sys"]
 opus = ["dep:opus"]
-default = ["vad_webrtc", "vad_silero", "vad_ten", "opus"]
+g729 = ["dep:g729-sys"]
+default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729"]
 not_vad = []
 
 [dependencies]
@@ -55,6 +56,7 @@ ort-sys = { version = "2.0.0-rc.10", optional = true }
 chrono = "0.4.41"
 rsipstack = "0.2.51"
 #rsipstack = { path = "../rsipstack" }
+g729-sys = { path = "../g729-sys", optional = true }
 rsip = "0.4.0"
 reqwest = { version = "0.12.23", features = [
     "json",
