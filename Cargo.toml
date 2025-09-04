@@ -16,7 +16,7 @@ vad_silero = ["ort", "ort-sys"]
 vad_ten = ["ort", "ort-sys"]
 opus = ["dep:opus"]
 g729 = ["dep:g729-sys"]
-default = ["vad_webrtc", "vad_silero", "vad_ten", "opus"]
+default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729"]
 not_vad = []
 
 [dependencies]

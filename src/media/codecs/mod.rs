@@ -114,9 +114,9 @@ impl CodecType {
             CodecType::PCMA => 8,
             CodecType::G722 => 9,
             #[cfg(feature = "g729")]
-            CodecType::G729 => 18, // Dynamic payload type
+            CodecType::G729 => 18, // Static payload type
             #[cfg(feature = "opus")]
-            CodecType::Opus => 111, // Dynamic payload type
+            CodecType::Opus => 111, // Static payload type
             CodecType::TelephoneEvent => 101,
         }
     }
@@ -153,7 +153,7 @@ impl TryFrom<&String> for CodecType {
             "8" => Ok(CodecType::PCMA),
             "9" => Ok(CodecType::G722),
             #[cfg(feature = "g729")]
-            "18" => Ok(CodecType::G729), // Dynamic payload type
+            "18" => Ok(CodecType::G729), // Static payload type
             #[cfg(feature = "opus")]
             "111" => Ok(CodecType::Opus), // Dynamic payload type
             "101" => Ok(CodecType::TelephoneEvent),
