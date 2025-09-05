@@ -95,6 +95,18 @@ impl WebrtcTrack {
                 payload_type: 111,
                 ..Default::default()
             },
+            #[cfg(feature = "g729")]
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: "audio/G729".to_owned(),
+                    clock_rate: 8000,
+                    channels: 1,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 111,
+                ..Default::default()
+            },
             RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_G722.to_owned(),
