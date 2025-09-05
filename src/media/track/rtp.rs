@@ -212,11 +212,13 @@ impl RtpTrackBuilder {
             rtp_end_port: u16::MAX - 1,
             rtp_alloc_count: 500,
             enabled_codecs: vec![
+                #[cfg(feature = "opus")]
+                CodecType::Opus,
+                #[cfg(feature = "g729")]
+                CodecType::G729,
                 CodecType::G722,
                 CodecType::PCMU,
                 CodecType::PCMA,
-                #[cfg(feature = "opus")]
-                CodecType::Opus,
                 CodecType::TelephoneEvent,
             ],
             ssrc_cname: format!("rustpbx-{}", ssrc),
