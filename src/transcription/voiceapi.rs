@@ -1,21 +1,22 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::handle_wait_for_answer_with_audio_drop;
 use crate::event::{EventSender, SessionEvent};
 use crate::{Sample, TrackId};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use futures::{SinkExt, StreamExt};
 use http::{Request, StatusCode, Uri};
 use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -33,10 +34,13 @@ pub struct VoiceApiAsrResult {
     pub idx: u32,
 }
 
-/// VoiceAPI ASR client
-pub struct VoiceApiAsrClient {
+struct VoiceApiAsrClientInner {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     option: TranscriptionOption,
+}
+/// VoiceAPI ASR client
+pub struct VoiceApiAsrClient {
+    inner: Arc<VoiceApiAsrClientInner>,
 }
 
 pub struct VoiceApiAsrClientBuilder {
@@ -84,29 +88,56 @@ impl VoiceApiAsrClientBuilder {
     }
 
     pub async fn build(self) -> Result<VoiceApiAsrClient> {
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
 
-        let client = VoiceApiAsrClient {
+        let inner = Arc::new(VoiceApiAsrClientInner {
             audio_tx,
             option: self.option.clone(),
+        });
+
+        let event_sender_rx = match self.option.start_when_answer {
+            Some(true) => Some(self.event_sender.subscribe()),
+            _ => None,
         };
+
         let sample_rate = self.option.samplerate.unwrap_or(16000);
-        let ws_stream = client.connect_websocket(sample_rate).await?;
         let token = self.cancel_token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        info!("start track_id: {}  sample_rate: {}", track_id, sample_rate);
+        info!(%track_id, sample_rate, "VoiceAPI ASR client started");
+        let inner_ref = inner.clone();
 
         tokio::spawn(async move {
-            match VoiceApiAsrClient::handle_websocket_message(
-                track_id,
-                ws_stream,
-                audio_rx,
-                event_sender,
-                token,
-            )
-            .await
+            // Handle wait_for_answer if enabled
+            if event_sender_rx.is_some() {
+                handle_wait_for_answer_with_audio_drop(event_sender_rx, &mut audio_rx, &token)
+                    .await;
+
+                // Check if cancelled during wait
+                if token.is_cancelled() {
+                    debug!("Cancelled during wait for answer");
+                    return Ok::<(), anyhow::Error>(());
+                }
+            }
+
+            let ws_stream = match inner_ref.connect_websocket(&track_id, sample_rate).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!("Failed to connect to VoiceAPI ASR WebSocket: {}", e);
+                    let _ = event_sender.send(SessionEvent::Error {
+                        timestamp: crate::get_timestamp(),
+                        track_id,
+                        sender: "VoiceApiAsrClient".to_string(),
+                        error: format!("Failed to connect to VoiceAPI ASR WebSocket: {}", e),
+                        code: Some(500),
+                    });
+                    return Err(e);
+                }
+            };
+            match inner_ref
+                .handle_websocket_message(track_id, ws_stream, audio_rx, event_sender, token)
+                .await
             {
                 Ok(_) => {
                     debug!("WebSocket message handling completed");
@@ -115,23 +146,18 @@ impl VoiceApiAsrClientBuilder {
                     info!("Error in handle_websocket_message: {}", e);
                 }
             }
+            Ok::<(), anyhow::Error>(())
         });
 
-        Ok(client)
+        Ok(VoiceApiAsrClient { inner })
     }
 }
 
-impl VoiceApiAsrClient {
-    pub fn new() -> Self {
-        Self {
-            audio_tx: mpsc::unbounded_channel().0,
-            option: TranscriptionOption::default(),
-        }
-    }
-
+impl VoiceApiAsrClientInner {
     // Establish WebSocket connection to VoiceAPI ASR service
     async fn connect_websocket(
         &self,
+        voice_id: &str,
         sample_rate: u32,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         // Get the host and port from the options or use defaults
@@ -154,10 +180,12 @@ impl VoiceApiAsrClient {
             .header("Sec-WebSocket-Key", STANDARD.encode(random::<[u8; 16]>()))
             .body(())?;
 
-        debug!("Connecting with request: {:?}", request);
-
         let (ws_stream, response) = connect_async(request).await?;
-        debug!("WebSocket connection established. Response: {:?}", response);
+        debug!(
+            voice_id,
+            "WebSocket connection established. Response: {}",
+            response.status()
+        );
 
         match response.status() {
             StatusCode::SWITCHING_PROTOCOLS => Ok(ws_stream),
@@ -169,6 +197,7 @@ impl VoiceApiAsrClient {
     }
 
     async fn handle_websocket_message(
+        &self,
         track_id: TrackId,
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -302,7 +331,7 @@ impl TranscriptionClient for VoiceApiAsrClient {
         }
 
         // Send PCM data to the audio channel
-        if let Err(e) = self.audio_tx.send(buffer) {
+        if let Err(e) = self.inner.audio_tx.send(buffer) {
             warn!("Failed to send audio: {}", e);
             return Err(anyhow!("Failed to send audio: {}", e));
         }

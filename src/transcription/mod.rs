@@ -1,10 +1,13 @@
 use crate::AudioFrame;
 use crate::Sample;
+use crate::event::SessionEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 mod aliyun;
 mod tencent_cloud;
@@ -16,6 +19,42 @@ pub use tencent_cloud::TencentCloudAsrClient;
 pub use tencent_cloud::TencentCloudAsrClientBuilder;
 pub use voiceapi::VoiceApiAsrClient;
 pub use voiceapi::VoiceApiAsrClientBuilder;
+
+/// Common helper function for handling wait_for_answer logic with audio dropping
+pub async fn handle_wait_for_answer_with_audio_drop(
+    event_rx: Option<crate::event::EventReceiver>,
+    audio_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    token: &CancellationToken,
+) {
+    tokio::select! {
+        _ = token.cancelled() => {
+            debug!("Cancelled before answer");
+            return;
+        }
+        // drop audio if not started after answer
+        _ = async {
+            while let Some(_) = audio_rx.recv().await {}
+        } => {}
+        _ = async {
+            match event_rx {
+                Some(mut rx) => {
+                    while let Ok(event) = rx.recv().await {
+                        match event {
+                            SessionEvent::Answer { .. } => {
+                                debug!("Received answer event, starting transcription");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+        } => {
+            debug!("Wait for answer completed");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Hash, Eq, PartialEq)]
 pub enum TranscriptionType {
@@ -42,6 +81,7 @@ pub struct TranscriptionOption {
     pub samplerate: Option<u32>,
     pub endpoint: Option<String>,
     pub extra: Option<HashMap<String, String>>,
+    pub start_when_answer: Option<bool>,
 }
 
 impl std::fmt::Display for TranscriptionType {
@@ -84,6 +124,7 @@ impl Default for TranscriptionOption {
             samplerate: None,
             endpoint: None,
             extra: None,
+            start_when_answer: None,
         }
     }
 }

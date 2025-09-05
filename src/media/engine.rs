@@ -13,8 +13,8 @@ use crate::{
     call::{CallOption, EouOption},
     event::EventSender,
     synthesis::{
-        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
-         TencentCloudTtsClient, VoiceApiTtsClient,
+        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient,
+        VoiceApiTtsClient,
     },
     transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
@@ -25,7 +25,6 @@ use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 pub type FnCreateVadProcessor = fn(
     token: CancellationToken,
@@ -275,7 +274,6 @@ impl StreamEngine {
                         event_sender.clone(),
                         option.to_owned(),
                     )?;
-                    info!("Vad processor added {:?}", option);
                     processors.push(vad_processor);
                 }
                 None => {}
@@ -290,7 +288,6 @@ impl StreamEngine {
                             event_sender.clone(),
                         )
                         .await?;
-                    info!("Asr processor added {:?}", option);
                     processors.push(asr_processor);
                 }
                 None => {}

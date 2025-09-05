@@ -1,11 +1,13 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
-use crate::transcription::{TranscriptionClient, TranscriptionOption};
+use crate::transcription::{
+    TranscriptionClient, TranscriptionOption, handle_wait_for_answer_with_audio_drop,
+};
 use crate::{Sample, TrackId};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use chrono;
 use futures::{SinkExt, StreamExt};
 use http::{Request, StatusCode, Uri};
@@ -14,15 +16,16 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
+
 /// API Tencent Cloud streaming ASR
 /// https://cloud.tencent.com/document/api/1093/48982
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,9 +54,13 @@ pub struct TencentCloudAsrResponse {
     pub result: Option<TencentCloudAsrResult>,
 }
 
-pub struct TencentCloudAsrClient {
-    option: TranscriptionOption,
+struct TencentCloudAsrClientInner {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
+    option: TranscriptionOption,
+}
+
+pub struct TencentCloudAsrClient {
+    inner: Arc<TencentCloudAsrClientInner>,
 }
 
 pub struct TencentCloudAsrClientBuilder {
@@ -117,22 +124,59 @@ impl TencentCloudAsrClientBuilder {
         self
     }
     pub async fn build(self) -> Result<TencentCloudAsrClient> {
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
+
+        let event_sender_rx = match self.option.start_when_answer {
+            Some(true) => Some(self.event_sender.subscribe()),
+            _ => None,
+        };
+
+        let inner = Arc::new(TencentCloudAsrClientInner {
+            audio_tx,
+            option: self.option,
+        });
 
         let client = TencentCloudAsrClient {
-            option: self.option,
-            audio_tx,
+            inner: inner.clone(),
         };
-        let voice_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let ws_stream = client.connect_websocket(voice_id.as_str()).await?;
+
+        let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let token = self.token.unwrap_or(CancellationToken::new());
         let event_sender = self.event_sender;
-        let track_id = voice_id.clone();
-        info!(
-            "start track_id: {} voice_id: {} config: {:?}",
-            track_id, voice_id, client.option
-        );
+
+        info!(track_id, "Starting TencentCloud ASR client");
+
         tokio::spawn(async move {
+            // Handle wait_for_answer if enabled
+            if event_sender_rx.is_some() {
+                handle_wait_for_answer_with_audio_drop(event_sender_rx, &mut audio_rx, &token)
+                    .await;
+
+                // Check if cancelled during wait
+                if token.is_cancelled() {
+                    debug!("Cancelled during wait for answer");
+                    return Ok::<(), anyhow::Error>(());
+                }
+            }
+
+            let ws_stream = match inner.connect_websocket(track_id.as_str()).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!(
+                        track_id,
+                        "Failed to connect to TencentCloud ASR WebSocket: {}", e
+                    );
+                    let _ = event_sender.send(SessionEvent::Error {
+                        timestamp: crate::get_timestamp(),
+                        track_id: track_id.clone(),
+                        sender: "TencentCloudAsrClient".to_string(),
+                        error: format!("Failed to connect to TencentCloud ASR WebSocket: {}", e),
+                        code: Some(500),
+                    });
+                    return Err(e);
+                }
+            };
+
             match TencentCloudAsrClient::handle_websocket_message(
                 track_id.clone(),
                 ws_stream,
@@ -143,10 +187,10 @@ impl TencentCloudAsrClientBuilder {
             .await
             {
                 Ok(_) => {
-                    debug!("WebSocket message handling completed");
+                    debug!(track_id, "WebSocket message handling completed");
                 }
                 Err(e) => {
-                    info!("Error in handle_websocket_message: {}", e);
+                    info!(track_id, "Error in handle_websocket_message: {}", e);
                     event_sender
                         .send(SessionEvent::Error {
                             track_id,
@@ -158,12 +202,14 @@ impl TencentCloudAsrClientBuilder {
                         .ok();
                 }
             }
+            Ok::<(), anyhow::Error>(())
         });
+
         Ok(client)
     }
 }
 
-impl TencentCloudAsrClient {
+impl TencentCloudAsrClientInner {
     fn generate_signature(
         &self,
         secret_key: &str,
@@ -262,7 +308,6 @@ impl TencentCloudAsrClient {
             "wss://{}{}?{}&signature={}",
             host, url_path, query_string, signature
         );
-        info!("Connecting to WebSocket URL: {}", ws_url);
         let request = Request::builder()
             .uri(ws_url.parse::<Uri>()?)
             .header("Host", host)
@@ -275,16 +320,20 @@ impl TencentCloudAsrClient {
             .header("Content-Type", "application/json")
             .body(())?;
 
-        debug!("Connecting with request: {:?}", request);
-
         let (ws_stream, response) = connect_async(request).await?;
-        debug!("WebSocket connection established. Response: {:?}", response);
+        debug!(
+            voice_id,
+            "WebSocket connection established. Response: {}",
+            response.status()
+        );
         match response.status() {
             StatusCode::SWITCHING_PROTOCOLS => Ok(ws_stream),
             _ => Err(anyhow!("Failed to connect to WebSocket: {:?}", response)),
         }
     }
+}
 
+impl TencentCloudAsrClient {
     async fn handle_websocket_message(
         track_id: TrackId,
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -296,17 +345,20 @@ impl TencentCloudAsrClient {
         let begin_time = crate::get_timestamp();
         let start_time = Arc::new(AtomicU64::new(0));
         let start_time_ref = start_time.clone();
+        let track_id_clone = track_id.clone();
+
         let recv_loop = async move {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        debug!("ASR response: {}", text);
                         match serde_json::from_str::<TencentCloudAsrResponse>(&text) {
                             Ok(response) => {
                                 if response.code != 0 {
                                     warn!(
+                                        track_id,
                                         "Error from ASR service: {} ({})",
-                                        response.message, response.code
+                                        response.message,
+                                        response.code
                                     );
                                     return Err(anyhow!(
                                         "Error from ASR service: {} ({})",
@@ -362,23 +414,22 @@ impl TencentCloudAsrClient {
                                 });
                             }
                             Err(e) => {
-                                warn!("Failed to parse ASR response: {} {}", e, text);
+                                warn!(track_id, "Failed to parse ASR response: {} {}", e, text);
                                 return Err(anyhow!("Failed to parse ASR response: {}", e));
                             }
                         }
                     }
                     Ok(Message::Close(frame)) => {
-                        info!("WebSocket connection closed: {:?}", frame);
+                        info!(track_id, "WebSocket connection closed: {:?}", frame);
                         break;
                     }
                     Err(e) => {
-                        warn!("WebSocket error: {}", e);
+                        warn!(track_id, "WebSocket error: {}", e);
                         return Err(anyhow!("WebSocket error: {}", e));
                     }
                     _ => {}
                 }
             }
-            debug!("WebSocket receiver task completed");
             Result::<(), anyhow::Error>::Ok(())
         };
 
@@ -405,8 +456,8 @@ impl TencentCloudAsrClient {
                 }
             }
             info!(
-                "Audio sender task completed. Total bytes sent: {}",
-                total_bytes_sent
+                track_id = track_id_clone,
+                "Audio sender task completed. Total bytes sent: {}", total_bytes_sent
             );
             Result::<(), anyhow::Error>::Ok(())
         };
@@ -421,7 +472,9 @@ impl TencentCloudAsrClient {
 #[async_trait]
 impl TranscriptionClient for TencentCloudAsrClient {
     fn send_audio(&self, samples: &[Sample]) -> Result<()> {
-        self.audio_tx.send(codecs::samples_to_bytes(samples))?;
+        self.inner
+            .audio_tx
+            .send(codecs::samples_to_bytes(samples))?;
         Ok(())
     }
 }

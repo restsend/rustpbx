@@ -211,8 +211,11 @@ The `mediaPass` option in `CallOption` configures the WebSocket connection for a
     },
     "asr": {
       "provider": "tencent",
+      "language": "zh-CN",
       "secretId": "your_secret_id",
-      "secretKey": "your_secret_key"
+      "secretKey": "your_secret_key",
+      "modelType": "16k_zh",
+      "samplerate": 16000
     }
   }
 }
@@ -301,12 +304,20 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
     "denoise": true,
     "asr": {
       "provider": "tencent",
+      "language": "zh-CN",
+      "appId": "app_id",
       "secretId": "your_secret_id",
-      "secretKey": "your_secret_key"
+      "secretKey": "your_secret_key",
+      "modelType": "16k_zh",
+      "samplerate": 16000,
+      "startWhenAnswer": true
     },
     "tts": {
       "provider": "tencent",
-      "speaker": "xiaoyan"
+      "speaker": "xiaoyan",
+      "volume": 5,
+      "speed": 1.0,
+      "emotion": "neutral"
     }
   }
 }
@@ -327,8 +338,9 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
     "callee": "sip:bob@example.com",
     "codec": "g722",
     "recorder": {
-      "enable": true,
-      "format": "wav"
+      "recorderFile": "/path/to/recording.wav",
+      "samplerate": 16000,
+      "ptime": 200
     }
   }
 }
@@ -485,10 +497,18 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
     "moh": "http://example.com/hold_music.wav",
     "asr": {
       "provider": "tencent",
+      "language": "zh-CN",
+      "appId": "app_id",
       "secretId": "your_secret_id",
       "secretKey": "your_secret_key",
-      "region": "ap-beijing",
-      "model": "16k_zh"
+      "modelType": "16k_zh",
+      "bufferSize": 4000,
+      "samplerate": 16000,
+      "endpoint": "https://api.example.com",
+      "extra": {
+        "custom_param": "value"
+      },
+      "startWhenAnswer": true
     },
     "autoHangup": true,
     "sip": {
@@ -584,10 +604,18 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   },
   "asr": {
     "provider": "tencent",
+    "language": "zh-CN",
+    "appId": "app_id",
     "secretId": "your_secret_id",
     "secretKey": "your_secret_key",
-    "region": "ap-beijing",
-    "modelType": "16k_zh"
+    "modelType": "16k_zh",
+    "bufferSize": 4000,
+    "samplerate": 16000,
+    "endpoint": "https://api.example.com",
+    "extra": {
+      "custom_param": "value"
+    },
+    "startWhenAnswer": true
   },
   "vad": {
     "type": "webrtc",
@@ -603,10 +631,22 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "secretId": null
   },
   "tts": {
+    "samplerate": 16000,
     "provider": "tencent",
+    "speed": 1.0,
+    "appId": "app_id",
     "secretId": "your_secret_id",
     "secretKey": "your_secret_key",
-    "speaker": "xiaoyan"
+    "volume": 5,
+    "speaker": "1345",
+    "codec": "pcm",
+    "subtitle": true,
+    "emotion": "neutral",
+    "endpoint": "https://api.example.com",
+    "extra": {
+      "custom_param": "value"
+    },
+    "cacheKey": "cache_key_example"
   },
   "mediaPass": {
     "url": "ws://localhost:9090/media",
@@ -638,6 +678,75 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
 }
 ```
 
+**CallOption Fields:**
+- `denoise` (boolean, optional): Enable noise reduction for audio processing
+- `offer` (string, optional): SDP offer string for WebRTC/SIP negotiation
+- `callee` (string, optional): Callee's SIP URI or phone number (e.g., "sip:bob@example.com")
+- `caller` (string, optional): Caller's SIP URI or phone number (e.g., "sip:alice@example.com")
+- `recorder` (RecorderOption, optional): Call recording configuration
+  - `recorderFile` (string): Path to the recording file
+  - `samplerate` (number): Recording sample rate in Hz (default: 16000)
+  - `ptime` (number): Packet time in milliseconds (default: 200)
+- `asr` (TranscriptionOption, optional): Automatic Speech Recognition configuration
+  - `provider` (string): ASR provider ("tencent", "aliyun", "voiceapi")
+  - `language` (string, optional): Language code (e.g., "zh-CN", "en-US")
+  - `appId` (string, optional): Application ID for the ASR service
+  - `secretId` (string, optional): Secret ID for authentication
+  - `secretKey` (string, optional): Secret key for authentication
+  - `modelType` (string, optional): ASR model type (e.g., "16k_zh", "8k_en")
+  - `bufferSize` (number, optional): Audio buffer size in bytes
+  - `samplerate` (number, optional): Audio sample rate for ASR processing
+  - `endpoint` (string, optional): Custom ASR service endpoint URL
+  - `extra` (object, optional): Additional provider-specific parameters
+  - `startWhenAnswer` (boolean, optional): Start ASR when call is answered
+- `vad` (VADOption, optional): Voice Activity Detection configuration
+  - `type` (string): VAD algorithm type ("webrtc", "tencent")
+  - `samplerate` (number): Audio sample rate for VAD processing (default: 16000)
+  - `speechPadding` (number): Padding before speech detection in milliseconds (default: 250)
+  - `silencePadding` (number): Padding after silence detection in milliseconds (default: 100)
+  - `ratio` (number): Voice detection ratio threshold (default: 0.5)
+  - `voiceThreshold` (number): Voice energy threshold (default: 0.5)
+  - `maxBufferDurationSecs` (number): Maximum buffer duration in seconds (default: 50)
+  - `silenceTimeout` (number, optional): Timeout for silence detection in milliseconds
+  - `endpoint` (string, optional): Custom VAD service endpoint
+  - `secretKey` (string, optional): Secret key for VAD service authentication
+  - `secretId` (string, optional): Secret ID for VAD service authentication
+- `tts` (SynthesisOption, optional): Text-to-Speech configuration
+  - `samplerate` (number, optional): TTS output sample rate in Hz
+  - `provider` (string, optional): TTS provider ("tencent", "aliyun", "voiceapi")
+  - `speed` (number, optional): Speech speed multiplier (default: 1.0)
+  - `appId` (string, optional): Application ID for TTS service
+  - `secretId` (string, optional): Secret ID for authentication
+  - `secretKey` (string, optional): Secret key for authentication
+  - `volume` (number, optional): Speech volume level (1-10)
+  - `speaker` (string, optional): Voice speaker name (e.g., "xiaoyan", "xiaoyun")
+  - `codec` (string, optional): Audio codec for TTS output
+  - `subtitle` (boolean, optional): Enable subtitle generation
+  - `emotion` (string, optional): Speech emotion ("neutral", "sad", "happy", "angry", "fear", "news", "story", "radio", "poetry", "call", "sajiao", "disgusted", "amaze", "peaceful", "exciting", "aojiao", "jieshuo")
+  - `endpoint` (string, optional): Custom TTS service endpoint URL
+  - `extra` (object, optional): Additional provider-specific parameters
+  - `cacheKey` (string, optional): Cache key for TTS result caching
+- `mediaPass` (MediaPassOption, optional): Media pass-through configuration for external audio processing
+  - `url` (string): WebSocket URL for media streaming
+  - `inputSampleRate` (number): Sample rate of audio received from WebSocket server
+  - `outputSampleRate` (number): Sample rate of audio sent to WebSocket server
+  - `packetSize` (number, optional): Packet size sent to WebSocket server in bytes (default: 2560)
+- `handshakeTimeout` (string, optional): Timeout for connection handshake (e.g., "30s")
+- `enableIpv6` (boolean, optional): Enable IPv6 support for networking
+- `sip` (SipOption, optional): SIP protocol configuration
+  - `username` (string): SIP username for authentication
+  - `password` (string): SIP password for authentication
+  - `realm` (string): SIP realm/domain
+  - `headers` (object, optional): Additional SIP headers as key-value pairs
+- `extra` (object, optional): Additional custom parameters as key-value pairs
+- `codec` (string, optional): Audio codec for WebSocket calls ("pcmu", "pcma", "g722", "pcm")
+- `eou` (EouOption, optional): End of Utterance detection configuration
+  - `type` (string, optional): EOU detection provider
+  - `endpoint` (string, optional): Custom EOU service endpoint URL
+  - `secretKey` (string, optional): Secret key for EOU service authentication
+  - `secretId` (string, optional): Secret ID for EOU service authentication
+  - `timeout` (number, optional): Maximum timeout for EOU detection in milliseconds
+
 ### ReferOption Object Structure
 
 The `ReferOption` object is used in the `refer` command and contains the following fields:
@@ -649,10 +758,18 @@ The `ReferOption` object is used in the `refer` command and contains the followi
   "moh": "http://example.com/hold_music.wav",
   "asr": {
     "provider": "tencent",
+    "language": "zh-CN",
+    "appId": "app_id",
     "secretId": "your_secret_id",
     "secretKey": "your_secret_key",
-    "region": "ap-beijing",
-    "model": "16k_zh"
+    "modelType": "16k_zh",
+    "bufferSize": 4000,
+    "samplerate": 16000,
+    "endpoint": "https://api.example.com",
+    "extra": {
+      "custom_param": "value"
+    },
+    "startWhenAnswer": true
   },
   "autoHangup": true,
   "sip": {
