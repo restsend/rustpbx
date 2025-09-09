@@ -433,6 +433,9 @@ impl Track for WebrtcTrack {
 
         let payload_type = self.track_config.codec.payload_type();
         let payload = self.encoder.encode(payload_type, packet.clone());
+        if payload.is_empty() {
+            return Ok(());
+        }
 
         let sample = webrtc::media::Sample {
             data: payload.into(),
