@@ -77,13 +77,16 @@ impl ProcessorChain {
             ..
         } = &frame.samples
         {
-            let samples =
-                self.codec
-                    .lock()
-                    .unwrap()
-                    .decode(*payload_type, &payload, self.sample_rate);
-            frame.samples = Samples::PCM { samples };
-            frame.sample_rate = self.sample_rate;
+            // Only sample non-DTMF frames
+            if *payload_type < 96 || *payload_type > 127 {
+                let samples =
+                    self.codec
+                        .lock()
+                        .unwrap()
+                        .decode(*payload_type, &payload, self.sample_rate);
+                frame.samples = Samples::PCM { samples };
+                frame.sample_rate = self.sample_rate;
+            }
         }
         // Process the frame with all processors
         for processor in processors.iter() {

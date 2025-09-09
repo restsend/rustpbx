@@ -344,10 +344,15 @@ impl MuteProcessor {
 
 impl Processor for MuteProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
-        if let Samples::PCM { samples } = &mut frame.samples {
-            samples.fill(0);
-        } else {
-            unreachable!("pcm samples only");
+        match &mut frame.samples {
+            Samples::PCM { samples } => {
+                samples.fill(0);
+            }
+            // discard DTMF frames
+            Samples::RTP { payload_type, .. } if *payload_type >= 96 && *payload_type <= 127 => {
+                frame.samples = Samples::Empty;
+            }
+            _ => {}
         }
         Ok(())
     }
