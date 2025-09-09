@@ -159,8 +159,9 @@ impl TrackCodec {
                     _ => samples_to_bytes(&pcm),
                 }
             }
-            Samples::RTP { payload, .. } => payload,
-            Samples::Empty => vec![],
+            Samples::RTP { payload, .. } if payload_type < 96 || payload_type > 127 => payload,
+            // discard DTMF frames
+            _ => vec![],
         }
     }
 }
