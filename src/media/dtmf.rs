@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicU8, AtomicU16};
 // DTMF events as per RFC 4733
 const DTMF_EVENT_0: u8 = 0;
 const DTMF_EVENT_1: u8 = 1;
@@ -20,14 +20,16 @@ const DTMF_EVENT_D: u8 = 15;
 pub struct DtmfDetector {
     // Track the last seen event to avoid repeated events
     last_event: AtomicU8,
-    last_duration: AtomicU64,
+    last_duration: AtomicU16,
 }
 
+#[derive(Debug)]
 struct DtmfPayload {
-    event: u8,     // 8bits
-    is_end: bool,  // 1bit
+    event: u8, // 8bits
+    #[allow(dead_code)]
+    is_end: bool, // 1bit
     _reserved: u8, // 1bits
-    _volume: u8,   // 6bits
+    _volume: u8, // 6bits
     duration: u16, // 16bits
 }
 
@@ -75,7 +77,7 @@ impl DtmfDetector {
     pub fn new() -> Self {
         Self {
             last_event: AtomicU8::new(0),
-            last_duration: AtomicU64::new(0),
+            last_duration: AtomicU16::new(0),
         }
     }
 
@@ -95,31 +97,20 @@ impl DtmfDetector {
         // Parse the DTMF payload
         let dtmf_payload = DtmfPayload::parse(payload)?;
 
-        // Only report end packets to avoid duplicates
-        if !dtmf_payload.is_end {
-            return None;
-        }
         // Get current duration
-        let current_duration = crate::get_timestamp();
+        let current_event = dtmf_payload.event;
+        let current_duration = dtmf_payload.duration;
+        let last_event = self
+            .last_event
+            .swap(current_event, std::sync::atomic::Ordering::Relaxed);
         let last_duration = self
             .last_duration
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let last_event = self.last_event.load(std::sync::atomic::Ordering::Relaxed);
+            .swap(current_duration, std::sync::atomic::Ordering::Relaxed);
 
-        // Check if this is a duplicate event (same event with similar duration)
-        if dtmf_payload.event == last_event
-            && (current_duration <= last_duration || current_duration - last_duration < 100)
-        {
+        if current_event == last_event && current_duration >= last_duration {
             return None;
         }
 
-        // Update last event and duration
-        self.last_event
-            .store(dtmf_payload.event, std::sync::atomic::Ordering::Relaxed);
-        self.last_duration.store(
-            current_duration + dtmf_payload.duration as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         Some(
             match dtmf_payload.event {
                 DTMF_EVENT_0 => "0",
@@ -229,11 +220,6 @@ mod tests {
             let payload2 = [DTMF_EVENT_5, 0x80, 0, 100]; // Duration 150 (similar)
             let digit2 = detector.detect_rtp(101, &payload2);
             assert_eq!(digit2, None);
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            // Much larger duration - should be detected as new event
-            let payload3 = [DTMF_EVENT_5, 0x80, 0, 100]; // Much larger duration
-            let digit3 = detector.detect_rtp(101, &payload3);
-            assert_eq!(digit3, Some("5".to_string()));
 
             // Different event - should be detected
             let payload4 = [DTMF_EVENT_6, 0x80, 1, 8]; // Event 6 ("6" key)
