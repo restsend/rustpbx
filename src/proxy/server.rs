@@ -340,7 +340,7 @@ impl SipServerBuilder {
 
 impl SipServer {
     pub async fn serve(&self) -> Result<()> {
-        let incoming = self.inner.endpoint.incoming_transactions();
+        let incoming = self.inner.endpoint.incoming_transactions()?;
         let cancel_token = self.inner.cancel_token.clone();
         tokio::select! {
             _ = cancel_token.cancelled() => {

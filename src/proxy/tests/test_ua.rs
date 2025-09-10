@@ -86,7 +86,7 @@ impl TestUa {
             .with_transport_layer(transport_layer)
             .build();
 
-        let incoming = endpoint.incoming_transactions();
+        let incoming = endpoint.incoming_transactions()?;
         self.dialog_layer = Some(Arc::new(DialogLayer::new(endpoint.inner.clone())));
 
         let (state_sender, state_receiver) = unbounded_channel();
