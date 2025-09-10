@@ -278,7 +278,7 @@ impl UserAgent {
     }
 
     pub async fn serve(&self) -> Result<()> {
-        let incoming_txs = self.endpoint.incoming_transactions();
+        let incoming_txs = self.endpoint.incoming_transactions()?;
         let token = self.token.child_token();
         let endpoint_inner = self.endpoint.inner.clone();
         let dialog_layer = self.dialog_layer.clone();
