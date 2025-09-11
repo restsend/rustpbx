@@ -177,7 +177,7 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
 
     // Test PCMU encoding
     let payload_type = 0; // PCMU
-    let encoded = encoder.encode(payload_type, audio_frame);
+    let (_, encoded) = encoder.encode(payload_type, audio_frame);
 
     // PCMU should be approximately the same size as the input (1 byte per sample)
     assert_eq!(encoded.len(), samples.len());

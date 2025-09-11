@@ -67,6 +67,17 @@ impl TrackCodec {
         }
     }
 
+    pub fn is_audio(payload_type: u8) -> bool {
+        match payload_type {
+            0 | 8 | 9 => true,
+            #[cfg(feature = "g729")]
+            18 => true,
+            #[cfg(feature = "opus")]
+            111 => true,
+            _ => false,
+        }
+    }
+
     pub fn decode(&self, payload_type: u8, payload: &[u8], target_sample_rate: u32) -> PcmBuf {
         let payload = match payload_type {
             0 => self.pcmu_decoder.borrow_mut().decode(payload),
@@ -113,7 +124,7 @@ impl TrackCodec {
         }
     }
 
-    pub fn encode(&self, payload_type: u8, frame: AudioFrame) -> Vec<u8> {
+    pub fn encode(&self, payload_type: u8, frame: AudioFrame) -> (u8, Vec<u8>) {
         match frame.samples {
             Samples::PCM { samples: mut pcm } => {
                 let target_samplerate = match payload_type {
@@ -138,7 +149,7 @@ impl TrackCodec {
                     pcm = self.resampler.borrow_mut().as_mut().unwrap().resample(&pcm);
                 }
 
-                match payload_type {
+                let payload = match payload_type {
                     0 => self.pcmu_encoder.borrow_mut().encode(&pcm),
                     8 => self.pcma_encoder.borrow_mut().encode(&pcm),
                     9 => self.g722_encoder.borrow_mut().encode(&pcm),
@@ -157,11 +168,15 @@ impl TrackCodec {
                         }
                     }
                     _ => samples_to_bytes(&pcm),
-                }
+                };
+                (payload_type, payload)
             }
-            Samples::RTP { payload, .. } if payload_type < 96 || payload_type > 127 => payload,
-            // discard DTMF frames
-            _ => vec![],
+            Samples::RTP {
+                payload_type,
+                payload,
+                ..
+            } => (payload_type, payload),
+            _ => (payload_type, vec![]),
         }
     }
 }

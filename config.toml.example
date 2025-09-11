@@ -47,7 +47,7 @@ rtp_end_port = 30000
 [proxy.user_backend]
 type = "memory"
 users = [
-    { username = "bob", password = "123456", realm = "127.0.0.1" },
+    { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
 

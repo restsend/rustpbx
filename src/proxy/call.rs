@@ -143,7 +143,7 @@ impl CallModule {
             .locator
             .lookup(&callee, Some(&callee_realm))
             .await
-            .map_err(|e| (e, None))?;
+            .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
 
         if locations.is_empty() {
             warn!(callee = %callee_uri, "user offline in locator");
@@ -322,7 +322,7 @@ impl ProxyModule for CallModule {
             %dialog_id,
             method = %tx.original.method,
             uri = %tx.original.uri,
-            caller = ?cookie.get_user(),
+            caller = %cookie.get_user().as_ref().map(|u|u.to_string()).unwrap_or_default(),
             "call transaction begin",
         );
         match tx.original.method {
@@ -334,7 +334,7 @@ impl ProxyModule for CallModule {
                             rsip::StatusCode::ServerInternalError,
                             vec![rsip::Header::Other(
                                 "Reason".into(),
-                                format!("SIP ;cause=500 ;text=\"{}\"", e.to_string()),
+                                format!("SIP;cause=500;text=\"{}\"", e.to_string()),
                             )],
                             None,
                         )
