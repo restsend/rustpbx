@@ -77,8 +77,7 @@ impl ProcessorChain {
             ..
         } = &frame.samples
         {
-            // Only sample non-DTMF frames
-            if *payload_type < 96 || *payload_type > 127 {
+            if TrackCodec::is_audio(*payload_type) {
                 let samples =
                     self.codec
                         .lock()

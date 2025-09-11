@@ -157,7 +157,7 @@ impl Track for WebsocketTrack {
     }
 
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()> {
-        let payload = self.encoder.encode(self.payload_type, packet.clone());
+        let (_, payload) = self.encoder.encode(self.payload_type, packet.clone());
         if payload.is_empty() {
             return Ok(());
         }

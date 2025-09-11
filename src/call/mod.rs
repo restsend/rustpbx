@@ -237,6 +237,12 @@ pub struct Location {
     pub headers: Option<Vec<rsip::Header>>,
 }
 
+impl std::fmt::Display for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "aor: {}, destination: {}", self.aor, self.destination)
+    }
+}
+
 #[derive(Clone)]
 pub enum DialStrategy {
     Sequential(Vec<Location>),

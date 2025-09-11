@@ -28,6 +28,16 @@ pub struct SipUser {
     pub is_support_webrtc: bool,
 }
 
+impl ToString for SipUser {
+    fn to_string(&self) -> String {
+        if let Some(realm) = &self.realm {
+            format!("{}@{}", self.username, realm)
+        } else {
+            self.username.clone()
+        }
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -131,7 +141,7 @@ impl TryFrom<&Transaction> for SipUser {
                     .user()
                     .unwrap_or_default()
                     .to_string();
-                let realm = tx.original.to_header()?.uri()?.host().to_string();
+                let realm = tx.original.uri().host().to_string();
                 (username, Some(realm))
             }
         };

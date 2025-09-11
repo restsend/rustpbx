@@ -210,7 +210,7 @@ impl ProxyModule for AuthModule {
                     Ok(ProxyAction::Continue)
                 } else {
                     let from_uri = tx.original.from_header()?.uri()?;
-                    let realm = from_uri.host().to_string();
+                    let realm = tx.original.uri().host().to_string();
                     let realm = ProxyConfig::normalize_realm(&realm);
                     // Check which type of authentication was attempted or send both challenges
                     let has_proxy_auth_header =

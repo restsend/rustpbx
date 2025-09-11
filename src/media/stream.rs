@@ -1,6 +1,6 @@
 use crate::event::{EventSender, SessionEvent};
+use crate::media::dtmf::DtmfDetector;
 use crate::media::{
-    dtmf::DtmfDetector,
     processor::Processor,
     recorder::{Recorder, RecorderOption},
     track::{Track, TrackPacketReceiver, TrackPacketSender},
@@ -16,18 +16,17 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 use uuid;
 
 pub struct MediaStream {
     id: String,
     cancel_token: CancellationToken,
     recorder_option: Mutex<Option<RecorderOption>>,
-    tracks: Mutex<HashMap<TrackId, Box<dyn Track>>>,
+    tracks: Mutex<HashMap<TrackId, (Box<dyn Track>, DtmfDetector)>>,
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
-    dtmf_detector: DtmfDetector,
     recorder_sender: mpsc::UnboundedSender<AudioFrame>,
     recorder_receiver: Mutex<Option<mpsc::UnboundedReceiver<AudioFrame>>>,
     recorder_handle: Mutex<Option<JoinHandle<()>>>,
@@ -79,7 +78,6 @@ impl MediaStreamBuilder {
             event_sender: self.event_sender,
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
-            dtmf_detector: DtmfDetector::new(),
             recorder_sender,
             recorder_receiver: Mutex::new(Some(recorder_receiver)),
             recorder_handle: Mutex::new(None),
@@ -100,11 +98,7 @@ impl MediaStream {
             }
         };
         self.start_recorder().await.ok();
-        info!(
-            session_id = self.id,
-            "serving tracks {:?}",
-            self.tracks.lock().await.keys()
-        );
+        info!(session_id = self.id, "mediastream serving");
         select! {
             _ = self.cancel_token.cancelled() => {}
             r = self.handle_forward_track(packet_receiver) => {
@@ -137,7 +131,7 @@ impl MediaStream {
     }
 
     pub async fn remove_track(&self, id: &TrackId) {
-        if let Some(track) = self.tracks.lock().await.remove(id) {
+        if let Some((track, _)) = self.tracks.lock().await.remove(id) {
             match track.stop().await {
                 Ok(_) => {}
                 Err(e) => {
@@ -151,7 +145,7 @@ impl MediaStream {
         track_id: &TrackId,
         answer: &String,
     ) -> Result<()> {
-        if let Some(track) = self.tracks.lock().await.get_mut(track_id) {
+        if let Some((track, _)) = self.tracks.lock().await.get_mut(track_id) {
             track.update_remote_description(answer).await?;
         }
         Ok(())
@@ -170,7 +164,10 @@ impl MediaStream {
             Ok(_) => {
                 info!(session_id = self.id, track_id = track.id(), "track started");
                 let track_id = track.id().clone();
-                self.tracks.lock().await.insert(track_id.clone(), track);
+                self.tracks
+                    .lock()
+                    .await
+                    .insert(track_id.clone(), (track, DtmfDetector::new()));
                 self.event_sender
                     .send(SessionEvent::TrackStart {
                         track_id,
@@ -193,11 +190,11 @@ impl MediaStream {
 
     pub async fn mute_track(&self, id: Option<TrackId>) {
         if let Some(id) = id {
-            if let Some(track) = self.tracks.lock().await.get_mut(&id) {
+            if let Some((track, _)) = self.tracks.lock().await.get_mut(&id) {
                 MuteProcessor::mute_track(track.as_mut());
             }
         } else {
-            for track in self.tracks.lock().await.values_mut() {
+            for (track, _) in self.tracks.lock().await.values_mut() {
                 MuteProcessor::mute_track(track.as_mut());
             }
         }
@@ -205,11 +202,11 @@ impl MediaStream {
 
     pub async fn unmute_track(&self, id: Option<TrackId>) {
         if let Some(id) = id {
-            if let Some(track) = self.tracks.lock().await.get_mut(&id) {
+            if let Some((track, _)) = self.tracks.lock().await.get_mut(&id) {
                 MuteProcessor::unmute_track(track.as_mut());
             }
         } else {
-            for track in self.tracks.lock().await.values_mut() {
+            for (track, _) in self.tracks.lock().await.values_mut() {
                 MuteProcessor::unmute_track(track.as_mut());
             }
         }
@@ -285,43 +282,39 @@ impl MediaStream {
     }
 
     async fn handle_forward_track(&self, mut packet_receiver: TrackPacketReceiver) {
+        let event_sender = self.event_sender.clone();
         while let Some(packet) = packet_receiver.recv().await {
-            // Process for DTMF
-            self.process_dtmf(&packet).await;
             // Process the packet with each track
-            for track in self.tracks.lock().await.values() {
+            for (track, dtmf_detector) in self.tracks.lock().await.values() {
                 if &packet.track_id == track.id() {
+                    match &packet.samples {
+                        Samples::RTP {
+                            payload_type,
+                            payload,
+                            ..
+                        } => {
+                            if let Some(digit) = dtmf_detector.detect_rtp(*payload_type, payload) {
+                                debug!(track_id = track.id(), digit, "DTMF detected");
+                                event_sender
+                                    .send(SessionEvent::Dtmf {
+                                        track_id: packet.track_id.to_string(),
+                                        timestamp: packet.timestamp,
+                                        digit,
+                                    })
+                                    .ok();
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 if let Err(e) = track.send_packet(&packet).await {
-                    error!(
+                    warn!(
                         id = track.id(),
                         "media_stream: Failed to send packet to track: {}", e
                     );
                 }
             }
-        }
-    }
-
-    async fn process_dtmf(&self, packet: &AudioFrame) {
-        match &packet.samples {
-            // Check if the packet contains RTP data (our focus for DTMF detection)
-            Samples::RTP {
-                payload_type,
-                payload,
-                ..
-            } => {
-                if let Some(digit) = self.dtmf_detector.detect_rtp(*payload_type, payload) {
-                    self.event_sender
-                        .send(SessionEvent::Dtmf {
-                            track_id: packet.track_id.clone(),
-                            timestamp: packet.timestamp,
-                            digit,
-                        })
-                        .ok();
-                }
-            }
-            _ => {}
         }
     }
 }

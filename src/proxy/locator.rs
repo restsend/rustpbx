@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::{debug, info};
 
 #[async_trait]
 pub trait Locator: Send + Sync {
@@ -49,6 +50,7 @@ impl Locator for MemoryLocator {
         location: Location,
     ) -> Result<()> {
         let identifier = self.get_identifier(username, realm);
+        debug!(identifier, %location, "Registering");
         let mut locations = self.locations.lock().await;
         locations.insert(identifier, location);
         Ok(())
@@ -67,6 +69,7 @@ impl Locator for MemoryLocator {
         if let Some(location) = locations.get(&identifier) {
             Ok(vec![location.clone()])
         } else {
+            info!("User not found: {}", identifier);
             Err(anyhow::anyhow!("missing user: {}", identifier))
         }
     }
