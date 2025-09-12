@@ -203,7 +203,7 @@ fn on_dialog_terminated(
             play_id: None,
         })
         .ok();
-    let hangup_event = call_state_ref.build_hangup_event(Some(initiator));
+    let hangup_event = call_state_ref.build_hangup_event(track_id, Some(initiator));
     event_sender.send(hangup_event).ok();
 }
 

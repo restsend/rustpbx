@@ -70,7 +70,6 @@ impl MediaPassTrack {
         let track_sample_rate = option.input_sample_rate;
         let config = TrackConfig {
             samplerate: track_sample_rate,
-            server_side_track_id: track_id.clone(),
             ..Default::default()
         };
         let processor_chain = ProcessorChain::new(track_sample_rate);

@@ -64,6 +64,7 @@ pub async fn call_handler(
     params: CallParams,
 ) -> Response {
     let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let server_side_track = params.server_side_track.clone();
     let dump_events = params.dump_events.unwrap_or(true);
     let ping_interval = params.ping_interval.unwrap_or(20);
     let useragent = match app_state.useragent.clone() {
@@ -91,6 +92,7 @@ pub async fn call_handler(
             track_config,
             Some(audio_receiver),
             dump_events,
+            server_side_track,
             None, // No extra data for now
         ));
         

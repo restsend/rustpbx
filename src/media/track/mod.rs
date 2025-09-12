@@ -20,7 +20,6 @@ pub struct TrackConfig {
     pub samplerate: u32,
     // Number of audio channels (1 for mono, 2 for stereo)
     pub channels: u16,
-    pub server_side_track_id: TrackId,
 }
 
 impl Default for TrackConfig {
@@ -30,7 +29,6 @@ impl Default for TrackConfig {
             ptime: Duration::from_millis(20),
             samplerate: 16000,
             channels: 1,
-            server_side_track_id: "server-side-track".to_string(),
         }
     }
 }
@@ -48,11 +46,6 @@ impl TrackConfig {
 
     pub fn with_channels(mut self, channels: u16) -> Self {
         self.channels = channels;
-        self
-    }
-
-    pub fn with_server_side_track_id(mut self, server_side_track_id: TrackId) -> Self {
-        self.server_side_track_id = server_side_track_id;
         self
     }
 }

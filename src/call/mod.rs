@@ -165,9 +165,8 @@ pub enum Command {
         code: Option<u32>,
     },
     Ringing {
-        recorder: bool,
-        #[serde(rename = "earlyMedia")]
-        early_media: bool,
+        recorder: Option<bool>,
+        early_media: Option<bool>,
         ringtone: Option<String>,
     },
     Tts {

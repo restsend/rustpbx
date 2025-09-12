@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::{fs::File, select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Deserialize)]
 pub struct CallParams {
@@ -47,6 +47,7 @@ pub struct CallParams {
     pub dump_events: Option<bool>,
     #[serde(rename = "ping")]
     pub ping_interval: Option<u32>,
+    pub server_side_track: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -91,6 +92,7 @@ pub struct ActiveCall {
     pub cmd_sender: CommandSender,
     pub audio_receiver: Mutex<Option<WebsocketBytesReceiver>>,
     pub dump_events: bool,
+    pub server_side_track_id: TrackId,
     can_start_send_command: CancellationToken,
     ready_to_answer: Mutex<Option<(String, Option<Box<dyn Track>>, ServerInviteDialog)>>,
 }
@@ -105,6 +107,7 @@ impl ActiveCall {
         track_config: TrackConfig,
         audio_receiver: Option<WebsocketBytesReceiver>,
         dump_events: bool,
+        server_side_track_id: Option<TrackId>,
         extras: Option<HashMap<String, serde_json::Value>>,
     ) -> Self {
         let event_sender = crate::event::create_event_sender();
@@ -135,6 +138,7 @@ impl ActiveCall {
             cmd_sender,
             audio_receiver: Mutex::new(audio_receiver),
             dump_events,
+            server_side_track_id: server_side_track_id.unwrap_or("server-side-track".to_string()),
             can_start_send_command: CancellationToken::new(),
             ready_to_answer: Mutex::new(None),
         }
@@ -165,6 +169,15 @@ impl ActiveCall {
                     Ok(_) => (),
                     Err(e) => {
                         warn!(session_id = self.session_id, "{}", e);
+                        self.event_sender
+                            .send(SessionEvent::Error {
+                                track_id: self.session_id.clone(),
+                                timestamp: crate::get_timestamp(),
+                                sender: "command".to_string(),
+                                error: e.to_string(),
+                                code: None,
+                            })
+                            .ok();
                     }
                 }
             }
@@ -218,7 +231,7 @@ impl ActiveCall {
                     *input_timeout_expire.lock().await = (0, 0);
                     event_sender
                         .send(SessionEvent::Silence {
-                            track_id: self.track_config.server_side_track_id.clone(),
+                            track_id: self.server_side_track_id.clone(),
                             timestamp: crate::get_timestamp(),
                             start_time,
                             duration: expire as u64,
@@ -229,7 +242,7 @@ impl ActiveCall {
                 sleep(Duration::from_millis(100)).await;
             }
         };
-        let server_side_track_id = &self.track_config.server_side_track_id;
+        let server_side_track_id = &self.server_side_track_id;
         let event_hook_loop = async move {
             while let Ok(event) = event_receiver.recv().await {
                 match event {
@@ -398,7 +411,7 @@ impl ActiveCall {
         }
 
         if let Some(opt) = &option.media_pass {
-            let track_id = self.track_config.server_side_track_id.clone();
+            let track_id = self.server_side_track_id.clone();
             let cancel_token = self.cancel_token.child_token();
             let ssrc = rand::random::<u32>();
             let media_pass_track = MediaPassTrack::new(ssrc, track_id, cancel_token, opt.clone());
@@ -446,6 +459,13 @@ impl ActiveCall {
     async fn do_accept(&self, mut option: CallOption) -> Result<()> {
         if self.ready_to_answer.lock().await.is_none() {
             option = self.invite_or_accept(option, "accept".to_string()).await?;
+        } else {
+            option.check_default();
+            self.call_state
+                .write()
+                .as_mut()
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+                .option = Some(option.clone());
         }
 
         if let Some((answer, track, dialog)) = self.ready_to_answer.lock().await.take() {
@@ -479,31 +499,23 @@ impl ActiveCall {
     async fn do_ringing(
         &self,
         ringtone: Option<String>,
-        recorder: bool,
-        early_media: bool,
+        recorder: Option<bool>,
+        early_media: Option<bool>,
     ) -> Result<()> {
         if self.ready_to_answer.lock().await.is_none() {
             let option = CallOption {
-                recorder: if recorder {
+                recorder: if recorder.unwrap_or_default() {
                     Some(RecorderOption::default())
                 } else {
                     None
                 },
                 ..Default::default()
             };
-            debug!(
-                session_id = self.session_id,
-                ringtone,
-                recorder,
-                early_media,
-                ?option,
-                "do_ringing with optio"
-            );
-            let _ = self.invite_or_accept(option, "accept".to_string()).await?;
+            let _ = self.invite_or_accept(option, "ringing".to_string()).await?;
         }
 
         if let Some((answer, _, dialog)) = self.ready_to_answer.lock().await.as_ref() {
-            let (headers, body) = if early_media || ringtone.is_some() {
+            let (headers, body) = if early_media.unwrap_or_default() || ringtone.is_some() {
                 let headers = vec![rsip::Header::ContentType(
                     "application/sdp".to_string().into(),
                 )];
@@ -540,7 +552,13 @@ impl ActiveCall {
         let tts_option = match self.call_state.read() {
             Ok(ref call_state) => match call_state.option.clone().unwrap_or_default().tts {
                 Some(opt) => opt.merge_with(option),
-                None => return Ok(()),
+                None => {
+                    if let Some(opt) = option {
+                        opt
+                    } else {
+                        return Err(anyhow::anyhow!("no tts option available"));
+                    }
+                }
             },
             Err(_) => return Err(anyhow::anyhow!("failed to read call state")),
         };
@@ -592,7 +610,7 @@ impl ActiveCall {
             self.app_state.stream_engine.clone(),
             self.cancel_token.child_token(),
             self.session_id.clone(),
-            self.track_config.server_side_track_id.clone(),
+            self.server_side_track_id.clone(),
             ssrc,
             play_id.clone(),
             &play_command.option,
@@ -618,7 +636,7 @@ impl ActiveCall {
             ssrc, url, auto_hangup, "play file track"
         );
 
-        let file_track = FileTrack::new(self.track_config.server_side_track_id.clone())
+        let file_track = FileTrack::new(self.server_side_track_id.clone())
             .with_ssrc(ssrc)
             .with_path(url.clone())
             .with_cancel_token(self.cancel_token.child_token());
@@ -650,7 +668,7 @@ impl ActiveCall {
     async fn do_interrupt(&self) -> Result<()> {
         self.tts_handle.lock().await.take();
         self.media_stream
-            .remove_track(&self.track_config.server_side_track_id)
+            .remove_track(&self.server_side_track_id)
             .await;
         Ok(())
     }
@@ -709,7 +727,7 @@ impl ActiveCall {
         self.tts_handle.lock().await.take();
         let token = self.cancel_token.child_token();
         let session_id = self.session_id.clone();
-        let track_id = self.track_config.server_side_track_id.clone();
+        let track_id = self.server_side_track_id.clone();
 
         let call_option = CallOption {
             caller: Some(caller),
@@ -1321,7 +1339,8 @@ impl ActiveCall {
 
     /// Detect if SDP is WebRTC format
     pub fn is_webrtc_sdp(sdp: &str) -> bool {
-        sdp.contains("a=ice-ufrag:") || sdp.contains("a=ice-pwd:")
+        (sdp.contains("a=ice-ufrag:") || sdp.contains("a=ice-pwd:"))
+            && sdp.contains("a=fingerprint:")
     }
 
     pub async fn setup_answer_track(
@@ -1364,8 +1383,7 @@ impl ActiveCall {
         let answer = match media_track.handshake(offer.clone(), timeout).await {
             Ok(answer) => answer,
             Err(e) => {
-                warn!(session_id = self.session_id, "failed to handshake: {}", e);
-                return Err(anyhow::anyhow!("failed to handshake"));
+                return Err(anyhow::anyhow!("handshake failed: {e}"));
             }
         };
 
@@ -1420,7 +1438,6 @@ impl ActiveCall {
                     .replace((offer, None, pending_dialog.dialog));
             }
             Err(e) => {
-                warn!(session_id = self.session_id, "error creating track: {}", e);
                 return Err(anyhow::anyhow!("error creating track: {}", e));
             }
         }
@@ -1462,12 +1479,17 @@ impl ActiveCall {
 }
 
 impl ActiveCallState {
-    pub fn build_hangup_event(&self, initiator: Option<String>) -> crate::event::SessionEvent {
+    pub fn build_hangup_event(
+        &self,
+        track_id: TrackId,
+        initiator: Option<String>,
+    ) -> crate::event::SessionEvent {
         let from = self.option.as_ref().and_then(|o| o.caller.as_ref());
         let to = self.option.as_ref().and_then(|o| o.callee.as_ref());
         let extra = self.extras.clone();
 
         crate::event::SessionEvent::Hangup {
+            track_id,
             timestamp: crate::get_timestamp(),
             reason: Some(format!("{:?}", self.hangup_reason)),
             initiator,

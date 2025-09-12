@@ -96,7 +96,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
                 webhook_requests_clone.lock().unwrap().push(webhook_req);
 
                 // Extract dialog_id for subsequent accept
-                if let Some(dialog_id) = body.get("dialog_id") {
+                if let Some(dialog_id) = body.get("dialogId") {
                     if let Some(id_str) = dialog_id.as_str() {
                         *alice_dialog_id_clone.lock().unwrap() = Some(id_str.to_string());
                     }

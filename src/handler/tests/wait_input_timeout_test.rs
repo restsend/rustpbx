@@ -71,6 +71,7 @@ mod wait_input_timeout_tests {
             None,
             false,
             None,
+            None,
         )))
     }
 
@@ -101,7 +102,7 @@ mod wait_input_timeout_tests {
 
         // Simulate TrackEnd event to trigger wait_input_timeout
         active_call.event_sender.send(SessionEvent::TrackEnd {
-            track_id: active_call.track_config.server_side_track_id.clone(),
+            track_id: active_call.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
@@ -133,7 +134,7 @@ mod wait_input_timeout_tests {
         );
         assert_eq!(
             silence_track_id.unwrap(),
-            active_call.track_config.server_side_track_id,
+            active_call.server_side_track_id,
             "Silence event should have correct track_id"
         );
 
@@ -155,7 +156,7 @@ mod wait_input_timeout_tests {
 
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
-            track_id: active_call.track_config.server_side_track_id.clone(),
+            track_id: active_call.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
@@ -218,7 +219,7 @@ mod wait_input_timeout_tests {
 
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
-            track_id: active_call.track_config.server_side_track_id.clone(),
+            track_id: active_call.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,
@@ -282,7 +283,7 @@ mod wait_input_timeout_tests {
 
         // Simulate TrackEnd
         event_sender.send(SessionEvent::TrackEnd {
-            track_id: active_call.track_config.server_side_track_id.clone(),
+            track_id: active_call.server_side_track_id.clone(),
             timestamp: crate::get_timestamp(),
             duration: 1000,
             ssrc: 0,

@@ -55,6 +55,7 @@ pub enum SessionEvent {
         early_media: bool,
     },
     Hangup {
+        track_id: String,
         timestamp: u64,
         reason: Option<String>,
         initiator: Option<String>,
@@ -68,6 +69,7 @@ pub enum SessionEvent {
     },
     AnswerMachineDetection {
         // Answer machine detection
+        track_id: String,
         timestamp: u64,
         start_time: u64,
         end_time: u64,

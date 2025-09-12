@@ -274,12 +274,13 @@ impl Track for TtsTrack {
                     }
                 }
                 info!(
+                    %provider,
                     session_id,
                     text,
                     play_id,
-                    "synthesizing eos: {}, streaming: {}",
-                    command.end_of_stream.unwrap_or_default(),
-                    command.streaming.unwrap_or_default(),
+                    eos = command.end_of_stream.unwrap_or_default(),
+                    streaming = command.streaming.unwrap_or_default(),
+                    "synthesizing",
                 );
                 match client_ref
                     .synthesize(&text, command.end_of_stream, Some(command.option))
