@@ -53,8 +53,8 @@ impl InvitationHandler for WebhookInvitationHandler {
             .collect::<Vec<_>>();
 
         let payload = json!({
-            "dialog_id": dialog_id,
-            "created_at": create_time,
+            "dialogId": dialog_id,
+            "createdAt": create_time,
             "caller": caller,
             "callee": callee,
             "event": "invite",

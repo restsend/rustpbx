@@ -1159,6 +1159,7 @@ impl Track for RtpTrack {
         if payload.is_empty() {
             return Ok(());
         }
+
         let clock_rate = match payload_type {
             9 => 8000,    // G.722 (RTP clock rate is 8000 even though sample rate is 16000)
             111 => 48000, // Opus
@@ -1167,8 +1168,9 @@ impl Track for RtpTrack {
 
         let now = crate::get_timestamp();
         let last_update = stats.last_timestamp_update.load(Ordering::Relaxed);
+
         let skipped_packets = if last_update > 0 {
-            (now - last_update) / clock_rate as u64
+            (now - last_update) / (self.config.ptime.as_millis() as u64 * 2)
         } else {
             0
         };
@@ -1176,6 +1178,10 @@ impl Track for RtpTrack {
         stats.last_timestamp_update.store(now, Ordering::Relaxed);
 
         if skipped_packets > 0 {
+            info!(
+                track_id = self.track_id,
+                "Skipping {} packets to resync timestamp", skipped_packets
+            );
             for _ in 0..skipped_packets {
                 self.sequencer.next_sequence_number();
             }
@@ -1208,11 +1214,14 @@ impl Track for RtpTrack {
                         stats.update_send_stats(rtp_data.len() as u32, samples_per_packet);
                     }
                     Err(e) => {
-                        warn!("Failed to send RTP packet: {}", e);
+                        warn!(track_id = self.track_id, "Failed to send RTP packet: {}", e);
                     }
                 },
                 Err(e) => {
-                    error!("Failed to build RTP packet: {:?}", e);
+                    warn!(
+                        track_id = self.track_id,
+                        "Failed to build RTP packet: {:?}", e
+                    );
                     return Err(anyhow::anyhow!("Failed to build RTP packet"));
                 }
             }
@@ -1346,6 +1355,33 @@ a=rtcp-mux"#;
         let peer_media = select_peer_media(&sdp, "audio").expect("Failed to select_peer_media");
         assert!(peer_media.rtcp_mux);
         assert_eq!(peer_media.rtcp_port, 10638);
+    }
+
+    #[tokio::test]
+    async fn test_parse_linphone_candidate() {
+        let answer = r#"v=0
+o=mpi 2590 792 IN IP4 192.168.3.181
+s=Talk
+c=IN IP4 192.168.3.181
+t=0 0
+a=ice-pwd:96adb77560869c783656fe0a
+a=ice-ufrag:409dfd53
+a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics
+a=record:off
+m=audio 61794 RTP/AVP 8 101
+c=IN IP4 115.205.103.101
+a=rtpmap:101 telephone-event/8000
+a=rtcp:50735
+a=candidate:1 1 UDP 2130706303 192.168.3.181 61794 typ host
+a=candidate:1 2 UDP 2130706302 192.168.3.181 50735 typ host
+a=candidate:2 1 UDP 1694498687 115.205.103.101 61794 typ srflx raddr 192.168.3.181 rport 61794
+a=candidate:2 2 UDP 1694498686 115.205.103.101 50735 typ srflx raddr 192.168.3.181 rport 50735
+a=rtcp-fb:* trr-int 5000
+a=rtcp-fb:* ccm tmmbr"#;
+        let mut reader = Cursor::new(answer);
+        let sdp = SessionDescription::unmarshal(&mut reader).expect("Failed to parse SDP");
+        let peer_media = select_peer_media(&sdp, "audio").expect("Failed to select_peer_media");
+        assert_eq!(peer_media.rtp_addr, "192.168.3.181");
     }
 
     #[tokio::test]

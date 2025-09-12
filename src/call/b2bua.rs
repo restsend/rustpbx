@@ -136,6 +136,7 @@ impl B2bua {
             TrackConfig::default(),
             None,
             self.dump_events,
+            None,
             dialplan.extras.clone(),
         ));
 
@@ -274,7 +275,7 @@ impl B2bua {
         let rtp_track = ActiveCall::create_rtp_track(
             rtp_token.clone(),
             active_call.app_state.clone(),
-            active_call.track_config.server_side_track_id.clone(),
+            active_call.server_side_track_id.clone(),
             active_call.track_config.clone(),
             ssrc,
         )
@@ -313,7 +314,7 @@ impl B2bua {
         } else {
             invite_option
         };
-        let track_id = active_call.track_config.server_side_track_id.clone();
+        let track_id = active_call.server_side_track_id.clone();
         info!(
             session_id = self.session_id,
             track_id,
@@ -376,8 +377,8 @@ impl B2bua {
                                     let body = String::from_utf8_lossy(&resp.body);
                                     let rinning_command = Command::Ringing {
                                         ringtone: None,
-                                        recorder,
-                                        early_media: !body.is_empty()
+                                        recorder: Some(recorder),
+                                        early_media: Some(!body.is_empty()),
                                     };
                                     active_call_ref.enqueue_command(rinning_command).await.ok();
                                 }
