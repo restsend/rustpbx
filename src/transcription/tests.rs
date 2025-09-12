@@ -99,7 +99,7 @@ async fn test_tencent_cloud_asr() {
         let mut fulltext = String::new();
         while let Ok(event) = event_receiver.recv().await {
             match event {
-                SessionEvent::AsrDelta { text, .. } => {
+                SessionEvent::AsrFinal { text, .. } => {
                     fulltext += &text;
                 }
                 SessionEvent::Error { error, .. } => {
@@ -161,7 +161,7 @@ async fn test_aliyun_asr() {
         samplerate: Some(sample_rate),
         ..Default::default()
     };
-    
+
     let (event_sender, mut event_receiver) = tokio::sync::broadcast::channel(16);
 
     // Create client builder and connect
