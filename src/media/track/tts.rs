@@ -14,9 +14,12 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{StreamExt, future::pending};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 use tokio::{
@@ -171,6 +174,7 @@ impl Track for TtsTrack {
         let status = Arc::new(RwLock::new(SynthesisStatus {
             play_id: None,
             speaker: None,
+            // TODO: total audio length is not correct for streaming mode, need to fix
             total_audio_len: 0,
             full_text: String::new(),
             subtitles: Vec::new(),
@@ -184,95 +188,99 @@ impl Track for TtsTrack {
         let buffer_tx_ref = buffer_tx.clone();
 
         let command_loop = async move {
-            while let Some(mut command) = command_rx.recv().await {
+            let mut end_of_stream = false;
+            // set end of stream from command, loop will quit in next iteration
+            while !end_of_stream {
+                let result = command_rx.recv().await;
+                if result.is_none() {
+                    break;
+                }
+
+                let mut command = result.unwrap();
                 let text = command.text;
-                if text.is_empty() {
-                    if command.end_of_stream.unwrap_or_default() {
-                        buffer_tx_ref.send(None).ok();
-                    }
-                    continue;
-                }
                 let play_id = command.play_id;
-                if command.option.speaker.is_none() {
-                    command.option.speaker = command.speaker;
-                }
-                let streaming = command.streaming.unwrap_or(false);
-                let cache_key = if !streaming && use_cache {
-                    Some(cache::generate_cache_key(
-                        &format!("tts:{}{}", provider, text),
-                        sample_rate,
-                        command.option.speaker.as_ref(),
-                        command.option.speed.clone(),
-                    ))
-                } else {
-                    None
-                };
-                command.option.cache_key = cache_key.clone();
 
-                status_ref
-                    .write()
-                    .as_mut()
-                    .and_then(|status| {
-                        if !streaming {
-                            status.full_text = text.clone();
-                            status.subtitles.clear();
-                            status.total_audio_len = 0;
-                        } else {
-                            status.full_text.push_str(&text);
-                        }
-                        status.play_id = play_id.clone();
-                        status.speaker = command.option.speaker.clone();
-                        Ok(())
-                    })
-                    .ok();
-                if let Some(cache_key) = cache_key {
-                    match cache::is_cached(&cache_key).await {
-                        Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
-                            Ok(audio) => {
-                                info!(session_id, text, "using cached audio for {}", cache_key);
-                                buffer_tx_ref.send(Some(bytes_to_samples(&audio))).ok();
-                                if command.end_of_stream.unwrap_or_default() {
-                                    buffer_tx_ref.send(None).ok();
+                end_of_stream = command.end_of_stream.unwrap_or_default();
+                if !text.is_empty() {
+                    if command.option.speaker.is_none() {
+                        command.option.speaker = command.speaker;
+                    }
+                    let streaming = command.streaming.unwrap_or(false);
+                    let cache_key = if !streaming && use_cache {
+                        Some(cache::generate_cache_key(
+                            &format!("tts:{}{}", provider, text),
+                            sample_rate,
+                            command.option.speaker.as_ref(),
+                            command.option.speed.clone(),
+                        ))
+                    } else {
+                        None
+                    };
+                    command.option.cache_key = cache_key.clone();
+
+                    status_ref
+                        .write()
+                        .as_mut()
+                        .and_then(|status| {
+                            if !streaming {
+                                status.full_text = text.clone();
+                                status.subtitles.clear();
+                                status.total_audio_len = 0;
+                            } else {
+                                status.full_text.push_str(&text);
+                            }
+                            status.play_id = play_id.clone();
+                            status.speaker = command.option.speaker.clone();
+                            Ok(())
+                        })
+                        .ok();
+
+                    if let Some(cache_key) = cache_key {
+                        if let Ok(true) = cache::is_cached(&cache_key).await {
+                            match cache::retrieve_from_cache(&cache_key).await {
+                                Ok(audio) => {
+                                    info!(session_id, text, "using cached audio for {}", cache_key);
+                                    buffer_tx_ref.send(bytes_to_samples(&audio)).ok();
+                                    event_sender_clone
+                                        .send(SessionEvent::Metrics {
+                                            timestamp: crate::get_timestamp(),
+                                            key: format!("completed.tts.{}", provider),
+                                            data: serde_json::json!({
+                                                    "speaker": command.option.speaker,
+                                                    "playId": play_id,
+                                                    "length": audio.len(),
+                                                    "cached": true,
+                                            }),
+                                            duration: 0,
+                                        })
+                                        .ok();
+
+                                    let duration = bytes_size_to_duration(audio.len(), sample_rate);
+                                    status_ref
+                                        .write()
+                                        .as_mut()
+                                        .and_then(|status| {
+                                            status.total_audio_len = audio.len();
+                                            status.subtitles.push(Subtitle::new(
+                                                0,
+                                                duration,
+                                                0,
+                                                text.chars().count() as u32,
+                                            ));
+                                            Ok(())
+                                        })
+                                        .ok();
+                                    // if cached, skip synthesize
+                                    continue;
                                 }
-
-                                event_sender_clone
-                                    .send(SessionEvent::Metrics {
-                                        timestamp: crate::get_timestamp(),
-                                        key: format!("completed.tts.{}", provider),
-                                        data: serde_json::json!({
-                                                "speaker": command.option.speaker,
-                                                "playId": play_id,
-                                                "length": audio.len(),
-                                                "cached": true,
-                                        }),
-                                        duration: 0,
-                                    })
-                                    .ok();
-
-                                let duration = bytes_size_to_duration(audio.len(), sample_rate);
-                                status_ref
-                                    .write()
-                                    .as_mut()
-                                    .and_then(|status| {
-                                        status.total_audio_len = audio.len();
-                                        status.subtitles.push(Subtitle::new(
-                                            0,
-                                            duration,
-                                            0,
-                                            text.chars().count() as u32,
-                                        ));
-                                        Ok(())
-                                    })
-                                    .ok();
-                                continue;
+                                Err(e) => {
+                                    warn!(session_id, "error retrieving cached audio: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                warn!(session_id, "error retrieving cached audio: {}", e);
-                            }
-                        },
-                        _ => {}
+                        }
                     }
                 }
+
                 info!(
                     %provider,
                     session_id,
@@ -282,40 +290,42 @@ impl Track for TtsTrack {
                     streaming = command.streaming.unwrap_or_default(),
                     "synthesizing",
                 );
-                match client_ref
-                    .synthesize(&text, command.end_of_stream, Some(command.option))
+
+                // handle end of stream out of loop
+                if let Err(e) = client_ref
+                    .synthesize(&text, Some(false), Some(command.option))
                     .await
                 {
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(session_id, "error synthesizing text: {}", e);
-                        event_sender_clone
-                            .send(SessionEvent::Error {
-                                timestamp: crate::get_timestamp(),
-                                track_id: track_id.clone(),
-                                sender: format!("tts.{}", provider),
-                                error: e.to_string(),
-                                code: None,
-                            })
-                            .ok();
-                        if command.end_of_stream.unwrap_or_default() {
-                            buffer_tx_ref.send(None).ok();
-                        }
-                        continue;
-                    }
+                    warn!(session_id, "error synthesizing text: {}", e);
+                    event_sender_clone
+                        .send(SessionEvent::Error {
+                            timestamp: crate::get_timestamp(),
+                            track_id: track_id.clone(),
+                            sender: format!("tts.{}", provider),
+                            error: e.to_string(),
+                            code: None,
+                        })
+                        .ok();
                 }
             }
+
+            // notify receive loop to end
+            client_ref.synthesize("", Some(true), None).await.ok();
+            // notify emit loop to end
+            drop(buffer_tx_ref);
+            // waiting emit loop quit
+            pending().await
         };
+
         let status_ref = status.clone();
         let provider = client.provider();
         let session_id = self.session_id.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
-        let buffer_tx_ref = buffer_tx.clone();
 
         let receive_result_loop = async move {
+            // complete audio chunks
             let mut audio_chunks = Vec::new();
-            let mut first_chunk = true;
             let start_time = Instant::now();
             // Process each audio chunk as it arrives
             while let Some(chunk_result) = stream.next().await {
@@ -325,12 +335,12 @@ impl Track for TtsTrack {
                         status_ref
                             .write()
                             .as_mut()
-                            .and_then(|status| {
+                            .map(|status| {
                                 status.total_audio_len += audio_chunk.len();
-                                if !first_chunk {
-                                    return Ok(());
+                                // if not the first chunk, skip metrics event
+                                if !audio_chunks.is_empty() {
+                                    return;
                                 }
-                                first_chunk = false;
                                 // Send metrics event after the first chunk
                                 event_sender_clone
                                     .send(SessionEvent::Metrics {
@@ -344,7 +354,6 @@ impl Track for TtsTrack {
                                         duration: start_time.elapsed().as_millis() as u32,
                                     })
                                     .ok();
-                                Ok(())
                             })
                             .ok();
 
@@ -360,23 +369,21 @@ impl Track for TtsTrack {
 
                         // Store the processed chunk for caching later if needed
                         audio_chunks.push(processed_chunk.clone());
-                        match buffer_tx_ref.send(Some(bytes_to_samples(&processed_chunk))) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!(session_id, "error sending cached audio: {}", e);
-                                continue;
-                            }
+                        if let Err(e) = buffer_tx.send(bytes_to_samples(&processed_chunk)) {
+                            warn!(session_id, "error sending cached audio: {}", e);
+                            break;
                         }
                     }
                     Ok(SynthesisEvent::Finished {
-                        end_of_stream,
+                        #[allow(unused)]
+                        end_of_stream, // todo: remvoe this field
                         cache_key,
                     }) => {
                         let status = match status_ref.read() {
                             Ok(status) => status.clone(),
                             Err(e) => {
                                 warn!(session_id, "error reading synthesis status: {}", e);
-                                return;
+                                break;
                             }
                         };
                         // Send metrics event after all chunks are received
@@ -407,9 +414,8 @@ impl Track for TtsTrack {
                                 cache::store_in_cache(cache_key, &complete_audio).await.ok();
                             }
                         }
-                        if end_of_stream.unwrap_or_default() {
-                            buffer_tx_ref.send(None).ok();
-                        }
+
+                        break;
                     }
                     Ok(SynthesisEvent::Subtitles(subtitles)) => {
                         status_ref
@@ -433,10 +439,15 @@ impl Track for TtsTrack {
                             })
                             .ok();
                         audio_chunks.drain(..);
-                        buffer_tx_ref.send(None).ok();
+                        break;
                     }
                 }
             }
+
+            // notify emit loop to end
+            drop(buffer_tx);
+            // waiting emit loop quit
+            pending().await
         };
         let sample_rate = self.config.samplerate;
         let track_id = self.track_id.clone();
@@ -448,66 +459,72 @@ impl Track for TtsTrack {
         );
         let processor_chain = self.processor_chain.clone();
         let session_id = self.session_id.clone();
-        let remaining_size = Arc::new(Mutex::new(0usize));
-        let remaining_size_ref = Arc::new(Mutex::new(0usize));
+        let remaining_size = Arc::new(AtomicUsize::new(0));
+        let remaining_size_ref = Arc::clone(&remaining_size);
         let emit_loop = async move {
             let mut ptimer =
                 tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
+            // skip first tick
+            ptimer.tick().await;
             let mut buffer = Vec::new();
             let mut is_recv_finished = false;
-            loop {
+
+            while !is_recv_finished || !buffer.is_empty() {
                 select! {
-                        _ = ptimer.tick() => {
-                                let mut packet = if buffer.len() >= max_pcm_chunk_size {
-                                    let packet_samples = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
-                                    AudioFrame {
-                                        track_id: track_id.clone(),
-                                        samples: Samples::PCM { samples: packet_samples },
-                                        timestamp: crate::get_timestamp(),
-                                        sample_rate,
-                                    }
-                                } else {
-                                    if is_recv_finished {
-                                        break;
-                                    }
-                                    AudioFrame {
-                                        track_id: track_id.clone(),
-                                        samples: Samples::PCM { samples: Vec::new() },
-                                        timestamp: crate::get_timestamp(),
-                                        sample_rate,
-                                    }
-                                };
-                                *remaining_size_ref.lock().await = buffer.len();
-                                // Process the frame with processor chain
-                                if let Err(e) = processor_chain.process_frame(&mut packet) {
-                                    warn!(track_id, session_id, "error processing frame: {}", e);
-                                }
-                                // Send the packet
-                                match packet_sender.send(packet) {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        break; /* Track has been closed */
-                                    }
-                                }
-                        }
-                        chunk = buffer_rx.recv() => {
-                            match chunk {
-                                Some(Some(mut samples)) => {
-                                    is_recv_finished = false;
-                                    buffer.append(&mut samples);
-                                }
-                                Some(None) => {
-                                    is_recv_finished = true;
-                                }
-                                None => {
-                                    // Channel closed
-                                    break;
-                                }
+                    // send packet first if possible
+                    biased;
+                    _ = ptimer.tick() => {
+                        // todo: extend audio to packet duration if it is not enough
+                        let mut packet;
+                        if buffer.len() >= max_pcm_chunk_size {
+                            // let samples = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
+                            packet = AudioFrame {
+                                track_id: track_id.clone(),
+                                samples: Samples::PCM { samples:buffer[..max_pcm_chunk_size].to_vec() },
+                                timestamp: crate::get_timestamp(),
+                                sample_rate,
+                            };
+                            buffer.drain(..max_pcm_chunk_size);
+                        } else {
+                            if !is_recv_finished {
+                                continue;
                             }
+
+                            // if finished, send rest of buffer, it must be non-empty
+                            packet = AudioFrame {
+                                track_id: track_id.clone(),
+                                samples: Samples::PCM { samples: buffer[..].to_vec() },
+                                timestamp: crate::get_timestamp(),
+                                sample_rate,
+                            };
+                            buffer.clear();
+                        };
+
+                        remaining_size_ref.store(buffer.len(), Ordering::Relaxed);
+                        // Process the frame with processor chain
+                        if let Err(e) = processor_chain.process_frame(&mut packet) {
+                            warn!(track_id, session_id, "error processing frame: {}", e);
+                            break;
                         }
+
+                        // Send the packet
+                        if let Err(_) = packet_sender.send(packet) {
+                            warn!(track_id, session_id, "track already closed");
+                            break;
+                        }
+                    }
+                    // if recv is finished, do not poll it anymore
+                    chunk = buffer_rx.recv(), if !is_recv_finished => {
+                        if let Some(samples) = chunk {
+                            buffer.extend_from_slice(&samples);
+                        } else {
+                            is_recv_finished = true;
+                        }
+                    }
                 }
             }
         };
+
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
         let session_id = self.session_id.clone();
@@ -516,17 +533,11 @@ impl Track for TtsTrack {
         tokio::spawn(async move {
             let start_time = crate::get_timestamp();
             select! {
-                _ = command_loop => {
-                    info!(session_id, "command loop completed");
-                }
-                _ = receive_result_loop => {
-                    info!(session_id, "receive result loop completed");
-                }
-                _ = emit_loop => {
-                    info!(session_id, "emit loop completed");
-                }
+                biased;
                 _ = token.cancelled() => {
-                    let remaining_size = {*remaining_size.lock().await * 2};
+                   info!(session_id, "tts track canceled");
+                    // remaining bytes size
+                    let remaining_size = remaining_size.load(Ordering::Relaxed) * 2;
                     let status = match status.write() {
                         Ok(status) => status.clone(),
                         Err(e) => {
@@ -556,6 +567,11 @@ impl Track for TtsTrack {
                     };
                    event_sender_clone.send(event).ok();
                 }
+                _ = emit_loop => {
+                    info!(session_id, "emit loop completed");
+                }
+                _ = receive_result_loop => {}
+                _ = command_loop => {}
             }
 
             let duration = crate::get_timestamp() - start_time;
