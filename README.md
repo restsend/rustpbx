@@ -118,16 +118,11 @@ acl_rules = [
     "allow all",
 ]
 
-[proxy.media_proxy]
-mode = "auto"
-rtp_start_port = 20000
-rtp_end_port = 30000
-
 [proxy.user_backend]
 type = "memory"
 users = [
-    { username = "bob", password = "123456", realm = "127.0.0.1" },
-    { username = "alice", password = "123456", realm = "127.0.0.1" },
+    { username = "bob", password = "123456" },
+    { username = "alice", password = "123456" },
 ]
 
 [callrecord]
@@ -160,11 +155,11 @@ docker run -d \
 
 The following environment variables are required for Tencent Cloud ASR/TTS services:
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `TENCENT_APPID` | Your Tencent Cloud App ID | Yes |
-| `TENCENT_SECRET_ID` | Your Tencent Cloud Secret ID | Yes |
-| `TENCENT_SECRET_KEY` | Your Tencent Cloud Secret Key | Yes |
+| Variable             | Description                   | Required |
+| -------------------- | ----------------------------- | -------- |
+| `TENCENT_APPID`      | Your Tencent Cloud App ID     | Yes      |
+| `TENCENT_SECRET_ID`  | Your Tencent Cloud Secret ID  | Yes      |
+| `TENCENT_SECRET_KEY` | Your Tencent Cloud Secret Key | Yes      |
 
 ### Configuration Options
 
@@ -173,7 +168,6 @@ Key configuration options in `config.toml`:
 - **HTTP Server**: `http_addr` - Web interface and API endpoint
 - **SIP Proxy**: `proxy.udp_port` - SIP proxy server port
 - **User Agent**: `ua.udp_port` - Outbound call user agent port
-- **Media Proxy**: `proxy.media_proxy` - RTP port range for media proxying
 - **Call Recording**: `callrecord.root` - Directory for call recordings
 
 ## 🧪 Go Client Integration
