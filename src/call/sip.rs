@@ -1,7 +1,7 @@
 use crate::TrackId;
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
-use crate::event::{EventSender, SessionEvent};
+use crate::event::EventSender;
 use crate::media::stream::MediaStream;
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
@@ -116,8 +116,6 @@ impl Invitation {
 
     pub async fn invite(
         &self,
-        event_sender: &EventSender,
-        track_id: &TrackId,
         invite_option: InviteOption,
         state_sender: DialogStateSender,
     ) -> Result<(DialogId, Option<Vec<u8>>), rsipstack::Error> {
@@ -133,27 +131,22 @@ impl Invitation {
                     Some(offer)
                 }
                 _ => {
-                    event_sender
-                        .send(SessionEvent::Reject {
-                            track_id: track_id.clone(),
-                            timestamp: crate::get_timestamp(),
-                            reason: resp
-                                .reason_phrase()
-                                .unwrap_or(&resp.status_code().to_string())
-                                .to_string(),
-                            code: Some(resp.status_code.code() as u32),
-                        })
-                        .ok();
+                    let reason = resp
+                        .reason_phrase()
+                        .unwrap_or(&resp.status_code.to_string())
+                        .to_string();
                     return Err(rsipstack::Error::DialogError(
-                        resp.status_code.to_string(),
+                        reason,
                         dialog.id(),
+                        resp.status_code,
                     ));
                 }
             },
             None => {
                 return Err(rsipstack::Error::DialogError(
-                    "No response received".to_string(),
+                    "no response received".to_string(),
                     dialog.id(),
+                    rsip::StatusCode::NotAcceptableHere,
                 ));
             }
         };
@@ -180,14 +173,8 @@ fn on_dialog_terminated(
         TerminatedReason::UasBye => 200,
         TerminatedReason::UasBusy => 486,
         TerminatedReason::UasDecline => 603,
-        TerminatedReason::UacOther(code) => code
-            .clone()
-            .unwrap_or(rsip::StatusCode::ServerInternalError)
-            .code(),
-        TerminatedReason::UasOther(code) => code
-            .clone()
-            .unwrap_or(rsip::StatusCode::ServerInternalError)
-            .code(),
+        TerminatedReason::UacOther(code) => code.code(),
+        TerminatedReason::UasOther(code) => code.code(),
         _ => 500, // Default to internal server error
     };
 

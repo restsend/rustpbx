@@ -814,6 +814,19 @@ impl ActiveCall {
                     session_id = session_id,
                     "failed to create refer sip track: {}", e
                 );
+                match &e {
+                    rsipstack::Error::DialogError(reason, _, code) => {
+                        self.event_sender
+                            .send(SessionEvent::Reject {
+                                track_id,
+                                timestamp: crate::get_timestamp(),
+                                reason: reason.clone(),
+                                code: Some(code.code() as u32),
+                            })
+                            .ok();
+                    }
+                    _ => {}
+                }
                 return Err(e.into());
             }
         }
@@ -1036,6 +1049,19 @@ impl ActiveCall {
                             session_id = self.session_id,
                             "failed to create sip track: {}", e
                         );
+                        match &e {
+                            rsipstack::Error::DialogError(reason, _, code) => {
+                                self.event_sender
+                                    .send(SessionEvent::Reject {
+                                        track_id: self.session_id.clone(),
+                                        timestamp: crate::get_timestamp(),
+                                        reason: reason.clone(),
+                                        code: Some(code.code() as u32),
+                                    })
+                                    .ok();
+                            }
+                            _ => {}
+                        }
                         return Err(e.into());
                     }
                 }
@@ -1337,12 +1363,7 @@ impl ActiveCall {
 
         let (dialog_id, answer) = self
             .invitation
-            .invite(
-                &self.event_sender,
-                &track_id,
-                invite_option,
-                dlg_state_sender,
-            )
+            .invite(invite_option, dlg_state_sender)
             .await?;
 
         let answer = match answer {
@@ -1352,6 +1373,7 @@ impl ActiveCall {
                 return Err(rsipstack::Error::DialogError(
                     "No answer received".to_string(),
                     dialog_id,
+                    rsip::StatusCode::NotAcceptableHere,
                 ));
             }
         };
