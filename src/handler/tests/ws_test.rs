@@ -47,8 +47,6 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
     config.ua = Some(UseragentConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: ua_port,
-        rtp_start_port: Some(12000),
-        rtp_end_port: Some(42000),
         useragent: Some("rustpbx-test".to_string()),
         ..Default::default()
     });

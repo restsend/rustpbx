@@ -7,9 +7,10 @@ use anyhow::{Error, Result};
 use clap::Parser;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-const USER_AGENT: &str = "rustpbx";
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -33,6 +34,17 @@ fn default_config_media_cache_path() -> String {
 fn default_config_http_addr() -> String {
     "0.0.0.0:8080".to_string()
 }
+
+fn default_config_rtp_start_port() -> Option<u16> {
+    Some(12000)
+}
+
+fn default_config_rtp_end_port() -> Option<u16> {
+    Some(42000)
+}
+
+pub type ConfigRef = Arc<RwLock<Config>>;
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -41,6 +53,13 @@ pub struct Config {
     pub log_file: Option<String>,
     pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
+
+    pub external_ip: Option<String>,
+    #[serde(default = "default_config_rtp_start_port")]
+    pub rtp_start_port: Option<u16>,
+    #[serde(default = "default_config_rtp_end_port")]
+    pub rtp_end_port: Option<u16>,
+
     #[serde(default = "default_config_recorder_path")]
     pub recorder_path: String,
     pub callrecord: Option<CallRecordConfig>,
@@ -65,10 +84,6 @@ pub struct IceServer {
 pub struct UseragentConfig {
     pub addr: String,
     pub udp_port: u16,
-    pub external_ip: Option<String>,
-    pub stun_server: Option<String>,
-    pub rtp_start_port: Option<u16>,
-    pub rtp_end_port: Option<u16>,
     pub useragent: Option<String>,
     pub callid_suffix: Option<String>,
     pub register_users: Option<Vec<RegisterOption>>,
@@ -170,7 +185,7 @@ pub enum CallRecordConfig {
     },
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+#[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
 pub enum MediaProxyMode {
@@ -190,27 +205,6 @@ impl Default for MediaProxyMode {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
-pub struct MediaProxyConfig {
-    pub mode: MediaProxyMode,
-    pub rtp_start_port: Option<u16>,
-    pub rtp_end_port: Option<u16>,
-    pub external_ip: Option<String>,
-    pub force_proxy: Option<Vec<String>>, // List of IP addresses to always proxy
-}
-
-impl Default for MediaProxyConfig {
-    fn default() -> Self {
-        Self {
-            mode: MediaProxyMode::None,
-            rtp_start_port: Some(20000),
-            rtp_end_port: Some(30000),
-            external_ip: None,
-            force_proxy: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
@@ -225,6 +219,8 @@ pub struct ProxyConfig {
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
     pub acl_rules: Option<Vec<String>>,
+    pub ua_white_list: Option<Vec<String>>,
+    pub ua_black_list: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
     #[serde(default)]
@@ -232,7 +228,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub locator: LocatorConfig,
     #[serde(default)]
-    pub media_proxy: MediaProxyConfig,
+    pub media_proxy: MediaProxyMode,
     #[serde(default)]
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
@@ -286,6 +282,8 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             acl_rules: Some(vec!["allow all".to_string(), "deny all".to_string()]),
+            ua_white_list: Some(vec![]),
+            ua_black_list: Some(vec![]),
             addr: "0.0.0.0".to_string(),
             modules: Some(vec![
                 "acl".to_string(),
@@ -294,8 +292,8 @@ impl Default for ProxyConfig {
                 "call".to_string(),
             ]),
             external_ip: None,
-            useragent: None,
-            callid_suffix: Some("restsend.com".to_string()),
+            useragent: Some(crate::version::get_useragent()),
+            callid_suffix: Some("rustpbx.com".to_string()),
             ssl_private_key: None,
             ssl_certificate: None,
             udp_port: Some(5060),
@@ -306,7 +304,7 @@ impl Default for ProxyConfig {
             registrar_expires: Some(60),
             user_backend: UserBackendConfig::default(),
             locator: LocatorConfig::default(),
-            media_proxy: MediaProxyConfig::default(),
+            media_proxy: MediaProxyMode::default(),
             realms: Some(vec![]),
             ws_handler: None,
             routes: None,
@@ -333,12 +331,8 @@ impl Default for UseragentConfig {
         Self {
             addr: "0.0.0.0".to_string(),
             udp_port: 25060,
-            external_ip: None,
-            rtp_start_port: Some(12000),
-            rtp_end_port: Some(42000),
-            stun_server: None,
-            useragent: Some(USER_AGENT.to_string()),
-            callid_suffix: Some("restsend.com".to_string()),
+            useragent: Some(crate::version::get_useragent()),
+            callid_suffix: Some("rustpbx.com".to_string()),
             register_users: None,
             graceful_shutdown: Some(true),
             handler: None,
@@ -373,6 +367,9 @@ impl Default for Config {
             restsend_token: None,
             ice_servers: None,
             ami: Some(AmiConfig::default()),
+            external_ip: None,
+            rtp_start_port: default_config_rtp_start_port(),
+            rtp_end_port: default_config_rtp_end_port(),
         }
     }
 }

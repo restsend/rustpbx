@@ -23,8 +23,6 @@ mod wait_input_timeout_tests {
         config.ua = Some(UseragentConfig {
             addr: "127.0.0.1".to_string(),
             udp_port: ua_port,
-            rtp_start_port: Some((12000 + (port_offset as u32 * 1000)) as u16),
-            rtp_end_port: Some((13000 + (port_offset as u32 * 1000)) as u16),
             useragent: Some("rustpbx-test".to_string()),
             ..Default::default()
         });

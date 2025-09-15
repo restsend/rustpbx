@@ -207,14 +207,6 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
     Ok(())
 }
 
-// Test RTCP socket setup
-#[tokio::test]
-#[ignore] // Skip this test as we have other RTCP tests that verify functionality
-async fn test_rtcp_socket_setup() -> Result<()> {
-    // This test is now covered by test_rtp_track_e2e_with_jitter_buffer
-    // which sets up both RTP and RTCP sockets correctly
-    Ok(())
-}
 
 // Test DTMF sending
 #[tokio::test]
