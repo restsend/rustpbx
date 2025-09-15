@@ -802,7 +802,15 @@ impl ActiveCall {
                     session_id = session_id,
                     "failed to create refer sip track: {}", e
                 );
-                return Err(e);
+                self.event_sender
+                    .send(SessionEvent::Reject {
+                        track_id,
+                        timestamp: crate::get_timestamp(),
+                        reason: e.to_string(),
+                        code: None,
+                    })
+                    .ok();
+                return Err(e.into());
             }
         }
         Ok(())
@@ -1024,7 +1032,15 @@ impl ActiveCall {
                             session_id = self.session_id,
                             "failed to create sip track: {}", e
                         );
-                        return Err(e);
+                        self.event_sender
+                            .send(SessionEvent::Reject {
+                                track_id: self.session_id.clone(),
+                                timestamp: crate::get_timestamp(),
+                                reason: e.to_string(),
+                                code: None,
+                            })
+                            .ok();
+                        return Err(e.into());
                     }
                 }
             }
@@ -1247,10 +1263,10 @@ impl ActiveCall {
         call_state_ref: ActiveCallStateRef,
         track_id: &String,
         mut invite_option: InviteOption,
-    ) -> Result<String> {
+    ) -> Result<String, rsipstack::Error> {
         let ssrc = call_state_ref
             .read()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map_err(|e| rsipstack::Error::Error(e.to_string()))?
             .ssrc;
         let rtp_track = Self::create_rtp_track(
             cancel_token.child_token(),
@@ -1259,7 +1275,8 @@ impl ActiveCall {
             self.track_config.clone(),
             ssrc,
         )
-        .await?;
+        .await
+        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
 
         let offer = rtp_track.local_description().ok();
         let call_option = call_state_ref
@@ -1287,7 +1304,8 @@ impl ActiveCall {
             &call_option,
             Box::new(rtp_track),
         )
-        .await?;
+        .await
+        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
 
         info!(
             session_id = self.session_id,
@@ -1324,16 +1342,15 @@ impl ActiveCall {
         let (dialog_id, answer) = self
             .invitation
             .invite(invite_option, dlg_state_sender)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .await?;
 
         let answer = match answer {
             Some(answer) => String::from_utf8_lossy(&answer).to_string(),
             None => {
                 warn!(session_id = self.session_id, "no answer received");
-                return Err(anyhow::anyhow!(
-                    "no answer received for dialog: {}",
-                    dialog_id
+                return Err(rsipstack::Error::DialogError(
+                    "No answer received".to_string(),
+                    dialog_id,
                 ));
             }
         };
