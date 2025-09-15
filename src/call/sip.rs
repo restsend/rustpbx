@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::{
-    Dialog, DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
+    DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
@@ -72,20 +72,9 @@ impl Invitation {
         pending_dialogs.remove(session_id)
     }
 
-    pub async fn ringing(&self, dialog_id: DialogId, early_media: Option<String>) -> Result<()> {
-        let dialog = self
-            .dialog_layer
-            .get_dialog(&dialog_id)
-            .ok_or(anyhow::anyhow!("dialog not found"))?;
-        match dialog {
-            Dialog::ServerInvite(dialog) => {
-                dialog
-                    .ringing(None, early_media.map(|early| early.into_bytes()))
-                    .ok();
-            }
-            _ => {}
-        }
-        Ok(())
+    pub async fn has_pending_call(&self, dialog_id_str: &str) -> Option<DialogId> {
+        let pending_dialogs = self.pending_dialogs.lock().await;
+        pending_dialogs.get(dialog_id_str).map(|d| d.dialog.id())
     }
 
     pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
@@ -94,13 +83,13 @@ impl Invitation {
             call.dialog.reject().ok();
             call.token.cancel();
         }
-
-        let dialog = self
-            .dialog_layer
-            .get_dialog(&dialog_id)
-            .ok_or(anyhow::anyhow!("dialog not found"))?;
-        dialog.hangup().await.ok();
-        self.dialog_layer.remove_dialog(&dialog_id);
+        match self.dialog_layer.get_dialog(&dialog_id) {
+            Some(dialog) => {
+                dialog.hangup().await.ok();
+                self.dialog_layer.remove_dialog(&dialog_id);
+            }
+            None => {}
+        }
         Ok(())
     }
 

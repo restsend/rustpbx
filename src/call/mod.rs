@@ -165,7 +165,7 @@ pub enum Command {
         code: Option<u32>,
     },
     Ringing {
-        recorder: Option<bool>,
+        recorder: Option<RecorderOption>,
         early_media: Option<bool>,
         ringtone: Option<String>,
     },

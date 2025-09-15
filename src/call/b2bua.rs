@@ -375,9 +375,15 @@ impl B2bua {
                                 }
                                 DialogState::Early(_, resp) => {
                                     let body = String::from_utf8_lossy(&resp.body);
+                                    let recorder_option = if recorder {
+                                        let recorder_file = active_call_ref.app_state.get_recorder_file(&session_id);
+                                        Some(RecorderOption::new(recorder_file))
+                                    } else {
+                                        None
+                                    };
                                     let rinning_command = Command::Ringing {
                                         ringtone: None,
-                                        recorder: Some(recorder),
+                                        recorder: recorder_option,
                                         early_media: Some(!body.is_empty()),
                                     };
                                     active_call_ref.enqueue_command(rinning_command).await.ok();
