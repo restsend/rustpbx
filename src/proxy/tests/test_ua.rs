@@ -487,7 +487,7 @@ a=rtpmap:8 PCMA/8000\r
 mod tests {
     use super::*;
     use crate::app::AppStateBuilder;
-    use crate::config::{MediaProxyConfig, MediaProxyMode, ProxyConfig};
+    use crate::config::{MediaProxyMode, ProxyConfig};
     use crate::proxy::{
         auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
         server::SipServerBuilder, user::MemoryUserBackend,
@@ -506,16 +506,6 @@ mod tests {
         /// Create and start test proxy server with media proxy enabled
         pub async fn start_with_media_proxy(mode: MediaProxyMode) -> Result<Self> {
             let port = portpicker::pick_unused_port().unwrap_or(15060);
-            let mode_clone = mode.clone();
-
-            let media_proxy_config = MediaProxyConfig {
-                mode,
-                rtp_start_port: Some(20000),
-                rtp_end_port: Some(21000),
-                external_ip: Some("127.0.0.1".to_string()),
-                force_proxy: None,
-            };
-
             let config = Arc::new(ProxyConfig {
                 addr: "127.0.0.1".to_string(),
                 udp_port: Some(port),
@@ -529,7 +519,7 @@ mod tests {
                     "registrar".to_string(),
                     "call".to_string(),
                 ]),
-                media_proxy: media_proxy_config,
+                media_proxy: mode,
                 ..Default::default()
             });
 
@@ -604,7 +594,7 @@ mod tests {
 
             info!(
                 "Test proxy server started on port {} with media proxy mode: {:?}",
-                port, mode_clone
+                port, mode
             );
 
             Ok(Self {
@@ -852,9 +842,7 @@ mod tests {
         alice.register().await.unwrap();
 
         // Verify media proxy configuration
-        assert_eq!(config.media_proxy.mode, MediaProxyMode::Nat);
-        assert!(config.media_proxy.rtp_start_port.is_some());
-        assert!(config.media_proxy.rtp_end_port.is_some());
+        assert_eq!(config.media_proxy, MediaProxyMode::Nat);
 
         alice.stop();
         proxy.stop();

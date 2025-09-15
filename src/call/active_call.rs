@@ -968,17 +968,15 @@ impl ActiveCall {
             .with_ssrc(ssrc)
             .with_cancel_token(cancel_token);
 
-        if let Some(ref sip) = app_state.config.ua {
-            if let Some(rtp_start_port) = sip.rtp_start_port {
-                rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
-            }
-            if let Some(rtp_end_port) = sip.rtp_end_port {
-                rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
-            }
+        if let Some(rtp_start_port) = app_state.config.rtp_start_port {
+            rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
+        }
+        if let Some(rtp_end_port) = app_state.config.rtp_end_port {
+            rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
+        }
 
-            if let Some(ref external_ip) = sip.external_ip {
-                rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
-            }
+        if let Some(ref external_ip) = app_state.config.external_ip {
+            rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
         }
         rtp_track.build().await
     }

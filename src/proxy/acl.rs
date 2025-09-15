@@ -3,9 +3,9 @@ use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::prelude::HeadersExt;
+use rsip::prelude::{HeadersExt, UntypedHeader};
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use std::{net::IpAddr, str::FromStr, sync::Arc};
+use std::{collections::HashSet, net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -103,6 +103,8 @@ impl AclRule {
 
 struct AclModuleInner {
     rules: Vec<AclRule>,
+    ua_white_list: HashSet<String>,
+    ua_black_list: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -122,9 +124,23 @@ impl AclModule {
             |rules| rules.clone(),
         );
 
+        let ua_white_list = config
+            .ua_white_list
+            .as_ref()
+            .map_or_else(|| HashSet::new(), |list| list.iter().cloned().collect());
+
+        let ua_black_list = config
+            .ua_black_list
+            .as_ref()
+            .map_or_else(|| HashSet::new(), |list| list.iter().cloned().collect());
+
         let acl_rules = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
         Self {
-            inner: Arc::new(AclModuleInner { rules: acl_rules }),
+            inner: Arc::new(AclModuleInner {
+                rules: acl_rules,
+                ua_white_list,
+                ua_black_list,
+            }),
         }
     }
 
@@ -143,6 +159,16 @@ impl AclModule {
             }
         }
         false // Default deny if no rules match
+    }
+
+    pub fn is_ua_allowed(&self, ua: &str) -> bool {
+        if self.inner.ua_black_list.contains(ua) {
+            return false;
+        }
+        if self.inner.ua_white_list.is_empty() {
+            return true; // No whitelist means all UAs are allowed unless blacklisted
+        }
+        self.inner.ua_white_list.contains(ua)
     }
 }
 
@@ -223,8 +249,34 @@ impl ProxyModule for AclModule {
         &self,
         _token: CancellationToken,
         tx: &mut Transaction,
-        _cookie: TransactionCookie,
+        cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
+        match tx.original.user_agent_header() {
+            Some(ua_header) => {
+                let ua = ua_header.value();
+                if !self.is_ua_allowed(ua) {
+                    info!(
+                        method = tx.original.method().to_string(),
+                        ua = ua,
+                        "User-Agent is denied by acl module"
+                    );
+                    cookie.mark_as_spam(crate::call::cookie::SpamResult::UaBlacklist);
+                    return Ok(ProxyAction::Abort);
+                }
+            }
+            None => {
+                // No User-Agent header, treat as denied if whitelist is not empty
+                if !self.inner.ua_white_list.is_empty() {
+                    info!(
+                        method = tx.original.method().to_string(),
+                        "Missing User-Agent header, denied by acl module"
+                    );
+                    cookie.mark_as_spam(crate::call::cookie::SpamResult::Spam);
+                    return Ok(ProxyAction::Abort);
+                }
+            }
+        }
+
         let via = tx.original.via_header()?;
         let (_, target) =
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -233,10 +285,10 @@ impl ProxyModule for AclModule {
         }
         info!(
             method = tx.original.method().to_string(),
-            via = via.to_string(),
+            via = via.value(),
             "IP is denied by acl module"
         );
-        tx.reply(rsip::StatusCode::Forbidden).await.ok();
+        cookie.mark_as_spam(crate::call::cookie::SpamResult::IpBlacklist);
         Ok(ProxyAction::Abort)
     }
 }

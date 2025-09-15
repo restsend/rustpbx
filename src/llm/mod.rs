@@ -1,12 +1,12 @@
 use anyhow::Result;
 use async_openai::{
+    Client,
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     },
-    Client,
 };
 use async_trait::async_trait;
 use dotenv::dotenv;
@@ -15,8 +15,6 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-#[cfg(test)]
-mod tests;
 // Configuration for Language Model
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {

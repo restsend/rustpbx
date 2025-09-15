@@ -48,6 +48,17 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
         .install_default()
         .ok();
     dotenv().ok();
+    let tencent_appid = match std::env::var("TENCENT_APPID") {
+        Ok(val) => val,
+        Err(_) => {
+            println!("TENCENT_APPID not set, skipping test");
+            return Ok(());
+        }
+    };
+    let tencent_secret_id = std::env::var("TENCENT_SECRET_ID").expect("TENCENT_SECRET_ID not set");
+    let tencent_secret_key =
+        std::env::var("TENCENT_SECRET_KEY").expect("TENCENT_SECRET_KEY not set");
+
     // Create a custom config with different ports to avoid conflicts
     let mut config = Config::default();
     // Use different static ports for this test to avoid conflicts
@@ -57,8 +68,6 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     config.ua = Some(UseragentConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: ua_port,
-        rtp_start_port: Some(12000),
-        rtp_end_port: Some(42000),
         useragent: Some("rustpbx-test".to_string()),
         ..Default::default()
     });
@@ -177,9 +186,6 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
 
     let mut asr_config = TranscriptionOption::default();
     let mut tts_config = SynthesisOption::default();
-    let tencent_appid = std::env::var("TENCENT_APPID").unwrap();
-    let tencent_secret_id = std::env::var("TENCENT_SECRET_ID").unwrap();
-    let tencent_secret_key = std::env::var("TENCENT_SECRET_KEY").unwrap();
 
     asr_config.provider = Some(TranscriptionType::TencentCloud);
     asr_config.app_id = Some(tencent_appid.clone());

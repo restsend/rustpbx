@@ -14,7 +14,6 @@ pub struct PlainTextBackend {
 
 impl PlainTextBackend {
     pub fn new(path: &String) -> Self {
-        info!("Creating PlainTextBackend");
         Self {
             users: Arc::new(Mutex::new(HashMap::new())),
             path: path.clone(),
@@ -61,6 +60,11 @@ impl PlainTextBackend {
                 origin_contact: None,
                 destination: None,
                 is_support_webrtc: false,
+                department_id: None,
+                display_name: None,
+                email: None,
+                phone: None,
+                note: None,
             };
             users.insert(username.to_string(), user);
         }

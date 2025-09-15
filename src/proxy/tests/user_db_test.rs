@@ -1,5 +1,5 @@
 use crate::proxy::user::UserBackend;
-use crate::proxy::user_db::DbBackend;
+use crate::proxy::user_db::{DbBackend, DbBackendConfig};
 use tempfile;
 
 #[tokio::test]
@@ -63,11 +63,19 @@ async fn test_db_backend() {
 
     // Close the setup connection
     setup_db.close().await;
-
+    let db_config = DbBackendConfig {
+        table_name: "users".to_string(),
+        username_column: "username".to_string(),
+        password_column: "password".to_string(),
+        enabled_column: Some("enabled".to_string()),
+        id_column: Some("id".to_string()),
+        realm_column: Some("realm".to_string()),
+        ..Default::default()
+    };
     // Create backend with the database URL (this will create its own connection)
-    let backend = DbBackend::new(db_url.clone(), None, None, None, None, None, None)
+    let backend = DbBackend::new(db_url.clone(), db_config)
         .await
-        .unwrap();
+        .expect("Failed to create DbBackend");
 
     // Test get_user
     let user = backend.get_user("testuser", None).await.unwrap();
@@ -82,20 +90,24 @@ async fn test_db_backend() {
     assert!(admin_user.enabled);
 
     // Test with custom table and column names
-    let custom_backend = DbBackend::new(
-        db_url.clone(),
-        Some("custom_users".to_string()),
-        Some("id".to_string()),
-        Some("user_name".to_string()),
-        Some("pass_word".to_string()),
-        Some("is_enabled".to_string()),
-        Some("realm_name".to_string()),
-    )
-    .await
-    .unwrap();
+    let db_config = DbBackendConfig {
+        table_name: "custom_users".to_string(),
+        username_column: "user_name".to_string(),
+        password_column: "pass_word".to_string(),
+        enabled_column: Some("is_enabled".to_string()),
+        id_column: Some("id".to_string()),
+        realm_column: Some("realm_name".to_string()),
+        ..Default::default()
+    };
+    let custom_backend = DbBackend::new(db_url.clone(), db_config)
+        .await
+        .expect("Failed to create DbBackend");
 
     // Test get_user with custom table
-    let user = custom_backend.get_user("customuser", None).await.unwrap();
+    let user = custom_backend
+        .get_user("customuser", None)
+        .await
+        .expect("Failed to get user");
     assert_eq!(user.username, "customuser");
     assert_eq!(user.password, Some("custompass".to_string()));
     assert!(user.enabled);

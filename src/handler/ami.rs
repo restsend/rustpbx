@@ -1,7 +1,7 @@
 use crate::{app::AppState, handler::middleware::clientaddr::ClientAddr};
 use axum::{
     Json, Router,
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{Path, State},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,7 +15,7 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/lists", get(list_calls))
         .route("/kill/{id}", post(kill_call))
         .route("/shutdown", post(shutdown_handler))
-        .route("/dialog", post(dialog_handler))
+        .route("/reload", post(reload_handler))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -70,16 +70,12 @@ async fn kill_call(
 ) -> Response {
     if let Some(call) = state.active_calls.lock().await.remove(&id) {
         call.cancel_token.cancel();
-        info!(id, %client_ip, "Call killed");
+        info!(id, %client_ip, "call killed");
     }
     Json(true).into_response()
 }
 
-/// Create a sip dialog via websocket, send/recv sip messages via websocket
-async fn dialog_handler(
-    _client_ip: ClientAddr,
-    ws: WebSocketUpgrade,
-    State(_state): State<AppState>,
-) -> Response {
-    ws.on_upgrade(move |_socket| async move {})
+async fn reload_handler(State(_state): State<AppState>, client_ip: ClientAddr) -> Response {
+    info!(%client_ip, "Reload configuration initiated via /reload endpoint");
+    Json(serde_json::json!({"status": "configuration reloaded"})).into_response()
 }

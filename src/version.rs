@@ -37,3 +37,10 @@ pub fn get_short_version() -> &'static str {
         Box::leak(format!("{}-{}", version, git_commit).into_boxed_str())
     }
 }
+
+pub fn get_useragent() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let build_time = env!("BUILD_TIME");
+
+    format!("rustpbx/{}-{}", version, build_time)
+}

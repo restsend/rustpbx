@@ -2,6 +2,7 @@ use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTex
 use crate::{
     call::user::SipUser,
     config::{ProxyConfig, UserBackendConfig},
+    proxy::user_db::DbBackendConfig,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -185,16 +186,25 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             id_column,
             realm_column,
         } => {
-            let backend = DbBackend::new(
-                url.clone(),
-                table_name.clone(),
-                id_column.clone(),
-                username_column.clone(),
-                password_column.clone(),
-                enabled_column.clone(),
-                realm_column.clone(),
-            )
-            .await?;
+            let db_config = DbBackendConfig {
+                table_name: table_name.clone().unwrap_or_else(|| "users".to_string()),
+                username_column: username_column
+                    .clone()
+                    .unwrap_or_else(|| "username".to_string()),
+                password_column: password_column
+                    .clone()
+                    .unwrap_or_else(|| "password".to_string()),
+                enabled_column: enabled_column.clone(),
+                id_column: id_column.clone(),
+                realm_column: realm_column.clone(),
+                department_column: None,
+                display_name_column: None,
+                email_column: None,
+                phone_column: None,
+                note_column: None,
+                deleted_at_column: None,
+            };
+            let backend = DbBackend::new(url.clone(), db_config).await?;
             Ok(Box::new(backend))
         }
     }

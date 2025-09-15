@@ -20,6 +20,11 @@ pub struct SipUser {
     pub username: String,
     pub password: Option<String>,
     pub realm: Option<String>,
+    pub department_id: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub note: Option<String>,
     #[serde(skip)]
     pub origin_contact: Option<rsip::typed::Contact>,
     #[serde(skip)]
@@ -57,6 +62,11 @@ impl Default for SipUser {
             origin_contact: None,
             destination: None,
             is_support_webrtc: false,
+            department_id: None,
+            display_name: None,
+            email: None,
+            phone: None,
+            note: None,
         }
     }
 }
@@ -171,6 +181,11 @@ impl TryFrom<&Transaction> for SipUser {
             origin_contact,
             destination: Some(destination),
             is_support_webrtc,
+            department_id: None,
+            display_name: None,
+            email: None,
+            phone: None,
+            note: None,
         })
     }
 }
