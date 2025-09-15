@@ -6,6 +6,7 @@ use crate::{
         sip::{Invitation, client_dialog_event_loop},
     },
     config::RouteResult,
+    event::SessionEvent,
     media::{recorder::RecorderOption, track::TrackConfig},
     useragent::invitation::PendingDialog,
 };
@@ -418,17 +419,26 @@ impl B2bua {
         let callee = invite_option.callee.clone();
         let (dialog_id, answer) = match active_call
             .invitation
-            .invite(
-                &active_call.event_sender,
-                &track_id,
-                invite_option,
-                dlg_state_sender,
-            )
+            .invite(invite_option, dlg_state_sender)
             .await
         {
             Ok((id, ans)) => (id, ans),
             Err(e) => {
                 warn!(session_id = self.session_id, %caller, %callee, "callee invite failed: {}", e);
+                match &e {
+                    rsipstack::Error::DialogError(reason, _, code) => {
+                        active_call
+                            .event_sender
+                            .send(SessionEvent::Reject {
+                                track_id,
+                                timestamp: crate::get_timestamp(),
+                                reason: reason.clone(),
+                                code: Some(code.code() as u32),
+                            })
+                            .ok();
+                    }
+                    _ => {}
+                }
                 return Err(anyhow::anyhow!("{}", e));
             }
         };
