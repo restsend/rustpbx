@@ -334,7 +334,7 @@ impl TestUa {
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
                 Dialog::ServerInvite(d) => {
-                    d.reject().map_err(|e| e.into_anyhow())?;
+                    d.reject(None, None).map_err(|e| e.into_anyhow())?;
                     info!("Call rejected for dialog {}", dialog_id);
                     Ok(())
                 }

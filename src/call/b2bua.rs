@@ -157,7 +157,7 @@ impl B2bua {
                 {
                     Ok(_) => {}
                     Err(_) => {
-                        dialog_ref.reject().ok();
+                        dialog_ref.reject(None, None).ok();
                     }
                 }
             },
@@ -173,7 +173,7 @@ impl B2bua {
                 session_id = self.session_id,
                 "pending dialog still exists, cleaning up"
             );
-            pending.dialog.reject().ok();
+            pending.dialog.reject(None, None).ok();
         }
         app_state.active_calls.lock().await.remove(&self.session_id);
         Ok(())
@@ -361,7 +361,7 @@ impl B2bua {
                     _ = cancel_token.cancelled() => {
                         if let Some(dialog_id) = dialog_id {
                             info!(session_id = session_id, dialog_id = %dialog_id, "cancelling callee dialog");
-                            active_call_ref.invitation.hangup(dialog_id).await.ok();
+                            active_call_ref.invitation.hangup(dialog_id, None, None).await.ok();
                         }
                     }
                     _ = async {
@@ -418,7 +418,12 @@ impl B2bua {
         let callee = invite_option.callee.clone();
         let (dialog_id, answer) = match active_call
             .invitation
-            .invite(invite_option, dlg_state_sender)
+            .invite(
+                &active_call.event_sender,
+                &track_id,
+                invite_option,
+                dlg_state_sender,
+            )
             .await
         {
             Ok((id, ans)) => (id, ans),

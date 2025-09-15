@@ -1,7 +1,7 @@
 use crate::TrackId;
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
-use crate::event::EventSender;
+use crate::event::{EventSender, SessionEvent};
 use crate::media::stream::MediaStream;
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
@@ -12,6 +12,7 @@ use rsipstack::dialog::dialog::{
 };
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::rsip_ext::RsipResponseExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -77,10 +78,30 @@ impl Invitation {
         pending_dialogs.get(dialog_id_str).map(|d| d.dialog.id())
     }
 
-    pub async fn hangup(&self, dialog_id: DialogId) -> Result<()> {
+    pub async fn hangup(
+        &self,
+        dialog_id: DialogId,
+        code: Option<rsip::StatusCode>,
+        reason: Option<String>,
+    ) -> Result<()> {
         let dialog_id_str = dialog_id.to_string();
         if let Some(call) = self.pending_dialogs.lock().await.remove(&dialog_id_str) {
-            call.dialog.reject().ok();
+            call.dialog.reject(code, reason).ok();
+            call.token.cancel();
+        }
+        match self.dialog_layer.get_dialog(&dialog_id) {
+            Some(dialog) => {
+                dialog.hangup().await.ok();
+                self.dialog_layer.remove_dialog(&dialog_id);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+    pub async fn reject(&self, dialog_id: DialogId) -> Result<()> {
+        let dialog_id_str = dialog_id.to_string();
+        if let Some(call) = self.pending_dialogs.lock().await.remove(&dialog_id_str) {
+            call.dialog.reject(None, None).ok();
             call.token.cancel();
         }
         match self.dialog_layer.get_dialog(&dialog_id) {
@@ -95,6 +116,8 @@ impl Invitation {
 
     pub async fn invite(
         &self,
+        event_sender: &EventSender,
+        track_id: &TrackId,
         invite_option: InviteOption,
         state_sender: DialogStateSender,
     ) -> Result<(DialogId, Option<Vec<u8>>), rsipstack::Error> {
@@ -110,6 +133,17 @@ impl Invitation {
                     Some(offer)
                 }
                 _ => {
+                    event_sender
+                        .send(SessionEvent::Reject {
+                            track_id: track_id.clone(),
+                            timestamp: crate::get_timestamp(),
+                            reason: resp
+                                .reason_phrase()
+                                .unwrap_or(&resp.status_code().to_string())
+                                .to_string(),
+                            code: Some(resp.status_code.code() as u32),
+                        })
+                        .ok();
                     return Err(rsipstack::Error::DialogError(
                         resp.status_code.to_string(),
                         dialog.id(),

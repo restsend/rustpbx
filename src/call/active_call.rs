@@ -310,7 +310,10 @@ impl ActiveCall {
         match command {
             Command::Invite { option } => self.do_invite(option).await,
             Command::Accept { option } => self.do_accept(option).await,
-            Command::Reject { reason, code } => self.do_reject(reason, code).await,
+            Command::Reject { reason, code } => {
+                self.do_reject(code.map(|c| (c as u16).into()), Some(reason))
+                    .await
+            }
             Command::Ringing {
                 ringtone,
                 recorder,
@@ -492,11 +495,20 @@ impl ActiveCall {
         return Ok(());
     }
 
-    async fn do_reject(&self, reason: String, code: Option<u32>) -> Result<()> {
+    async fn do_reject(
+        &self,
+        code: Option<rsip::StatusCode>,
+        reason: Option<String>,
+    ) -> Result<()> {
         match self.invitation.has_pending_call(&self.session_id).await {
             Some(id) => {
-                info!(session_id = self.session_id, reason, code, "rejecting call");
-                self.invitation.hangup(id).await
+                info!(
+                    session_id = self.session_id,
+                    ?reason,
+                    ?code,
+                    "rejecting call"
+                );
+                self.invitation.hangup(id, code, reason).await
             }
             None => Ok(()),
         }
@@ -802,14 +814,6 @@ impl ActiveCall {
                     session_id = session_id,
                     "failed to create refer sip track: {}", e
                 );
-                self.event_sender
-                    .send(SessionEvent::Reject {
-                        track_id,
-                        timestamp: crate::get_timestamp(),
-                        reason: e.to_string(),
-                        code: None,
-                    })
-                    .ok();
                 return Err(e.into());
             }
         }
@@ -1032,14 +1036,6 @@ impl ActiveCall {
                             session_id = self.session_id,
                             "failed to create sip track: {}", e
                         );
-                        self.event_sender
-                            .send(SessionEvent::Reject {
-                                track_id: self.session_id.clone(),
-                                timestamp: crate::get_timestamp(),
-                                reason: e.to_string(),
-                                code: None,
-                            })
-                            .ok();
                         return Err(e.into());
                     }
                 }
@@ -1341,7 +1337,12 @@ impl ActiveCall {
 
         let (dialog_id, answer) = self
             .invitation
-            .invite(invite_option, dlg_state_sender)
+            .invite(
+                &self.event_sender,
+                &track_id,
+                invite_option,
+                dlg_state_sender,
+            )
             .await?;
 
         let answer = match answer {
