@@ -220,7 +220,9 @@ impl UserAgent {
                         }
                         if let Some(call) = pending_dialogs.lock().await.remove(&dialog_id_str) {
                             info!(?dialog_id, timeout = ?accept_timeout, "accept timeout, rejecting dialog");
-                            call.dialog.reject().ok();
+                            call.dialog
+                                .reject(Some(rsip::StatusCode::BusyHere), None)
+                                .ok();
                             token_ref.cancel();
                         }
                     });
@@ -245,7 +247,9 @@ impl UserAgent {
                             info!(
                                 id = ?dialog.id(),
                                 "error handling invite: {:?}", e);
-                            dialog.reject().ok();
+                            dialog
+                                .reject(Some(rsip::StatusCode::ServerInternalError), None)
+                                .ok();
                         }
                     }
                 }

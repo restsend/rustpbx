@@ -179,7 +179,9 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
             // Start the invite in a separate task so we can handle Alice's response concurrently
             let bob_ua_invite = bob_ua_arc.invitation.clone();
             let invite_handle = tokio::spawn(async move {
-                bob_ua_invite.invite(invite_option, state_sender).await
+                let event_sender = crate::event::create_event_sender();
+                let track_id = "test_track_id".to_string();
+                bob_ua_invite.invite(&event_sender,  &track_id, invite_option, state_sender).await
             });
 
             // 6. Wait for webhook call and handle it immediately
