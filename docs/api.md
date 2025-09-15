@@ -364,17 +364,25 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 
 #### Ringing Command
 **Purpose:** Sends ringing response for incoming call.
-
+> **Note:** If a `recorder` is set in the ringing command, the `recorder` option in the subsequent accept command will **not** override the recorder settings from the ringing phase.
+> 
 **Fields:**
 - `command` (string): Always "ringing"
-- `recorder` (boolean): Enable call recording during ringing
+- `recorder` (RecorderOption, optional): Call recording configuration
+  - `recorderFile` (string): Path to the recording file
+  - `samplerate` (number): Recording sample rate in Hz (default: 16000)
+  - `ptime` (number): Packet time in milliseconds (default: 200)
 - `earlyMedia` (boolean): Enable early media during ringing
 - `ringtone` (string, optional): Custom ringtone URL
 
 ```json
 {
   "command": "ringing",
-  "recorder": false,
+  "recorder": {
+      "recorderFile": "/path/to/recording.wav",
+      "samplerate": 16000,
+      "ptime": 200
+  },
   "earlyMedia": true,
   "ringtone": "http://example.com/ringtone.wav"
 }

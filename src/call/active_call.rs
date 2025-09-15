@@ -492,23 +492,25 @@ impl ActiveCall {
         return Ok(());
     }
 
-    async fn do_reject(&self, _reason: String, _code: Option<u32>) -> Result<()> {
-        Ok(())
+    async fn do_reject(&self, reason: String, code: Option<u32>) -> Result<()> {
+        match self.invitation.has_pending_call(&self.session_id).await {
+            Some(id) => {
+                info!(session_id = self.session_id, reason, code, "rejecting call");
+                self.invitation.hangup(id).await
+            }
+            None => Ok(()),
+        }
     }
 
     async fn do_ringing(
         &self,
         ringtone: Option<String>,
-        recorder: Option<bool>,
+        recorder: Option<RecorderOption>,
         early_media: Option<bool>,
     ) -> Result<()> {
         if self.ready_to_answer.lock().await.is_none() {
             let option = CallOption {
-                recorder: if recorder.unwrap_or_default() {
-                    Some(RecorderOption::default())
-                } else {
-                    None
-                },
+                recorder,
                 ..Default::default()
             };
             let _ = self.invite_or_accept(option, "ringing".to_string()).await?;
@@ -527,7 +529,7 @@ impl ActiveCall {
             dialog.ringing(headers, body).ok();
             info!(
                 session_id = self.session_id,
-                recorder, ringtone, early_media, "playing ringtone"
+                ringtone, early_media, "playing ringtone"
             );
             if let Some(ringtone) = ringtone {
                 self.do_play(ringtone, None, None).await.ok();
@@ -769,15 +771,21 @@ impl ActiveCall {
             })
             .ok();
 
-        if refer_option
+        let auto_hangup = refer_option
             .as_ref()
             .and_then(|o| o.auto_hangup)
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+
+        if auto_hangup {
             *self.auto_hangup.lock().await = Some((ssrc, CallRecordHangupReason::ByRefer));
         } else {
             *self.auto_hangup.lock().await = None;
         }
+
+        info!(
+            session_id = self.session_id,
+            ssrc, auto_hangup, callee, "do_refer"
+        );
 
         match self
             .create_outgoing_sip_track(
