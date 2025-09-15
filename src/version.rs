@@ -42,5 +42,10 @@ pub fn get_useragent() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let build_time = env!("BUILD_TIME");
 
-    format!("rustpbx/{}-{}", version, build_time)
+    let build_timestamp: i64 = build_time.parse().unwrap_or(0);
+    let build_datetime: DateTime<Local> = DateTime::from_timestamp(build_timestamp, 0)
+        .map(|utc| utc.with_timezone(&Local))
+        .unwrap_or_else(|| Local::now());
+    let build_time_str = build_datetime.format("%Y-%m-%d").to_string();
+    format!("rustpbx/{} (built {})", version, build_time_str)
 }

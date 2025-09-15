@@ -7,10 +7,7 @@ use anyhow::{Error, Result};
 use clap::Parser;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::HashMap;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -43,7 +40,13 @@ fn default_config_rtp_end_port() -> Option<u16> {
     Some(42000)
 }
 
-pub type ConfigRef = Arc<RwLock<Config>>;
+fn default_useragent() -> Option<String> {
+    Some(crate::version::get_useragent())
+}
+
+fn default_callid_suffix() -> Option<String> {
+    Some("rustpbx.com".to_string())
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -84,7 +87,9 @@ pub struct IceServer {
 pub struct UseragentConfig {
     pub addr: String,
     pub udp_port: u16,
+    #[serde(default = "default_useragent")]
     pub useragent: Option<String>,
+    #[serde(default = "default_callid_suffix")]
     pub callid_suffix: Option<String>,
     pub register_users: Option<Vec<RegisterOption>>,
     pub graceful_shutdown: Option<bool>,
@@ -210,7 +215,9 @@ pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
     pub external_ip: Option<String>,
+    #[serde(default = "default_useragent")]
     pub useragent: Option<String>,
+    #[serde(default = "default_callid_suffix")]
     pub callid_suffix: Option<String>,
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
@@ -292,8 +299,8 @@ impl Default for ProxyConfig {
                 "call".to_string(),
             ]),
             external_ip: None,
-            useragent: Some(crate::version::get_useragent()),
-            callid_suffix: Some("rustpbx.com".to_string()),
+            useragent: default_useragent(),
+            callid_suffix: default_callid_suffix(),
             ssl_private_key: None,
             ssl_certificate: None,
             udp_port: Some(5060),
@@ -331,8 +338,8 @@ impl Default for UseragentConfig {
         Self {
             addr: "0.0.0.0".to_string(),
             udp_port: 25060,
-            useragent: Some(crate::version::get_useragent()),
-            callid_suffix: Some("rustpbx.com".to_string()),
+            useragent: default_useragent(),
+            callid_suffix: default_callid_suffix(),
             register_users: None,
             graceful_shutdown: Some(true),
             handler: None,
