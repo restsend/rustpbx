@@ -15,9 +15,7 @@ use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 use tracing::{debug, info};
 
 #[async_trait]
@@ -43,50 +41,45 @@ impl AuthModule {
     pub async fn authenticate_request(&self, original: &rsip::Request) -> Result<Option<SipUser>> {
         // Check for both Authorization and Proxy-Authorization headers
         // Prioritize Authorization for backward compatibility
-        let auth_result = check_authorization_headers(&original)?;
-
-        if let Some((user, auth_inner)) = auth_result {
-            // Check if user exists and is enabled
-            match self
-                .server
-                .user_backend
-                .get_user(&user.username, user.realm.as_deref())
-                .await
-            {
-                Ok(stored_user) => {
-                    if !stored_user.enabled {
-                        info!(username = user.username, realm = ?user.realm, "User is disabled");
+        let (user, auth_inner) = match check_authorization_headers(&original)? {
+            Some((user, auth)) => (user, auth),
+            None => {
+                return Ok(None);
+            }
+        };
+        // Check if user exists and is enabled
+        match self
+            .server
+            .user_backend
+            .get_user(&user.username, user.realm.as_deref())
+            .await
+        {
+            Ok(stored_user) => {
+                if !stored_user.enabled {
+                    info!(username = user.username, realm = ?user.realm, "User is disabled");
+                    return Ok(None);
+                }
+                if let Some(realm) = user.realm.as_ref() {
+                    if !self.server.is_same_realm(realm).await {
+                        info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
                         return Ok(None);
                     }
-                    if let Some(realm) = user.realm.as_ref() {
-                        if !self.server.is_same_realm(realm).await {
-                            info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
-                            return Ok(None);
-                        }
-                    }
-                    let result = self.verify_credentials(
-                        &stored_user,
-                        &original.uri,
-                        &original.method,
-                        &auth_inner,
-                    )?;
-                    debug!("Credential verification result: {}", result);
-                    if result {
-                        Ok(Some(stored_user))
-                    } else {
-                        Ok(None)
-                    }
                 }
-                Err(e) => {
-                    info!(
-                        username = user.username,
-                        ?user.realm, "{}", e);
-                    Ok(None)
+
+                match self.verify_credentials(
+                    &stored_user,
+                    &original.uri,
+                    &original.method,
+                    &auth_inner,
+                ) {
+                    true => Ok(Some(stored_user)),
+                    false => Ok(None),
                 }
             }
-        } else {
-            debug!("No authorization headers found");
-            Ok(None)
+            Err(e) => {
+                info!(username = user.username, realm = ?user.realm, "authenticate_request failed: {}", e);
+                Ok(None)
+            }
         }
     }
 
@@ -96,7 +89,7 @@ impl AuthModule {
         uri: &Uri,
         method: &rsip::Method,
         auth: &Authorization,
-    ) -> Result<bool> {
+    ) -> bool {
         // Use the same approach as common.rs
         let empty_string = "".to_string();
         let password = user.password.as_ref().unwrap_or(&empty_string);
@@ -114,16 +107,7 @@ impl AuthModule {
         }
         .compute();
 
-        let result = expected_response == auth.response;
-        if result {
-            debug!(username = user.username, "Authentication successful");
-        } else {
-            debug!(
-                username = user.username,
-                "Authentication failed: response mismatch"
-            );
-        }
-        Ok(result)
+        expected_response == auth.response
     }
 
     pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
@@ -183,11 +167,6 @@ impl ProxyModule for AuthModule {
             return Ok(ProxyAction::Continue);
         }
 
-        debug!(
-            method = tx.original.method.to_string(),
-            "Auth module processing request"
-        );
-
         match self.server.auth_backend.as_ref() {
             Some(backend) => match backend.authenticate(&tx.original).await {
                 Ok(Some(user)) => {
@@ -195,7 +174,7 @@ impl ProxyModule for AuthModule {
                     return Ok(ProxyAction::Continue);
                 }
                 Err(e) => {
-                    warn!("Authentication failed {:} request: {:?}", e, tx.original)
+                    info!(error=%e, key = %tx.key, "auth_backend authenticate failed");
                 }
                 _ => {}
             },
@@ -205,7 +184,6 @@ impl ProxyModule for AuthModule {
         match self.authenticate_request(&tx.original).await {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
-                    debug!("Authentication successful, continuing");
                     cookie.set_user(user);
                     Ok(ProxyAction::Continue)
                 } else {
@@ -243,17 +221,11 @@ impl ProxyModule for AuthModule {
                             .await
                             .ok();
                     }
-                    if tx.original.method == rsip::Method::Invite {
-                        // For INVITE, we need to consume the ACK to complete the transaction
-                        tokio::time::timeout(Duration::from_secs(2), tx.receive())
-                            .await
-                            .ok();
-                    }
                     Ok(ProxyAction::Abort)
                 }
             }
             Err(e) => {
-                debug!(error = e.to_string(), "Authentication error");
+                info!(error=%e, key = %tx.key, "Authentication error");
                 Err(e)
             }
         }

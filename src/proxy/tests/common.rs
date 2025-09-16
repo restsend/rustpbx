@@ -65,6 +65,7 @@ pub async fn create_test_server_with_config(
         endpoint,
         location_inspector: Arc::new(None),
         dialplan_inspector: Arc::new(None),
+        create_route_invite: None,
     });
 
     // Add test users

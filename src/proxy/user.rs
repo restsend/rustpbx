@@ -197,7 +197,6 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 enabled_column: enabled_column.clone(),
                 id_column: id_column.clone(),
                 realm_column: realm_column.clone(),
-                department_column: None,
                 display_name_column: None,
                 email_column: None,
                 phone_column: None,

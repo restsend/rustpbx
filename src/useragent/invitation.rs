@@ -22,19 +22,22 @@ pub trait InvitationHandler: Send + Sync {
     }
 }
 
-pub struct UnavailableInvitationHandler;
-impl InvitationHandler for UnavailableInvitationHandler {}
-
-pub fn create_invite_handler(config: &InviteHandlerConfig) -> Option<Box<dyn InvitationHandler>> {
+pub fn default_create_invite_handler(
+    config: Option<&InviteHandlerConfig>,
+) -> Option<Box<dyn InvitationHandler>> {
     match config {
-        InviteHandlerConfig::Webhook {
+        Some(InviteHandlerConfig::Webhook {
             url,
             method,
             headers,
-        } => Some(Box::new(WebhookInvitationHandler::new(
+        }) => Some(Box::new(WebhookInvitationHandler::new(
             url.clone(),
             method.clone(),
             headers.clone(),
         ))),
+        _ => None,
     }
 }
+
+pub type FnCreateInvitationHandler =
+    fn(config: Option<&InviteHandlerConfig>) -> Result<Box<dyn InvitationHandler>>;
