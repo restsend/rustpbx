@@ -12,7 +12,7 @@ use crate::{
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
     },
-    useragent::{UserAgent, invitation::create_invite_handler},
+    useragent::{UserAgent, invitation::FnCreateInvitationHandler},
 };
 use anyhow::Result;
 use axum::{
@@ -55,6 +55,7 @@ pub struct AppStateBuilder {
     pub callrecord_sender: Option<CallRecordSender>,
     pub cancel_token: Option<CancellationToken>,
     pub proxy_builder: Option<SipServerBuilder>,
+    pub create_invitation_handler: Option<FnCreateInvitationHandler>,
 }
 
 impl AppStateInner {
@@ -116,6 +117,7 @@ impl AppStateBuilder {
             callrecord_sender: None,
             cancel_token: None,
             proxy_builder: None,
+            create_invitation_handler: None,
         }
     }
 
@@ -149,7 +151,7 @@ impl AppStateBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<(AppState, Option<SipServer>)> {
+    pub async fn build(mut self) -> Result<(AppState, Option<SipServer>)> {
         let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
         let token = self
             .cancel_token
@@ -161,14 +163,10 @@ impl AppStateBuilder {
         } else {
             let config = config.ua.clone();
             if let Some(config) = config {
-                let invite_handler = config
-                    .handler
-                    .as_ref()
-                    .map(|c| create_invite_handler(c))
-                    .flatten();
+                let invite_handler = self.create_invitation_handler.take();
                 let ua_builder = crate::useragent::UserAgentBuilder::new()
                     .with_cancel_token(token.child_token())
-                    .with_invitation_handler(invite_handler)
+                    .with_create_invitation_handler(invite_handler)
                     .with_config(Some(config));
                 Some(Arc::new(ua_builder.build().await?))
             } else {

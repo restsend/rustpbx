@@ -11,7 +11,6 @@ pub struct DbBackendConfig {
     pub id_column: Option<String>,
     pub enabled_column: Option<String>,
     pub realm_column: Option<String>,
-    pub department_column: Option<String>,
     pub display_name_column: Option<String>,
     pub email_column: Option<String>,
     pub phone_column: Option<String>,
@@ -28,7 +27,6 @@ impl Default for DbBackendConfig {
             id_column: None,
             enabled_column: None,
             realm_column: None,
-            department_column: None,
             display_name_column: None,
             email_column: None,
             phone_column: None,
@@ -148,12 +146,6 @@ impl UserBackend for DbBackend {
         } else {
             None
         };
-        let department_id = self
-            .config
-            .department_column
-            .as_ref()
-            .map(|k| row.try_get(k.as_str()).ok())
-            .flatten();
 
         let display_name = self
             .config
@@ -190,7 +182,7 @@ impl UserBackend for DbBackend {
             origin_contact: None,
             destination: None,
             is_support_webrtc: false,
-            department_id,
+            departments: None,
             display_name,
             email,
             phone,

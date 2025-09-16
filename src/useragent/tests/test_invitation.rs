@@ -1,6 +1,6 @@
 use crate::{
     config::{InviteHandlerConfig, UseragentConfig},
-    useragent::{UserAgent, UserAgentBuilder, invitation::create_invite_handler},
+    useragent::{UserAgent, UserAgentBuilder},
 };
 use anyhow::Result;
 use rsipstack::dialog::invitation::InviteOption;
@@ -38,12 +38,9 @@ async fn create_test_useragent(webhook_url: String) -> Result<UserAgent> {
         }),
     });
 
-    let invitation_handler = create_invite_handler(&config.handler.as_ref().unwrap());
-
     let ua = UserAgentBuilder::new()
         .with_config(Some(config))
         .with_cancel_token(CancellationToken::new())
-        .with_invitation_handler(invitation_handler)
         .build()
         .await?;
 
@@ -59,7 +56,7 @@ async fn create_simple_useragent(listen_addr: String) -> Result<UserAgent> {
     let ua = UserAgentBuilder::new()
         .with_config(Some(config))
         .with_cancel_token(CancellationToken::new())
-        .with_invitation_handler(None)
+        .with_create_invitation_handler(None)
         .build()
         .await?;
 

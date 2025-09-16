@@ -190,10 +190,13 @@ impl CallModule {
             }
         };
 
-        let route_invite = Box::new(DefaultRouteInvite {
-            routing_state: self.inner.routing_state.clone(),
-            config: self.inner.config.clone(),
-        }) as Box<dyn RouteInvite>;
+        let route_invite = match self.inner.server.create_route_invite.as_ref() {
+            Some(f) => f(self.inner.server.clone(), self.inner.config.clone())?,
+            None => Box::new(DefaultRouteInvite {
+                routing_state: self.inner.routing_state.clone(),
+                config: self.inner.config.clone(),
+            }) as Box<dyn RouteInvite>,
+        };
 
         let r = if let Some(resolver) = self.inner.server.call_router.as_ref() {
             resolver.resolve(&tx.original, route_invite).await
@@ -206,7 +209,7 @@ impl CallModule {
             Err((e, code)) => {
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
-                warn!(%code, "failed to resolve dialplan: {}", reason_phrase);
+                warn!(%code, key = %tx.key,"failed to resolve dialplan: {}", reason_phrase);
                 tx.reply_with(code, vec![reason_phrase.into()], None)
                     .await
                     .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
@@ -334,7 +337,10 @@ impl ProxyModule for CallModule {
                             rsip::StatusCode::ServerInternalError,
                             vec![rsip::Header::Other(
                                 "Reason".into(),
-                                format!("SIP;cause=500;text=\"{}\"", e.to_string()),
+                                format!(
+                                    "SIP;cause=500;text=\"{}\"",
+                                    urlencoding::encode(e.to_string().as_str())
+                                ),
                             )],
                             None,
                         )

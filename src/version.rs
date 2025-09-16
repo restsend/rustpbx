@@ -15,12 +15,17 @@ pub fn get_version_info() -> &'static str {
 
     Box::leak(
         format!(
-            "rustpbx {}\n\
+            "rustpbx {} ({})\n\
          Build Time: {}\n\
          Git Commit: {}\n\
          Git Branch: {}\n\
          Git Status: {}",
-            version, build_time_str, git_commit, git_branch, git_dirty
+            version,
+            rsipstack::VERSION,
+            build_time_str,
+            git_commit,
+            git_branch,
+            git_dirty
         )
         .into_boxed_str(),
     )
@@ -47,5 +52,10 @@ pub fn get_useragent() -> String {
         .map(|utc| utc.with_timezone(&Local))
         .unwrap_or_else(|| Local::now());
     let build_time_str = build_datetime.format("%Y-%m-%d").to_string();
-    format!("rustpbx/{} (built {})", version, build_time_str)
+    format!(
+        "rustpbx/{} (built {} {})",
+        version,
+        build_time_str,
+        rsipstack::VERSION
+    )
 }

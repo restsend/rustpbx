@@ -9,6 +9,7 @@ use crate::{
     callrecord::CallRecordSender,
     config::ProxyConfig,
     proxy::{
+        FnCreateRouteInvite,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
     },
@@ -51,6 +52,7 @@ pub struct SipServerInner {
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
     pub location_inspector: Arc<Option<Box<dyn LocationInspector>>>,
+    pub create_route_invite: Option<FnCreateRouteInvite>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -73,6 +75,7 @@ pub struct SipServerBuilder {
     message_inspector: Option<Box<dyn MessageInspector>>,
     location_inspector: Option<Box<dyn LocationInspector>>,
     dialplan_inspector: Option<Box<dyn DialplanInspector>>,
+    create_route_invite: Option<FnCreateRouteInvite>,
 }
 
 impl SipServerBuilder {
@@ -89,6 +92,7 @@ impl SipServerBuilder {
             message_inspector: None,
             location_inspector: None,
             dialplan_inspector: None,
+            create_route_invite: None,
         }
     }
 
@@ -125,6 +129,11 @@ impl SipServerBuilder {
     }
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
+        self
+    }
+
+    pub fn with_create_route_invite(mut self, f: FnCreateRouteInvite) -> Self {
+        self.create_route_invite = Some(f);
         self
     }
 
@@ -264,6 +273,7 @@ impl SipServerBuilder {
             endpoint,
             location_inspector: Arc::new(location_inspector),
             dialplan_inspector: Arc::new(dialplan_inspector),
+            create_route_invite: self.create_route_invite,
         });
 
         let mut allow_methods = Vec::new();
@@ -432,10 +442,10 @@ impl SipServer {
                         let final_status = tx.last_response.as_ref().map(|r| r.status_code());
                         match r {
                             Ok(_) => {
-                                info!(key = %tx.key, ?final_status, "transaction processed in {} s ", start_time.elapsed().as_secs_f32());
+                                info!(key = %tx.key, ?final_status, "transaction processed in {:?}", start_time.elapsed());
                             },
                             Err(e) => {
-                                warn!(key = %tx.key, ?final_status, "failed to process transaction: {} in {} s", e, start_time.elapsed().as_secs_f32());
+                                warn!(key = %tx.key, ?final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());
                             }
                         }
                     }

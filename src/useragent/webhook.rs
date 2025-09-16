@@ -7,7 +7,6 @@ use rsip::prelude::{HasHeaders, HeadersExt};
 use rsipstack::dialog::server_dialog::ServerInviteDialog;
 use serde_json::json;
 use std::time::Instant;
-use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -35,7 +34,7 @@ impl WebhookInvitationHandler {
 impl InvitationHandler for WebhookInvitationHandler {
     async fn on_invite(
         &self,
-        cancel_token: CancellationToken,
+        _cancel_token: CancellationToken,
         dialog: ServerInviteDialog,
     ) -> Result<()> {
         let client = Client::new();
@@ -72,51 +71,26 @@ impl InvitationHandler for WebhookInvitationHandler {
             }
         }
         let url = self.url.clone();
-        tokio::spawn(async move {
-            let start_time = Instant::now();
-            select! {
-                    _ = cancel_token.cancelled() => {
-                            info!(
-                                dialog_id,
-                                url,
-                                caller,
-                                callee,
-                                "invite to webhook cancelled");
-                            return Ok(());
-                    }
-                    _ = async {
-                    match request.json(&payload).send().await {
-                        Ok(response) => {
-                            info!(
-                                dialog_id,
-                                url,
-                                caller,
-                                callee,
-                                elapsed = start_time.elapsed().as_millis(),
-                                status = ?response.status(),
-                                "invite to webhook"
-                            );
-                            if !response.status().is_success() {
-                                return Err(anyhow::anyhow!("failed to send invite to webhook"));
-                            }
-                        }
-                        Err(e) => {
-                            info!(
-                                dialog_id,
-                                url,
-                                caller,
-                                callee,
-                                "failed to send invite to webhook: {}",
-                                e
-                            );
-                            return Err(anyhow::anyhow!("failed to send invite to webhook: {}", e));
-                        }
-                    };
-                    Ok::<(), anyhow::Error>(())
-                } => {}
+        let start_time = Instant::now();
+        match request.json(&payload).send().await {
+            Ok(response) => {
+                info!(
+                    dialog_id,
+                    url,
+                    caller,
+                    callee,
+                    elapsed = start_time.elapsed().as_millis(),
+                    status = ?response.status(),
+                    "invite to webhook"
+                );
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!("failed to send invite to webhook"));
+                }
             }
-            Ok::<(), anyhow::Error>(())
-        });
+            Err(e) => {
+                return Err(anyhow::anyhow!("failed to send invite to webhook: {}", e));
+            }
+        }
         Ok(())
     }
 }

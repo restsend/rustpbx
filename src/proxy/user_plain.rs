@@ -60,7 +60,7 @@ impl PlainTextBackend {
                 origin_contact: None,
                 destination: None,
                 is_support_webrtc: false,
-                department_id: None,
+                departments: None,
                 display_name: None,
                 email: None,
                 phone: None,

@@ -2,7 +2,7 @@ use super::registration::RegistrationHandle;
 use crate::call::sip::Invitation;
 use crate::config::UseragentConfig;
 use crate::useragent::invitation::{
-    InvitationHandler, PendingDialog, UnavailableInvitationHandler,
+    FnCreateInvitationHandler, PendingDialog, default_create_invite_handler,
 };
 use anyhow::{Result, anyhow};
 use humantime::parse_duration;
@@ -26,7 +26,7 @@ use tracing::{info, warn};
 pub struct UserAgentBuilder {
     pub config: Option<UseragentConfig>,
     pub cancel_token: Option<CancellationToken>,
-    pub invitation_handler: Option<Box<dyn InvitationHandler>>,
+    pub create_invitation_handler: Option<FnCreateInvitationHandler>,
 }
 
 pub struct UserAgent {
@@ -36,7 +36,7 @@ pub struct UserAgent {
     pub registration_handles: Mutex<HashMap<String, RegistrationHandle>>,
     pub alive_users: Arc<RwLock<HashSet<String>>>,
     pub dialog_layer: Arc<DialogLayer>,
-    pub invitation_handler: Box<dyn InvitationHandler>,
+    pub create_invitation_handler: Option<FnCreateInvitationHandler>,
     pub invitation: Invitation,
 }
 
@@ -45,7 +45,7 @@ impl UserAgentBuilder {
         Self {
             config: None,
             cancel_token: None,
-            invitation_handler: None,
+            create_invitation_handler: None,
         }
     }
     pub fn with_config(mut self, config: Option<UseragentConfig>) -> Self {
@@ -57,8 +57,12 @@ impl UserAgentBuilder {
         self.cancel_token = Some(token);
         self
     }
-    pub fn with_invitation_handler(mut self, handler: Option<Box<dyn InvitationHandler>>) -> Self {
-        self.invitation_handler = handler;
+
+    pub fn with_create_invitation_handler(
+        mut self,
+        handler: Option<FnCreateInvitationHandler>,
+    ) -> Self {
+        self.create_invitation_handler = handler;
         self
     }
 
@@ -89,8 +93,11 @@ impl UserAgentBuilder {
             callid_suffix: config.callid_suffix.clone(),
             ..Default::default()
         };
-
-        let endpoint = EndpointBuilder::new()
+        let mut endpoint_builder = EndpointBuilder::new();
+        if let Some(ref user_agent) = config.useragent {
+            endpoint_builder.with_user_agent(user_agent.as_str());
+        }
+        let endpoint = endpoint_builder
             .with_cancel_token(cancel_token.child_token())
             .with_transport_layer(transport_layer)
             .with_option(endpoint_option)
@@ -104,10 +111,7 @@ impl UserAgentBuilder {
             registration_handles: Mutex::new(HashMap::new()),
             alive_users: Arc::new(RwLock::new(HashSet::new())),
             dialog_layer: dialog_layer.clone(),
-            invitation_handler: self
-                .invitation_handler
-                .take()
-                .unwrap_or_else(|| Box::new(UnavailableInvitationHandler)),
+            create_invitation_handler: self.create_invitation_handler,
             invitation: Invitation::new(dialog_layer),
         })
     }
@@ -155,6 +159,39 @@ impl UserAgent {
             let (state_sender, state_receiver) = unbounded_channel();
             match tx.original.method {
                 rsip::Method::Invite | rsip::Method::Ack => {
+                    let invitation_handler = match self.create_invitation_handler {
+                        Some(ref create_invitation_handler) => {
+                            create_invitation_handler(self.config.handler.as_ref()).ok()
+                        }
+                        _ => default_create_invite_handler(self.config.handler.as_ref()),
+                    };
+                    let invitation_handler = match invitation_handler {
+                        Some(h) => h,
+                        None => {
+                            info!(?key, "no invite handler configured, rejecting INVITE");
+                            match tx
+                                .reply_with(
+                                    rsip::StatusCode::ServiceUnavailable,
+                                    vec![
+                                        rsip::Header::Other(
+                                            "Reason".into(),
+                                            "SIP;cause=503;text=\"No invite handler configured\""
+                                                .into(),
+                                        )
+                                        .into(),
+                                    ],
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    info!("error replying to request: {:?}", e);
+                                }
+                            }
+                            continue;
+                        }
+                    };
                     let contact = match dialog_layer.endpoint.get_addrs().first() {
                         Some(addr) => Some(rsip::Uri {
                             scheme: Some(rsip::Scheme::Sip),
@@ -230,28 +267,25 @@ impl UserAgent {
                     let token_ref = token.clone();
 
                     tokio::spawn(async move {
+                        let invite_loop = async {
+                            match invitation_handler.on_invite(token, dialog.clone()).await {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    info!(id = ?dialog.id(),
+                                        "error handling invite: {:?}", e);
+                                    dialog
+                                        .reject(Some(rsip::StatusCode::ServerInternalError), None)
+                                        .ok();
+                                }
+                            }
+                        };
                         select! {
                             _ = token_ref.cancelled() => {}
-                            _ = dialog_ref.handle(&mut tx) => {
-                            }
+                            _ = async {
+                                let (_,_ ) = tokio::join!(dialog_ref.handle(&mut tx), invite_loop);
+                             } => {}
                         }
                     });
-
-                    match self
-                        .invitation_handler
-                        .on_invite(token, dialog.clone())
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(e) => {
-                            info!(
-                                id = ?dialog.id(),
-                                "error handling invite: {:?}", e);
-                            dialog
-                                .reject(Some(rsip::StatusCode::ServerInternalError), None)
-                                .ok();
-                        }
-                    }
                 }
                 rsip::Method::Options => {
                     if tx.endpoint_inner.option.ignore_out_of_dialog_option {

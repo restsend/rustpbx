@@ -1,4 +1,4 @@
-use crate::call::TransactionCookie;
+use crate::call::{RouteInvite, TransactionCookie};
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -56,3 +56,6 @@ pub trait ProxyModule: Send + Sync {
 
 pub type FnCreateProxyModule =
     fn(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>>;
+
+pub type FnCreateRouteInvite =
+    fn(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn RouteInvite>>;
