@@ -13,3 +13,4 @@ pub mod stream;
 mod tests;
 pub mod track;
 pub mod vad;
+pub mod volume_control;
