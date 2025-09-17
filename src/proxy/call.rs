@@ -5,10 +5,10 @@ use crate::call::Location;
 use crate::call::RouteInvite;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
-use crate::call::b2bua::B2buaBuilder;
 use crate::call::sip::Invitation;
 use crate::config::ProxyConfig;
 use crate::config::RouteResult;
+use crate::proxy::b2bcall::B2BCallBuilder;
 use crate::proxy::routing::matcher::match_invite;
 use anyhow::Error;
 use anyhow::{Result, anyhow};
@@ -183,7 +183,7 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
-        let caller_contact = match caller.build_contact_from_invite(&*tx) {
+        let _caller_contact = match caller.build_contact_from_invite(&*tx) {
             Some(contact) => contact,
             None => {
                 return Err(anyhow::anyhow!("Failed to build caller contact"));
@@ -224,7 +224,6 @@ impl CallModule {
         };
 
         let cancel_token = CancellationToken::new();
-        let media_capabilities = vec![];
 
         let dialog_id =
             DialogId::try_from(&tx.original).map_err(|e| anyhow!("Invalid dialog ID: {}", e))?;
@@ -234,35 +233,34 @@ impl CallModule {
             .unwrap_or_else(|| format!("b2bua-{}-{}", rand::random::<u32>(), dialog_id));
 
         let app_state = self.inner.server.app_state.clone();
-        let b2bua = B2buaBuilder::new(app_state.clone(), cookie, session_id)
-            .with_recorder(true)
-            .with_cancel_token(cancel_token)
-            .with_media_capabilities(media_capabilities)
-            .build(&tx)
-            .await?;
 
-        match b2bua
-            .serve(
-                tx,
-                caller_contact,
-                app_state.clone(),
-                self.inner.invitation.clone(),
-                dialplan,
-            )
-            .await
-        {
+        // Extract SDP offer from the original INVITE message
+        let body = tx.original.body();
+        let original_sdp = if !body.is_empty() {
+            String::from_utf8_lossy(body).to_string()
+        } else {
+            String::new()
+        };
+
+        let mut builder = B2BCallBuilder::new(session_id.clone(), app_state.clone(), cookie)
+            .with_dialplan(dialplan)
+            .with_cancel_token(cancel_token)
+            .with_invitation(self.inner.invitation.clone());
+
+        // If we have SDP content, pass it to the builder
+        if !original_sdp.trim().is_empty() {
+            builder = builder.with_original_sdp_offer(original_sdp);
+        }
+
+        let b2bcall = builder.build()?;
+
+        match b2bcall.start().await {
             Ok(()) => {
-                info!(
-                    session_id = b2bua.session_id,
-                    "session established successfully"
-                );
+                info!(session_id = session_id, "session established successfully");
                 Ok(())
             }
             Err(e) => {
-                warn!(
-                    session_id = b2bua.session_id,
-                    "error establishing session: {}", e
-                );
+                warn!(session_id = session_id, "error establishing session: {}", e);
                 Err(e)
             }
         }

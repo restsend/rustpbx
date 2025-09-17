@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod acl;
 pub mod auth;
+pub mod b2bcall;
 pub mod call;
 pub mod locator;
 pub mod locator_db;
