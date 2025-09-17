@@ -44,6 +44,7 @@ async fn test_save_with_http_without_media() {
         &url,
         &headers,
         &with_media,
+        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -110,6 +111,7 @@ async fn test_save_with_http_with_media() {
         &url,
         &headers,
         &with_media,
+        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -164,6 +166,7 @@ async fn test_save_with_http_with_custom_headers() {
         &url,
         &Some(headers),
         &with_media,
+        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -218,6 +221,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
         &url,
         &Some(headers),
         &with_media,
+        &None,
         &record,
     )
     .await;
@@ -243,6 +247,7 @@ async fn test_save_with_s3_like_memory_store() {
     let endpoint = "http://localhost:9000".to_string(); // Local minio endpoint
     let root = "test-records".to_string();
     let with_media = Some(false);
+    let keep_media_copy = Some(false);
 
     let mut extras = HashMap::new();
     extras.insert(
@@ -282,6 +287,7 @@ async fn test_save_with_s3_like_memory_store() {
         &endpoint,
         &root,
         &with_media,
+        &keep_media_copy,
         &record,
     )
     .await;
@@ -355,6 +361,7 @@ async fn test_save_with_s3_like_with_media() {
         let endpoint = endpoint.to_string();
         let root = "test-records".to_string();
         let with_media = Some(true);
+        let keep_media_copy = Some(false);
 
         let result = CallRecordManager::save_with_s3_like(
             Arc::new(DefaultCallRecordFormatter),
@@ -366,6 +373,7 @@ async fn test_save_with_s3_like_with_media() {
             &endpoint,
             &root,
             &with_media,
+            &keep_media_copy,
             &record,
         )
         .await;

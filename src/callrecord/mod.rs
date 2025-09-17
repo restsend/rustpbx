@@ -319,10 +319,20 @@ impl CallRecordManager {
                     endpoint,
                     root,
                     with_media,
+                    keep_media_copy,
                 } => {
                     Self::save_with_s3_like(
-                        formatter, vendor, bucket, region, access_key, secret_key, endpoint, root,
-                        with_media, &record,
+                        formatter,
+                        vendor,
+                        bucket,
+                        region,
+                        access_key,
+                        secret_key,
+                        endpoint,
+                        root,
+                        with_media,
+                        keep_media_copy,
+                        &record,
                     )
                     .await
                 }
@@ -330,7 +340,18 @@ impl CallRecordManager {
                     url,
                     headers,
                     with_media,
-                } => Self::save_with_http(formatter, url, headers, with_media, &record).await,
+                    keep_media_copy,
+                } => {
+                    Self::save_with_http(
+                        formatter,
+                        url,
+                        headers,
+                        with_media,
+                        keep_media_copy,
+                        &record,
+                    )
+                    .await
+                }
             };
             let file_name = match r {
                 Ok(file_name) => file_name,
@@ -355,6 +376,7 @@ impl CallRecordManager {
         url: &String,
         headers: &Option<HashMap<String, String>>,
         with_media: &Option<bool>,
+        keep_media_copy: &Option<bool>,
         record: &CallRecord,
     ) -> Result<String> {
         let client = reqwest::Client::new();
@@ -426,6 +448,15 @@ impl CallRecordManager {
         let response = request.send().await?;
         if response.status().is_success() {
             let response_text = response.text().await.unwrap_or_default();
+
+            if keep_media_copy.unwrap_or(false) {
+                for media in &record.recorder {
+                    let p = Path::new(&media.path);
+                    if p.exists() {
+                        tokio::fs::remove_file(p).await.ok();
+                    }
+                }
+            }
             Ok(format!("HTTP upload successful: {}", response_text))
         } else {
             Err(anyhow::anyhow!(
@@ -446,6 +477,7 @@ impl CallRecordManager {
         endpoint: &String,
         root: &String,
         with_media: &Option<bool>,
+        keep_media_copy: &Option<bool>,
         record: &CallRecord,
     ) -> Result<String> {
         // Create object store based on vendor
@@ -542,6 +574,15 @@ impl CallRecordManager {
                 }
             }
             uploaded_files.extend(media_files);
+        }
+        // Optionally delete local media files if keep_media_copy is false
+        if keep_media_copy.unwrap_or(false) {
+            for media in &record.recorder {
+                let p = Path::new(&media.path);
+                if p.exists() {
+                    tokio::fs::remove_file(p).await.ok();
+                }
+            }
         }
 
         Ok(format!(

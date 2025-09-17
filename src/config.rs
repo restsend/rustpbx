@@ -182,11 +182,13 @@ pub enum CallRecordConfig {
         endpoint: String,
         root: String,
         with_media: Option<bool>,
+        keep_media_copy: Option<bool>,
     },
     Http {
         url: String,
         headers: Option<HashMap<String, String>>,
         with_media: Option<bool>,
+        keep_media_copy: Option<bool>,
     },
 }
 
