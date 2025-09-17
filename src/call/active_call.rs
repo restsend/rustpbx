@@ -808,7 +808,15 @@ impl ActiveCall {
             )
             .await
         {
-            Ok(_) => {}
+            Ok(answer) => {
+                self.event_sender
+                    .send(SessionEvent::Answer {
+                        timestamp: crate::get_timestamp(),
+                        track_id,
+                        sdp: answer,
+                    })
+                    .ok();
+            }
             Err(e) => {
                 warn!(
                     session_id = session_id,
@@ -1375,6 +1383,12 @@ impl ActiveCall {
                 ));
             }
         };
+
+        call_state_ref.write().as_mut().ok().map(|cs| {
+            if cs.answer.is_none() {
+                cs.answer.replace(answer.clone());
+            }
+        });
 
         self.media_stream
             .update_remote_description(&track_id, &answer)
