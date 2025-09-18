@@ -226,16 +226,14 @@ impl AudioReader for WavAudioReader {
 
         if let Some(resampler) = &mut self.resampler {
             resampler.resample(chunk)
+        } else if let Ok(mut new_resampler) =
+            LinearResampler::new(self.sample_rate as usize, self.target_sample_rate as usize)
+        {
+            let result = new_resampler.resample(chunk);
+            self.resampler = Some(new_resampler);
+            result
         } else {
-            if let Ok(mut new_resampler) =
-                LinearResampler::new(self.sample_rate as usize, self.target_sample_rate as usize)
-            {
-                let result = new_resampler.resample(chunk);
-                self.resampler = Some(new_resampler);
-                result
-            } else {
-                chunk.to_vec()
-            }
+            chunk.to_vec()
         }
     }
 }

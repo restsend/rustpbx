@@ -14,6 +14,12 @@ pub struct RoutingState {
     round_robin_counters: Arc<std::sync::Mutex<HashMap<String, AtomicUsize>>>,
 }
 
+impl Default for RoutingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RoutingState {
     pub fn new() -> Self {
         Self {
@@ -225,8 +231,6 @@ impl RouteAction {
                 // If no explicit action, infer from other fields
                 if self.reject.is_some() {
                     ActionType::Reject
-                } else if self.dest.is_some() {
-                    ActionType::Forward
                 } else {
                     ActionType::Forward
                 }

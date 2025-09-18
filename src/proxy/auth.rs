@@ -41,7 +41,7 @@ impl AuthModule {
     pub async fn authenticate_request(&self, original: &rsip::Request) -> Result<Option<SipUser>> {
         // Check for both Authorization and Proxy-Authorization headers
         // Prioritize Authorization for backward compatibility
-        let (user, auth_inner) = match check_authorization_headers(&original)? {
+        let (user, auth_inner) = match check_authorization_headers(original)? {
             Some((user, auth)) => (user, auth),
             None => {
                 return Ok(None);
@@ -167,8 +167,8 @@ impl ProxyModule for AuthModule {
             return Ok(ProxyAction::Continue);
         }
 
-        match self.server.auth_backend.as_ref() {
-            Some(backend) => match backend.authenticate(&tx.original).await {
+        if let Some(backend) = self.server.auth_backend.as_ref() {
+            match backend.authenticate(&tx.original).await {
                 Ok(Some(user)) => {
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
@@ -177,8 +177,7 @@ impl ProxyModule for AuthModule {
                     info!(error=%e, key = %tx.key, "auth_backend authenticate failed");
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
 
         match self.authenticate_request(&tx.original).await {
@@ -196,7 +195,7 @@ impl ProxyModule for AuthModule {
                             .is_some();
                     if has_proxy_auth_header {
                         // Send proxy challenge if proxy auth was attempted
-                        let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
+                        let proxy_auth = self.create_proxy_auth_challenge(realm)?;
                         info!(
                             from = from_uri.to_string(),
                             realm = realm,
@@ -209,7 +208,7 @@ impl ProxyModule for AuthModule {
                             .ok();
                     } else {
                         // Send WWW challenge if WWW auth was attempted
-                        let www_auth = self.create_www_auth_challenge(&realm)?;
+                        let www_auth = self.create_www_auth_challenge(realm)?;
                         info!(
                             from = from_uri.to_string(),
                             realm = realm,

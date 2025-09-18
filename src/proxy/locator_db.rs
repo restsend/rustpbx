@@ -140,14 +140,13 @@ impl Locator for DbLocator {
         let realm_value = realm.unwrap_or_default().to_string();
 
         // Extract SipAddr components
-        let (host, transport) = match &location.destination {
-            SipAddr { r#type, addr } => {
-                let transport = match r#type {
-                    Some(t) => t.to_string(),
-                    None => "UDP".to_string(), // Default to UDP if not specified
-                };
-                (addr.to_string(), transport)
-            }
+        let SipAddr { r#type, addr } = &location.destination;
+        let (host, transport) = {
+            let transport = match r#type {
+                Some(t) => t.to_string(),
+                None => "UDP".to_string(), // Default to UDP if not specified
+            };
+            (addr.to_string(), transport)
         };
 
         let now = SystemTime::now()

@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use rsip::StatusCode;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
@@ -346,21 +347,19 @@ impl CallRecordingConfig {
 #[derive(Debug, Clone)]
 pub enum FailureAction {
     /// Hangup with specific status code
-    Hangup(u16),
+    Hangup(Option<StatusCode>),
     /// Play audio file and then hangup
     PlayThenHangup {
         audio_file: String,
-        status_code: u16,
+        status_code: StatusCode,
     },
     /// Transfer to another destination
     Transfer(String),
-    /// Try next target in sequence (only for Sequential strategy)
-    TryNext,
 }
 
 impl Default for FailureAction {
     fn default() -> Self {
-        Self::Hangup(486) // Busy Here
+        Self::Hangup(Some(rsip::StatusCode::BusyHere)) // Busy Here
     }
 }
 
@@ -411,6 +410,7 @@ impl MediaConfig {
 
 pub struct Dialplan {
     pub session_id: Option<String>,
+    pub caller_contact: Option<rsip::typed::Contact>,
     pub caller: Option<rsip::Uri>,
     pub targets: DialStrategy,
     pub max_ring_time: u32,
@@ -429,7 +429,6 @@ pub struct Dialplan {
     /// What to do when a call fails
     pub failure_action: FailureAction,
 
-    // Legacy fields (不参与 Clone)
     pub route_invite: Option<Box<dyn RouteInvite>>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
 }
@@ -450,25 +449,6 @@ impl std::fmt::Debug for Dialplan {
             .field("route_invite", &"<RouteInvite trait object>")
             .field("extras", &self.extras)
             .finish()
-    }
-}
-
-impl Clone for Dialplan {
-    fn clone(&self) -> Self {
-        Self {
-            session_id: self.session_id.clone(),
-            caller: self.caller.clone(),
-            targets: self.targets.clone(),
-            max_ring_time: self.max_ring_time,
-            recording: self.recording.clone(),
-            ringback: self.ringback.clone(),
-            media: self.media.clone(),
-            max_call_duration: self.max_call_duration,
-            call_timeout: self.call_timeout,
-            failure_action: self.failure_action.clone(),
-            route_invite: None, // 不克隆 RouteInvite trait object
-            extras: self.extras.clone(),
-        }
     }
 }
 
@@ -565,6 +545,7 @@ impl Default for Dialplan {
         Self {
             session_id: None,
             caller: None,
+            caller_contact: None,
             targets: DialStrategy::Sequential(vec![]),
             max_ring_time: 60,
             recording: CallRecordingConfig::default(),

@@ -13,10 +13,10 @@ pub struct PlainTextBackend {
 }
 
 impl PlainTextBackend {
-    pub fn new(path: &String) -> Self {
+    pub fn new(path: &str) -> Self {
         Self {
             users: Arc::new(Mutex::new(HashMap::new())),
-            path: path.clone(),
+            path: path.to_owned(),
         }
     }
 

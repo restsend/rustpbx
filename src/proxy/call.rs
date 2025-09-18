@@ -5,10 +5,10 @@ use crate::call::Location;
 use crate::call::RouteInvite;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
-use crate::call::sip::Invitation;
 use crate::config::ProxyConfig;
 use crate::config::RouteResult;
-use crate::proxy::b2bcall::B2BCallBuilder;
+use crate::proxy::proxy_call::ProxyCall;
+use crate::proxy::proxy_call::ProxyCallBuilder;
 use crate::proxy::routing::matcher::match_invite;
 use anyhow::Error;
 use anyhow::{Result, anyhow};
@@ -29,6 +29,7 @@ pub trait CallRouter: Send + Sync {
         &self,
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
+        contact: rsip::typed::Contact,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
@@ -37,6 +38,12 @@ pub trait DialplanInspector: Send + Sync {
     async fn inspect_dialplan(&self, dialplan: Dialplan, _original: &rsip::Request) -> Dialplan {
         dialplan
     }
+}
+
+#[async_trait]
+pub trait ProxyCallInspector: Send + Sync {
+    async fn on_start(&self, call: ProxyCall) -> Result<ProxyCall, (rsip::StatusCode, String)>;
+    async fn on_end(&self, call: &ProxyCall);
 }
 
 pub struct DefaultRouteInvite {
@@ -67,7 +74,6 @@ impl RouteInvite for DefaultRouteInvite {
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
     server: SipServerRef,
-    pub invitation: Invitation,
     pub dialog_layer: Arc<DialogLayer>,
     pub routing_state: Arc<crate::proxy::routing::RoutingState>,
 }
@@ -85,11 +91,9 @@ impl CallModule {
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
         let dialog_layer = Arc::new(DialogLayer::new(server.endpoint.inner.clone()));
-        let invitation = Invitation::new(dialog_layer.clone());
         let inner = Arc::new(CallModuleInner {
             config,
             server,
-            invitation,
             dialog_layer,
             routing_state: Arc::new(crate::proxy::routing::RoutingState::new()),
         });
@@ -100,6 +104,7 @@ impl CallModule {
         &self,
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
+        caller_contact: rsip::typed::Contact,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
         let callee_uri = original
             .to_header()
@@ -133,6 +138,7 @@ impl CallModule {
             return Ok(Dialplan {
                 targets: crate::call::DialStrategy::Sequential(vec![location]),
                 route_invite: Some(route_invite),
+                caller_contact: Some(caller_contact),
                 ..Default::default()
             });
         }
@@ -165,11 +171,12 @@ impl CallModule {
             }
         }
 
-        let targets = DialStrategy::Sequential(locations.iter().map(|loc| loc.clone()).collect());
+        let targets = DialStrategy::Sequential(locations.to_vec());
 
         Ok(Dialplan {
             targets,
             route_invite: Some(route_invite),
+            caller_contact: Some(caller_contact),
             ..Dialplan::default()
         })
     }
@@ -183,7 +190,7 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
-        let _caller_contact = match caller.build_contact_from_invite(&*tx) {
+        let caller_contact = match caller.build_contact_from_invite(&*tx) {
             Some(contact) => contact,
             None => {
                 return Err(anyhow::anyhow!("Failed to build caller contact"));
@@ -199,9 +206,12 @@ impl CallModule {
         };
 
         let r = if let Some(resolver) = self.inner.server.call_router.as_ref() {
-            resolver.resolve(&tx.original, route_invite).await
+            resolver
+                .resolve(&tx.original, route_invite, caller_contact)
+                .await
         } else {
-            self.default_resolve(&tx.original, route_invite).await
+            self.default_resolve(&tx.original, route_invite, caller_contact)
+                .await
         };
 
         let dialplan = match r {
@@ -210,7 +220,7 @@ impl CallModule {
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
                 warn!(%code, key = %tx.key,"failed to resolve dialplan: {}", reason_phrase);
-                tx.reply_with(code, vec![reason_phrase.into()], None)
+                tx.reply_with(code, vec![reason_phrase], None)
                     .await
                     .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
                 return Err(e);
@@ -223,44 +233,52 @@ impl CallModule {
             dialplan
         };
 
-        let cancel_token = CancellationToken::new();
+        let cancel_token = tx
+            .connection
+            .as_ref()
+            .map(|c| c.cancel_token())
+            .unwrap_or_else(|| Some(self.inner.server.cancel_token.child_token()))
+            .unwrap_or_default();
 
-        let dialog_id =
-            DialogId::try_from(&tx.original).map_err(|e| anyhow!("Invalid dialog ID: {}", e))?;
-        let session_id = dialplan
-            .session_id
-            .clone()
-            .unwrap_or_else(|| format!("b2bua-{}-{}", rand::random::<u32>(), dialog_id));
+        let mut builder = ProxyCallBuilder::new(cookie)
+            .with_dialplan(dialplan)
+            .with_cancel_token(cancel_token);
 
-        let app_state = self.inner.server.app_state.clone();
-
-        // Extract SDP offer from the original INVITE message
         let body = tx.original.body();
-        let original_sdp = if !body.is_empty() {
-            String::from_utf8_lossy(body).to_string()
-        } else {
-            String::new()
+        if !body.is_empty() {
+            let original_sdp = String::from_utf8_lossy(body).to_string();
+            builder = builder.with_original_sdp_offer(original_sdp);
         };
 
-        let mut builder = B2BCallBuilder::new(session_id.clone(), app_state.clone(), cookie)
-            .with_dialplan(dialplan)
-            .with_cancel_token(cancel_token)
-            .with_invitation(self.inner.invitation.clone());
+        let proxy_call = builder.build(self.inner.dialog_layer.clone());
+        let proxy_call = if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
+            match inspector.on_start(proxy_call).await {
+                Ok(call) => call,
+                Err((code, reason_phrase)) => {
+                    warn!(%code, key = %tx.key,"failed to proxy call {}", reason_phrase);
+                    let reason_phrase = rsip::Header::Other("Reason".into(), reason_phrase);
+                    tx.reply_with(code, vec![reason_phrase], None)
+                        .await
+                        .map_err(|e| anyhow!("failed to proxy call: {}", e))?;
+                    return Err(anyhow::anyhow!("failed toproxy call"));
+                }
+            }
+        } else {
+            proxy_call
+        };
 
-        // If we have SDP content, pass it to the builder
-        if !original_sdp.trim().is_empty() {
-            builder = builder.with_original_sdp_offer(original_sdp);
+        let r = proxy_call.process(tx).await;
+        if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
+            inspector.on_end(&proxy_call).await;
         }
 
-        let b2bcall = builder.build()?;
-
-        match b2bcall.start().await {
+        match r {
             Ok(()) => {
-                info!(session_id = session_id, "session established successfully");
+                info!(session_id=proxy_call.id(), elapsed = ?proxy_call.elapsed(), "session successfully");
                 Ok(())
             }
             Err(e) => {
-                warn!(session_id = session_id, "error establishing session: {}", e);
+                warn!(session_id=proxy_call.id(), elapsed = ?proxy_call.elapsed(), "error establishing session: {}", e);
                 Err(e)
             }
         }
@@ -312,11 +330,8 @@ impl ProxyModule for CallModule {
         tx: &mut Transaction,
         cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
-        match cookie.get_user() {
-            None => {
-                cookie.set_user(SipUser::try_from(&*tx)?);
-            }
-            _ => {}
+        if cookie.get_user().is_none() {
+            cookie.set_user(SipUser::try_from(&*tx)?);
         }
         let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
         info!(
@@ -329,7 +344,6 @@ impl ProxyModule for CallModule {
         match tx.original.method {
             rsip::Method::Invite => {
                 if let Err(e) = self.handle_invite(tx, cookie).await {
-                    warn!(%dialog_id, "error handling INVITE: {}", e);
                     if tx.last_response.is_none() {
                         tx.reply_with(
                             rsip::StatusCode::ServerInternalError,
