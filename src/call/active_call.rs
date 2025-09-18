@@ -392,8 +392,8 @@ impl ActiveCall {
             } else {
                 recorder_option.samplerate
             };
-            let recorder_ptime = if recorder_option.ptime.is_zero() {
-                Duration::from_millis(200)
+            let recorder_ptime = if recorder_option.ptime == 0 {
+                200
             } else {
                 recorder_option.ptime
             };
