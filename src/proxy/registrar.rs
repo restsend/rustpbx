@@ -66,9 +66,9 @@ impl ProxyModule for RegistrarModule {
         let expires = match tx.original.expires_header() {
             Some(expires) => match expires.value().parse::<u32>() {
                 Ok(v) => Some(v),
-                Err(_) => self.config.registrar_expires.clone(),
+                Err(_) => self.config.registrar_expires,
             },
-            _ => self.config.registrar_expires.clone(),
+            _ => self.config.registrar_expires,
         }
         .unwrap_or(60);
 
@@ -151,20 +151,17 @@ impl ProxyModule for RegistrarModule {
         }
 
         let mut headers = vec![contact.into(), rsip::Header::Expires(expires.into())];
-        match tx.endpoint_inner.allows.lock().unwrap().as_ref() {
-            Some(allows) => {
-                if !allows.is_empty() {
-                    headers.push(rsip::Header::Allow(
-                        allows
-                            .iter()
-                            .map(|m| m.to_string())
-                            .collect::<Vec<String>>()
-                            .join(",")
-                            .into(),
-                    ));
-                }
+        if let Some(allows) = tx.endpoint_inner.allows.lock().unwrap().as_ref() {
+            if !allows.is_empty() {
+                headers.push(rsip::Header::Allow(
+                    allows
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect::<Vec<String>>()
+                        .join(",")
+                        .into(),
+                ));
             }
-            None => {}
         }
         tx.reply_with(rsip::StatusCode::OK, headers, None)
             .await

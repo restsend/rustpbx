@@ -40,6 +40,12 @@ pub struct UserAgent {
     pub invitation: Invitation,
 }
 
+impl Default for UserAgentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UserAgentBuilder {
     pub fn new() -> Self {
         Self {
@@ -70,7 +76,7 @@ impl UserAgentBuilder {
         let cancel_token = self
             .cancel_token
             .take()
-            .unwrap_or_else(|| CancellationToken::new());
+            .unwrap_or_default();
 
         let config = self.config.to_owned().unwrap_or_default();
         let local_ip = if !config.addr.is_empty() {
@@ -126,8 +132,8 @@ impl UserAgent {
         while let Some(mut tx) = incoming.recv().await {
             let key: &rsipstack::transaction::key::TransactionKey = &tx.key;
             info!(?key, "received transaction");
-            match tx.original.to_header()?.tag()?.as_ref() {
-                Some(_) => match dialog_layer.match_dialog(&tx.original) {
+            if tx.original.to_header()?.tag()?.as_ref().is_some() {
+                match dialog_layer.match_dialog(&tx.original) {
                     Some(mut d) => {
                         tokio::spawn(async move {
                             match d.handle(&mut tx).await {
@@ -152,8 +158,7 @@ impl UserAgent {
                         }
                         continue;
                     }
-                },
-                None => {}
+                }
             }
             // out dialog, new server dialog
             let (state_sender, state_receiver) = unbounded_channel();
@@ -177,8 +182,7 @@ impl UserAgent {
                                             "Reason".into(),
                                             "SIP;cause=503;text=\"No invite handler configured\""
                                                 .into(),
-                                        )
-                                        .into(),
+                                        ),
                                     ],
                                     None,
                                 )
@@ -192,16 +196,13 @@ impl UserAgent {
                             continue;
                         }
                     };
-                    let contact = match dialog_layer.endpoint.get_addrs().first() {
-                        Some(addr) => Some(rsip::Uri {
-                            scheme: Some(rsip::Scheme::Sip),
-                            auth: None,
-                            host_with_port: addr.addr.clone(),
-                            params: vec![],
-                            headers: vec![],
-                        }),
-                        None => None,
-                    };
+                    let contact = dialog_layer.endpoint.get_addrs().first().map(|addr| rsip::Uri {
+                        scheme: Some(rsip::Scheme::Sip),
+                        auth: None,
+                        host_with_port: addr.addr.clone(),
+                        params: vec![],
+                        headers: vec![],
+                    });
                     let dialog = match dialog_layer.get_or_create_server_invite(
                         &tx,
                         state_sender,
@@ -243,8 +244,7 @@ impl UserAgent {
                         .config
                         .accept_timeout
                         .as_ref()
-                        .map(|t| parse_duration(t).ok())
-                        .flatten()
+                        .and_then(|t| parse_duration(t).ok())
                         .unwrap_or_else(|| Duration::from_secs(60));
                     let pending_dialogs = self.invitation.pending_dialogs.clone();
                     let dialog_id = dialog.id();

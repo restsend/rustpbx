@@ -21,6 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// Type alias to simplify complex return type
+type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+
 use super::{TranscriptionClient, TranscriptionOption};
 
 /// https://github.com/ruzhila/voiceapi
@@ -56,7 +59,7 @@ impl VoiceApiAsrClientBuilder {
         token: CancellationToken,
         option: TranscriptionOption,
         event_sender: EventSender,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>> {
+    ) -> TranscriptionClientFuture {
         Box::pin(async move {
             let builder = Self::new(option, event_sender);
             builder
@@ -101,7 +104,7 @@ impl VoiceApiAsrClientBuilder {
         };
 
         let sample_rate = self.option.samplerate.unwrap_or(16000);
-        let token = self.cancel_token.unwrap_or(CancellationToken::new());
+        let token = self.cancel_token.unwrap_or_default();
         let event_sender = self.event_sender;
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -258,7 +261,7 @@ impl VoiceApiAsrClientInner {
                                     start_time.store(0, Ordering::Relaxed);
                                     SessionEvent::Metrics {
                                         timestamp: crate::get_timestamp(),
-                                        key: format!("completed.asr.voiceapi"),
+                                        key: "completed.asr.voiceapi".to_string(),
                                         data: serde_json::json!({
                                             "index": result.idx,
                                         }),
@@ -267,7 +270,7 @@ impl VoiceApiAsrClientInner {
                                 } else {
                                     SessionEvent::Metrics {
                                         timestamp: crate::get_timestamp(),
-                                        key: format!("ttfb.asr.voiceapi"),
+                                        key: "ttfb.asr.voiceapi".to_string(),
                                         data: serde_json::json!({
                                             "index": result.idx,
                                         }),

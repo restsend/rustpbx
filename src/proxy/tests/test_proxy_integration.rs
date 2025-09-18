@@ -286,7 +286,7 @@ async fn test_call_success() {
 
     sleep(Duration::from_millis(500)).await;
 
-    let call_task = tokio::spawn(async move { alice.make_call("bob").await });
+    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
 
     let answer_task = tokio::spawn(async move {
         for _ in 0..50 {
@@ -295,7 +295,7 @@ async fn test_call_success() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id).await.unwrap();
+                        bob.answer_call(&dialog_id, None).await.unwrap();
                         return Ok::<_, anyhow::Error>(dialog_id);
                     }
                     _ => {}
@@ -339,7 +339,7 @@ async fn test_call_to_nonexistent_user() {
     sleep(Duration::from_millis(200)).await;
 
     // Alice calls nonexistent user
-    let result = alice.make_call("nonexistent").await;
+    let result = alice.make_call("nonexistent", None).await;
     assert!(result.is_err(), "Call to nonexistent user should fail");
 
     alice.stop();
@@ -364,7 +364,7 @@ async fn test_call_to_different_realm() {
     sleep(Duration::from_millis(200)).await;
 
     // Alice calls user in different realm (David is in other.com realm)
-    let result = alice.make_call("david").await;
+    let result = alice.make_call("david", None).await;
     assert!(
         result.is_err(),
         "Call to user in different realm should fail"
@@ -398,7 +398,7 @@ async fn test_call_rejection() {
     sleep(Duration::from_millis(500)).await;
 
     // Alice calls Bob
-    let call_task = tokio::spawn(async move { alice.make_call("bob").await });
+    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
 
     // Bob waits for incoming call and rejects it
     let reject_task = tokio::spawn(async move {
@@ -456,7 +456,7 @@ async fn test_call_hangup_flow() {
     sleep(Duration::from_millis(500)).await;
 
     // Alice calls Bob
-    let call_task = tokio::spawn(async move { alice.make_call("bob").await });
+    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
 
     // Bob waits for incoming call and answers it
     let answer_task = tokio::spawn(async move {
@@ -466,7 +466,7 @@ async fn test_call_hangup_flow() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id).await.unwrap();
+                        bob.answer_call(&dialog_id, None).await.unwrap();
 
                         // Wait for a while after answering, then hang up
                         sleep(Duration::from_millis(500)).await;

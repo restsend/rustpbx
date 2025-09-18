@@ -57,15 +57,16 @@ pub async fn create_test_server_with_config(
             .0,
         config: config.clone(),
         cancel_token: CancellationToken::new(),
-        user_backend: Arc::new(user_backend),
-        auth_backend: Arc::new(None),
-        call_router: Arc::new(None),
-        locator: Arc::new(locator),
+        user_backend: user_backend,
+        auth_backend: None,
+        call_router: None,
+        locator: locator,
         callrecord_sender: None,
         endpoint,
-        location_inspector: Arc::new(None),
-        dialplan_inspector: Arc::new(None),
+        location_inspector: None,
+        dialplan_inspector: None,
         create_route_invite: None,
+        proxycall_inspector: None,
     });
 
     // Add test users

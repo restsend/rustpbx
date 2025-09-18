@@ -9,11 +9,11 @@ use tokio_util::sync::CancellationToken;
 
 pub mod acl;
 pub mod auth;
-pub mod b2bcall;
 pub mod call;
 pub mod locator;
 pub mod locator_db;
 pub mod presence;
+pub mod proxy_call;
 pub mod registrar;
 pub mod routing;
 pub use routing::RoutingState;

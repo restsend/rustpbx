@@ -1,5 +1,5 @@
-pub mod useragent;
-pub use useragent::{UserAgent, UserAgentBuilder};
+mod user_agent;
+pub use user_agent::{UserAgent, UserAgentBuilder};
 mod registration;
 pub use registration::RegisterOption;
 pub mod invitation;

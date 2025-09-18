@@ -51,24 +51,23 @@ pub async fn match_invite(
 
     // Traverse routing rules by priority
     for rule in routes {
-        match rule.disabled {
-            Some(true) => continue,
-            _ => (),
+        if let Some(true) = rule.disabled {
+            continue;
         }
 
         debug!("Evaluating rule: {}", rule.name);
 
         // Check matching conditions
-        let rule_matched = matches_rule(
-            rule,
-            &origin,
-            &caller_user,
-            &caller_host,
-            &callee_user,
-            &callee_host,
-            &request_user,
-            &request_host,
-        )?;
+        let ctx = MatchContext {
+            origin,
+            caller_user: &caller_user,
+            caller_host: &caller_host,
+            callee_user: &callee_user,
+            callee_host: &callee_host,
+            request_user: &request_user,
+            request_host: &request_host,
+        };
+        let rule_matched = matches_rule(rule, &ctx)?;
 
         if !rule_matched {
             continue;
@@ -169,71 +168,73 @@ pub async fn match_invite(
     Ok(RouteResult::Forward(option))
 }
 
+/// Context for rule matching to reduce function arguments
+struct MatchContext<'a> {
+    origin: &'a rsip::Request,
+    caller_user: &'a str,
+    caller_host: &'a rsip::Host,
+    callee_user: &'a str,
+    callee_host: &'a rsip::Host,
+    request_user: &'a str,
+    request_host: &'a rsip::Host,
+}
+
 /// Check if routing rule matches
-fn matches_rule(
-    rule: &crate::proxy::routing::RouteRule,
-    origin: &rsip::Request,
-    caller_user: &str,
-    caller_host: &rsip::Host,
-    callee_user: &str,
-    callee_host: &rsip::Host,
-    request_user: &str,
-    request_host: &rsip::Host,
-) -> Result<bool> {
+fn matches_rule(rule: &crate::proxy::routing::RouteRule, ctx: &MatchContext) -> Result<bool> {
     let conditions = &rule.match_conditions;
 
     // Check from.user
     if let Some(pattern) = &conditions.from_user {
-        if !matches_pattern(pattern, caller_user)? {
+        if !matches_pattern(pattern, ctx.caller_user)? {
             return Ok(false);
         }
     }
 
     // Check from.host
     if let Some(pattern) = &conditions.from_host {
-        if !matches_pattern(pattern, &caller_host.to_string())? {
+        if !matches_pattern(pattern, &ctx.caller_host.to_string())? {
             return Ok(false);
         }
     }
 
     // Check to.user
     if let Some(pattern) = &conditions.to_user {
-        if !matches_pattern(pattern, callee_user)? {
+        if !matches_pattern(pattern, ctx.callee_user)? {
             return Ok(false);
         }
     }
 
     // Check to.host
     if let Some(pattern) = &conditions.to_host {
-        if !matches_pattern(pattern, &callee_host.to_string())? {
+        if !matches_pattern(pattern, &ctx.callee_host.to_string())? {
             return Ok(false);
         }
     }
 
     // Check request_uri.user
     if let Some(pattern) = &conditions.request_uri_user {
-        if !matches_pattern(pattern, request_user)? {
+        if !matches_pattern(pattern, ctx.request_user)? {
             return Ok(false);
         }
     }
 
     // Check request_uri.host
     if let Some(pattern) = &conditions.request_uri_host {
-        if !matches_pattern(pattern, &request_host.to_string())? {
+        if !matches_pattern(pattern, &ctx.request_host.to_string())? {
             return Ok(false);
         }
     }
 
     // Check compatibility fields
     if let Some(pattern) = &conditions.caller {
-        let caller_full = format!("{}@{}", caller_user, caller_host);
+        let caller_full = format!("{}@{}", ctx.caller_user, ctx.caller_host);
         if !matches_pattern(pattern, &caller_full)? {
             return Ok(false);
         }
     }
 
     if let Some(pattern) = &conditions.callee {
-        let callee_full = format!("{}@{}", callee_user, callee_host);
+        let callee_full = format!("{}@{}", ctx.callee_user, ctx.callee_host);
         if !matches_pattern(pattern, &callee_full)? {
             return Ok(false);
         }
@@ -241,9 +242,9 @@ fn matches_rule(
 
     // Check headers
     for (header_key, pattern) in &conditions.headers {
-        if header_key.starts_with("header.") {
-            let header_name = &header_key[7..]; // Remove "header." prefix
-            if let Some(header_value) = get_header_value(origin, header_name) {
+        if let Some(header_name) = header_key.strip_prefix("header.") {
+            // Remove "header." prefix
+            if let Some(header_value) = get_header_value(ctx.origin, header_name) {
                 if !matches_pattern(pattern, &header_value)? {
                     return Ok(false);
                 }
@@ -360,8 +361,7 @@ fn apply_rewrite_rules(
 
     // Add or modify headers
     for (header_key, pattern) in &rewrite.headers {
-        if header_key.starts_with("header.") {
-            let header_name = &header_key[7..];
+        if let Some(header_name) = header_key.strip_prefix("header.") {
             let new_value = apply_rewrite_pattern(pattern, "", origin)?;
 
             let new_header = rsip::Header::Other(header_name.to_string(), new_value);
@@ -432,7 +432,7 @@ fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
                     }
                 }
                 // Fallback for simple position-based extraction
-                if !positions.is_empty() && group_num == 1 && positions.len() >= 1 {
+                if !positions.is_empty() && group_num == 1 && !positions.is_empty() {
                     let start_pos = positions[0];
                     if original.len() > start_pos {
                         // Extract digits from this position onward
@@ -534,8 +534,14 @@ fn select_trunk(
             let index = (hasher.finish() as usize) % trunks.len();
             Ok(trunks[index].clone())
         }
-        "rr" | _ => {
+        "rr" => {
             // Real round-robin implementation with state
+            let destination_key = format!("{:?}", dest_config);
+            let index = routing_state.next_round_robin_index(&destination_key, trunks.len());
+            Ok(trunks[index].clone())
+        }
+        _ => {
+            // Default to round-robin for unknown selection methods
             let destination_key = format!("{:?}", dest_config);
             let index = routing_state.next_round_robin_index(&destination_key, trunks.len());
             Ok(trunks[index].clone())

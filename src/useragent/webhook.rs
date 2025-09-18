@@ -58,7 +58,7 @@ impl InvitationHandler for WebhookInvitationHandler {
             "callee": callee,
             "event": "invite",
             "headers": headers,
-            "offer": String::from_utf8_lossy(&invite_request.body()),
+            "offer": String::from_utf8_lossy(invite_request.body()),
         });
 
         let method = self.method.as_deref().unwrap_or("POST");

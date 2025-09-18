@@ -15,6 +15,12 @@ pub struct VolumeControlProcessor {
     muted: Arc<AtomicBool>,
 }
 
+impl Default for VolumeControlProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VolumeControlProcessor {
     pub fn new() -> Self {
         Self {
@@ -43,7 +49,7 @@ impl VolumeControlProcessor {
 
     pub fn toggle_mute(&self) -> bool {
         // Use fetch_xor to atomically toggle the boolean
-        self.muted.fetch_xor(true, Ordering::Relaxed) == false
+        !self.muted.fetch_xor(true, Ordering::Relaxed)
     }
 }
 
@@ -52,13 +58,10 @@ impl Processor for VolumeControlProcessor {
         // Check if muted
         if self.is_muted() {
             // Mute the audio by zeroing out samples
-            match &mut frame.samples {
-                crate::Samples::PCM { samples } => {
-                    for sample in samples.iter_mut() {
-                        *sample = 0;
-                    }
+            if let crate::Samples::PCM { samples } = &mut frame.samples {
+                for sample in samples.iter_mut() {
+                    *sample = 0;
                 }
-                _ => {} // Don't process non-PCM samples
             }
             return Ok(());
         }
@@ -66,14 +69,11 @@ impl Processor for VolumeControlProcessor {
         // Apply volume control
         let volume = self.get_volume();
         if (volume - 1.0).abs() > f32::EPSILON {
-            match &mut frame.samples {
-                crate::Samples::PCM { samples } => {
-                    for sample in samples.iter_mut() {
-                        let adjusted = (*sample as f32 * volume) as i16;
-                        *sample = adjusted.clamp(i16::MIN, i16::MAX);
-                    }
+            if let crate::Samples::PCM { samples } = &mut frame.samples {
+                for sample in samples.iter_mut() {
+                    let adjusted = (*sample as f32 * volume) as i16;
+                    *sample = adjusted.clamp(i16::MIN, i16::MAX);
                 }
-                _ => {} // Don't process non-PCM samples
             }
         }
 
@@ -86,6 +86,12 @@ impl Processor for VolumeControlProcessor {
 pub struct HoldProcessor {
     /// Whether the call is on hold
     on_hold: Arc<AtomicBool>,
+}
+
+impl Default for HoldProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HoldProcessor {
@@ -105,7 +111,7 @@ impl HoldProcessor {
 
     pub fn toggle_hold(&self) -> bool {
         // Use fetch_xor to atomically toggle the boolean
-        self.on_hold.fetch_xor(true, Ordering::Relaxed) == false
+        !self.on_hold.fetch_xor(true, Ordering::Relaxed)
     }
 }
 
@@ -113,15 +119,12 @@ impl Processor for HoldProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         if self.is_on_hold() {
             // When on hold, replace audio with silence or hold music
-            match &mut frame.samples {
-                crate::Samples::PCM { samples } => {
-                    // Replace with silence for now
-                    // TODO: Could be enhanced to play hold music
-                    for sample in samples.iter_mut() {
-                        *sample = 0;
-                    }
+            if let crate::Samples::PCM { samples } = &mut frame.samples {
+                // Replace with silence for now
+                // TODO: Could be enhanced to play hold music
+                for sample in samples.iter_mut() {
+                    *sample = 0;
                 }
-                _ => {} // Don't process non-PCM samples
             }
         }
         Ok(())

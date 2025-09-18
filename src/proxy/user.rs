@@ -30,10 +30,11 @@ pub struct MemoryUserBackend {
     users: Mutex<HashMap<String, SipUser>>,
 }
 
+// Type alias to simplify complex return type
+type UserBackendFuture = Pin<Box<dyn Future<Output = Result<Box<dyn UserBackend>>> + Send>>;
+
 impl MemoryUserBackend {
-    pub fn create(
-        config: Arc<ProxyConfig>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn UserBackend>>> + Send>> {
+    pub fn create(config: Arc<ProxyConfig>) -> UserBackendFuture {
         Box::pin(async move {
             let builtin_users = match &config.user_backend {
                 UserBackendConfig::Memory { users } => users.clone(),
@@ -136,14 +137,11 @@ impl UserBackend for MemoryUserBackend {
         let mut user = match users.get(&identifier) {
             Some(user) => user.clone(),
             None => {
-                match users.get(username) {
-                    Some(user) => {
-                        if user.realm.as_ref().is_some_and(|r| !r.is_empty()) {
-                            return Err(anyhow::anyhow!("missing user: {}", identifier));
-                        }
-                        return Ok(user.clone());
+                if let Some(user) = users.get(username) {
+                    if user.realm.as_ref().is_some_and(|r| !r.is_empty()) {
+                        return Err(anyhow::anyhow!("missing user: {}", identifier));
                     }
-                    None => {}
+                    return Ok(user.clone());
                 }
                 return Err(anyhow::anyhow!("missing user: {}", identifier));
             }

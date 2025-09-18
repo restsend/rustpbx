@@ -35,12 +35,12 @@ pub struct RegisterOption {
     pub credential: Option<UserCredential>,
 }
 
-impl Into<Credential> for UserCredential {
-    fn into(self) -> Credential {
+impl From<UserCredential> for Credential {
+    fn from(val: UserCredential) -> Self {
         Credential {
-            username: self.username,
-            password: self.password,
-            realm: self.realm,
+            username: val.username,
+            password: val.password,
+            realm: val.realm,
         }
     }
 }
@@ -90,12 +90,17 @@ impl UserAgent {
         if let Some(duration) = wait_for_clear {
             let live_users = self.alive_users.clone();
             let check_loop = async move {
-                while let Ok(users) = live_users.read() {
-                    if users.is_empty() {
+                loop {
+                    let is_empty = {
+                        let users = live_users.read().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
+                        users.is_empty()
+                    };
+                    if is_empty {
                         break;
                     }
                     sleep(Duration::from_millis(50)).await;
                 }
+                Ok::<(), anyhow::Error>(())
             };
             match timeout(duration, check_loop).await {
                 Ok(_) => {}

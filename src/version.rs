@@ -10,7 +10,7 @@ pub fn get_version_info() -> &'static str {
     let build_timestamp: i64 = build_time.parse().unwrap_or(0);
     let build_datetime: DateTime<Local> = DateTime::from_timestamp(build_timestamp, 0)
         .map(|utc| utc.with_timezone(&Local))
-        .unwrap_or_else(|| Local::now());
+        .unwrap_or_else(Local::now);
     let build_time_str = build_datetime.format("%Y-%m-%d %H:%M:%S %Z").to_string();
 
     Box::leak(
@@ -50,7 +50,7 @@ pub fn get_useragent() -> String {
     let build_timestamp: i64 = build_time.parse().unwrap_or(0);
     let build_datetime: DateTime<Local> = DateTime::from_timestamp(build_timestamp, 0)
         .map(|utc| utc.with_timezone(&Local))
-        .unwrap_or_else(|| Local::now());
+        .unwrap_or_else(Local::now);
     let build_time_str = build_datetime.format("%Y-%m-%d").to_string();
     format!(
         "rustpbx/{} (built {} {})",

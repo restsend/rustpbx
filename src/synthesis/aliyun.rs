@@ -39,9 +39,9 @@ struct Command {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum CommandPayload {
-    RunTask(RunTaskPayload),
-    ContinueTask(ContinueTaskPayload),
-    FinishTask(FinishTaskPayload),
+    Run(RunTaskPayload),
+    Continue(ContinueTaskPayload),
+    Finish(FinishTaskPayload),
 }
 
 impl Command {
@@ -70,7 +70,7 @@ impl Command {
                 task_id: task_id.to_string(),
                 streaming: "duplex".to_string(),
             },
-            payload: CommandPayload::RunTask(RunTaskPayload {
+            payload: CommandPayload::Run(RunTaskPayload {
                 task_group: "audio".to_string(),
                 task: "tts".to_string(),
                 function: "SpeechSynthesizer".to_string(),
@@ -95,7 +95,7 @@ impl Command {
                 task_id: task_id.to_string(),
                 streaming: "duplex".to_string(),
             },
-            payload: CommandPayload::ContinueTask(ContinueTaskPayload {
+            payload: CommandPayload::Continue(ContinueTaskPayload {
                 input: PayloadInput {
                     text: text.to_string(),
                 },
@@ -110,7 +110,7 @@ impl Command {
                 task_id: task_id.to_string(),
                 streaming: "duplex".to_string(),
             },
-            payload: CommandPayload::FinishTask(FinishTaskPayload {
+            payload: CommandPayload::Finish(FinishTaskPayload {
                 input: EmptyInput {},
             }),
         }
@@ -349,13 +349,13 @@ impl SynthesisClient for AliyunTtsClient {
         let task_id = self.task_id.as_str();
         if let Some(ws_sink) = self.ws_sink.lock().await.as_mut() {
             if !text.is_empty() {
-                let continue_task_cmd = Command::continue_task(&task_id, text);
+                let continue_task_cmd = Command::continue_task(task_id, text);
                 let continue_task_json = serde_json::to_string(&continue_task_cmd)?;
                 ws_sink.send(Message::text(continue_task_json)).await?;
             }
 
             if let Some(true) = end_of_stream {
-                let finish_task_cmd = Command::finish_task(&task_id);
+                let finish_task_cmd = Command::finish_task(task_id);
                 let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
                 ws_sink.send(Message::text(finish_task_json)).await?;
             }

@@ -865,7 +865,7 @@ impl RtpTrack {
         loop {
             select! {
                 Ok((n, _)) = rtp_socket.recv_raw(&mut buf) => {
-                    if n <= 0 {
+                    if n == 0 {
                         continue;
                     }
                     if Self::is_rtcp_or_stun(&track_id, &buf, n, &stats, ssrc).await {
