@@ -58,7 +58,7 @@ pub enum ActiveCallType {
     WebSocket,
     Sip,
 }
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct ActiveCallState {
     pub start_time: DateTime<Utc>,
     pub ring_time: Option<DateTime<Utc>>,
@@ -67,6 +67,7 @@ pub struct ActiveCallState {
     pub last_status_code: u16,
     pub option: Option<CallOption>,
     pub answer: Option<String>,
+    pub caller_dlg_handle: Option<tokio::task::JoinHandle<()>>,
     pub dialog: Option<DialogGuard>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
@@ -712,7 +713,6 @@ impl ActiveCall {
             _ => reason.unwrap_or(CallRecordHangupReason::BySystem),
         };
 
-        self.tts_handle.lock().await.take();
         self.media_stream
             .stop(Some(hangup_reason.to_string()), initiator);
 
@@ -725,7 +725,6 @@ impl ActiveCall {
             }
             Err(_) => None,
         };
-        self.cancel_token.cancel();
         Ok(())
     }
 
@@ -852,16 +851,20 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
+        let mut caller_jobhandle = None;
         self.call_state.write().as_mut().ok().map(|cs| {
+            caller_jobhandle = cs.caller_dlg_handle.take();
             cs.dialog.take();
             cs.refer_callstate
                 .as_mut()
                 .map(|rcs| rcs.write().as_mut().ok().map(|rcs| rcs.dialog.take()))
         });
-
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
         self.cancel_token.cancel();
+        if let Some(handle) = caller_jobhandle {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
         Ok(())
     }
 
@@ -1352,7 +1355,7 @@ impl ActiveCall {
         let call_state = call_state_ref.clone();
         let track_id_clone = track_id.clone();
         let dialog_layer = self.invitation.dialog_layer.clone();
-        tokio::spawn(async move {
+        let caller_dlg_handle = tokio::spawn(async move {
             client_dialog_event_loop(
                 cancel_token,
                 session_id,
@@ -1388,6 +1391,7 @@ impl ActiveCall {
             if cs.answer.is_none() {
                 cs.answer.replace(answer.clone());
             }
+            cs.caller_dlg_handle = Some(caller_dlg_handle);
         });
 
         self.media_stream
