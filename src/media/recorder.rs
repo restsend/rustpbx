@@ -32,7 +32,7 @@ pub struct RecorderOption {
     #[serde(default)]
     pub samplerate: u32,
     #[serde(default)]
-    pub ptime: Duration,
+    pub ptime: u32,
 }
 
 impl RecorderOption {
@@ -49,7 +49,7 @@ impl Default for RecorderOption {
         Self {
             recorder_file: "".to_string(),
             samplerate: 16000,
-            ptime: Duration::from_millis(200),
+            ptime: 200,
         }
     }
 }
@@ -141,6 +141,19 @@ impl Recorder {
         file_path: &Path,
         mut receiver: UnboundedReceiver<AudioFrame>,
     ) -> Result<()> {
+        if let Some(parent) = file_path.parent() {
+            if !parent.exists() {
+                if let Err(_) = std::fs::create_dir_all(parent) {
+                    warn!(
+                        "Failed to create recording file parent directory: {}",
+                        file_path.display()
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Failed to create recording file parent directory"
+                    ));
+                }
+            }
+        }
         let mut file = match File::create(file_path).await {
             Ok(file) => file,
             Err(e) => {
@@ -159,17 +172,18 @@ impl Recorder {
         );
         // Create an initial WAV header
         self.update_wav_header(&mut file).await?;
-        let chunk_size =
-            (self.option.samplerate / 1000 * self.option.ptime.as_millis() as u32) as usize;
+        let chunk_size = (self.option.samplerate / 1000 * self.option.ptime) as usize;
         info!(
             session_id = self.session_id,
             "Recording to {} ptime: {}ms chunk_size: {}",
             file_path.display(),
-            self.option.ptime.as_millis(),
+            self.option.ptime,
             chunk_size
         );
 
-        let mut interval = IntervalStream::new(tokio::time::interval(self.option.ptime));
+        let mut interval = IntervalStream::new(tokio::time::interval(Duration::from_millis(
+            self.option.ptime as u64,
+        )));
         loop {
             select! {
                 Some(frame) = receiver.recv() => {
