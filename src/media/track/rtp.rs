@@ -436,10 +436,6 @@ impl RtpTrack {
 
     pub fn set_remote_description(&self, answer: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.remote_description.is_some() {
-            // if remote description is already set, don't set it again
-            return Ok(());
-        }
         let mut reader = Cursor::new(answer);
         let sdp = SessionDescription::unmarshal(&mut reader)?;
         let peer_media = match select_peer_media(&sdp, "audio") {
@@ -1084,6 +1080,7 @@ impl Track for RtpTrack {
         let start_time = crate::get_timestamp();
         let ptime = self.config.ptime;
 
+        // Send ICE connectivity check if enabled and remote address is available
         if self.ice_connectivity_check {
             self.try_ice_connectivity_check().await;
         }
@@ -1091,7 +1088,6 @@ impl Track for RtpTrack {
         let inner = self.inner.clone();
 
         tokio::spawn(async move {
-            // Send ICE connectivity check if enabled and remote address is available
             select! {
                 _ = token.cancelled() => {
                 },
