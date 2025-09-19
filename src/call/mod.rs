@@ -278,6 +278,8 @@ pub struct RingbackConfig {
     pub auto_hangup: Option<bool>,
     /// Status code to send when auto hanging up
     pub hangup_status_code: Option<u16>,
+    /// Whether to wait for ringtone playback completion before starting call dialing (default: false)
+    pub wait_for_completion: Option<bool>,
 }
 
 impl Default for RingbackConfig {
@@ -294,6 +296,7 @@ impl RingbackConfig {
             max_duration: Some(Duration::from_secs(60)),
             auto_hangup: None,
             hangup_status_code: None,
+            wait_for_completion: Some(false), // Default: don't wait for completion
         }
     }
 

@@ -233,14 +233,12 @@ impl CallModule {
             dialplan
         };
 
-        let cancel_token = tx
-            .connection
-            .as_ref()
-            .map(|c| c.cancel_token())
-            .unwrap_or_else(|| Some(self.inner.server.cancel_token.child_token()))
-            .unwrap_or_default();
+        let cancel_token = self.inner.server.cancel_token.child_token();
 
-        let mut builder = ProxyCallBuilder::new(cookie)
+        // Create event sender for media stream events
+        let (event_sender, _) = tokio::sync::broadcast::channel(16);
+
+        let mut builder = ProxyCallBuilder::new(cookie, event_sender)
             .with_dialplan(dialplan)
             .with_cancel_token(cancel_token);
 
