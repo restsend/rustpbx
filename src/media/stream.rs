@@ -255,7 +255,7 @@ impl MediaStream {
             info!(
                 session_id = session_id_clone,
                 sample_rate = recorder_option.samplerate,
-                ptime = recorder_option.ptime.as_millis(),
+                ptime = recorder_option.ptime,
                 "start recorder",
             );
 
