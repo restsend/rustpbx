@@ -2,7 +2,7 @@ use crate::{
     TrackId,
     call::{DialStrategy, Dialplan, FailureAction, Location, TransactionCookie},
     callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender},
-    event::{EventSender},
+    event::EventSender,
     media::{
         stream::{MediaStream, MediaStreamBuilder},
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
@@ -124,10 +124,14 @@ struct CallSession {
 }
 
 impl CallSession {
-    fn new(server_dialog: ServerInviteDialog, use_media_proxy: bool, event_sender: EventSender) -> Self {
+    fn new(
+        server_dialog: ServerInviteDialog,
+        use_media_proxy: bool,
+        event_sender: EventSender,
+    ) -> Self {
         // Create MediaStream by default to avoid spawning later
         let media_stream = Arc::new(MediaStreamBuilder::new(event_sender).build());
-        
+
         Self {
             server_dialog,
             callee_dialogs: Vec::new(),
@@ -169,36 +173,36 @@ impl CallSession {
         let config = TrackConfig::default();
 
         let mut track: Box<dyn Track> = if self.determine_callee_track_type(callee_aor) {
-                Box::new(WebrtcTrack::new(
-                    tokio_util::sync::CancellationToken::new(),
-                    track_id.clone(),
-                    config,
-                    None,
-                ))
-            } else {
-                Box::new(
-                    RtpTrackBuilder::new(track_id.clone(), config)
-                        .build()
-                        .await?,
-                )
-            };
+            Box::new(WebrtcTrack::new(
+                tokio_util::sync::CancellationToken::new(),
+                track_id.clone(),
+                config,
+                None,
+            ))
+        } else {
+            Box::new(
+                RtpTrackBuilder::new(track_id.clone(), config)
+                    .build()
+                    .await?,
+            )
+        };
 
-            let answer = if !offer_sdp.trim().is_empty() {
-                match track.handshake(offer_sdp.to_string(), None).await {
-                    Ok(answer) => answer,
-                    Err(e) => {
-                        warn!("Failed to handshake callee track: {}", e);
-                        offer_sdp.to_string()
-                    }
+        let answer = if !offer_sdp.trim().is_empty() {
+            match track.handshake(offer_sdp.to_string(), None).await {
+                Ok(answer) => answer,
+                Err(e) => {
+                    warn!("Failed to handshake callee track: {}", e);
+                    offer_sdp.to_string()
                 }
-            } else {
-                String::new()
-            };
+            }
+        } else {
+            String::new()
+        };
 
-            self.media_stream.update_track(track, None).await;
-            self.callee_track_id = Some(track_id);
+        self.media_stream.update_track(track, None).await;
+        self.callee_track_id = Some(track_id);
 
-            Ok(answer)
+        Ok(answer)
     }
 
     async fn create_caller_track(&mut self, answer_sdp: &str) -> Result<String> {
@@ -256,17 +260,24 @@ impl CallSession {
             // Play ringtone if configured in dialplan
             if should_play_ringtone && !self.early_media_sent {
                 let ringtone_file = proxy_call.dialplan.ringback.audio_file.as_ref().unwrap();
-                let wait_for_completion = proxy_call.dialplan.ringback.wait_for_completion.unwrap_or(false);
-                
+                let wait_for_completion = proxy_call
+                    .dialplan
+                    .ringback
+                    .wait_for_completion
+                    .unwrap_or(false);
+
                 info!(
                     session_id = %proxy_call.session_id,
                     ringtone_file = %ringtone_file,
                     wait_for_completion = wait_for_completion,
                     "Playing ringtone from dialplan"
                 );
-                
+
                 // Play ringtone with configurable wait behavior
-                if let Err(e) = proxy_call.play_audio_file(self, ringtone_file, wait_for_completion).await {
+                if let Err(e) = proxy_call
+                    .play_audio_file(self, ringtone_file, wait_for_completion)
+                    .await
+                {
                     warn!(
                         session_id = %proxy_call.session_id,
                         error = %e,
@@ -340,9 +351,7 @@ impl CallSession {
         self.answer_time = Some(Instant::now());
 
         let mut processed_answer = answer.clone();
-        if !answer.trim().is_empty()
-            && self.caller_track_id.is_none()
-        {
+        if !answer.trim().is_empty() && self.caller_track_id.is_none() {
             match self.create_caller_track(&answer).await {
                 Ok(processed) => {
                     processed_answer = processed;
@@ -448,18 +457,23 @@ impl ProxyCall {
         info!(session_id = %self.session_id, "Starting proxy call processing");
 
         let (state_tx, state_rx) = mpsc::unbounded_channel();
-        let server_dialog = self
-            .dialog_layer
-            .get_or_create_server_invite(tx, state_tx, None, None)?;
+        let local_contact = self.dialplan.caller_contact.as_ref().map(|c| c.uri.clone());
+        let mut server_dialog =
+            self.dialog_layer
+                .get_or_create_server_invite(tx, state_tx, None, local_contact)?;
 
         // Extract initial offer SDP
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
-        
+
         // Determine if media proxy should be used
         let use_media_proxy = self.needs_media_proxy(&offer_sdp, "rtp");
-        let mut session = CallSession::new(server_dialog.clone(), use_media_proxy, self.event_sender.clone());
-        
+        let mut session = CallSession::new(
+            server_dialog.clone(),
+            use_media_proxy,
+            self.event_sender.clone(),
+        );
+
         session.offer = Some(offer_sdp.clone());
 
         // Configure media stream if proxy is needed
@@ -480,7 +494,10 @@ impl ProxyCall {
                 futures::future::pending::<()>().await;
             }
         };
-
+        let server_dialog_loop = async {
+            server_dialog.handle(tx).await.ok();
+            futures::future::pending::<()>().await;
+        };
         let result = tokio::select! {
             _ = self.cancel_token.cancelled() => {
                 session.set_error(StatusCode::RequestTerminated, Some("Cancelled by system".to_string()));
@@ -488,6 +505,7 @@ impl ProxyCall {
                 Err(anyhow!("Call cancelled"))
             }
             _ = serve_stream_loop => {Ok(())},
+            _ = server_dialog_loop => {Ok(())},
             r = self.execute_dialplan(&mut session) => r,
             r = self.handle_server_events(state_rx) => r,
         };
@@ -802,9 +820,7 @@ impl ProxyCall {
                         "Callee dialog is ringing/early"
                     );
 
-                    if !answer.trim().is_empty()
-                        && session.caller_track_id.is_none()
-                    {
+                    if !answer.trim().is_empty() && session.caller_track_id.is_none() {
                         match session.create_caller_track(&answer).await {
                             Ok(processed_answer) => {
                                 answer = processed_answer;
@@ -854,9 +870,15 @@ impl ProxyCall {
                     .unwrap_or(StatusCode::ServiceUnavailable);
                 session.set_error(status_code, Some("All targets failed".to_string()));
             }
-            FailureAction::PlayThenHangup { audio_file, status_code } => {
+            FailureAction::PlayThenHangup {
+                audio_file,
+                status_code,
+            } => {
                 // First, try to play the audio file to the caller, then hangup
-                match self.play_file_then_hangup(session, audio_file, status_code).await {
+                match self
+                    .play_file_then_hangup(session, audio_file, status_code)
+                    .await
+                {
                     Ok(()) => {
                         // Successfully played file and hungup
                         return Ok(());
@@ -868,7 +890,8 @@ impl ProxyCall {
                             error = %e,
                             "Failed to play file, hanging up immediately"
                         );
-                        session.set_error(status_code.clone(), Some("All targets failed".to_string()));
+                        session
+                            .set_error(status_code.clone(), Some("All targets failed".to_string()));
                     }
                 }
             }
@@ -908,7 +931,10 @@ impl ProxyCall {
             }
         }
 
-        let answer_sdp = session.answer.as_ref().ok_or_else(|| anyhow!("No SDP answer available"))?;
+        let answer_sdp = session
+            .answer
+            .as_ref()
+            .ok_or_else(|| anyhow!("No SDP answer available"))?;
 
         // Send 183 Session Progress with answer SDP to establish early media
         if let Err(e) = session.server_dialog.ringing(
@@ -916,10 +942,16 @@ impl ProxyCall {
                 rsip::Header::ContentType("application/sdp".into()),
                 rsip::Header::ContentLength((answer_sdp.len() as u32).into()),
             ]),
-            Some(answer_sdp.clone().into_bytes())
+            Some(answer_sdp.clone().into_bytes()),
         ) {
-            error!("Failed to send 183 Session Progress for audio playback: {}", e);
-            return Err(anyhow!("Failed to send 183 Session Progress for audio playback: {}", e));
+            error!(
+                "Failed to send 183 Session Progress for audio playback: {}",
+                e
+            );
+            return Err(anyhow!(
+                "Failed to send 183 Session Progress for audio playback: {}",
+                e
+            ));
         }
 
         session.ring_time = Some(Instant::now());
@@ -931,10 +963,10 @@ impl ProxyCall {
             .with_cancel_token(self.cancel_token.clone())
             .with_path(audio_file.to_string());
 
-        session.media_stream.update_track(
-            Box::new(file_track),
-            None,
-        ).await;
+        session
+            .media_stream
+            .update_track(Box::new(file_track), None)
+            .await;
 
         // Wait for track completion if requested
         if wait_for_completion {
@@ -980,7 +1012,10 @@ impl ProxyCall {
             Ok(()) => {
                 info!(session_id = %self.session_id, "File playback completed successfully, sending reject");
                 // Send reject after playback completion
-                if let Err(e) = session.server_dialog.reject(Some(status_code.clone()), Some("File playback completed".to_string())) {
+                if let Err(e) = session.server_dialog.reject(
+                    Some(status_code.clone()),
+                    Some("File playback completed".to_string()),
+                ) {
                     warn!("Failed to send reject after playback: {}", e);
                 }
                 Ok(())
@@ -988,7 +1023,10 @@ impl ProxyCall {
             Err(e) => {
                 warn!(session_id = %self.session_id, error = %e, "File playback failed, sending reject");
                 // Send reject after playback failure
-                if let Err(e) = session.server_dialog.reject(Some(status_code.clone()), Some("File playback failed".to_string())) {
+                if let Err(e) = session.server_dialog.reject(
+                    Some(status_code.clone()),
+                    Some("File playback failed".to_string()),
+                ) {
                     warn!("Failed to send reject after playback failure: {}", e);
                 }
                 Err(e)

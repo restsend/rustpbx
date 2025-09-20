@@ -518,6 +518,15 @@ impl Dialplan {
         self.call_timeout = timeout;
         self
     }
+    pub fn with_route_invite(mut self, route: Box<dyn RouteInvite>) -> Self {
+        self.route_invite = Some(route);
+        self
+    }
+
+    pub fn with_caller_contact(mut self, contact: rsip::typed::Contact) -> Self {
+        self.caller_contact = Some(contact);
+        self
+    }
 
     /// Get all target locations regardless of strategy
     pub fn get_all_targets(&self) -> &Vec<Location> {

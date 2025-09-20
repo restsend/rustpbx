@@ -1,5 +1,4 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
-use crate::call::DialStrategy;
 use crate::call::Dialplan;
 use crate::call::Location;
 use crate::call::RouteInvite;
@@ -113,6 +112,19 @@ impl CallModule {
             .map_err(|e| (anyhow::anyhow!(e), None))?;
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
+        let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
+        let session_id = format!("{}/{}", rand::random::<u32>(), dialog_id);
+
+        let caller = original
+            .from_header()
+            .map_err(|e| (anyhow::anyhow!(e), None))?
+            .uri()
+            .map_err(|e| (anyhow::anyhow!(e), None))?;
+
+        let mut dialplan = Dialplan::new(session_id)
+            .with_caller_contact(caller_contact)
+            .with_caller(caller)
+            .with_route_invite(route_invite);
 
         // Check if this is an external realm
         if !self.inner.server.is_same_realm(&callee_realm).await {
@@ -135,12 +147,8 @@ impl CallModule {
                     }
                 }
             }
-            return Ok(Dialplan {
-                targets: crate::call::DialStrategy::Sequential(vec![location]),
-                route_invite: Some(route_invite),
-                caller_contact: Some(caller_contact),
-                ..Default::default()
-            });
+            dialplan = dialplan.with_sequential_targets(vec![location]);
+            return Ok(dialplan);
         }
 
         let mut locations = self
@@ -171,14 +179,8 @@ impl CallModule {
             }
         }
 
-        let targets = DialStrategy::Sequential(locations.to_vec());
-
-        Ok(Dialplan {
-            targets,
-            route_invite: Some(route_invite),
-            caller_contact: Some(caller_contact),
-            ..Dialplan::default()
-        })
+        dialplan = dialplan.with_sequential_targets(locations);
+        Ok(dialplan)
     }
 
     pub(crate) async fn handle_invite(
