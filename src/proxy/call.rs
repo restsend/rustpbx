@@ -113,7 +113,7 @@ impl CallModule {
         let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
         let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
-        let session_id = format!("{}/{}", rand::random::<u32>(), dialog_id);
+        let session_id = format!("{}/{}", dialog_id, rand::random::<u32>());
 
         let caller = original
             .from_header()
@@ -235,20 +235,18 @@ impl CallModule {
             dialplan
         };
 
-        let cancel_token = self.inner.server.cancel_token.child_token();
+        let cancel_token = tx
+            .connection
+            .as_ref()
+            .map(|c| c.cancel_token())
+            .flatten()
+            .unwrap_or_else(|| self.inner.server.cancel_token.child_token());
 
         // Create event sender for media stream events
-        let (event_sender, _) = tokio::sync::broadcast::channel(16);
-
-        let mut builder = ProxyCallBuilder::new(cookie, event_sender)
+        let builder = ProxyCallBuilder::new(cookie)
             .with_dialplan(dialplan)
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
             .with_cancel_token(cancel_token);
-
-        let body = tx.original.body();
-        if !body.is_empty() {
-            let original_sdp = String::from_utf8_lossy(body).to_string();
-            builder = builder.with_original_sdp_offer(original_sdp);
-        };
 
         let proxy_call = builder.build(self.inner.dialog_layer.clone());
         let proxy_call = if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
