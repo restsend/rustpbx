@@ -305,7 +305,9 @@ impl CallRecordManager {
                 CallRecordConfig::Local { root } => {
                     let file_content = formatter.format(&record)?;
                     let file_name = formatter.format_file_name(root, &record);
-                    let mut file = File::create(&file_name).await?;
+                    let mut file = File::create(&file_name).await.map_err(|e| {
+                        anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
+                    })?;
                     file.write_all(file_content.as_bytes()).await?;
                     file.flush().await?;
                     Ok(file_name.to_string())

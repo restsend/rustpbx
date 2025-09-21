@@ -2,7 +2,7 @@ use crate::{
     call::{DialStrategy, Dialplan, FailureAction, Location, TransactionCookie},
     callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender},
     config::MediaProxyMode,
-    event::{EventReceiver, EventSender},
+    event::{EventReceiver, EventSender, create_event_sender},
     media::{
         stream::{MediaStream, MediaStreamBuilder},
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
@@ -50,17 +50,15 @@ pub struct ProxyCallBuilder {
     dialplan: Option<Dialplan>,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
-    event_sender: EventSender,
 }
 
 impl ProxyCallBuilder {
-    pub fn new(cookie: TransactionCookie, event_sender: EventSender) -> Self {
+    pub fn new(cookie: TransactionCookie) -> Self {
         Self {
             cookie,
             dialplan: None,
             cancel_token: None,
             call_record_sender: None,
-            event_sender,
         }
     }
 
@@ -74,12 +72,8 @@ impl ProxyCallBuilder {
         self
     }
 
-    pub fn with_call_record_sender(mut self, sender: CallRecordSender) -> Self {
-        self.call_record_sender = Some(sender);
-        self
-    }
-
-    pub fn with_original_sdp_offer(self, _sdp_offer: String) -> Self {
+    pub fn with_call_record_sender(mut self, sender: Option<CallRecordSender>) -> Self {
+        self.call_record_sender = sender;
         self
     }
 
@@ -100,7 +94,7 @@ impl ProxyCallBuilder {
             dialog_layer,
             cancel_token,
             call_record_sender: self.call_record_sender,
-            event_sender: self.event_sender,
+            event_sender: create_event_sender(),
         }
     }
 }
@@ -214,7 +208,7 @@ impl CallSession {
         Ok(offer)
     }
 
-    async fn create_callee_track_from_answer(&mut self, callee_answer_sdp: &String) -> Result<()> {
+    async fn setup_callee_track(&mut self, callee_answer_sdp: &String) -> Result<()> {
         let track_id = "callee-track".to_string();
         self.media_stream
             .update_remote_description(&track_id, callee_answer_sdp)
@@ -231,12 +225,10 @@ impl CallSession {
             self.ring_time = Some(Instant::now());
         }
 
-        let (headers, body, status_code) = if !answer.is_empty() {
-            //|| proxy_call.dialplan.ringback.audio_file.is_some()
+        if !answer.is_empty() {
             self.early_media_sent = true;
-            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
             if self.use_media_proxy {
-                self.create_callee_track_from_answer(&answer).await.ok();
+                self.setup_callee_track(&answer).await.ok();
                 match self.create_caller_answer_from_offer().await {
                     Ok(answer_for_caller) => {
                         self.answer = Some(answer_for_caller.clone());
@@ -252,15 +244,19 @@ impl CallSession {
                     }
                 };
             }
+        };
 
-            (
-                Some(headers),
-                Some(answer.into_bytes()),
-                StatusCode::SessionProgress,
-            )
+        let status_code = if !answer.is_empty() {
+            StatusCode::SessionProgress
         } else {
-            // 180 Ringing without media
-            (None, None, StatusCode::Ringing)
+            StatusCode::Ringing
+        };
+
+        let (headers, body) = if !answer.is_empty() {
+            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+            (Some(headers), Some(answer.into_bytes()))
+        } else {
+            (None, None)
         };
 
         if let Err(e) = self.server_dialog.ringing(headers, body) {
@@ -363,7 +359,7 @@ impl CallSession {
                 let answer_for_caller = self.create_caller_answer_from_offer().await?;
                 self.answer = Some(answer_for_caller);
             }
-            self.create_callee_track_from_answer(&answer).await?;
+            self.setup_callee_track(&answer).await?;
         } else {
             self.answer = Some(answer);
         }
@@ -842,89 +838,6 @@ impl ProxyCall {
         }
         Ok(())
     }
-
-    // /// Simplified audio file playback with early media (183 Session Progress)
-    // async fn play_audio_file(
-    //     &self,
-    //     session: &mut CallSession,
-    //     audio_file: &str,
-    //     wait_for_completion: bool,
-    // ) -> Result<()> {
-    //     if !session.use_media_proxy {
-    //         warn!("Media proxy not enabled, cannot play audio file");
-    //         return Err(anyhow!("Media proxy not enabled for audio playback"));
-    //     }
-
-    //     // Negotiate answer from original offer via real track handshake (no mock)
-    //     if session.answer.is_none() {
-    //         // Only negotiate if we have an offer from caller
-    //         let offer_sdp = session.offer.as_ref().cloned().unwrap_or_default();
-    //         if offer_sdp.trim().is_empty() {
-    //             return Err(anyhow!(
-    //                 "No SDP offer available for audio playback negotiation"
-    //             ));
-    //         }
-
-    //         // If caller track not yet created, create it using the offer to produce the proper answer
-    //         if session.caller_track_id.is_none() {
-    //             let negotiated_answer = session.create_caller_answer_from_offer().await?;
-    //             if negotiated_answer.trim().is_empty() {
-    //                 return Err(anyhow!("Failed to negotiate answer for audio playback"));
-    //             }
-    //             session.answer = Some(negotiated_answer);
-    //         }
-    //     }
-
-    //     let answer_sdp = session
-    //         .answer
-    //         .as_ref()
-    //         .ok_or_else(|| anyhow!("No SDP answer available"))?;
-
-    //     // Send 183 Session Progress with answer SDP to establish early media
-    //     if let Err(e) = session.server_dialog.ringing(
-    //         Some(vec![
-    //             rsip::Header::ContentType("application/sdp".into()),
-    //             rsip::Header::ContentLength((answer_sdp.len() as u32).into()),
-    //         ]),
-    //         Some(answer_sdp.clone().into_bytes()),
-    //     ) {
-    //         warn!(
-    //             "Failed to send 183 Session Progress for audio playback: {}",
-    //             e
-    //         );
-    //         return Err(anyhow!(
-    //             "Failed to send 183 Session Progress for audio playback: {}",
-    //             e
-    //         ));
-    //     }
-
-    //     session.ring_time = Some(Instant::now());
-    //     session.early_media_sent = true;
-
-    //     // Create file track for audio playback
-    //     let track_id = format!("audio-playback-{}", uuid::Uuid::new_v4());
-    //     let file_track = FileTrack::new(track_id)
-    //         .with_cancel_token(self.cancel_token.clone())
-    //         .with_path(audio_file.to_string());
-
-    //     session
-    //         .media_stream
-    //         .update_track(Box::new(file_track), None)
-    //         .await;
-
-    //     // Wait for track completion if requested
-    //     if wait_for_completion {
-    //         // Simple delay for audio playback - in practice, audio length should be calculated
-    //         tokio::time::sleep(Duration::from_secs(5)).await;
-    //         info!(
-    //             session_id = %self.session_id,
-    //             audio_file = %audio_file,
-    //             "Audio file playback completed (simulated)"
-    //         );
-    //     }
-
-    //     Ok(())
-    // }
 
     async fn record_call(&self, session: &CallSession) {
         if let Some(ref sender) = self.call_record_sender {
