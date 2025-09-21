@@ -465,7 +465,7 @@ pub fn create_test_sdp(ip: &str, port: u16, is_private_ip: bool) -> String {
     let connection_ip = if is_private_ip { "192.168.1.100" } else { ip };
     let session_id = chrono::Utc::now().timestamp();
     let session_version = session_id + 1;
-    
+
     format!(
         "v=0\r\n\
 o=testua {} {} IN IP4 {}\r\n\
@@ -476,11 +476,7 @@ m=audio {} RTP/AVP 0 8\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=sendrecv\r\n",
-        session_id,
-        session_version,
-        ip,
-        connection_ip,
-        port
+        session_id, session_version, ip, connection_ip, port
     )
 }
 
@@ -489,10 +485,10 @@ pub fn create_test_sdp_answer(offer: &str, ip: &str, port: u16) -> String {
     // Parse basic info from offer
     let session_id = chrono::Utc::now().timestamp();
     let session_version = session_id + 1;
-    
+
     // Determine if offer is WebRTC or RTP based
     let is_webrtc = offer.contains("a=ice-ufrag") || offer.contains("a=fingerprint");
-    
+
     if is_webrtc {
         // Respond to WebRTC with WebRTC
         format!(
@@ -508,11 +504,7 @@ a=setup:active\r\n\
 a=ice-ufrag:wxyz\r\n\
 a=ice-pwd:abcdefghijklmnopqrstuvw\r\n\
 a=sendrecv\r\n",
-            session_id,
-            session_version,
-            ip,
-            ip,
-            port
+            session_id, session_version, ip, ip, port
         )
     } else {
         // Respond to RTP with RTP
@@ -526,11 +518,7 @@ m=audio {} RTP/AVP 0 8\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=sendrecv\r\n",
-            session_id,
-            session_version,
-            ip,
-            ip,
-            port
+            session_id, session_version, ip, ip, port
         )
     }
 }
@@ -549,7 +537,6 @@ mod tests {
     pub struct TestProxyServer {
         cancel_token: CancellationToken,
         port: u16,
-        config: Arc<ProxyConfig>,
     }
 
     impl TestProxyServer {
@@ -633,11 +620,7 @@ mod tests {
             });
 
             sleep(Duration::from_millis(100)).await; // Reduced from 200ms
-            Ok(Self {
-                cancel_token,
-                port,
-                config,
-            })
+            Ok(Self { cancel_token, port })
         }
 
         pub fn get_addr(&self) -> SocketAddr {
@@ -1709,7 +1692,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         sleep(Duration::from_millis(100)).await;
 
         // Test callee hangup after answering
-        if let Ok(alice_dialog_id) = alice.make_call("bob", None).await {
+        if let Ok(_alice_dialog_id) = alice.make_call("bob", None).await {
             if wait_for_event(
                 &mut bob,
                 |e| matches!(e, TestUaEvent::IncomingCall(_)),
@@ -1982,13 +1965,15 @@ a=rtpmap:0 PCMU/8000"#;
         // Test should be able to make call that triggers PlayThenHangup
         // In a real test scenario, this would be triggered by dialplan configuration
         // For now, we just verify the basic functionality works
-        println!("PlayThenHangup test with 183 Session Progress - basic registration and call setup works");
+        println!(
+            "PlayThenHangup test with 183 Session Progress - basic registration and call setup works"
+        );
 
         alice.stop();
         proxy.stop();
     }
 
-    #[tokio::test] 
+    #[tokio::test]
     async fn test_ringtone_functionality() {
         let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
             .await
@@ -2042,8 +2027,10 @@ a=rtpmap:0 PCMU/8000"#;
         // Test verifies that both PlayThenHangup and Ringtone functionality
         // can work with the same underlying simplified audio playback infrastructure
         // The code reuse is implemented through the unified play_audio_file method
-        
-        println!("Audio playback code reuse test - simplified audio infrastructure supports both ringtone and PlayThenHangup");
+
+        println!(
+            "Audio playback code reuse test - simplified audio infrastructure supports both ringtone and PlayThenHangup"
+        );
 
         alice.stop();
         proxy.stop();

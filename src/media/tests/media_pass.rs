@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::warn;
 use warp;
 use warp::Filter;
 use warp::ws::Ws;
@@ -63,7 +63,7 @@ async fn start_mock_server(
                 let (tx, rx) = websocket.split();
                 rx.forward(tx).map(|result| {
                     if let Err(e) = result {
-                        error!("websocket error: {:?}", e);
+                        warn!("websocket error: {:?}", e);
                     }
                 })
             })

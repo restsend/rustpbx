@@ -265,19 +265,9 @@ pub enum DialStrategy {
     Parallel(Vec<Location>),
 }
 
-/// Ringback configuration for call control
 #[derive(Debug, Clone)]
 pub struct RingbackConfig {
-    /// Play ringback for these status codes
-    pub status_codes: Vec<u16>,
-    /// Audio file path for ringback tone
     pub audio_file: Option<String>,
-    /// Maximum ringback duration
-    pub max_duration: Option<Duration>,
-    /// Auto hangup after ringback finishes
-    pub auto_hangup: Option<bool>,
-    /// Status code to send when auto hanging up
-    pub hangup_status_code: Option<u16>,
     /// Whether to wait for ringtone playback completion before starting call dialing (default: false)
     pub wait_for_completion: Option<bool>,
 }
@@ -291,12 +281,8 @@ impl Default for RingbackConfig {
 impl RingbackConfig {
     pub fn new() -> Self {
         Self {
-            status_codes: vec![180, 183], // Ringing, Session Progress
             audio_file: None,
-            max_duration: Some(Duration::from_secs(60)),
-            auto_hangup: None,
-            hangup_status_code: None,
-            wait_for_completion: Some(false), // Default: don't wait for completion
+            wait_for_completion: Some(false),
         }
     }
 
@@ -304,14 +290,7 @@ impl RingbackConfig {
         self.audio_file = Some(file);
         self
     }
-
-    pub fn with_auto_hangup(mut self, status_code: u16) -> Self {
-        self.auto_hangup = Some(true);
-        self.hangup_status_code = Some(status_code);
-        self
-    }
 }
-
 /// Recording configuration for call control
 #[derive(Debug, Clone, Default)]
 pub struct CallRecordingConfig {
@@ -462,7 +441,12 @@ impl Dialplan {
             DialStrategy::Parallel(targets) => targets.is_empty(),
         }
     }
-
+    pub fn all_webrtc_target(&self) -> bool {
+        match &self.targets {
+            DialStrategy::Sequential(targets) => targets.iter().all(|loc| loc.supports_webrtc),
+            DialStrategy::Parallel(targets) => targets.iter().all(|loc| loc.supports_webrtc),
+        }
+    }
     /// Create a new dialplan with basic configuration
     pub fn new(session_id: String) -> Self {
         Self {
@@ -544,11 +528,6 @@ impl Dialplan {
     /// Check if recording is enabled
     pub fn is_recording_enabled(&self) -> bool {
         self.recording.enabled
-    }
-
-    /// Check if auto hangup after ringback is enabled
-    pub fn is_auto_hangup_enabled(&self) -> bool {
-        self.ringback.auto_hangup.unwrap_or(false)
     }
 }
 

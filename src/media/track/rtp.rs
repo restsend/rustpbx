@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::{select, time::Instant, time::interval_at};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use webrtc::{
     rtcp::{
         goodbye::Goodbye,
@@ -88,7 +88,7 @@ impl RtpTrackStats {
             timestamp: Arc::new(AtomicU32::new(0)),
             packet_count: Arc::new(AtomicU32::new(0)),
             octet_count: Arc::new(AtomicU32::new(0)),
-            last_timestamp_update: Arc::new(AtomicU64::new(crate::get_timestamp())),
+            last_timestamp_update: Arc::new(AtomicU64::new(0)),
             received_packets: Arc::new(AtomicU32::new(0)),
             received_octets: Arc::new(AtomicU32::new(0)),
             expected_packets: Arc::new(AtomicU32::new(0)),
@@ -666,7 +666,7 @@ impl RtpTrack {
                         match socket.send_raw(rtp_data, &remote_addr).await {
                             Ok(_) => {}
                             Err(e) => {
-                                error!("Failed to send DTMF RTP packet: {}", e);
+                                warn!("Failed to send DTMF RTP packet: {}", e);
                             }
                         }
 
@@ -683,7 +683,7 @@ impl RtpTrack {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to create DTMF RTP packet: {:?}", e);
+                        warn!("Failed to create DTMF RTP packet: {:?}", e);
                         continue;
                     }
                 }
@@ -917,7 +917,7 @@ impl RtpTrack {
                     match packet_sender.send(frame) {
                         Ok(_) => {}
                         Err(e) => {
-                            error!(track_id, "Error sending audio frame: {}", e);
+                            warn!(track_id, "Error sending audio frame: {}", e);
                             break;
                         }
                     }
@@ -1120,7 +1120,7 @@ impl Track for RtpTrack {
                         as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>];
                     if let Ok(data) = webrtc::rtcp::packet::marshal(&pkts) {
                         if let Err(e) = rtcp_socket.send_raw(&data, addr).await {
-                            error!(track_id, "Failed to send RTCP goodbye packet: {}", e);
+                            warn!(track_id, "Failed to send RTCP goodbye packet: {}", e);
                         }
                     }
                 }

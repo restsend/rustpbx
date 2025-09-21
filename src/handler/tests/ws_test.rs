@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::{select, time};
 use tokio_tungstenite::tungstenite;
-use tracing::{error, info};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 // Error handling middleware
@@ -28,7 +28,7 @@ async fn handle_error(
     State(_state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Response {
-    error!("Error handling request: {:?}", request);
+    warn!("Error handling request: {:?}", request);
     (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
 }
 
@@ -86,7 +86,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(e) => {
-            error!("Failed to bind to 127.0.0.1:0: {}", e);
+            warn!("Failed to bind to 127.0.0.1:0: {}", e);
             return Ok(());
         }
     };
@@ -113,10 +113,10 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
                 tungstenite::Error::Http(resp) => {
                     let body = resp.body();
                     let body_str = String::from_utf8_lossy(&body.as_ref().unwrap());
-                    error!("Failed to connect to WebSocket: {}", body_str);
+                    warn!("Failed to connect to WebSocket: {}", body_str);
                 }
                 _ => {
-                    error!("Failed to connect to WebSocket: {:?}", e);
+                    warn!("Failed to connect to WebSocket: {:?}", e);
                 }
             }
             return Err(anyhow::anyhow!("Failed to connect to WebSocket"));
@@ -162,7 +162,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
                     let event: SessionEvent = match serde_json::from_str(&text) {
                         Ok(event) => event,
                         Err(e) => {
-                            error!("Failed to parse event: {} - {}", e, text);
+                            warn!("Failed to parse event: {} - {}", e, text);
                             continue;
                         }
                     };
@@ -201,7 +201,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
             {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("Failed to send audio data: {}", e);
+                    warn!("Failed to send audio data: {}", e);
                     break;
                 }
             }
@@ -249,7 +249,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
             info!("Received at least one event from the server");
         }
         _ = time::sleep(Duration::from_secs(5)) => {
-            error!("Timed out waiting for server response");
+            warn!("Timed out waiting for server response");
         }
     }
 
@@ -262,7 +262,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
             info!("Audio sending task completed");
         }
         _ = time::sleep(Duration::from_secs(10)) => {
-            error!("Test timed out");
+            warn!("Test timed out");
         }
     }
 

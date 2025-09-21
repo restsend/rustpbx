@@ -18,7 +18,7 @@ use std::time::Instant;
 use tokio::select;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use url::Url;
 
 // AudioReader trait to unify WAV and MP3 handling
@@ -519,7 +519,7 @@ impl Track for FileTrack {
             let file = match file {
                 Ok(file) => file,
                 Err(e) => {
-                    error!("filetrack: Error opening file: {}", e);
+                    warn!("filetrack: Error opening file: {}", e);
                     event_sender
                         .send(SessionEvent::Error {
                             track_id: id.clone(),
@@ -557,7 +557,7 @@ impl Track for FileTrack {
 
             // Handle any streaming errors
             if let Err(e) = stream_result {
-                error!("filetrack: Error streaming audio: {}, {}", path, e);
+                warn!("filetrack: Error streaming audio: {}, {}", path, e);
                 event_sender
                     .send(SessionEvent::Error {
                         track_id: id.clone(),
@@ -604,7 +604,7 @@ async fn download_from_url(url: &str, use_cache: bool) -> Result<File> {
         match cache::get_cache_path(&cache_key) {
             Ok(path) => return File::open(&path).map_err(|e| anyhow::anyhow!(e)),
             Err(e) => {
-                error!("filetrack: Error getting cache path: {}", e);
+                warn!("filetrack: Error getting cache path: {}", e);
                 return Err(e);
             }
         }
@@ -631,7 +631,7 @@ async fn download_from_url(url: &str, use_cache: bool) -> Result<File> {
         match cache::get_cache_path(&cache_key) {
             Ok(path) => return File::open(path).map_err(|e| anyhow::anyhow!(e)),
             Err(e) => {
-                error!("filetrack: Error getting cache path: {}", e);
+                warn!("filetrack: Error getting cache path: {}", e);
                 return Err(e);
             }
         }
