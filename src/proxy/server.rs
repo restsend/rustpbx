@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub struct SipServerInner {
     pub app_state: AppState,
@@ -167,7 +167,7 @@ impl SipServerBuilder {
             match create_user_backend(&self.config.user_backend).await {
                 Ok(backend) => backend,
                 Err(e) => {
-                    error!(
+                    warn!(
                         "failed to create user backend: {} {:?}",
                         e, self.config.user_backend
                     );
@@ -182,7 +182,7 @@ impl SipServerBuilder {
             match create_locator(&self.config.locator).await {
                 Ok(locator) => locator,
                 Err(e) => {
-                    error!("failed to create locator: {} {:?}", e, self.config.locator);
+                    warn!("failed to create locator: {} {:?}", e, self.config.locator);
                     return Err(e);
                 }
             }
@@ -295,14 +295,14 @@ impl SipServerBuilder {
                     let mut module = match module_fn(inner.clone(), self.config.clone()) {
                         Ok(module) => module,
                         Err(e) => {
-                            error!("failed to create module {}: {}", name, e);
+                            warn!("failed to create module {}: {}", name, e);
                             continue;
                         }
                     };
                     match module.on_start().await {
                         Ok(_) => {}
                         Err(e) => {
-                            error!("failed to start module {}: {}", name, e);
+                            warn!("failed to start module {}: {}", name, e);
                             continue;
                         }
                     }
@@ -315,7 +315,7 @@ impl SipServerBuilder {
                         module_start_time.elapsed()
                     );
                 } else {
-                    error!("module {} not found", name);
+                    warn!("module {} not found", name);
                 }
             }
             // remove duplicate methods
@@ -377,7 +377,7 @@ impl SipServer {
             match module.on_stop().await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("failed to stop module {}: {}", module.name(), e);
+                    warn!("failed to stop module {}: {}", module.name(), e);
                 }
             }
         }
@@ -492,7 +492,7 @@ impl SipServer {
                     ProxyAction::Abort => break,
                 },
                 Err(e) => {
-                    error!(
+                    warn!(
                         key = %tx.key,
                         module = module.name(),
                         "failed to handle transaction: {}",
@@ -510,7 +510,7 @@ impl SipServer {
             match module.on_transaction_end(tx).await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!(key = %tx.key, "failed to handle transaction: {}", e);
+                    warn!(key = %tx.key, "failed to handle transaction: {}", e);
                 }
             }
         }

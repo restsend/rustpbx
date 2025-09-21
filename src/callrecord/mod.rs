@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[cfg(test)]
 mod tests;
@@ -273,7 +273,7 @@ impl CallRecordManagerBuilder {
                             info!("CallRecordManager created directory: {}", root);
                         }
                         Err(e) => {
-                            error!("CallRecordManager failed to create directory: {}", e);
+                            warn!("CallRecordManager failed to create directory: {}", e);
                         }
                     }
                 }
@@ -356,7 +356,7 @@ impl CallRecordManager {
             let file_name = match r {
                 Ok(file_name) => file_name,
                 Err(e) => {
-                    error!("Failed to save call record: {}", e);
+                    warn!("Failed to save call record: {}", e);
                     return Err(e);
                 }
             };
@@ -414,7 +414,7 @@ impl CallRecordManager {
                             form = form.part(format!("media_{}", media.track_id), part);
                         }
                         Err(e) => {
-                            error!("Failed to read media file {}: {}", media.path, e);
+                            warn!("Failed to read media file {}: {}", media.path, e);
                         }
                     }
                 }
@@ -634,7 +634,7 @@ impl CallRecordManager {
                             Ok(_) => {
                             }
                             Err(e) => {
-                                error!("Failed to save call record: {}", e);
+                                warn!("Failed to save call record: {}", e);
                             }
                         }
                     }

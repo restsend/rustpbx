@@ -10,7 +10,7 @@ use bytes::Bytes;
 use std::{sync::Mutex, time::Duration};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{info, warn};
 
 pub type WebsocketBytesSender = tokio::sync::mpsc::UnboundedSender<Bytes>;
 pub type WebsocketBytesReceiver = tokio::sync::mpsc::UnboundedReceiver<Bytes>;
@@ -87,7 +87,7 @@ impl Track for WebsocketTrack {
         let mut audio_from_ws = match self.rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
-                error!(track_id, "no audio from ws");
+                warn!(track_id, "no audio from ws");
                 return Ok(());
             }
         };
@@ -122,7 +122,7 @@ impl Track for WebsocketTrack {
                     match packet_sender.send(packet) {
                         Ok(_) => (),
                         Err(e) => {
-                            error!("error sending packet: {}", e);
+                            warn!("error sending packet: {}", e);
                             break;
                         }
                     }

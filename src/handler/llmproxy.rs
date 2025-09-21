@@ -1,17 +1,17 @@
 use crate::app::AppState;
 use anyhow::Result;
 use axum::{
+    Router,
     body::Body,
     extract::State,
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
-    Router,
 };
 use reqwest::header;
 use serde::{Deserialize, Serialize};
 use std::{env, time::Instant};
-use tracing::{error, info};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenAIConfig {
@@ -37,7 +37,7 @@ async fn proxy_handler(State(state): State<AppState>, req: Request<Body>) -> Res
     match forward_request(&state, req).await {
         Ok(response) => response,
         Err(e) => {
-            error!("Error forwarding request: {}", e);
+            warn!("Error forwarding request: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to proxy request: {}", e),
