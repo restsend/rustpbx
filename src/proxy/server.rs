@@ -11,7 +11,7 @@ use crate::{
     proxy::{
         FnCreateRouteInvite,
         auth::AuthBackend,
-        call::{CallRouter, DialplanInspector},
+        call::{CallRouter, DialplanInspector, ProxyCallInspector},
     },
 };
 use anyhow::{Result, anyhow};
@@ -38,20 +38,21 @@ use std::{
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub struct SipServerInner {
     pub app_state: AppState,
     pub cancel_token: CancellationToken,
     pub config: Arc<ProxyConfig>,
-    pub user_backend: Arc<Box<dyn UserBackend>>,
-    pub auth_backend: Arc<Option<Box<dyn AuthBackend>>>,
-    pub call_router: Arc<Option<Box<dyn CallRouter>>>,
-    pub dialplan_inspector: Arc<Option<Box<dyn DialplanInspector>>>,
-    pub locator: Arc<Box<dyn Locator>>,
+    pub user_backend: Box<dyn UserBackend>,
+    pub auth_backend: Option<Box<dyn AuthBackend>>,
+    pub call_router: Option<Box<dyn CallRouter>>,
+    pub dialplan_inspector: Option<Box<dyn DialplanInspector>>,
+    pub proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
+    pub locator: Box<dyn Locator>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
-    pub location_inspector: Arc<Option<Box<dyn LocationInspector>>>,
+    pub location_inspector: Option<Box<dyn LocationInspector>>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
 }
 
@@ -75,6 +76,7 @@ pub struct SipServerBuilder {
     message_inspector: Option<Box<dyn MessageInspector>>,
     location_inspector: Option<Box<dyn LocationInspector>>,
     dialplan_inspector: Option<Box<dyn DialplanInspector>>,
+    proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
 }
 
@@ -86,6 +88,7 @@ impl SipServerBuilder {
             user_backend: None,
             auth_backend: None,
             call_router: None,
+            proxycall_inspector: None,
             module_fns: HashMap::new(),
             locator: None,
             callrecord_sender: None,
@@ -152,6 +155,11 @@ impl SipServerBuilder {
         self
     }
 
+    pub fn with_proxycall_inspector(mut self, inspector: Box<dyn ProxyCallInspector>) -> Self {
+        self.proxycall_inspector = Some(inspector);
+        self
+    }
+
     pub async fn build(self, app_state: AppState) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
@@ -159,7 +167,7 @@ impl SipServerBuilder {
             match create_user_backend(&self.config.user_backend).await {
                 Ok(backend) => backend,
                 Err(e) => {
-                    error!(
+                    warn!(
                         "failed to create user backend: {} {:?}",
                         e, self.config.user_backend
                     );
@@ -174,7 +182,7 @@ impl SipServerBuilder {
             match create_locator(&self.config.locator).await {
                 Ok(locator) => locator,
                 Err(e) => {
-                    error!("failed to create locator: {} {:?}", e, self.config.locator);
+                    warn!("failed to create locator: {} {:?}", e, self.config.locator);
                     return Err(e);
                 }
             }
@@ -260,19 +268,20 @@ impl SipServerBuilder {
         let call_router = self.call_router;
         let location_inspector = self.location_inspector;
         let dialplan_inspector = self.dialplan_inspector;
-
+        let proxycall_inspector = self.proxycall_inspector;
         let inner = Arc::new(SipServerInner {
             app_state,
             config: self.config.clone(),
             cancel_token,
-            user_backend: Arc::new(user_backend),
-            auth_backend: Arc::new(auth_backend),
-            call_router: Arc::new(call_router),
-            locator: Arc::new(locator),
+            user_backend: user_backend,
+            auth_backend: auth_backend,
+            call_router: call_router,
+            proxycall_inspector: proxycall_inspector,
+            locator: locator,
             callrecord_sender: self.callrecord_sender,
             endpoint,
-            location_inspector: Arc::new(location_inspector),
-            dialplan_inspector: Arc::new(dialplan_inspector),
+            location_inspector: location_inspector,
+            dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
         });
 
@@ -286,14 +295,14 @@ impl SipServerBuilder {
                     let mut module = match module_fn(inner.clone(), self.config.clone()) {
                         Ok(module) => module,
                         Err(e) => {
-                            error!("failed to create module {}: {}", name, e);
+                            warn!("failed to create module {}: {}", name, e);
                             continue;
                         }
                     };
                     match module.on_start().await {
                         Ok(_) => {}
                         Err(e) => {
-                            error!("failed to start module {}: {}", name, e);
+                            warn!("failed to start module {}: {}", name, e);
                             continue;
                         }
                     }
@@ -306,7 +315,7 @@ impl SipServerBuilder {
                         module_start_time.elapsed()
                     );
                 } else {
-                    error!("module {} not found", name);
+                    warn!("module {} not found", name);
                 }
             }
             // remove duplicate methods
@@ -368,7 +377,7 @@ impl SipServer {
             match module.on_stop().await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("failed to stop module {}: {}", module.name(), e);
+                    warn!("failed to stop module {}: {}", module.name(), e);
                 }
             }
         }
@@ -419,18 +428,17 @@ impl SipServer {
                     | rsip::method::Method::Info
                     | rsip::method::Method::Refer
                     | rsip::method::Method::Update
-            ) {
-                if tx.endpoint_inner.option.ignore_out_of_dialog_option {
-                    let to_tag = tx
-                        .original
-                        .to_header()
-                        .and_then(|to| to.tag())
-                        .ok()
-                        .flatten();
-                    if to_tag.is_none() {
-                        info!(key = %tx.key, "ignoring out-of-dialog OPTIONS request");
-                        continue;
-                    }
+            ) && tx.endpoint_inner.option.ignore_out_of_dialog_option
+            {
+                let to_tag = tx
+                    .original
+                    .to_header()
+                    .and_then(|to| to.tag())
+                    .ok()
+                    .flatten();
+                if to_tag.is_none() {
+                    info!(key = %tx.key, "ignoring out-of-dialog OPTIONS request");
+                    continue;
                 }
             }
             tokio::spawn(async move {
@@ -457,12 +465,12 @@ impl SipServer {
                 if !matches!(
                     tx.original.method,
                     rsip::Method::Bye | rsip::method::Method::Cancel | rsip::Method::Ack
-                ) {
-                    if tx.last_response.is_none() && !cookie.is_spam() {
-                        tx.reply(rsip::StatusCode::NotImplemented).await.ok();
-                    }
+                ) && tx.last_response.is_none()
+                    && !cookie.is_spam()
+                {
+                    tx.reply(rsip::StatusCode::NotImplemented).await.ok();
                 }
-                return Ok::<(), anyhow::Error>(());
+                Ok::<(), anyhow::Error>(())
             });
         }
         Ok(())
@@ -484,7 +492,7 @@ impl SipServer {
                     ProxyAction::Abort => break,
                 },
                 Err(e) => {
-                    error!(
+                    warn!(
                         key = %tx.key,
                         module = module.name(),
                         "failed to handle transaction: {}",
@@ -502,7 +510,7 @@ impl SipServer {
             match module.on_transaction_end(tx).await {
                 Ok(_) => {}
                 Err(e) => {
-                    error!(key = %tx.key, "failed to handle transaction: {}", e);
+                    warn!(key = %tx.key, "failed to handle transaction: {}", e);
                 }
             }
         }

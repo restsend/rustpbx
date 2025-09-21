@@ -260,7 +260,7 @@ fn event_stream(ws_stream: WsSource) -> BoxStream<'static, Result<SynthesisEvent
                 None
             }
             Ok(Message::Close(_)) => {
-                return Some(Err(anyhow::anyhow!("Tencent TTS closed by server")));
+                Some(Err(anyhow::anyhow!("Tencent TTS closed by server")))
             }
             Err(e) => Some(Err(anyhow::anyhow!("Tencent TTS websocket error: {}", e))),
             _ => None,

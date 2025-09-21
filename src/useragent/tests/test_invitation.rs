@@ -166,9 +166,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
                 content_type: Some("application/sdp".to_string()),
                 offer: Some(b"v=0\r\no=bob 123456 123456 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n".to_vec()),
                 contact: bob_uri.try_into()?,
-                credential: None,
-                headers: None,
-                destination: None,
+                ..Default::default()
             };
 
             info!("Bob initiating call to Alice...");

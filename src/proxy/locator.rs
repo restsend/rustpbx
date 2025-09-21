@@ -9,6 +9,8 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
+
 #[async_trait]
 pub trait Locator: Send + Sync {
     fn get_identifier(&self, user: &str, realm: Option<&str>) -> String {
@@ -28,6 +30,12 @@ pub struct MemoryLocator {
     locations: Mutex<HashMap<String, Location>>,
 }
 
+impl Default for MemoryLocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryLocator {
     pub fn new() -> Self {
         Self {
@@ -36,7 +44,7 @@ impl MemoryLocator {
     }
     pub fn create(
         _config: Arc<ProxyConfig>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>> {
+    ) -> LocatorCreationFuture {
         Box::pin(async move { Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>) })
     }
 }

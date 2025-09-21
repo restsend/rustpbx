@@ -84,7 +84,7 @@ impl SileroVad {
             ),
             state_data.to_vec(),
         )
-        .map_err(|e| ort::Error::new(&format!("Failed to reshape state array: {}", e)))?;
+        .map_err(|e|                     ort::Error::new(format!("Failed to reshape state array: {}", e)))?;
         self.state.assign(&state_array);
 
         Ok(probability)
@@ -99,7 +99,7 @@ impl VadEngine for SileroVad {
         };
 
         self.buffer.extend_from_slice(samples);
-        while self.buffer.len() >= self.chunk_size {
+        if self.buffer.len() >= self.chunk_size {
             let chunk: Vec<i16> = self.buffer.drain(..self.chunk_size).collect();
             let score = match self.predict(&chunk) {
                 Ok(score) => score,

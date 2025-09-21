@@ -62,7 +62,7 @@ impl VoiceApiTtsClient {
         end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
-        let cache_key = option.as_ref().map(|opt| opt.cache_key.clone()).flatten();
+        let cache_key = option.as_ref().and_then(|opt| opt.cache_key.clone());
         let option = self.option.merge_with(option);
         let endpoint = option
             .endpoint
@@ -180,10 +180,7 @@ impl SynthesisClient for VoiceApiTtsClient {
             anyhow!("VoiceApiTtsClient: Receiver already taken, cannot start new stream")
         })?;
         Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            match rx.recv().await {
-                Some(event) => Some((event, rx)),
-                None => None,
-            }
+            rx.recv().await.map(|event| (event, rx))
         })))
     }
     async fn synthesize(

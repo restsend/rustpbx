@@ -424,7 +424,7 @@ async fn main() -> Result<()> {
     };
     select! {
         _ = async {
-            for handle in handles {
+            if let Some(handle) = handles.into_iter().next() {
                 handle.await.expect("Failed to join client");
             }
         } => {}

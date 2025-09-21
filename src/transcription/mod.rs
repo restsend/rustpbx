@@ -29,26 +29,19 @@ pub async fn handle_wait_for_answer_with_audio_drop(
     tokio::select! {
         _ = token.cancelled() => {
             debug!("Cancelled before answer");
-            return;
         }
         // drop audio if not started after answer
         _ = async {
-            while let Some(_) = audio_rx.recv().await {}
+            while (audio_rx.recv().await).is_some() {}
         } => {}
         _ = async {
-            match event_rx {
-                Some(mut rx) => {
-                    while let Ok(event) = rx.recv().await {
-                        match event {
-                            SessionEvent::Answer { .. } => {
-                                debug!("Received answer event, starting transcription");
-                                break;
-                            }
-                            _ => {}
-                        }
+            if let Some(mut rx) = event_rx {
+                while let Ok(event) = rx.recv().await {
+                    if let SessionEvent::Answer { .. } = event {
+                        debug!("Received answer event, starting transcription");
+                        break;
                     }
                 }
-                None => {}
             }
         } => {
             debug!("Wait for answer completed");
@@ -67,7 +60,7 @@ pub enum TranscriptionType {
     Other(String),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct TranscriptionOption {
@@ -106,25 +99,6 @@ impl<'de> Deserialize<'de> for TranscriptionType {
             "voiceapi" => Ok(TranscriptionType::VoiceApi),
             "aliyun" => Ok(TranscriptionType::Aliyun),
             _ => Ok(TranscriptionType::Other(value)),
-        }
-    }
-}
-
-// Default config for backward compatibility
-impl Default for TranscriptionOption {
-    fn default() -> Self {
-        Self {
-            provider: None,
-            language: None,
-            app_id: None,
-            secret_id: None,
-            secret_key: None,
-            model_type: None,
-            buffer_size: None,
-            samplerate: None,
-            endpoint: None,
-            extra: None,
-            start_when_answer: None,
         }
     }
 }

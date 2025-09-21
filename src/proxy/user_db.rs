@@ -151,27 +151,23 @@ impl UserBackend for DbBackend {
             .config
             .display_name_column
             .as_ref()
-            .map(|k| row.try_get(k.as_str()).ok())
-            .flatten();
+            .and_then(|k| row.try_get(k.as_str()).ok());
 
         let email = self
             .config
             .email_column
             .as_ref()
-            .map(|k| row.try_get(k.as_str()).ok())
-            .flatten();
+            .and_then(|k| row.try_get(k.as_str()).ok());
         let phone = self
             .config
             .phone_column
             .as_ref()
-            .map(|k| row.try_get(k.as_str()).ok())
-            .flatten();
+            .and_then(|k| row.try_get(k.as_str()).ok());
         let note = self
             .config
             .note_column
             .as_ref()
-            .map(|k| row.try_get(k.as_str()).ok())
-            .flatten();
+            .and_then(|k| row.try_get(k.as_str()).ok());
 
         Ok(SipUser {
             id: id as u64,

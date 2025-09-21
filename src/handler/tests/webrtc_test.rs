@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::{select, time};
 use tokio_tungstenite::tungstenite::{self, Message};
-use tracing::{error, info};
+use tracing::{info, warn};
 use uuid::Uuid;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::{
@@ -38,7 +38,7 @@ async fn handle_error(
     State(_state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
 ) -> Response {
-    error!("Error handling request: {:?}", request);
+    warn!("Error handling request: {:?}", request);
     (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
 }
 
@@ -150,7 +150,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             info!("ICE gathering ok");
         }
         _ = time::sleep(std::time::Duration::from_secs(3)) => {
-            error!("ICE gathering timeout");
+            warn!("ICE gathering timeout");
         }
     }
 
@@ -173,10 +173,10 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
                 tungstenite::Error::Http(resp) => {
                     let body = resp.body();
                     let body_str = String::from_utf8_lossy(&body.as_ref().unwrap());
-                    error!("Failed to connect to WebSocket: {}", body_str);
+                    warn!("Failed to connect to WebSocket: {}", body_str);
                 }
                 _ => {
-                    error!("Failed to connect to WebSocket: {:?}", e);
+                    warn!("Failed to connect to WebSocket: {:?}", e);
                 }
             }
             return Err(anyhow::anyhow!("Failed to connect to WebSocket"));
@@ -222,7 +222,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             let msg = match ws_receiver.next().await {
                 Some(Ok(msg)) => msg,
                 Some(Err(e)) => {
-                    error!("WebSocket error: {:?}", e);
+                    warn!("WebSocket error: {:?}", e);
                     assert!(false, "WebSocket error: {:?}", e);
                     break;
                 }
@@ -244,7 +244,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
                     peer_connection.set_remote_description(offer).await?;
                 }
                 SessionEvent::Error { error, .. } => {
-                    error!("Received error: {}", error);
+                    warn!("Received error: {}", error);
                     assert!(false, "Received error: {}", error);
                     break;
                 }
@@ -305,7 +305,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
             info!("Audio sent successfully");
         }
         _ = time::sleep(std::time::Duration::from_secs(30)) => {
-            error!("Transcription timeout");
+            warn!("Transcription timeout");
         }
     }
     assert!(*has_answer.lock().await, "No answer received");

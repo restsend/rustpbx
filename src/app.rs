@@ -177,20 +177,18 @@ impl AppStateBuilder {
 
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
+        } else if let Some(ref callrecord) = config.callrecord {
+            let mut callrecord_manager = CallRecordManagerBuilder::new()
+                .with_cancel_token(token.child_token())
+                .with_config(callrecord.clone())
+                .build();
+            let sender = callrecord_manager.sender.clone();
+            tokio::spawn(async move {
+                callrecord_manager.serve().await;
+            });
+            Some(sender)
         } else {
-            if let Some(ref callrecord) = config.callrecord {
-                let mut callrecord_manager = CallRecordManagerBuilder::new()
-                    .with_cancel_token(token.child_token())
-                    .with_config(callrecord.clone())
-                    .build();
-                let sender = callrecord_manager.sender.clone();
-                tokio::spawn(async move {
-                    callrecord_manager.serve().await;
-                });
-                Some(sender)
-            } else {
-                None
-            }
+            None
         };
         let app_state = Arc::new(AppStateInner {
             config: config.clone(),

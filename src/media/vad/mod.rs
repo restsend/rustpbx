@@ -179,21 +179,13 @@ impl VadProcessorInner {
 
             if let Some(temp_end) = self.temp_end {
                 // Use saturating_sub to handle timestamp wrapping or out-of-order frames
-                let silence_duration = if timestamp >= temp_end {
-                    timestamp - temp_end
-                } else {
-                    0 // If timestamps are out of order, assume no silence
-                };
+                let silence_duration = timestamp.saturating_sub(temp_end);
 
                 // Process regular silence detection for speech segments
                 if self.triggered && silence_duration >= self.option.silence_padding {
                     if let Some(start_time) = self.current_speech_start {
                         // Use safe duration calculation
-                        let duration = if temp_end >= start_time {
-                            temp_end - start_time
-                        } else {
-                            0 // If timestamps are out of order, assume no duration
-                        };
+                        let duration = temp_end.saturating_sub(start_time);
                         if duration >= self.option.speech_padding {
                             let samples_vec = self
                                 .window_bufs
@@ -224,11 +216,7 @@ impl VadProcessorInner {
                 // Process silence timeout if configured
                 if let Some(timeout) = self.option.silence_timeout {
                     // Use same safe calculation for silence timeout
-                    let timeout_duration = if timestamp >= temp_end {
-                        timestamp - temp_end
-                    } else {
-                        0
-                    };
+                    let timeout_duration = timestamp.saturating_sub(temp_end);
 
                     if timeout_duration >= timeout {
                         let event = SessionEvent::Silence {

@@ -30,7 +30,7 @@ pub async fn sip_ws_handler(
     };
     let local_addr = SipAddr {
         r#type: Some(transport_type),
-        addr: client_addr.addr.clone().into(),
+        addr: client_addr.addr.into(),
     };
     let ws_token = token.child_token();
     let connection = match ChannelConnection::create_connection(
