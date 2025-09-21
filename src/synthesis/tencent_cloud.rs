@@ -5,33 +5,31 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Duration;
 use futures::{
-    SinkExt, StreamExt,
-    stream::{BoxStream, SplitSink, SplitStream},
+    FutureExt, SinkExt, Stream, StreamExt,
+    stream::{self, BoxStream, SplitSink},
 };
 use ring::hmac;
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, sync::Mutex};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{client::IntoClientRequest, protocol::Message},
+use std::sync::Arc;
+use tokio::{
+    net::TcpStream,
+    sync::{Notify, mpsc},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+};
 use tracing::debug;
-use unic_emoji::char::is_emoji;
-use unic_emoji::char::is_emoji_component;
-use unic_emoji::char::is_emoji_modifier;
-use unic_emoji::char::is_emoji_modifier_base;
+use unic_emoji::char::{is_emoji, is_emoji_component, is_emoji_modifier, is_emoji_modifier_base};
 use urlencoding;
 use uuid::Uuid;
 
 const HOST: &str = "tts.cloud.tencent.com";
-const PATH: &str = "/stream_wsv2";
+const NON_STREAMING_PATH: &str = "/stream_ws";
+const STREAMING_PATH: &str = "/stream_wsv2";
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type WsSource = SplitStream<WsStream>;
 type WsSink = SplitSink<WsStream, Message>;
-/// TencentCloud TTS Response structure
-/// https://cloud.tencent.com/document/product/1073/94308   
 
 #[derive(Debug, Serialize)]
 struct WebSocketRequest {
@@ -42,16 +40,18 @@ struct WebSocketRequest {
 }
 
 impl WebSocketRequest {
-    fn synthesis_action(session_id: &str, message_id: &str, text: &str) -> Self {
+    fn synthesis_action(session_id: &str, text: &str) -> Self {
+        let message_id = Uuid::new_v4().to_string();
         Self {
             session_id: session_id.to_string(),
-            message_id: message_id.to_string(),
+            message_id,
             action: "ACTION_SYNTHESIS".to_string(),
             data: text.to_string(),
         }
     }
 
-    fn complete_action(session_id: &str, message_id: &str) -> Self {
+    fn complete_action(session_id: &str) -> Self {
+        let message_id = Uuid::new_v4().to_string();
         Self {
             session_id: session_id.to_string(),
             message_id: message_id.to_string(),
@@ -96,229 +96,6 @@ impl From<&TencentSubtitle> for Subtitle {
     }
 }
 
-#[derive(Debug)]
-pub struct TencentCloudTtsClient {
-    option: SynthesisOption,
-    session_id: String,
-    message_id: String,
-    sink: Mutex<Option<WsSink>>,
-}
-
-impl TencentCloudTtsClient {
-    pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-        let client = Self::new(option.clone());
-        Ok(Box::new(client))
-    }
-
-    pub fn new(option: SynthesisOption) -> Self {
-        Self {
-            option,
-            session_id: Uuid::new_v4().into(),
-            message_id: Uuid::new_v4().into(),
-            sink: Mutex::new(None),
-        }
-    }
-
-    async fn connect(&self) -> Result<WsStream> {
-        let url = self.generate_websocket_url();
-        let request = url.into_client_request()?;
-        let (mut ws_stream, _) = connect_async(request).await?;
-        while let Some(message) = ws_stream.next().await {
-            if let Ok(Message::Text(text)) = message {
-                let response = serde_json::from_str::<WebSocketResponse>(&text)?;
-                if response.ready == 1 {
-                    debug!("TencentCloud TTS: connected");
-                    break;
-                }
-
-                if response.code != 0 {
-                    return Err(anyhow::anyhow!(
-                        "TencentCloud TTS: failed, code: {}, message: {}",
-                        response.code,
-                        response.message
-                    ));
-                }
-            }
-        }
-
-        Ok(ws_stream)
-    }
-
-    fn generate_websocket_url(&self) -> String {
-        let secret_id = self.option.secret_id.clone().unwrap_or_default();
-        let secret_key = self.option.secret_key.clone().unwrap_or_default();
-        let app_id = self.option.app_id.clone().unwrap_or_default();
-        let volume = self.option.volume.unwrap_or(0);
-        let speed = self.option.speed.unwrap_or(0.0);
-        let codec = self
-            .option
-            .codec
-            .clone()
-            .unwrap_or_else(|| "pcm".to_string());
-        let sample_rate = self.option.samplerate.unwrap_or(16000);
-        let now = chrono::Utc::now();
-        let timestamp = now.timestamp();
-        let tomorrow = now + Duration::days(1);
-        let expired = tomorrow.timestamp();
-        let expired_str = expired.to_string();
-        let sample_rate_str = sample_rate.to_string();
-        let speed_str = speed.to_string();
-        let timestamp_str = timestamp.to_string();
-        let volume_str = volume.to_string();
-        let voice_type = self
-            .option
-            .speaker
-            .clone()
-            .unwrap_or_else(|| "101001".to_string());
-        let mut query_params = vec![
-            ("Action", "TextToStreamAudioWSv2"),
-            ("AppId", &app_id),
-            ("SecretId", &secret_id),
-            ("Timestamp", &timestamp_str),
-            ("Expired", &expired_str),
-            ("SessionId", &self.session_id),
-            ("VoiceType", &voice_type),
-            ("Volume", &volume_str),
-            ("Speed", &speed_str),
-            ("SampleRate", &sample_rate_str),
-            ("Codec", &codec),
-            ("EnableSubtitle", "true"),
-        ];
-
-        // Sort query parameters by key
-        query_params.sort_by(|a, b| a.0.cmp(b.0));
-
-        // Build query string without URL encoding
-        let query_string = query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let string_to_sign = format!("GET{}{}?{}", HOST, PATH, query_string);
-
-        // Calculate signature using HMAC-SHA1
-        let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
-        let tag = hmac::sign(&key, string_to_sign.as_bytes());
-        let signature = STANDARD.encode(tag.as_ref());
-        // URL encode parameters for final URL
-        let encoded_query_string = query_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        format!(
-            "wss://{}{}?{}&Signature={}",
-            HOST,
-            PATH,
-            encoded_query_string,
-            urlencoding::encode(&signature)
-        )
-    }
-}
-
-fn event_stream(ws_stream: WsSource) -> BoxStream<'static, Result<SynthesisEvent>> {
-    let stream = ws_stream.filter_map(move |message| async move {
-        match message {
-            Ok(Message::Binary(data)) => Some(Ok(SynthesisEvent::AudioChunk(data.to_vec()))),
-            Ok(Message::Text(text)) => {
-                let response =
-                    if let Ok(response) = serde_json::from_str::<WebSocketResponse>(&text) {
-                        response
-                    } else {
-                        return Some(Err(anyhow::anyhow!(
-                            "Tencent TTS invalid response: {}",
-                            text
-                        )));
-                    };
-
-                if response.r#final == 1 {
-                    return Some(Ok(SynthesisEvent::Finished {
-                        end_of_stream: Some(true),
-                        cache_key: None,
-                    }));
-                }
-
-                if response.code != 0 {
-                    return Some(Err(anyhow::anyhow!(
-                        "Tencent TTS failed, code: {}, message: {}",
-                        response.code,
-                        response.message
-                    )));
-                }
-
-                if response.heartbeat == 1 {
-                    return None;
-                }
-
-                if let Some(subtitles) = response.result.subtitles {
-                    let subtitles: Vec<Subtitle> = subtitles.iter().map(Into::into).collect();
-                    return Some(Ok(SynthesisEvent::Subtitles(subtitles)));
-                }
-
-                None
-            }
-            Ok(Message::Close(_)) => {
-                Some(Err(anyhow::anyhow!("Tencent TTS closed by server")))
-            }
-            Err(e) => Some(Err(anyhow::anyhow!("Tencent TTS websocket error: {}", e))),
-            _ => None,
-        }
-    });
-
-    Box::pin(stream)
-}
-
-#[async_trait]
-impl SynthesisClient for TencentCloudTtsClient {
-    fn provider(&self) -> SynthesisType {
-        SynthesisType::TencentCloud
-    }
-
-    async fn start(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
-        let stream = self.connect().await?;
-        let (ws_sink, ws_stream) = stream.split();
-        *self.sink.lock().await = Some(ws_sink);
-        Ok(event_stream(ws_stream))
-    }
-
-    async fn synthesize(
-        &self,
-        text: &str,
-        end_of_stream: Option<bool>,
-        _option: Option<SynthesisOption>,
-    ) -> Result<()> {
-        match self.sink.lock().await.as_mut() {
-            Some(sink) => {
-                let text = remove_emoji(text);
-
-                if !text.is_empty() {
-                    let request = WebSocketRequest::synthesis_action(
-                        &self.session_id,
-                        &self.message_id,
-                        &text,
-                    );
-                    let data = serde_json::to_string(&request)?;
-                    sink.send(Message::Text(data.into())).await?;
-                }
-
-                if let Some(true) = end_of_stream {
-                    let request =
-                        WebSocketRequest::complete_action(&self.session_id, &self.message_id);
-                    let data = serde_json::to_string(&request)?;
-                    sink.send(Message::Text(data.into())).await?;
-                }
-                Ok(())
-            }
-            None => Err(anyhow::anyhow!("should call start first")),
-        }
-    }
-}
-
 // tencent cloud will crash if text contains emoji
 fn remove_emoji(text: &str) -> String {
     text.chars()
@@ -329,4 +106,367 @@ fn remove_emoji(text: &str) -> String {
                 || is_emoji_modifier_base(*c))
         })
         .collect()
+}
+
+// construct request url
+// for non-streaming client, text is Some
+// session_id is used for tencent cloud tts service, not the session_id of media session
+fn construct_request_url(option: &SynthesisOption, session_id: &str, text: Option<&str>) -> String {
+    let streaming = text.is_none();
+    let action = if !streaming {
+        "TextToStreamAudioWS"
+    } else {
+        "TextToStreamAudioWSv2"
+    };
+    let secret_id = option.secret_id.clone().unwrap_or_default();
+    let secret_key = option.secret_key.clone().unwrap_or_default();
+    let app_id = option.app_id.clone().unwrap_or_default();
+    let volume = option.volume.unwrap_or(0);
+    let speed = option.speed.unwrap_or(0.0);
+    let codec = option.codec.clone().unwrap_or_else(|| "pcm".to_string());
+    let sample_rate = option.samplerate.unwrap_or(16000);
+    let now = chrono::Utc::now();
+    let timestamp = now.timestamp();
+    let tomorrow = now + Duration::days(1);
+    let expired = tomorrow.timestamp();
+    let expired_str = expired.to_string();
+    let sample_rate_str = sample_rate.to_string();
+    let speed_str = speed.to_string();
+    let timestamp_str = timestamp.to_string();
+    let volume_str = volume.to_string();
+    let voice_type = option
+        .speaker
+        .clone()
+        .unwrap_or_else(|| "101001".to_string());
+    let mut query_params = vec![
+        ("Action", action),
+        ("AppId", &app_id),
+        ("SecretId", &secret_id),
+        ("Timestamp", &timestamp_str),
+        ("Expired", &expired_str),
+        ("SessionId", &session_id),
+        ("VoiceType", &voice_type),
+        ("Volume", &volume_str),
+        ("Speed", &speed_str),
+        ("SampleRate", &sample_rate_str),
+        ("Codec", &codec),
+        ("EnableSubtitle", "true"),
+    ];
+
+    if let Some(text) = text {
+        query_params.push(("Text", text));
+    }
+
+    // Sort query parameters by key
+    query_params.sort_by(|a, b| a.0.cmp(b.0));
+
+    // Build query string without URL encoding
+    let query_string = query_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let path = if streaming {
+        STREAMING_PATH
+    } else {
+        NON_STREAMING_PATH
+    };
+
+    let string_to_sign = format!("GET{}{}?{}", HOST, path, query_string);
+    // Calculate signature using HMAC-SHA1
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
+    let tag = hmac::sign(&key, string_to_sign.as_bytes());
+    let signature: String = STANDARD.encode(tag.as_ref());
+    // URL encode parameters for final URL
+    let encoded_query_string = query_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    format!(
+        "wss://{}{}?{}&Signature={}",
+        HOST,
+        path,
+        encoded_query_string,
+        urlencoding::encode(&signature)
+    )
+}
+
+// convert websocket to event stream
+// text and cmd_seq and cache key are used for non-streaming mode (realtime client)
+// text is for debuging purpose
+fn ws_to_event_stream<T>(
+    ws_stream: T,
+    cmd_seq: Option<usize>,
+    cache_key: Option<String>,
+) -> BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>
+where
+    T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Send
+        + Unpin
+        + 'static,
+{
+    let notify = Arc::new(Notify::new());
+    let notify_clone = notify.clone();
+    ws_stream
+        .take_until(notify.notified_owned())
+        .filter_map(move |message| {
+            let cache_key = cache_key.clone();
+            let notify = notify_clone.clone();
+            async move {
+                match message {
+                    Ok(Message::Binary(data)) => {
+                        Some(Ok((cmd_seq, SynthesisEvent::AudioChunk(data))))
+                    }
+                    Ok(Message::Text(text)) => {
+                        let response: WebSocketResponse =
+                            serde_json::from_str(&text).expect("Tencent TTS API changed!");
+
+                        if response.code != 0 {
+                            tracing::error!(
+                                "Tencent TTS error, code: {}, message: {}, cmd_seq: {:?}",
+                                response.code,
+                                response.message,
+                                cmd_seq
+                            );
+
+                            notify.notify_one();
+                            return None;
+                        }
+
+                        if response.heartbeat == 1 {
+                            return None;
+                        }
+
+                        if let Some(subtitles) = response.result.subtitles {
+                            let subtitles: Vec<Subtitle> =
+                                subtitles.iter().map(Into::into).collect();
+                            return Some(Ok((cmd_seq, SynthesisEvent::Subtitles(subtitles))));
+                        }
+
+                        // final == 1 means the synthesis is finished, should close the websocket
+                        if response.r#final == 1 {
+                            notify.notify_one();
+                            return Some(Ok((cmd_seq, SynthesisEvent::Finished { cache_key })));
+                        }
+
+                        None
+                    }
+                    Ok(Message::Close(_)) => {
+                        notify.notify_one();
+                        tracing::error!("Tencent TTS closed by remote, {:?}", cmd_seq);
+                        None
+                    }
+                    Err(e) => {
+                        notify.notify_one();
+                        Some(Err(anyhow::anyhow!(
+                            "Tencent TTS websocket error: {:?}, {:?}",
+                            cmd_seq,
+                            e
+                        )))
+                    }
+                    _ => None,
+                }
+            }
+        })
+        .boxed()
+}
+
+// tencent cloud realtime tts client, non-streaming
+// https://cloud.tencent.com/document/product/1073/94308
+// each tts command have one websocket connection, with different session_id
+pub struct RealTimeClient {
+    option: SynthesisOption,
+    //item: (text, option), drop tx if `end_of_stream`
+    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
+}
+
+impl RealTimeClient {
+    fn new(option: SynthesisOption) -> Self {
+        Self { option, tx: None }
+    }
+}
+
+#[async_trait]
+impl SynthesisClient for RealTimeClient {
+    fn provider(&self) -> SynthesisType {
+        SynthesisType::TencentCloud
+    }
+
+    async fn start(
+        &mut self,
+    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+        // set the number to the concurrent ongoing websocket connections
+        // Tencent cloud alow 10 - 20 concurrent websocket connections for default setting, dependent on voice type
+        let (tx, rx) = mpsc::channel(5);
+        self.tx = Some(tx);
+        let client_option = self.option.clone();
+        let stream = ReceiverStream::new(rx)
+            .flat_map_unordered(Some(10), move |(text, cmd_seq, option)| {
+                // each reequest have its own session_id
+                let session_id = Uuid::new_v4().to_string();
+                let option = client_option.merge_with(option);
+                let url = construct_request_url(&option, &session_id, Some(&text));
+                connect_async(url)
+                    .then(async move |res| match res {
+                        Ok((ws_stream, _)) => {
+                            ws_to_event_stream(ws_stream, Some(cmd_seq), option.cache_key)
+                        }
+                        Err(e) => {
+                            tracing::error!("Tencent TTS websocket error: {}", e);
+                            stream::empty().boxed()
+                        }
+                    })
+                    .flatten_stream()
+                    .boxed()
+            })
+            .boxed();
+        Ok(stream)
+    }
+
+    async fn synthesize(
+        &mut self,
+        text: &str,
+        cmd_seq: usize,
+        option: Option<SynthesisOption>,
+    ) -> Result<()> {
+        if let Some(tx) = &self.tx {
+            let text = remove_emoji(text);
+            tx.send((text, cmd_seq, option)).await?;
+        } else {
+            return Err(anyhow::anyhow!("TencentCloud TTS: missing client sender"));
+        };
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        self.tx.take();
+        Ok(())
+    }
+}
+
+// tencent cloud streaming tts client
+// https://cloud.tencent.com/document/product/1073/108595
+// all the tts commands with same play_id belong to same websocket connection
+struct StreamingClient {
+    session_id: String,
+    option: SynthesisOption,
+    sink: Option<WsSink>,
+}
+
+impl StreamingClient {
+    pub fn new(option: SynthesisOption) -> Self {
+        let session_id = Uuid::new_v4().to_string();
+        Self {
+            session_id,
+            option,
+            sink: None,
+        }
+    }
+}
+
+impl StreamingClient {
+    async fn connect(&self) -> Result<WsStream> {
+        let url = construct_request_url(&self.option, &self.session_id, None);
+        let (mut ws_stream, _) = connect_async(url).await?;
+        // waiting for ready = 1
+        while let Some(message) = ws_stream.next().await {
+            match message {
+                Ok(Message::Text(text)) => {
+                    let response = serde_json::from_str::<WebSocketResponse>(&text)?;
+                    if response.ready == 1 {
+                        debug!("TencentCloud TTS streaming client connected");
+                        return Ok(ws_stream);
+                    }
+
+                    if response.code != 0 {
+                        return Err(anyhow::anyhow!(
+                            "TencentCloud TTS streaming client connecting failed: code: {}, message: {}",
+                            response.code,
+                            response.message
+                        ));
+                    }
+                }
+                Ok(Message::Close { .. }) => {
+                    return Err(anyhow::anyhow!(
+                        "TencentCloud TTS streaming client connecting failed: closed by remote"
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "TencentCloud TTS streaming client connecting failed: websocket error: {}",
+                        e
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "TencentCloud TTS streaming client connecting failed"
+        ))
+    }
+}
+
+#[async_trait]
+impl SynthesisClient for StreamingClient {
+    fn provider(&self) -> SynthesisType {
+        SynthesisType::TencentCloud
+    }
+
+    async fn start(
+        &mut self,
+    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+        let stream = self.connect().await?;
+        let (ws_sink, ws_stream) = stream.split();
+        self.sink = Some(ws_sink);
+        Ok(ws_to_event_stream(ws_stream, None, None))
+    }
+
+    async fn synthesize(
+        &mut self,
+        text: &str,
+        _cmd_seq: usize,
+        _option: Option<SynthesisOption>,
+    ) -> Result<()> {
+        if let Some(sink) = &mut self.sink {
+            let text = remove_emoji(text);
+            let request = WebSocketRequest::synthesis_action(&self.session_id, &text);
+            let data = serde_json::to_string(&request)?;
+            sink.send(Message::Text(data.into())).await?;
+
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("TencentCloud TTS streaming: missing sink"))
+        }
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if let Some(sink) = &mut self.sink {
+            let request = WebSocketRequest::complete_action(&self.session_id);
+            let data = serde_json::to_string(&request)?;
+            sink.send(Message::Text(data.into())).await?;
+        }
+
+        Ok(())
+    }
+}
+
+pub struct TencentCloudTtsClient;
+
+impl TencentCloudTtsClient {
+    pub fn create(streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+        if streaming {
+            Ok(Box::new(StreamingClient::new(option.clone())))
+        } else {
+            Ok(Box::new(RealTimeClient::new(option.clone())))
+        }
+    }
+
+    pub fn new(option: SynthesisOption) -> RealTimeClient {
+        RealTimeClient::new(option)
+    }
 }

@@ -335,8 +335,8 @@ impl ActiveCall {
                     speaker,
                     play_id,
                     auto_hangup,
-                    streaming,
-                    end_of_stream,
+                    streaming.unwrap_or_default(),
+                    end_of_stream.unwrap_or_default(),
                     option,
                     wait_input_timeout,
                 )
@@ -559,8 +559,8 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
         auto_hangup: Option<bool>,
-        streaming: Option<bool>,
-        end_of_stream: Option<bool>,
+        streaming: bool,
+        end_of_stream: bool,
         option: Option<SynthesisOption>,
         wait_input_timeout: Option<u32>,
     ) -> Result<()> {
@@ -598,7 +598,7 @@ impl ActiveCall {
             auto_hangup = auto_hangup.unwrap_or_default(),
             play_id = play_command.play_id.as_deref(),
             streaming = play_command.streaming,
-            eos = play_command.end_of_stream.unwrap_or_default(),
+            eos = play_command.end_of_stream,
             wit = wait_input_timeout.unwrap_or_default(),
             "new synthesis"
         );
@@ -628,6 +628,7 @@ impl ActiveCall {
             self.server_side_track_id.clone(),
             ssrc,
             play_id.clone(),
+            streaming,
             &play_command.option,
         )
         .await?;
