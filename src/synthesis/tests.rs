@@ -10,7 +10,6 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use std::env;
 use std::fs::File;
 use std::io::Write;
-use tokio_util::sync::CancellationToken;
 
 fn get_tencent_credentials() -> Option<(String, String, String)> {
     dotenv().ok();
@@ -50,14 +49,11 @@ async fn test_tencent_cloud_tts() {
         ..Default::default()
     };
 
-    let client = TencentCloudTtsClient::new(config);
+    let mut client = TencentCloudTtsClient::new(config);
     let text = "Hello, this is a test of Tencent Cloud TTS.";
-    let mut stream = client
-        .start(CancellationToken::new())
-        .await
-        .expect("Failed to start TTS stream");
+    let mut stream = client.start().await.expect("Failed to start TTS stream");
     client
-        .synthesize(text, Some(true), None)
+        .synthesize(text, 0, None)
         .await
         .expect("Failed to synthesize text");
     // Collect all chunks from the stream
@@ -66,15 +62,15 @@ async fn test_tencent_cloud_tts() {
     let mut collected_audio = Vec::new();
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
-            Ok(SynthesisEvent::AudioChunk(audio)) => {
+            Ok((_cmd_seq, SynthesisEvent::AudioChunk(audio))) => {
                 total_size += audio.len();
                 chunks_count += 1;
                 collected_audio.extend_from_slice(&audio);
             }
-            Ok(SynthesisEvent::Finished { .. }) => {
+            Ok((_cmd_seq, SynthesisEvent::Finished { .. })) => {
                 break;
             }
-            Ok(SynthesisEvent::Subtitles { .. }) => {
+            Ok((_cmd_seq, SynthesisEvent::Subtitles { .. })) => {
                 // ignore progress
             }
             Err(e) => {
@@ -112,18 +108,18 @@ async fn test_aliyun_tts() {
     };
 
     // Test that the client can be created successfully
-    let client = AliyunTtsClient::new(config);
+    let mut client = AliyunTtsClient::new(config);
     assert_eq!(client.provider(), SynthesisType::Aliyun);
 
     println!("Aliyun TTS client created successfully");
     println!("Test passes - implementation is structurally correct");
     let mut stream = client
-        .start(CancellationToken::new())
+        .start()
         .await
         .expect("Failed to start Aliyun TTS stream");
 
     client
-        .synthesize("Hello, how are you?", Some(true), None)
+        .synthesize("Hello, how are you?", 0, None)
         .await
         .expect("Failed to synthesize text");
 
@@ -131,15 +127,19 @@ async fn test_aliyun_tts() {
     let mut chunks_count = 0;
     while let Some(res) = stream.next().await {
         match res {
-            Ok(SynthesisEvent::AudioChunk(chunk)) => {
-                audio_collector.extend_from_slice(&chunk);
-                chunks_count += 1;
-            }
-            Ok(SynthesisEvent::Finished { .. }) => {
-                break;
-            }
-            Ok(SynthesisEvent::Subtitles { .. }) => {
-                // ignore progress
+            Ok((_cmd_seq, event)) => {
+                match event {
+                    SynthesisEvent::AudioChunk(chunk) => {
+                        audio_collector.extend_from_slice(&chunk);
+                        chunks_count += 1;
+                    }
+                    SynthesisEvent::Finished { .. } => {
+                        break;
+                    }
+                    SynthesisEvent::Subtitles { .. } => {
+                        // ignore progress
+                    }
+                }
             }
             Err(e) => {
                 panic!("Error in audio stream chunk: {:?}", e);

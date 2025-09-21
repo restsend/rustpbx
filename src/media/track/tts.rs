@@ -8,33 +8,22 @@ use crate::{
         track::{Track, TrackConfig, TrackId, TrackPacketSender},
     },
     synthesis::{
-        Subtitle, SynthesisClient, SynthesisCommand, SynthesisCommandReceiver,
-        SynthesisCommandSender, SynthesisEvent, bytes_size_to_duration,
+        SynthesisClient, SynthesisCommand, SynthesisCommandReceiver, SynthesisCommandSender,
+        SynthesisEvent,
     },
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::StreamExt;
-use std::{
-    sync::{Arc, RwLock},
-    time::Instant,
-};
+use bytes::{Bytes, BytesMut};
+use futures::{StreamExt, future};
+use std::collections::VecDeque;
 use tokio::{
     select,
     sync::{Mutex, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-
-#[derive(Clone)]
-struct SynthesisStatus {
-    play_id: Option<String>,
-    speaker: Option<String>,
-    total_audio_len: usize,
-    full_text: String,
-    subtitles: Vec<Subtitle>,
-}
+use tracing::{debug, info, warn};
 
 pub struct SynthesisHandle {
     pub play_id: Option<String>,
@@ -44,6 +33,8 @@ pub struct SynthesisHandle {
 pub struct TtsTrack {
     track_id: TrackId,
     session_id: String,
+    streaming: bool,
+    play_id: Option<String>,
     processor_chain: ProcessorChain,
     config: TrackConfig,
     cancel_token: CancellationToken,
@@ -76,6 +67,8 @@ impl TtsTrack {
     pub fn new(
         track_id: TrackId,
         session_id: String,
+        streaming: bool,
+        play_id: Option<String>,
         command_rx: SynthesisCommandReceiver,
         client: Box<dyn SynthesisClient>,
     ) -> Self {
@@ -83,6 +76,8 @@ impl TtsTrack {
         Self {
             track_id,
             session_id,
+            streaming,
+            play_id,
             processor_chain: ProcessorChain::new(config.samplerate),
             config,
             cancel_token: CancellationToken::new(),
@@ -147,6 +142,7 @@ impl Track for TtsTrack {
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
+        // command sender is held by tts handle, it will dropped when there is a tts command with new play_id
         let mut command_rx = self
             .command_rx
             .lock()
@@ -154,360 +150,330 @@ impl Track for TtsTrack {
             .take()
             .ok_or(anyhow!("Command receiver not found"))?;
 
-        let sample_rate = self.config.samplerate;
-        let use_cache = self.use_cache;
+        let play_id = self.play_id.clone();
         let track_id = self.track_id.clone();
         let session_id = self.session_id.clone();
+        let sample_rate = self.config.samplerate;
+        let streaming = self.streaming;
+        let use_cache = self.use_cache;
+        let cache_enabled = !streaming && use_cache;
 
-        let client = self
+        let mut client = self
             .client
             .lock()
             .await
             .take()
             .ok_or(anyhow!("Synthesis client not found"))?;
-        let client = Arc::new(client);
-        let client_ref = client.clone();
-        let mut stream = client_ref.start(self.cancel_token.clone()).await?;
-        let status = Arc::new(RwLock::new(SynthesisStatus {
-            play_id: None,
-            speaker: None,
-            total_audio_len: 0,
-            full_text: String::new(),
-            subtitles: Vec::new(),
-        }));
-        let status_ref = status.clone();
-        let provider = client.provider();
-        let client = client.clone();
-        let event_sender_clone = event_sender.clone();
-        let client_ref = client.clone();
-        let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel();
-        let buffer_tx_ref = buffer_tx.clone();
 
+        let mut stream = client.start().await?;
+        let event_sender_clone = event_sender.clone();
+
+        // channel for cache,  (seq, chunk)
+        let (cache_tx, mut cache_rx) = mpsc::channel(5);
+        // channel for tts result, (seq, Option<chunk>), None indicates seq is finished
+        let (tts_tx, mut tts_rx) = mpsc::channel(10);
+
+        let provider_clone = client.provider();
         let command_loop = async move {
-            while let Some(mut command) = command_rx.recv().await {
+            let mut cmd_seq = 0;
+            let mut end_of_stream = false;
+            let mut cache_buffer = BytesMut::new();
+
+            // TODO: change to if let chain
+            // !end_of_stream && let Some(command) = command_rx.recv().await
+            while !end_of_stream {
+                let res = command_rx.recv().await;
+                if res.is_none() {
+                    break;
+                }
+                let mut command = res.unwrap();
+
+                // if end_of_stream, quit in next iteration
+                end_of_stream = command.end_of_stream;
                 let text = command.text;
+
+                // skip empty text
                 if text.is_empty() {
-                    if command.end_of_stream.unwrap_or_default() {
-                        buffer_tx_ref.send(None).ok();
-                    }
                     continue;
                 }
-                let play_id = command.play_id;
+
                 if command.option.speaker.is_none() {
                     command.option.speaker = command.speaker;
                 }
-                let streaming = command.streaming.unwrap_or(false);
-                let cache_key = if !streaming && use_cache {
+
+                let cache_key = if cache_enabled {
                     Some(cache::generate_cache_key(
-                        &format!("tts:{}{}", provider, text),
+                        &format!("tts:{}{}", provider_clone, text),
                         sample_rate,
                         command.option.speaker.as_ref(),
-                        command.option.speed.clone(),
+                        command.option.speed,
                     ))
                 } else {
                     None
                 };
+
                 command.option.cache_key = cache_key.clone();
 
-                status_ref
-                    .write()
-                    .as_mut()
-                    .and_then(|status| {
-                        if !streaming {
-                            status.full_text = text.clone();
-                            status.subtitles.clear();
-                            status.total_audio_len = 0;
-                        } else {
-                            status.full_text.push_str(&text);
-                        }
-                        status.play_id = play_id.clone();
-                        status.speaker = command.option.speaker.clone();
-                        Ok(())
-                    })
-                    .ok();
-                if let Some(cache_key) = cache_key {
-                    match cache::is_cached(&cache_key).await {
-                        Ok(true) => match cache::retrieve_from_cache(&cache_key).await {
-                            Ok(audio) => {
-                                info!(session_id, text, "using cached audio for {}", cache_key);
-                                buffer_tx_ref.send(Some(bytes_to_samples(&audio))).ok();
-                                if command.end_of_stream.unwrap_or_default() {
-                                    buffer_tx_ref.send(None).ok();
-                                }
-
+                if let Some(cache_key) = &cache_key {
+                    if let Ok(true) = cache::is_cached(cache_key).await {
+                        cache_buffer.clear();
+                        match cache::retrieve_from_cache_with_buffer(cache_key, &mut cache_buffer)
+                            .await
+                        {
+                            Ok(()) => {
+                                debug!(session_id, text, "using cached audio for {}", cache_key);
+                                let bytes = cache_buffer.split().freeze();
+                                let len = bytes.len();
+                                cache_tx.send((cmd_seq, bytes)).await.ok();
                                 event_sender_clone
                                     .send(SessionEvent::Metrics {
                                         timestamp: crate::get_timestamp(),
-                                        key: format!("completed.tts.{}", provider),
+                                        key: format!("completed.tts.{}", provider_clone),
                                         data: serde_json::json!({
                                                 "speaker": command.option.speaker,
                                                 "playId": play_id,
-                                                "length": audio.len(),
+                                                "length": len,
                                                 "cached": true,
                                         }),
                                         duration: 0,
                                     })
                                     .ok();
-
-                                let duration = bytes_size_to_duration(audio.len(), sample_rate);
-                                status_ref
-                                    .write()
-                                    .as_mut()
-                                    .and_then(|status| {
-                                        status.total_audio_len = audio.len();
-                                        status.subtitles.push(Subtitle::new(
-                                            0,
-                                            duration,
-                                            0,
-                                            text.chars().count() as u32,
-                                        ));
-                                        Ok(())
-                                    })
-                                    .ok();
+                                cmd_seq += 1;
                                 continue;
                             }
                             Err(e) => {
                                 warn!(session_id, "error retrieving cached audio: {}", e);
                             }
-                        },
-                        _ => {}
+                        }
                     }
                 }
                 info!(
-                    %provider,
+                    %provider_clone,
                     session_id,
                     text,
                     play_id,
-                    eos = command.end_of_stream.unwrap_or_default(),
-                    streaming = command.streaming.unwrap_or_default(),
+                    eos = command.end_of_stream,
+                    streaming = command.streaming,
                     "synthesizing",
                 );
-                match client_ref
-                    .synthesize(&text, command.end_of_stream, Some(command.option))
+                if let Err(e) = client
+                    .synthesize(&text, cmd_seq, Some(command.option))
                     .await
                 {
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(session_id, "error synthesizing text: {}", e);
-                        event_sender_clone
-                            .send(SessionEvent::Error {
-                                timestamp: crate::get_timestamp(),
-                                track_id: track_id.clone(),
-                                sender: format!("tts.{}", provider),
-                                error: e.to_string(),
-                                code: None,
-                            })
-                            .ok();
-                        if command.end_of_stream.unwrap_or_default() {
-                            buffer_tx_ref.send(None).ok();
-                        }
-                        continue;
-                    }
+                    warn!(session_id, "error synthesizing text: {}", e);
+                    event_sender_clone
+                        .send(SessionEvent::Error {
+                            timestamp: crate::get_timestamp(),
+                            track_id: track_id.clone(),
+                            sender: format!("tts.{}", provider_clone),
+                            error: e.to_string(),
+                            code: None,
+                        })
+                        .ok();
+                    break;
                 }
+                cmd_seq += 1;
             }
-        };
-        let status_ref = status.clone();
-        let provider = client.provider();
-        let session_id = self.session_id.clone();
-        let event_sender_clone = event_sender.clone();
-        let track_id = self.track_id.clone();
-        let buffer_tx_ref = buffer_tx.clone();
 
-        let receive_result_loop = async move {
-            let mut audio_chunks = Vec::new();
+            // clean up and waiting emit loop quit
+            drop(cache_tx);
+            drop(cache_buffer);
+            client.stop().await.ok();
+            future::pending().await
+        };
+
+        let session_id = self.session_id.clone();
+        let recv_loop = async move {
+            // chunks for each seq, save for cache if `cache_enabled`
+            // TO-DO: merge `complete_audio` and `tts_rx`
+            let mut complete_audio = Vec::<Vec<Bytes>>::new();
+
+            // flag for streaming mode, check if it is the first chunk
             let mut first_chunk = true;
-            let start_time = Instant::now();
-            // Process each audio chunk as it arrives
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(SynthesisEvent::AudioChunk(audio_chunk)) => {
-                        // Process the audio chunk
-                        status_ref
-                            .write()
-                            .as_mut()
-                            .and_then(|status| {
-                                status.total_audio_len += audio_chunk.len();
-                                if !first_chunk {
-                                    return Ok(());
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((cmd_seq, event)) => {
+                        match event {
+                            SynthesisEvent::AudioChunk(mut audio_chunk) => {
+                                // for streaming mode seq is None
+                                let seq = cmd_seq.unwrap_or(0);
+                                // first chunk
+                                debug!(cmd_seq, "audio chunk: {}", audio_chunk.len());
+                                if first_chunk && streaming
+                                    || seq >= complete_audio.len()
+                                    || complete_audio[seq].is_empty()
+                                {
+                                    if audio_chunk.len() > 44
+                                        && audio_chunk[..4] == [0x52, 0x49, 0x46, 0x46]
+                                    {
+                                        let _ = audio_chunk.split_to(44);
+                                    };
+                                    first_chunk = false;
                                 }
-                                first_chunk = false;
-                                // Send metrics event after the first chunk
-                                event_sender_clone
-                                    .send(SessionEvent::Metrics {
-                                        timestamp: crate::get_timestamp(),
-                                        key: format!("ttfb.tts.{}", provider),
-                                        data: serde_json::json!({
-                                                "speaker": status.speaker,
-                                                "playId": status.play_id,
-                                                "length": audio_chunk.len(),
-                                        }),
-                                        duration: start_time.elapsed().as_millis() as u32,
-                                    })
-                                    .ok();
-                                Ok(())
-                            })
-                            .ok();
 
-                        // Strip wav header if present (only for the first chunk)
-                        let processed_chunk = if audio_chunks.is_empty()
-                            && audio_chunk.len() > 44
-                            && audio_chunk[..4] == [0x52, 0x49, 0x46, 0x46]
-                        {
-                            audio_chunk[44..].to_vec()
-                        } else {
-                            audio_chunk
-                        };
+                                if cache_enabled {
+                                    if seq >= complete_audio.len() {
+                                        complete_audio.resize_with(seq + 1, || Vec::new());
+                                    }
 
-                        // Store the processed chunk for caching later if needed
-                        audio_chunks.push(processed_chunk.clone());
-                        match buffer_tx_ref.send(Some(bytes_to_samples(&processed_chunk))) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                warn!(session_id, "error sending cached audio: {}", e);
-                                continue;
-                            }
-                        }
-                    }
-                    Ok(SynthesisEvent::Finished {
-                        end_of_stream,
-                        cache_key,
-                    }) => {
-                        let status = match status_ref.read() {
-                            Ok(status) => status.clone(),
-                            Err(e) => {
-                                warn!(session_id, "error reading synthesis status: {}", e);
-                                return;
-                            }
-                        };
-                        // Send metrics event after all chunks are received
-                        event_sender_clone
-                            .send(SessionEvent::Metrics {
-                                timestamp: crate::get_timestamp(),
-                                key: format!("completed.tts.{}", provider),
-                                data: serde_json::json!({
-                                        "speaker": status.speaker,
-                                        "playId": status.play_id,
-                                        "length": status.total_audio_len,
-                                }),
-                                duration: start_time.elapsed().as_millis() as u32,
-                            })
-                            .ok();
+                                    complete_audio[seq].push(audio_chunk.clone());
+                                }
 
-                        info!(
-                            session_id,
-                            %provider,
-                            audio_len = status.total_audio_len,
-                            elapsed = start_time.elapsed().as_millis(),
-                            text = status.full_text,
-                            "synthesize audio completed",
-                        );
-                        let complete_audio = audio_chunks.drain(..).flatten().collect::<Vec<_>>();
-                        if use_cache && !complete_audio.is_empty() {
-                            if let Some(ref cache_key) = cache_key {
-                                cache::store_in_cache(cache_key, &complete_audio).await.ok();
-                            }
-                        }
-                        if end_of_stream.unwrap_or_default() {
-                            buffer_tx_ref.send(None).ok();
-                        }
-                    }
-                    Ok(SynthesisEvent::Subtitles(subtitles)) => {
-                        status_ref
-                            .write()
-                            .as_mut()
-                            .and_then(|status| {
-                                status.subtitles.extend(subtitles);
-                                Ok(())
-                            })
-                            .ok();
-                    }
-                    Err(e) => {
-                        warn!(session_id, "Error in audio stream chunk: {}", e);
-                        event_sender_clone
-                            .send(SessionEvent::Error {
-                                timestamp: crate::get_timestamp(),
-                                track_id: track_id.clone(),
-                                sender: format!("tts.{}", provider),
-                                error: e.to_string(),
-                                code: None,
-                            })
-                            .ok();
-                        audio_chunks.drain(..);
-                        buffer_tx_ref.send(None).ok();
-                    }
-                }
-            }
-        };
-        let sample_rate = self.config.samplerate;
-        let track_id = self.track_id.clone();
-        let packet_duration_ms = self.config.ptime.as_millis() as u32;
-        let max_pcm_chunk_size = sample_rate as usize * packet_duration_ms as usize / 1000;
-        info!(
-            session_id = self.session_id,
-            track_id, sample_rate, packet_duration_ms, max_pcm_chunk_size, "tts track started"
-        );
-        let processor_chain = self.processor_chain.clone();
-        let session_id = self.session_id.clone();
-        let remaining_size = Arc::new(Mutex::new(0usize));
-        let remaining_size_ref = Arc::new(Mutex::new(0usize));
-        let emit_loop = async move {
-            let mut ptimer =
-                tokio::time::interval(Duration::from_millis(packet_duration_ms as u64));
-            let mut buffer = Vec::new();
-            let mut is_recv_finished = false;
-            loop {
-                select! {
-                        _ = ptimer.tick() => {
-                                let mut packet = if buffer.len() >= max_pcm_chunk_size {
-                                    let packet_samples = buffer.drain(..max_pcm_chunk_size).collect::<Vec<_>>();
-                                    AudioFrame {
-                                        track_id: track_id.clone(),
-                                        samples: Samples::PCM { samples: packet_samples },
-                                        timestamp: crate::get_timestamp(),
-                                        sample_rate,
-                                    }
-                                } else {
-                                    if is_recv_finished {
-                                        break;
-                                    }
-                                    AudioFrame {
-                                        track_id: track_id.clone(),
-                                        samples: Samples::PCM { samples: Vec::new() },
-                                        timestamp: crate::get_timestamp(),
-                                        sample_rate,
-                                    }
-                                };
-                                *remaining_size_ref.lock().await = buffer.len();
-                                // Process the frame with processor chain
-                                if let Err(e) = processor_chain.process_frame(&mut packet) {
-                                    warn!(track_id, session_id, "error processing frame: {}", e);
-                                }
-                                // Send the packet
-                                match packet_sender.send(packet) {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        break; /* Track has been closed */
-                                    }
-                                }
-                        }
-                        chunk = buffer_rx.recv() => {
-                            match chunk {
-                                Some(Some(mut samples)) => {
-                                    is_recv_finished = false;
-                                    buffer.append(&mut samples);
-                                }
-                                Some(None) => {
-                                    is_recv_finished = true;
-                                }
-                                None => {
-                                    // Channel closed
+                                if let Err(e) = tts_tx.send((cmd_seq, Some(audio_chunk))).await {
+                                    warn!(session_id, "error sending cached audio: {}", e);
                                     break;
                                 }
                             }
+                            SynthesisEvent::Subtitles(..) => {}
+                            SynthesisEvent::Finished { cache_key } => {
+                                tts_tx.send((cmd_seq, None)).await.ok();
+                                if let Some(seq) = cmd_seq {
+                                    if let Some(cache_key) = cache_key {
+                                        if cache::is_cached(&cache_key).await.unwrap_or(false) {
+                                            let chunks = complete_audio[seq].as_slice();
+                                            debug!(
+                                                session_id,
+                                                "storing cached audio: key: {}, len: {}",
+                                                cache_key,
+                                                chunks.len()
+                                            );
+                                            if let Err(e) =
+                                                cache::store_in_cache_v(&cache_key, chunks).await
+                                            {
+                                                warn!(
+                                                    session_id,
+                                                    "error storing cached audio: {}", e
+                                                );
+                                            }
+                                        }
+                                    }
+                                    complete_audio[seq].clear();
+                                }
+                            }
                         }
+                    }
+                    Err(e) => {
+                        warn!("error receiving tts result: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            drop(tts_tx);
+            drop(complete_audio);
+            // waiting emit loop quit
+            future::pending().await
+        };
+
+        let sample_rate = self.config.samplerate;
+        let track_id = self.track_id.clone();
+        let packet_duration_ms = self.config.ptime.as_millis();
+        // audio frame in bytes size
+        let capacity = sample_rate as usize * packet_duration_ms as usize / 500;
+        let processor_chain = self.processor_chain.clone();
+        let session_id = self.session_id.clone();
+        let emit_loop = async move {
+            let mut ptimer = tokio::time::interval_at(
+                Instant::now() + Duration::from_millis(200),
+                Duration::from_millis(packet_duration_ms as u64),
+            );
+            let mut cmd_finished = !cache_enabled;
+            let mut tts_finished = false;
+            // current processing seq
+            let mut cur_seq = 0;
+            // in streaming mode, all the chunks stored in the first deque
+            // (deque, finished), deque save all the chunks for the seq, finished is true if all the chunks are received
+            let mut chunks = VecDeque::<(VecDeque<Bytes>, bool)>::new();
+
+            // buffer for sample, if data is not enough, rest of the capacity is filled with 0
+            let mut samples = vec![0u8; capacity];
+            while !cmd_finished || !tts_finished || !chunks.is_empty() {
+                tokio::select! {
+                    biased;
+                    _ = ptimer.tick() => {
+                        let mut i = 0;
+                        samples.fill(0);
+                        while i < capacity && !chunks.is_empty() {
+                            let (dq, finished) = &mut chunks[0];
+                            if dq.is_empty() && !*finished {
+                                break;
+                            }
+                            while i < capacity && !dq.is_empty() {
+                                let first = &mut dq[0];
+                                let len = first.len().min(capacity - i);
+                                samples[i..i+len].copy_from_slice(&first[..len]);
+                                i += len;
+                                let _ = first.split_to(len);
+                                if first.is_empty() {
+                                    dq.pop_front();
+                                }
+                            }
+
+                            if *finished && dq.is_empty(){
+                                debug!("TTS track, cmd seq: {} finished", cur_seq);
+                                chunks.pop_front();
+                                cur_seq += 1;
+                            }
+                        }
+
+
+                        let samples = bytes_to_samples(&samples[..]);
+                        let samples = Samples::PCM{
+                            samples,
+                        };
+                        let mut frame = AudioFrame {
+                            track_id: track_id.clone(),
+                            samples,
+                            timestamp: crate::get_timestamp(),
+                            sample_rate,
+                        };
+                        if let Err(e) = processor_chain.process_frame(&mut frame) {
+                            warn!(track_id, session_id, "error processing frame: {}", e);
+                            break;
+                        }
+
+                        if let Err(_) = packet_sender.send(frame) {
+                            warn!(track_id, session_id, "track already closed");
+                            break;
+                        }
+                    },
+                    res = cache_rx.recv() ,if !cmd_finished => {
+                        if let Some((seq, chunk)) = res {
+                            if seq >= cur_seq + chunks.len(){
+                                chunks.resize(seq + 1 - cur_seq, (VecDeque::new(), false));
+                            }
+                            let (deq, finished) = &mut chunks[seq];
+                            debug!(seq, len = chunk.len());
+                            deq.push_back(chunk);
+                            *finished = true;
+                        }else{
+                            cmd_finished = true;
+                        }
+                    },
+                    res = tts_rx.recv() , if !tts_finished => {
+                        if let Some((seq, chunk)) = res {
+                            tracing::debug!(seq, chunk = chunk.as_ref().map(|c| c.len()).unwrap_or(0));
+                            // for streaming mode all the chunks stored in the 0 index
+                            let seq = seq.unwrap_or(0);
+                            if seq >= cur_seq + chunks.len(){
+                                chunks.resize(seq + 1 - cur_seq, (VecDeque::new(), false));
+                            }
+
+                            let (deq, finished) = &mut chunks[seq];
+                            if let Some(chunk) = chunk {
+                                deq.push_back(chunk);
+                            }else{
+                                *finished = true;
+                            }
+
+                        }else{
+                            tts_finished = true;
+                        }
+                    }
                 }
             }
         };
+
         let track_id = self.track_id.clone();
         let token = self.cancel_token.clone();
         let session_id = self.session_id.clone();
@@ -516,54 +482,20 @@ impl Track for TtsTrack {
         tokio::spawn(async move {
             let start_time = crate::get_timestamp();
             select! {
-                _ = command_loop => {
-                    info!(session_id, "command loop completed");
-                }
-                _ = receive_result_loop => {
-                    info!(session_id, "receive result loop completed");
+                biased;
+                _ = token.cancelled() => {
+                   info!(session_id, "tts track canceled");
                 }
                 _ = emit_loop => {
                     info!(session_id, "emit loop completed");
                 }
-                _ = token.cancelled() => {
-                    let remaining_size = {*remaining_size.lock().await * 2};
-                    let status = match status.write() {
-                        Ok(status) => status.clone(),
-                        Err(e) => {
-                            warn!(session_id, "error writing synthesis status: {}", e);
-                            return;
-                        }
-                    };
-                    let total_size = status.total_audio_len;
-                    let sended_size = total_size - remaining_size;
-                    let mut position = None;
-                    let current = bytes_size_to_duration(sended_size, sample_rate);
-                    let total_duration = bytes_size_to_duration(total_size, sample_rate);
-                    for subtitle in status.subtitles.iter().rev() {
-                        if subtitle.begin_time <= current {
-                            position = Some(subtitle.begin_index);
-                            break;
-                        }
-                    }
-                    let event = SessionEvent::Interruption {
-                        track_id: track_id.clone(),
-                        play_id: status.play_id.clone(),
-                        timestamp: crate::get_timestamp(),
-                        subtitle: Some(status.full_text),
-                        position,
-                        total_duration,
-                        current,
-                    };
-                   event_sender_clone.send(event).ok();
-                }
+                _ = recv_loop => {}
+                _ = command_loop => {}
             }
 
             let duration = crate::get_timestamp() - start_time;
             info!(session_id, track_id, duration, "tts track ended");
-            let play_id = match status.read() {
-                Ok(status) => status.play_id.clone(),
-                Err(_) => None,
-            };
+            let play_id = Some("play".to_string());
             event_sender_clone
                 .send(SessionEvent::TrackEnd {
                     track_id,

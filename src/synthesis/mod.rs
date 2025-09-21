@@ -1,14 +1,13 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 mod aliyun;
 mod tencent_cloud;
 mod voiceapi;
-
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 // pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
@@ -19,8 +18,8 @@ pub struct SynthesisCommand {
     pub text: String,
     pub speaker: Option<String>,
     pub play_id: Option<String>,
-    pub streaming: Option<bool>,
-    pub end_of_stream: Option<bool>,
+    pub streaming: bool,
+    pub end_of_stream: bool,
     pub option: SynthesisOption,
 }
 pub type SynthesisCommandSender = mpsc::UnboundedSender<SynthesisCommand>;
@@ -144,11 +143,10 @@ impl SynthesisOption {
 #[derive(Debug)]
 pub enum SynthesisEvent {
     /// Raw audio data chunk
-    AudioChunk(Vec<u8>),
+    AudioChunk(Bytes),
     /// Progress information including completion status
     Subtitles(Vec<Subtitle>),
     Finished {
-        end_of_stream: Option<bool>,
         cache_key: Option<String>,
     },
 }
@@ -172,25 +170,31 @@ impl Subtitle {
     }
 }
 
+// calculate audio duration from bytes size and sample rate
 pub fn bytes_size_to_duration(bytes: usize, sample_rate: u32) -> u32 {
     (500.0 * bytes as f32 / sample_rate as f32) as u32
 }
 
 #[async_trait]
-pub trait SynthesisClient: Send + Sync {
-    /// Returns the provider type for this synthesis client.
+pub trait SynthesisClient: Send {
+    // provider of the synthesis client.
     fn provider(&self) -> SynthesisType;
+
+    // connect to the synthesis service.
     async fn start(
-        &self,
-        cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>>;
-    // break out of stream polling loop when res is Err or Progress is finished
+        &mut self,
+    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>>;
+
+    // send text to the synthesis service.
+    // `cmd_seq` and `option` are used for non streaming mode
     async fn synthesize(
-        &self,
+        &mut self,
         text: &str,
-        end_of_stream: Option<bool>,
+        cmd_seq: usize,
         option: Option<SynthesisOption>,
     ) -> Result<()>;
+
+    async fn stop(&mut self) -> Result<()>;
 }
 
 impl Default for SynthesisOption {

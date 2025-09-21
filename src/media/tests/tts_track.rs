@@ -9,6 +9,7 @@ use crate::{
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use tokio::{
     sync::{broadcast, mpsc},
@@ -24,10 +25,7 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn start(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+    async fn start(&mut self) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
         // Generate a simple sine wave audio sample for testing
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
@@ -47,18 +45,23 @@ impl SynthesisClient for MockSynthesisClient {
         }
 
         let stream = stream! {
-            yield Ok(SynthesisEvent::AudioChunk(audio_data));
-            yield Ok(SynthesisEvent::Subtitles(vec![Subtitle::new(0, 1000, 0, 10)]));
+            yield Ok((None, SynthesisEvent::AudioChunk(Bytes::from(audio_data))));
+            yield Ok((None, SynthesisEvent::Subtitles(vec![Subtitle::new(0, 1000, 0, 10)])));
             std::future::pending().await
         };
         Ok(Box::pin(stream))
     }
+
     async fn synthesize(
-        &self,
+        &mut self,
         _text: &str,
-        _end_of_stream: Option<bool>,
+        _cmd_seq: usize,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -74,6 +77,8 @@ async fn test_tts_track_basic() -> Result<()> {
     let tts_track = TtsTrack::new(
         track_id.clone(),
         "test_session".to_string(),
+        false,
+        None,
         command_rx,
         Box::new(client),
     );
@@ -132,6 +137,8 @@ async fn test_tts_track_multiple_commands() -> Result<()> {
     let tts_track = TtsTrack::new(
         track_id.clone(),
         "test_session".to_string(),
+        false,
+        None,
         command_rx,
         Box::new(client),
     )
@@ -205,6 +212,8 @@ async fn test_tts_track_configuration() -> Result<()> {
     let tts_track = TtsTrack::new(
         track_id.clone(),
         "test_session".to_string(),
+        false,
+        None,
         command_rx,
         Box::new(client),
     )
@@ -259,6 +268,8 @@ async fn test_tts_track_interrupt() -> Result<()> {
     let tts_track = TtsTrack::new(
         track_id.clone(),
         "test_session".to_string(),
+        false,
+        None,
         command_rx,
         Box::new(client),
     );

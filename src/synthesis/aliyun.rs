@@ -13,7 +13,6 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -179,7 +178,7 @@ struct EventHeader {
 }
 
 impl AliyunTtsClient {
-    pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+    pub fn create(_streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
         let client = Self::new(option.clone());
         Ok(Box::new(client))
     }
@@ -261,20 +260,22 @@ async fn event_stream(
     ws_stream: WsSource,
     task_id: String,
     cache_key: Option<String>,
-) -> BoxStream<'static, Result<SynthesisEvent>> {
+) -> BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>> {
     let stream = ws_stream.filter_map(move |message| {
         let task_id = task_id.clone();
         let cache_key = cache_key.clone();
         async move {
             match message {
-                Ok(Message::Binary(data)) => Some(Ok(SynthesisEvent::AudioChunk(data.to_vec()))),
+                Ok(Message::Binary(data)) => Some(Ok((None, SynthesisEvent::AudioChunk(data)))),
                 Ok(Message::Text(text)) => {
                     if let Ok(event) = serde_json::from_str::<Event>(&text) {
                         match event.header.event.as_str() {
-                            "task-finished" => Some(Ok(SynthesisEvent::Finished {
-                                end_of_stream: Some(true),
-                                cache_key: cache_key.clone(),
-                            })),
+                            "task-finished" => Some(Ok((
+                                None,
+                                SynthesisEvent::Finished {
+                                    cache_key: cache_key.clone(),
+                                },
+                            ))),
                             "task-failed" => {
                                 let error_code = event
                                     .header
@@ -325,9 +326,8 @@ impl SynthesisClient for AliyunTtsClient {
     }
 
     async fn start(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+        &mut self,
+    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
         let ws_stream = self.connect().await?;
         let (ws_sink, ws_source) = ws_stream.split();
         let stream = event_stream(
@@ -341,26 +341,29 @@ impl SynthesisClient for AliyunTtsClient {
     }
 
     async fn synthesize(
-        &self,
+        &mut self,
         text: &str,
-        end_of_stream: Option<bool>,
+        _cmd_seq: usize,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
-        let task_id = self.task_id.as_str();
         if let Some(ws_sink) = self.ws_sink.lock().await.as_mut() {
             if !text.is_empty() {
-                let continue_task_cmd = Command::continue_task(task_id, text);
+                let continue_task_cmd = Command::continue_task(self.task_id.as_str(), text);
                 let continue_task_json = serde_json::to_string(&continue_task_cmd)?;
                 ws_sink.send(Message::text(continue_task_json)).await?;
             }
-
-            if let Some(true) = end_of_stream {
-                let finish_task_cmd = Command::finish_task(task_id);
-                let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
-                ws_sink.send(Message::text(finish_task_json)).await?;
-            }
         } else {
-            return Err(anyhow!("Aliyun TTS Task: {task_id} not connected"));
+            return Err(anyhow!("Aliyun TTS Task: not connected"));
+        }
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if let Some(ws_sink) = self.ws_sink.lock().await.as_mut() {
+            let finish_task_cmd = Command::finish_task(self.task_id.as_str());
+            let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
+            ws_sink.send(Message::text(finish_task_json)).await?;
         }
 
         Ok(())
