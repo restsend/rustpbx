@@ -46,7 +46,7 @@ impl IpNetwork {
                     let mask = if bits == 16 {
                         0xFFFF
                     } else {
-                        (0xFFFF << (16 - bits)) & 0xFFFF
+                        0xFFFF << (16 - bits)
                     };
                     if (network_segments[i] & mask) != (ip_segments[i] & mask) {
                         return false;
@@ -127,12 +127,12 @@ impl AclModule {
         let ua_white_list = config
             .ua_white_list
             .as_ref()
-            .map_or_else(|| HashSet::new(), |list| list.iter().cloned().collect());
+            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
 
         let ua_black_list = config
             .ua_black_list
             .as_ref()
-            .map_or_else(|| HashSet::new(), |list| list.iter().cloned().collect());
+            .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
 
         let acl_rules = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
         Self {
@@ -219,7 +219,7 @@ fn parse_network(addr: &str) -> Result<(IpAddr, u8)> {
                     let mask = if bits == 16 {
                         0xFFFF
                     } else {
-                        (0xFFFF << (16 - bits)) & 0xFFFF
+                        0xFFFF << (16 - bits)
                     };
                     result[i] = segments[i] & mask;
                 }

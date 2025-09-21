@@ -689,14 +689,13 @@ fn create_invite_option(
     InviteOption {
         caller: caller.try_into().expect("Invalid caller URI"),
         callee: callee.try_into().expect("Invalid callee URI"),
-        destination: None,
         content_type: content_type.map(|s| s.to_string()),
         offer: content_type
             .filter(|ct| ct.contains("sdp"))
             .map(|_| create_minimal_sdp(caller).into_bytes()),
         contact: contact_uri.try_into().expect("Invalid contact URI"),
-        credential: None,
         headers,
+        ..Default::default()
     }
 }
 

@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 /// Aliyun DashScope Paraformer real-time speech recognition API
 /// https://help.aliyun.com/zh/model-studio/paraformer-real-time-speech-recognition-api/
-
 struct AliyunAsrClientInner {
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     option: TranscriptionOption,
@@ -198,36 +197,41 @@ impl AliyunAsrClientInner {
     }
 }
 
+/// Context for websocket message handling to reduce function arguments
+struct WebSocketContext {
+    track_id: TrackId,
+    sample_rate: u32,
+    model: String,
+    language_hints: Vec<String>,
+}
+
 impl AliyunAsrClient {
     async fn handle_websocket_message(
-        track_id: TrackId,
+        ctx: WebSocketContext,
         ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         event_sender: EventSender,
         token: CancellationToken,
-        model: String,
-        sample_rate: u32,
-        language_hints: Vec<String>,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::get_timestamp();
-        let start_msg = RunTaskCommand::new(track_id.clone(), sample_rate, model, language_hints);
+        let start_msg = RunTaskCommand::new(ctx.track_id.clone(), ctx.sample_rate, ctx.model, ctx.language_hints);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
-                warn!(track_id, "Failed to send start message: {}", e);
+                warn!(ctx.track_id, "Failed to send start message: {}", e);
                 return Err(anyhow!("Failed to send start message: {}", e));
             }
         }
 
-        let track_id_clone = track_id.clone();
+        let track_id_clone = ctx.track_id.clone();
         let recv_loop = async move {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
                     Ok(Message::Text(text)) => match serde_json::from_str::<AsrEvent>(&text) {
                         Ok(response) => {
                             let task_id = response.header.task_id.clone();
-                            debug!(track_id, task_id, "Task: {}", response.header.event);
+                            debug!(ctx.track_id, task_id, "Task: {}", response.header.event);
                             if response.header.event == "task-failed" {
                                 let code = response.header.error_code.expect("mising_code");
                                 let message =
@@ -303,15 +307,15 @@ impl AliyunAsrClient {
                             event_sender.send(metrics_event).ok();
                         }
                         Err(e) => {
-                            warn!(track_id, "Failed to parse ASR response: {}", e);
+                            warn!(ctx.track_id, "Failed to parse ASR response: {}", e);
                         }
                     },
                     Ok(Message::Close(_)) => {
-                        info!(track_id, "WebSocket connection closed by server");
+                        info!(ctx.track_id, "WebSocket connection closed by server");
                         break;
                     }
                     Err(e) => {
-                        warn!(track_id, "WebSocket error: {}", e);
+                        warn!(ctx.track_id, "WebSocket error: {}", e);
                         return Err(anyhow!("WebSocket error: {}", e));
                     }
                     _ => {
@@ -363,13 +367,16 @@ pub struct AliyunAsrClientBuilder {
     event_sender: EventSender,
 }
 
+/// Type alias to simplify complex return type
+type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+
 impl AliyunAsrClientBuilder {
     pub fn create(
         track_id: TrackId,
         token: CancellationToken,
         option: TranscriptionOption,
         event_sender: EventSender,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>> {
+    ) -> TranscriptionClientFuture {
         Box::pin(async move {
             let builder = Self::new(option, event_sender);
             builder
@@ -440,7 +447,7 @@ impl AliyunAsrClientBuilder {
         };
 
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let token = self.token.unwrap_or(CancellationToken::new());
+        let token = self.token.unwrap_or_default();
         let event_sender = self.event_sender;
         info!(%track_id, "Starting Aliyun ASR client");
 
@@ -463,7 +470,7 @@ impl AliyunAsrClientBuilder {
                     warn!(track_id, "Failed to connect to Aliyun ASR WebSocket: {}", e);
                     let _ = event_sender.send(SessionEvent::Error {
                         timestamp: crate::get_timestamp(),
-                        track_id: track_id,
+                        track_id,
                         sender: "AliyunAsrClient".to_string(),
                         error: format!("Failed to connect to Aliyun ASR WebSocket: {}", e),
                         code: Some(500),
@@ -472,15 +479,19 @@ impl AliyunAsrClientBuilder {
                 }
             };
 
+            let ctx = WebSocketContext {
+                track_id: track_id.clone(),
+                sample_rate,
+                model: model_type,
+                language_hints,
+            };
+
             match AliyunAsrClient::handle_websocket_message(
-                track_id.clone(),
+                ctx,
                 ws_stream,
                 audio_rx,
                 event_sender.clone(),
                 token,
-                model_type,
-                sample_rate,
-                language_hints,
             )
             .await
             {

@@ -259,7 +259,7 @@ pub async fn client_dialog_event_loop(
             DialogState::Calling(dialog_id) => {
                 info!(session_id, track_id, %dialog_id, "client dialog calling");
             }
-            DialogState::Confirmed(dialog_id) => {
+            DialogState::Confirmed(dialog_id, _) => {
                 info!(session_id, track_id, %dialog_id, "client dialog confirmed");
                 call_state
                     .write()
@@ -329,7 +329,7 @@ pub async fn server_dialog_event_loop(
             DialogState::Calling(dialog_id) => {
                 info!(session_id, track_id, %dialog_id, "server dialog calling");
             }
-            DialogState::Confirmed(dialog_id) => {
+            DialogState::Confirmed(dialog_id, _) => {
                 info!(session_id, track_id, %dialog_id, "server dialog confirmed");
                 call_state
                     .write()

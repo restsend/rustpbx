@@ -26,6 +26,9 @@ use tracing::{debug, info, warn};
 use urlencoding;
 use uuid::Uuid;
 
+/// Type alias to simplify complex return type
+type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+
 /// API Tencent Cloud streaming ASR
 /// https://cloud.tencent.com/document/api/1093/48982
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +79,7 @@ impl TencentCloudAsrClientBuilder {
         token: CancellationToken,
         option: TranscriptionOption,
         event_sender: EventSender,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>> {
+    ) -> TranscriptionClientFuture {
         Box::pin(async move {
             let builder = Self::new(option, event_sender);
             builder
@@ -141,7 +144,7 @@ impl TencentCloudAsrClientBuilder {
         };
 
         let track_id = self.track_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let token = self.token.unwrap_or(CancellationToken::new());
+        let token = self.token.unwrap_or_default();
         let event_sender = self.event_sender;
 
         info!(track_id, "Starting TencentCloud ASR client");
@@ -394,7 +397,7 @@ impl TencentCloudAsrClient {
                                         start_time.store(0, Ordering::Relaxed);
                                         SessionEvent::Metrics {
                                             timestamp: crate::get_timestamp(),
-                                            key: format!("completed.asr.tencent"),
+                                            key: "completed.asr.tencent".to_string(),
                                             data: serde_json::json!({
                                                 "index": result.index,
                                             }),
@@ -403,7 +406,7 @@ impl TencentCloudAsrClient {
                                     } else {
                                         SessionEvent::Metrics {
                                             timestamp: crate::get_timestamp(),
-                                            key: format!("ttfb.asr.tencent"),
+                                            key: "ttfb.asr.tencent".to_string(),
                                             data: serde_json::json!({
                                                 "index": result.index,
                                             }),
@@ -436,7 +439,7 @@ impl TencentCloudAsrClient {
         let send_loop = async move {
             let mut total_bytes_sent = 0;
             while let Some(samples) = audio_rx.recv().await {
-                if samples.len() == 0 {
+                if samples.is_empty() {
                     ws_sender
                         .send(Message::Text("{\"type\": \"end\"}".into()))
                         .await?;

@@ -93,52 +93,49 @@ pub struct SynthesisOption {
 impl SynthesisOption {
     pub fn merge_with(&self, option: Option<SynthesisOption>) -> Self {
         let mut merged = self.clone();
-        match option {
-            Some(option) => {
-                if option.samplerate.is_some() {
-                    merged.samplerate = option.samplerate;
-                }
-                if option.speed.is_some() {
-                    merged.speed = option.speed;
-                }
-                if option.volume.is_some() {
-                    merged.volume = option.volume;
-                }
-                if option.speaker.is_some() {
-                    merged.speaker = option.speaker;
-                }
-                if option.codec.is_some() {
-                    merged.codec = option.codec;
-                }
-                if option.subtitle.is_some() {
-                    merged.subtitle = option.subtitle;
-                }
-                if option.emotion.is_some() {
-                    merged.emotion = option.emotion;
-                }
-                if option.endpoint.is_some() {
-                    merged.endpoint = option.endpoint;
-                }
-                if option.provider.is_some() {
-                    merged.provider = option.provider;
-                }
-                if option.app_id.is_some() {
-                    merged.app_id = option.app_id;
-                }
-                if option.secret_id.is_some() {
-                    merged.secret_id = option.secret_id;
-                }
-                if option.secret_key.is_some() {
-                    merged.secret_key = option.secret_key;
-                }
-                if option.cache_key.is_some() {
-                    merged.cache_key = option.cache_key;
-                }
-                if option.extra.is_some() {
-                    merged.extra = option.extra;
-                }
+        if let Some(option) = option {
+            if option.samplerate.is_some() {
+                merged.samplerate = option.samplerate;
             }
-            None => {}
+            if option.speed.is_some() {
+                merged.speed = option.speed;
+            }
+            if option.volume.is_some() {
+                merged.volume = option.volume;
+            }
+            if option.speaker.is_some() {
+                merged.speaker = option.speaker;
+            }
+            if option.codec.is_some() {
+                merged.codec = option.codec;
+            }
+            if option.subtitle.is_some() {
+                merged.subtitle = option.subtitle;
+            }
+            if option.emotion.is_some() {
+                merged.emotion = option.emotion;
+            }
+            if option.endpoint.is_some() {
+                merged.endpoint = option.endpoint;
+            }
+            if option.provider.is_some() {
+                merged.provider = option.provider;
+            }
+            if option.app_id.is_some() {
+                merged.app_id = option.app_id;
+            }
+            if option.secret_id.is_some() {
+                merged.secret_id = option.secret_id;
+            }
+            if option.secret_key.is_some() {
+                merged.secret_key = option.secret_key;
+            }
+            if option.cache_key.is_some() {
+                merged.cache_key = option.cache_key;
+            }
+            if option.extra.is_some() {
+                merged.extra = option.extra;
+            }
         }
         merged
     }
@@ -277,7 +274,7 @@ pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn Synthe
             Ok(Box::new(client))
         }
         SynthesisType::Other(provider) => {
-            return Err(anyhow::anyhow!("Unsupported provider: {}", provider));
+            Err(anyhow::anyhow!("Unsupported provider: {}", provider))
         }
     }
 }

@@ -39,7 +39,7 @@ impl SessionParty {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MediaStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -47,19 +47,6 @@ pub struct MediaStats {
     pub packets_received: u32,
     pub codec_used: Option<String>,
     pub last_packet_time: Option<Instant>,
-}
-
-impl Default for MediaStats {
-    fn default() -> Self {
-        Self {
-            bytes_sent: 0,
-            bytes_received: 0,
-            packets_sent: 0,
-            packets_received: 0,
-            codec_used: None,
-            last_packet_time: None,
-        }
-    }
 }
 
 pub struct Session {

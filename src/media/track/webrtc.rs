@@ -16,7 +16,7 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::time::sleep;
 use tokio::{select, sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use webrtc::{
     api::{
         APIBuilder,
@@ -447,7 +447,7 @@ impl Track for WebrtcTrack {
         match local_track.write_sample(&sample).await {
             Ok(_) => {}
             Err(e) => {
-                error!("failed to send sample: {}", e);
+                warn!("failed to send sample: {}", e);
                 return Err(anyhow::anyhow!("Failed to send sample: {}", e));
             }
         }
