@@ -997,7 +997,7 @@ impl RtpTrack {
                             reports: vec![report],
                             profile_extensions: Bytes::new(),
                         };
-
+                        debug!(track_id, ?rr, "Sending RTCP Receiver Report");
                         pkts.push(Box::new(rr) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>);
                     }
 
