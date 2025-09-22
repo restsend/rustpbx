@@ -406,7 +406,14 @@ impl SipServer {
             debug!(key = %tx.key, "received transaction");
             let modules = self.modules.clone();
 
-            let token = self.inner.cancel_token.child_token();
+            let token = tx
+                .connection
+                .as_ref()
+                .map(|c| c.cancel_token())
+                .flatten()
+                .unwrap_or_else(|| self.inner.cancel_token.clone())
+                .child_token();
+
             let runnings_tx = runnings_tx.clone();
 
             if let Some(max_concurrency) = self.inner.config.max_concurrency {
