@@ -86,7 +86,6 @@ pub struct SynthesisOption {
     pub emotion: Option<String>,
     pub endpoint: Option<String>,
     pub extra: Option<HashMap<String, String>>,
-    pub cache_key: Option<String>,
 }
 
 impl SynthesisOption {
@@ -129,9 +128,6 @@ impl SynthesisOption {
             if option.secret_key.is_some() {
                 merged.secret_key = option.secret_key;
             }
-            if option.cache_key.is_some() {
-                merged.cache_key = option.cache_key;
-            }
             if option.extra.is_some() {
                 merged.extra = option.extra;
             }
@@ -146,9 +142,7 @@ pub enum SynthesisEvent {
     AudioChunk(Bytes),
     /// Progress information including completion status
     Subtitles(Vec<Subtitle>),
-    Finished {
-        cache_key: Option<String>,
-    },
+    Finished,
 }
 
 #[derive(Debug, Clone)]
@@ -183,7 +177,7 @@ pub trait SynthesisClient: Send {
     // connect to the synthesis service.
     async fn start(
         &mut self,
-    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>>;
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>>;
 
     // send text to the synthesis service.
     // `cmd_seq` and `option` are used for non streaming mode
@@ -213,7 +207,6 @@ impl Default for SynthesisOption {
             emotion: None,
             endpoint: None,
             extra: None,
-            cache_key: None,
         }
     }
 }

@@ -200,8 +200,7 @@ fn construct_request_url(option: &SynthesisOption, session_id: &str, text: Optio
 fn ws_to_event_stream<T>(
     ws_stream: T,
     cmd_seq: Option<usize>,
-    cache_key: Option<String>,
-) -> BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>
+) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
 where
     T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Send
@@ -213,12 +212,11 @@ where
     ws_stream
         .take_until(notify.notified_owned())
         .filter_map(move |message| {
-            let cache_key = cache_key.clone();
             let notify = notify_clone.clone();
             async move {
                 match message {
                     Ok(Message::Binary(data)) => {
-                        Some(Ok((cmd_seq, SynthesisEvent::AudioChunk(data))))
+                        Some((cmd_seq, Ok(SynthesisEvent::AudioChunk(data))))
                     }
                     Ok(Message::Text(text)) => {
                         let response: WebSocketResponse =
@@ -243,13 +241,13 @@ where
                         if let Some(subtitles) = response.result.subtitles {
                             let subtitles: Vec<Subtitle> =
                                 subtitles.iter().map(Into::into).collect();
-                            return Some(Ok((cmd_seq, SynthesisEvent::Subtitles(subtitles))));
+                            return Some((cmd_seq, Ok(SynthesisEvent::Subtitles(subtitles))));
                         }
 
                         // final == 1 means the synthesis is finished, should close the websocket
                         if response.r#final == 1 {
                             notify.notify_one();
-                            return Some(Ok((cmd_seq, SynthesisEvent::Finished { cache_key })));
+                            return Some((cmd_seq, Ok(SynthesisEvent::Finished)));
                         }
 
                         None
@@ -261,11 +259,11 @@ where
                     }
                     Err(e) => {
                         notify.notify_one();
-                        Some(Err(anyhow::anyhow!(
+                        Some((cmd_seq, Err(anyhow::anyhow!(
                             "Tencent TTS websocket error: {:?}, {:?}",
                             cmd_seq,
                             e
-                        )))
+                        ))))
                     }
                     _ => None,
                 }
@@ -297,23 +295,21 @@ impl SynthesisClient for RealTimeClient {
 
     async fn start(
         &mut self,
-    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
-        // set the number to the concurrent ongoing websocket connections
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         // Tencent cloud alow 10 - 20 concurrent websocket connections for default setting, dependent on voice type
-        let (tx, rx) = mpsc::channel(5);
+        // set the number more higher will lead to waiting for unordered results longer
+        let (tx, rx) = mpsc::channel(10);
         self.tx = Some(tx);
         let client_option = self.option.clone();
         let stream = ReceiverStream::new(rx)
-            .flat_map_unordered(Some(10), move |(text, cmd_seq, option)| {
+            .flat_map_unordered(3, move |(text, cmd_seq, option)| {
                 // each reequest have its own session_id
                 let session_id = Uuid::new_v4().to_string();
                 let option = client_option.merge_with(option);
                 let url = construct_request_url(&option, &session_id, Some(&text));
                 connect_async(url)
                     .then(async move |res| match res {
-                        Ok((ws_stream, _)) => {
-                            ws_to_event_stream(ws_stream, Some(cmd_seq), option.cache_key)
-                        }
+                        Ok((ws_stream, _)) => ws_to_event_stream(ws_stream, Some(cmd_seq)),
                         Err(e) => {
                             tracing::error!("Tencent TTS websocket error: {}", e);
                             stream::empty().boxed()
@@ -419,11 +415,11 @@ impl SynthesisClient for StreamingClient {
 
     async fn start(
         &mut self,
-    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         let stream = self.connect().await?;
         let (ws_sink, ws_stream) = stream.split();
         self.sink = Some(ws_sink);
-        Ok(ws_to_event_stream(ws_stream, None, None))
+        Ok(ws_to_event_stream(ws_stream, None))
     }
 
     async fn synthesize(

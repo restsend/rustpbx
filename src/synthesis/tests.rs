@@ -60,17 +60,17 @@ async fn test_tencent_cloud_tts() {
     let mut total_size = 0;
     let mut chunks_count = 0;
     let mut collected_audio = Vec::new();
-    while let Some(chunk_result) = stream.next().await {
+    while let Some((_cmd_seq, chunk_result)) = stream.next().await {
         match chunk_result {
-            Ok((_cmd_seq, SynthesisEvent::AudioChunk(audio))) => {
+            Ok(SynthesisEvent::AudioChunk(audio)) => {
                 total_size += audio.len();
                 chunks_count += 1;
                 collected_audio.extend_from_slice(&audio);
             }
-            Ok((_cmd_seq, SynthesisEvent::Finished { .. })) => {
+            Ok(SynthesisEvent::Finished { .. }) => {
                 break;
             }
-            Ok((_cmd_seq, SynthesisEvent::Subtitles { .. })) => {
+            Ok(SynthesisEvent::Subtitles { .. }) => {
                 // ignore progress
             }
             Err(e) => {
@@ -125,9 +125,9 @@ async fn test_aliyun_tts() {
 
     let mut audio_collector = Vec::with_capacity(8096);
     let mut chunks_count = 0;
-    while let Some(res) = stream.next().await {
+    while let Some((_cmd_seq, res)) = stream.next().await {
         match res {
-            Ok((_cmd_seq, event)) => {
+            Ok(event) => {
                 match event {
                     SynthesisEvent::AudioChunk(chunk) => {
                         audio_collector.extend_from_slice(&chunk);

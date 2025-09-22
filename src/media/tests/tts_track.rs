@@ -25,7 +25,7 @@ impl SynthesisClient for MockSynthesisClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Other("mock".to_string())
     }
-    async fn start(&mut self) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+    async fn start(&mut self) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         // Generate a simple sine wave audio sample for testing
         let sample_rate = 16000;
         let frequency = 440.0; // A4 note
@@ -45,8 +45,8 @@ impl SynthesisClient for MockSynthesisClient {
         }
 
         let stream = stream! {
-            yield Ok((None, SynthesisEvent::AudioChunk(Bytes::from(audio_data))));
-            yield Ok((None, SynthesisEvent::Subtitles(vec![Subtitle::new(0, 1000, 0, 10)])));
+            yield (None, Ok(SynthesisEvent::AudioChunk(Bytes::from(audio_data))));
+            yield (None, Ok(SynthesisEvent::Subtitles(vec![Subtitle::new(0, 1000, 0, 10)])));
             std::future::pending().await
         };
         Ok(Box::pin(stream))

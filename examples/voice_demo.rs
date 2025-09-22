@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
                                         .expect("Failed to synthesize text");
 
                                     let mut total_bytes = 0;
-                                    while let Some(Ok((_cmd_seq, event))) = audio_stream.next().await {
+                                    while let Some((_cmd_seq, Ok(event))) = audio_stream.next().await {
                                         match event {
                                             SynthesisEvent::AudioChunk(chunk) => {
                                                 total_bytes += chunk.len();
