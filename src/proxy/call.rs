@@ -22,7 +22,6 @@ use rsipstack::transport::SipAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use webrtc::media;
 
 #[async_trait]
 pub trait CallRouter: Send + Sync {
@@ -128,7 +127,7 @@ impl CallModule {
             .with_rtp_start_port(self.inner.server.app_state.config.rtp_start_port.clone())
             .with_rtp_end_port(self.inner.server.app_state.config.rtp_end_port.clone());
 
-        let mut dialplan = Dialplan::new(session_id)
+        let mut dialplan = Dialplan::new(session_id, original.clone())
             .with_caller_contact(caller_contact)
             .with_caller(caller)
             .with_media(media_config)
@@ -168,8 +167,13 @@ impl CallModule {
             .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
 
         if locations.is_empty() {
-            warn!(callee = %callee_uri, "user offline in locator");
-            return Err((anyhow!("User offline"), Some(rsip::StatusCode::NotFound)));
+            info!(%dialog_id, callee = %callee_uri, "user offline in locator");
+            locations.push(Location {
+                aor: callee_uri.clone(),
+                destination: SipAddr::try_from(&callee_uri).map_err(|e| (anyhow!(e), None))?,
+                abort_on_route_invite_missing: Some(rsip::StatusCode::TemporarilyUnavailable), // abort if route invite is missing
+                ..Default::default()
+            });
         }
 
         if let Some(location_inspector) = self.inner.server.location_inspector.as_ref() {
@@ -248,13 +252,12 @@ impl CallModule {
             .as_ref()
             .map(|c| c.cancel_token())
             .flatten()
-            .unwrap_or_else(|| self.inner.server.cancel_token.child_token());
+            .unwrap_or_else(|| self.inner.server.cancel_token.clone());
 
         // Create event sender for media stream events
-        let builder = ProxyCallBuilder::new(cookie)
-            .with_dialplan(dialplan)
+        let builder = ProxyCallBuilder::new(cookie, dialplan)
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_cancel_token(cancel_token);
+            .with_cancel_token(cancel_token.child_token());
 
         let proxy_call = builder.build(self.inner.dialog_layer.clone());
         let proxy_call = if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {

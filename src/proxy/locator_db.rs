@@ -234,7 +234,7 @@ impl Locator for DbLocator {
             .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
         if models.is_empty() {
-            return Err(anyhow::anyhow!("missing user: {}", username));
+            return Ok(vec![]);
         }
 
         let mut locations = Vec::new();

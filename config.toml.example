@@ -8,6 +8,7 @@ log_level = "debug"
 stun_server = "stun.l.google.com:19302"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
+# external_ip = "1.2.3.4"
 
 [ua]
 addr="0.0.0.0"
@@ -47,19 +48,19 @@ users = [
 type = "local"
 root = "/tmp/cdr"
 
-[proxy.trunks.wuhoo]
-dest = "sip:123.456.789.00:1234"
+# [proxy.trunks.wuhoo]
+# dest = "sip:123.456.789.00:1234"
 
-[[proxy.routes]]
-name = "default"
-priority = 1
-dest = "wuhoo"
+# [[proxy.routes]]
+# name = "default"
+# priority = 1
+# dest = "wuhoo"
 
-[proxy.routes.match]
-"to.user" = "^\\+.*"
+# [proxy.routes.match]
+# "to.user" = "^\\+.*"
 
-[proxy.routes.rewrite]
-"to.user" = "+{1}"
-"to.host" = "123.456.789.00:1234"
-"from.user" = "12345"
-"from.host" = "123.456.789.00:1234"
+# [proxy.routes.rewrite]
+# "to.user" = "+{1}"
+# "to.host" = "123.456.789.00:1234"
+# "from.user" = "12345"
+# "from.host" = "123.456.789.00:1234"

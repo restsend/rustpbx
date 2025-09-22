@@ -93,7 +93,10 @@ async fn test_registrar_unregister() {
         .lookup("alice", Some("example.com"))
         .await;
 
-    assert!(locations.is_err()); // Should return an error since the user is not registered
+    match locations {
+        Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
+        Err(_) => {}
+    }
 }
 
 #[tokio::test]
