@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::debug;
 
 type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
 
@@ -42,9 +42,7 @@ impl MemoryLocator {
             locations: Mutex::new(HashMap::new()),
         }
     }
-    pub fn create(
-        _config: Arc<ProxyConfig>,
-    ) -> LocatorCreationFuture {
+    pub fn create(_config: Arc<ProxyConfig>) -> LocatorCreationFuture {
         Box::pin(async move { Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>) })
     }
 }
@@ -77,8 +75,7 @@ impl Locator for MemoryLocator {
         if let Some(location) = locations.get(&identifier) {
             Ok(vec![location.clone()])
         } else {
-            info!("User not found: {}", identifier);
-            Err(anyhow::anyhow!("missing user: {}", identifier))
+            Ok(vec![])
         }
     }
 }

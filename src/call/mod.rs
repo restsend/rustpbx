@@ -237,32 +237,49 @@ pub struct Location {
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
     pub headers: Option<Vec<rsip::Header>>,
-}
-
-impl std::fmt::Debug for Location {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Location")
-            .field("aor", &self.aor)
-            .field("expires", &self.expires)
-            .field("destination", &self.destination)
-            .field("last_modified", &self.last_modified)
-            .field("supports_webrtc", &self.supports_webrtc)
-            .field("credential", &"<Credential>")
-            .field("headers", &self.headers)
-            .finish()
-    }
+    pub abort_on_route_invite_missing: Option<StatusCode>,
 }
 
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "aor: {}, destination: {}", self.aor, self.destination)
+        let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
+        write!(f, "({} -> {}{})", self.aor, self.destination, is_webrtc)
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum DialStrategy {
     Sequential(Vec<Location>),
     Parallel(Vec<Location>),
+}
+
+impl std::fmt::Display for DialStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialStrategy::Sequential(locations) => {
+                write!(
+                    f,
+                    "Sequential: [{}]",
+                    locations
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            DialStrategy::Parallel(locations) => {
+                write!(
+                    f,
+                    "Parallel: [{}]",
+                    locations
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -391,7 +408,7 @@ pub struct Dialplan {
     pub caller: Option<rsip::Uri>,
     pub targets: DialStrategy,
     pub max_ring_time: u32,
-
+    pub original: rsip::Request,
     // Enhanced call control options
     /// Recording configuration
     pub recording: CallRecordingConfig,
@@ -410,25 +427,6 @@ pub struct Dialplan {
     pub extras: Option<HashMap<String, serde_json::Value>>,
 }
 
-impl std::fmt::Debug for Dialplan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Dialplan")
-            .field("session_id", &self.session_id)
-            .field("caller", &self.caller)
-            .field("targets", &self.targets)
-            .field("max_ring_time", &self.max_ring_time)
-            .field("recording", &self.recording)
-            .field("ringback", &self.ringback)
-            .field("media", &self.media)
-            .field("max_call_duration", &self.max_call_duration)
-            .field("call_timeout", &self.call_timeout)
-            .field("failure_action", &self.failure_action)
-            .field("route_invite", &"<RouteInvite trait object>")
-            .field("extras", &self.extras)
-            .finish()
-    }
-}
-
 impl Dialplan {
     pub fn is_empty(&self) -> bool {
         match &self.targets {
@@ -443,10 +441,22 @@ impl Dialplan {
         }
     }
     /// Create a new dialplan with basic configuration
-    pub fn new(session_id: String) -> Self {
+    pub fn new(session_id: String, original: rsip::Request) -> Self {
         Self {
             session_id: Some(session_id),
-            ..Default::default()
+            original,
+            caller: None,
+            caller_contact: None,
+            targets: DialStrategy::Sequential(vec![]),
+            max_ring_time: 60,
+            recording: CallRecordingConfig::default(),
+            ringback: RingbackConfig::default(),
+            media: MediaConfig::default(),
+            max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
+            call_timeout: Duration::from_secs(60),              // 60 seconds
+            failure_action: FailureAction::default(),
+            route_invite: None,
+            extras: None,
         }
     }
 
@@ -523,26 +533,6 @@ impl Dialplan {
     /// Check if recording is enabled
     pub fn is_recording_enabled(&self) -> bool {
         self.recording.enabled
-    }
-}
-
-impl Default for Dialplan {
-    fn default() -> Self {
-        Self {
-            session_id: None,
-            caller: None,
-            caller_contact: None,
-            targets: DialStrategy::Sequential(vec![]),
-            max_ring_time: 60,
-            recording: CallRecordingConfig::default(),
-            ringback: RingbackConfig::default(),
-            media: MediaConfig::default(),
-            max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
-            call_timeout: Duration::from_secs(60),              // 60 seconds
-            failure_action: FailureAction::default(),
-            route_invite: None,
-            extras: None,
-        }
     }
 }
 

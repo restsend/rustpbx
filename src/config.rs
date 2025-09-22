@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use clap::Parser;
+use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -251,7 +252,8 @@ pub struct ProxyConfig {
 
 pub enum RouteResult {
     Forward(InviteOption),
-    Abort(u16, String),
+    NotHandled(InviteOption),
+    Abort(StatusCode, Option<String>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]

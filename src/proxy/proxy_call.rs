@@ -1,7 +1,7 @@
 use crate::{
     call::{DialStrategy, Dialplan, FailureAction, Location, TransactionCookie},
     callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender},
-    config::MediaProxyMode,
+    config::{MediaProxyMode, RouteResult},
     event::{EventReceiver, EventSender, create_event_sender},
     media::{
         stream::{MediaStream, MediaStreamBuilder},
@@ -30,6 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -47,24 +48,19 @@ pub struct ProxyCall {
 
 pub struct ProxyCallBuilder {
     cookie: TransactionCookie,
-    dialplan: Option<Dialplan>,
+    dialplan: Dialplan,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
 }
 
 impl ProxyCallBuilder {
-    pub fn new(cookie: TransactionCookie) -> Self {
+    pub fn new(cookie: TransactionCookie, dialplan: Dialplan) -> Self {
         Self {
             cookie,
-            dialplan: None,
+            dialplan,
             cancel_token: None,
             call_record_sender: None,
         }
-    }
-
-    pub fn with_dialplan(mut self, dialplan: Dialplan) -> Self {
-        self.dialplan = Some(dialplan);
-        self
     }
 
     pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
@@ -78,7 +74,7 @@ impl ProxyCallBuilder {
     }
 
     pub fn build(self, dialog_layer: Arc<DialogLayer>) -> ProxyCall {
-        let dialplan = self.dialplan.unwrap_or_default();
+        let dialplan = self.dialplan;
         let cancel_token = self.cancel_token.unwrap_or_default();
         let session_id = dialplan
             .session_id
@@ -558,7 +554,7 @@ impl ProxyCall {
 
         info!(
             session_id = %self.session_id,
-            strategy = ?self.dialplan.targets,
+            strategy = %self.dialplan.targets,
             media_proxy = session.use_media_proxy,
             "executing dialplan"
         );
@@ -573,10 +569,7 @@ impl ProxyCall {
                 info!(session_id = %self.session_id, "Dialplan executed successfully");
                 Ok(())
             }
-            Err(e) => {
-                warn!(session_id = %self.session_id, error = %e, "Dialplan execution failed");
-                self.handle_failure(session).await
-            }
+            Err(_) => self.handle_failure(session).await,
         }
     }
 
@@ -594,7 +587,6 @@ impl ProxyCall {
                 target = %target.aor,
                 "Trying sequential target"
             );
-
             match self.try_single_target(session, target).await {
                 Ok(_) => {
                     info!(
@@ -605,11 +597,11 @@ impl ProxyCall {
                     return Ok(());
                 }
                 Err((code, reason)) => {
-                    warn!(
+                    info!(
                         session_id = %self.session_id,
                         target_index = index,
                         code = %code,
-                        reason = ?reason,
+                        reason,
                         "Sequential target failed, trying next"
                     );
                     session.set_error(code, reason);
@@ -625,22 +617,239 @@ impl ProxyCall {
         info!(
             session_id = %self.session_id,
             target_count = targets.len(),
-            "Starting parallel dialing (simplified: using first target)"
+            "Starting parallel dialing"
         );
 
-        if let Some(target) = targets.first() {
-            self.try_single_target(session, target)
-                .await
-                .map_err(|(code, reason)| {
-                    session.set_error(code, reason);
-                    anyhow!("Parallel dialing failed")
-                })
-        } else {
+        if targets.is_empty() {
             session.set_error(
                 StatusCode::ServerInternalError,
                 Some("No targets provided".to_string()),
             );
-            Err(anyhow!("No targets provided for parallel dialing"))
+            return Err(anyhow!("No targets provided for parallel dialing"));
+        }
+
+        if !session.early_media_sent {
+            session.start_ringing(String::new(), self).await;
+        }
+
+        #[derive(Debug)]
+        enum ParallelEvent {
+            Calling {
+                idx: usize,
+                dialog_id: DialogId,
+            },
+            Early {
+                sdp: Option<String>,
+            },
+            Accepted {
+                idx: usize,
+                dialog_id: DialogId,
+                answer: String,
+                aor: String,
+            },
+            Failed {
+                code: StatusCode,
+                reason: Option<String>,
+            },
+            Terminated {
+                idx: usize,
+            },
+        }
+
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<ParallelEvent>();
+        let dialog_layer = self.dialog_layer.clone();
+        let cancel_token = self.cancel_token.clone();
+        let mut join_set = JoinSet::<()>::new();
+
+        let mut known_dialogs: Vec<Option<DialogId>> = vec![None; targets.len()];
+        let caller = match self.dialplan.caller.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                session.set_error(
+                    StatusCode::ServerInternalError,
+                    Some("No caller specified in dialplan".to_string()),
+                );
+                return Err(anyhow!("No caller specified in dialplan"));
+            }
+        };
+
+        for (idx, target) in targets.iter().enumerate() {
+            let (state_tx, mut state_rx) = mpsc::unbounded_channel();
+            let ev_tx_c = ev_tx.clone();
+            let aor = target.aor.to_string();
+
+            let offer = match session.callee_offer.as_ref() {
+                Some(sdp) if !sdp.trim().is_empty() => Some(sdp.clone().into_bytes()),
+                _ => None,
+            };
+            let content_type = if offer.is_some() {
+                Some("application/sdp".to_string())
+            } else {
+                None
+            };
+
+            let invite_option = InviteOption {
+                callee: target.aor.clone(),
+                caller: caller.clone(),
+                content_type,
+                offer,
+                destination: Some(target.destination.clone()),
+                contact: self
+                    .dialplan
+                    .caller_contact
+                    .as_ref()
+                    .map(|c| c.uri.clone())
+                    .unwrap_or_else(|| caller.clone()),
+                credential: target.credential.clone(),
+                headers: target.headers.clone(),
+            };
+
+            // Forward dialog state events to aggregator
+            join_set.spawn({
+                let ev_tx_c = ev_tx_c.clone();
+                async move {
+                    while let Some(state) = state_rx.recv().await {
+                        match state {
+                            DialogState::Calling(dialog_id) => {
+                                let _ = ev_tx_c.send(ParallelEvent::Calling { idx, dialog_id });
+                            }
+                            DialogState::Early(_, response) => {
+                                let sdp = if !response.body().is_empty() {
+                                    Some(String::from_utf8_lossy(response.body()).to_string())
+                                } else {
+                                    None
+                                };
+                                let _ = ev_tx_c.send(ParallelEvent::Early { sdp });
+                            }
+                            DialogState::Terminated(_, _) => {
+                                let _ = ev_tx_c.send(ParallelEvent::Terminated { idx });
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            });
+
+            // Perform INVITE and report result
+            join_set.spawn({
+                let dialog_layer = dialog_layer.clone();
+                let ev_tx_c = ev_tx_c.clone();
+                async move {
+                    let invite_result = dialog_layer.do_invite(invite_option, state_tx).await;
+                    match invite_result {
+                        Ok((dlg, resp_opt)) => {
+                            if let Some(resp) = resp_opt {
+                                if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
+                                    let answer = String::from_utf8_lossy(resp.body()).to_string();
+                                    let _ = ev_tx_c.send(ParallelEvent::Accepted {
+                                        idx,
+                                        dialog_id: dlg.id(),
+                                        answer,
+                                        aor,
+                                    });
+                                } else {
+                                    let reason = resp.reason_phrase().clone().map(Into::into);
+                                    let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                        code: resp.status_code,
+                                        reason,
+                                    });
+                                }
+                            } else {
+                                let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                    code: StatusCode::RequestTerminated,
+                                    reason: Some("Cancelled by callee".to_string()),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let (code, reason) = match e {
+                                rsipstack::Error::DialogError(reason, _, code) => {
+                                    (code, Some(reason))
+                                }
+                                _ => (
+                                    StatusCode::ServerInternalError,
+                                    Some("Invite failed".to_string()),
+                                ),
+                            };
+                            let _ = ev_tx_c.send(ParallelEvent::Failed { code, reason });
+                        }
+                    }
+                }
+            });
+        }
+
+        drop(ev_tx);
+
+        let mut failures = 0usize;
+        let mut accepted_idx: Option<usize> = None;
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    for maybe_id in known_dialogs.iter().filter_map(|o| o.as_ref()) {
+                        if let Some(dlg) = self.dialog_layer.get_dialog(maybe_id) {
+                            dlg.hangup().await.ok();
+                        }
+                    }
+                    return Err(anyhow!("Caller cancelled"));
+                }
+                ev = ev_rx.recv() => {
+                    if let Some(event) = ev {
+                        match event {
+                            ParallelEvent::Calling { idx, dialog_id } => {
+                                known_dialogs[idx] = Some(dialog_id);
+                                if let Some(id) = &known_dialogs[idx] { session.add_callee_dialog(id.clone()); }
+                            }
+                            ParallelEvent::Early { sdp } => {
+                                if let Some(answer) = sdp {
+                                    session.start_ringing(answer, self).await;
+                                } else if !session.early_media_sent {
+                                    session.start_ringing(String::new(), self).await;
+                                }
+                            }
+                            ParallelEvent::Accepted { idx, dialog_id, answer, aor } => {
+                                if accepted_idx.is_none() {
+                                    if let Err(e) = session.accept_call(dialog_id.clone(), aor, answer).await {
+                                        warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
+                                        continue;
+                                    }
+                                    accepted_idx = Some(idx);
+                                    for (j, maybe_id) in known_dialogs.iter().enumerate() {
+                                        if j != idx {
+                                            if let Some(id) = maybe_id.clone() {
+                                                if let Some(dlg) = self.dialog_layer.get_dialog(&id) {
+                                                    dlg.hangup().await.ok();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ParallelEvent::Failed { code, reason } => {
+                                failures += 1;
+                                session.set_error(code, reason);
+                                if failures >= targets.len() && accepted_idx.is_none() {
+                                    return Err(anyhow!("All parallel targets failed"));
+                                }
+                            }
+                            ParallelEvent::Terminated { idx } => {
+                                if Some(idx) == accepted_idx {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if accepted_idx.is_some() {
+            Ok(())
+        } else {
+            Err(anyhow!("Parallel dialing concluded without success"))
         }
     }
 
@@ -679,6 +888,38 @@ impl ProxyCall {
                 .unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
             headers: target.headers.clone(),
+        };
+
+        let invite_option = if let Some(ref route_invite) = self.dialplan.route_invite {
+            let route_result = route_invite
+                .route_invite(invite_option, &self.dialplan.original)
+                .await
+                .map_err(|e| {
+                    warn!(session_id = %self.session_id, error = %e, "Routing function error");
+                    (
+                        StatusCode::ServerInternalError,
+                        Some("Routing function error".to_string()),
+                    )
+                })?;
+            match route_result {
+                RouteResult::NotHandled(option) => {
+                    info!(
+                        session_id = self.session_id,
+                        "Routing function returned NotHandled"
+                    );
+                    if let Some(ref code) = target.abort_on_route_invite_missing {
+                        return Err((code.clone(), None));
+                    }
+                    option
+                }
+                RouteResult::Forward(option) => option,
+                RouteResult::Abort(code, reason) => {
+                    warn!(session_id = self.session_id, %code, ?reason, "route abort");
+                    return Err((code, reason));
+                }
+            }
+        } else {
+            invite_option
         };
 
         debug!(

@@ -33,7 +33,7 @@ pub async fn match_invite(
 ) -> Result<RouteResult> {
     let routes = match routes {
         Some(routes) => routes,
-        None => return Ok(RouteResult::Forward(option)),
+        None => return Ok(RouteResult::NotHandled(option)),
     };
 
     // Extract URI information early to avoid borrowing conflicts
@@ -54,8 +54,6 @@ pub async fn match_invite(
         if let Some(true) = rule.disabled {
             continue;
         }
-
-        debug!("Evaluating rule: {}", rule.name);
 
         // Check matching conditions
         let ctx = MatchContext {
@@ -84,27 +82,18 @@ pub async fn match_invite(
         match rule.action.get_action_type() {
             ActionType::Reject => {
                 if let Some(reject_config) = &rule.action.reject {
-                    let reason =
-                        reject_config
-                            .reason
-                            .clone()
-                            .unwrap_or_else(|| match reject_config.code {
-                                403 => "Forbidden".to_string(),
-                                404 => "Not Found".to_string(),
-                                486 => "Busy Here".to_string(),
-                                _ => "Rejected".to_string(),
-                            });
+                    let reason = reject_config.reason.clone();
                     info!(
-                        "Rejecting call with code {} and reason: {}",
+                        "Rejecting call with code {} and reason: {:?}",
                         reject_config.code, reason
                     );
-                    return Ok(RouteResult::Abort(reject_config.code, reason));
+                    return Ok(RouteResult::Abort(reject_config.code.into(), reason));
                 } else {
-                    return Ok(RouteResult::Abort(403, "Forbidden".to_string()));
+                    return Ok(RouteResult::Abort(rsip::StatusCode::Forbidden, None));
                 }
             }
             ActionType::Busy => {
-                return Ok(RouteResult::Abort(486, "Busy Here".to_string()));
+                return Ok(RouteResult::Abort(rsip::StatusCode::BusyHere, None));
             }
             ActionType::Forward => {
                 // Select trunk and apply configuration
@@ -135,12 +124,9 @@ pub async fn match_invite(
         }
     }
 
-    // If no rules matched, use default route
-    debug!("No rules matched, using default route");
-
     let default = match default {
         Some(default) => default,
-        None => return Ok(RouteResult::Forward(option)),
+        None => return Ok(RouteResult::NotHandled(option)),
     };
 
     let selected_trunk = select_trunk(
@@ -163,9 +149,7 @@ pub async fn match_invite(
         return Ok(RouteResult::Forward(option));
     }
 
-    // If nothing found, forward directly
-    debug!("No trunk configuration found, forwarding directly");
-    Ok(RouteResult::Forward(option))
+    Ok(RouteResult::NotHandled(option))
 }
 
 /// Context for rule matching to reduce function arguments
