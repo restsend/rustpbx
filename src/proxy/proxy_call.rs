@@ -429,13 +429,25 @@ impl ProxyCall {
             MediaProxyMode::None => false,
             MediaProxyMode::All => true,
             MediaProxyMode::Auto => {
+                if let Some(ip) = self.dialplan.media.external_ip.as_ref() {
+                    if let Ok(ip_addr) = IpAddr::from_str(ip) {
+                        return !is_private_ip(&ip_addr) && self.contains_private_ip(offer_sdp);
+                    }
+                }
                 let is_webrtc_sdp = Self::is_webrtc_sdp(offer_sdp);
                 let all_webrtc_target = self.dialplan.all_webrtc_target();
-                (is_webrtc_sdp && !all_webrtc_target) || (!is_webrtc_sdp && all_webrtc_target)
+                if (is_webrtc_sdp && !all_webrtc_target) || (!is_webrtc_sdp && all_webrtc_target) {
+                    return true;
+                }
+                return false;
             }
             MediaProxyMode::Nat => {
-                // NAT: only proxy when private IPs are involved
-                self.contains_private_ip(offer_sdp)
+                if let Some(ip) = self.dialplan.media.external_ip.as_ref() {
+                    if let Ok(ip_addr) = IpAddr::from_str(ip) {
+                        return !is_private_ip(&ip_addr) && self.contains_private_ip(offer_sdp);
+                    }
+                }
+                return false;
             }
         }
     }

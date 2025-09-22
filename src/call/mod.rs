@@ -350,27 +350,18 @@ impl Default for FailureAction {
 pub struct MediaConfig {
     /// Media proxy mode
     pub proxy_mode: MediaProxyMode,
-    /// Enable media pass-through
-    pub media_pass: Option<MediaPassOption>,
-    /// Voice activity detection
-    pub vad: Option<VADOption>,
-    /// Audio enhancement (denoise)
-    pub denoise: Option<bool>,
-    /// Transcription (ASR) configuration
-    pub asr: Option<TranscriptionOption>,
-    /// Text-to-speech configuration
-    pub tts: Option<SynthesisOption>,
+    pub external_ip: Option<String>,
+    pub rtp_start_port: Option<u16>,
+    pub rtp_end_port: Option<u16>,
 }
 
 impl MediaConfig {
     pub fn new() -> Self {
         Self {
             proxy_mode: MediaProxyMode::Auto,
-            media_pass: None,
-            vad: None,
-            denoise: None,
-            asr: None,
-            tts: None,
+            external_ip: None,
+            rtp_start_port: None,
+            rtp_end_port: None,
         }
     }
 
@@ -379,13 +370,17 @@ impl MediaConfig {
         self
     }
 
-    pub fn with_asr(mut self, asr: TranscriptionOption) -> Self {
-        self.asr = Some(asr);
+    pub fn with_external_ip(mut self, ip: Option<String>) -> Self {
+        self.external_ip = ip;
         self
     }
 
-    pub fn with_tts(mut self, tts: SynthesisOption) -> Self {
-        self.tts = Some(tts);
+    pub fn with_rtp_start_port(mut self, start: Option<u16>) -> Self {
+        self.rtp_start_port = start;
+        self
+    }
+    pub fn with_rtp_end_port(mut self, end: Option<u16>) -> Self {
+        self.rtp_end_port = end;
         self
     }
 }
