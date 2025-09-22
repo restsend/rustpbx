@@ -23,7 +23,7 @@ pub trait Locator: Send + Sync {
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
-    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>>;
+    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>>;
 }
 
 pub struct MemoryLocator {
@@ -69,11 +69,14 @@ impl Locator for MemoryLocator {
         Ok(())
     }
 
-    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>> {
-        let identifier = self.get_identifier(username, realm);
+    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
+        let username = uri.user().unwrap_or_else(|| "");
+        let realm = uri.host().to_string();
+        let identifier = self.get_identifier(username, Some(realm.as_str()));
         let locations = self.locations.lock().await;
-        if let Some(location) = locations.get(&identifier) {
-            Ok(vec![location.clone()])
+        if let Some(mut location) = locations.get(&identifier).cloned() {
+            location.aor = uri.clone();
+            Ok(vec![location])
         } else {
             Ok(vec![])
         }

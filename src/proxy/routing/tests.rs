@@ -1,3 +1,4 @@
+use crate::call::DialDirection;
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::match_invite;
 use crate::proxy::routing::{
@@ -26,6 +27,7 @@ async fn test_match_invite_no_routes() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -86,6 +88,7 @@ async fn test_match_invite_exact_match() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .expect("Failed to match invite");
@@ -165,6 +168,7 @@ async fn test_match_invite_regex_match() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -222,6 +226,7 @@ async fn test_match_invite_reject_rule() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -290,6 +295,7 @@ async fn test_match_invite_rewrite_rules() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -395,6 +401,7 @@ async fn test_match_invite_load_balancing() {
             test_option,
             &origin,
             routing_state.clone(),
+            &DialDirection::Outbound,
         )
         .await
         .unwrap();
@@ -480,6 +487,7 @@ async fn test_match_invite_header_matching() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -543,6 +551,7 @@ async fn test_match_invite_default_route() {
         option,
         &origin,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -620,6 +629,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         option_us,
         &origin_us,
         routing_state.clone(),
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();
@@ -672,6 +682,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         option_digits,
         &origin_digits,
         routing_state,
+        &DialDirection::Outbound,
     )
     .await
     .unwrap();

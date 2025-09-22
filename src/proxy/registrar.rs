@@ -130,7 +130,7 @@ impl ProxyModule for RegistrarModule {
         let location = Location {
             aor: contact.uri.clone(),
             expires,
-            destination: destination.clone(),
+            destination: Some(destination.clone()),
             last_modified: Some(Instant::now()),
             supports_webrtc: user.is_support_webrtc,
             ..Default::default()
