@@ -1,6 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::Dialplan;
 use crate::call::Location;
+use crate::call::MediaConfig;
 use crate::call::RouteInvite;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
@@ -21,6 +22,7 @@ use rsipstack::transport::SipAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use webrtc::media;
 
 #[async_trait]
 pub trait CallRouter: Send + Sync {
@@ -121,14 +123,20 @@ impl CallModule {
             .uri()
             .map_err(|e| (anyhow::anyhow!(e), None))?;
 
+        let media_config = MediaConfig::new()
+            .with_external_ip(self.inner.server.app_state.config.external_ip.clone())
+            .with_rtp_start_port(self.inner.server.app_state.config.rtp_start_port.clone())
+            .with_rtp_end_port(self.inner.server.app_state.config.rtp_end_port.clone());
+
         let mut dialplan = Dialplan::new(session_id)
             .with_caller_contact(caller_contact)
             .with_caller(caller)
+            .with_media(media_config)
             .with_route_invite(route_invite);
 
         // Check if this is an external realm
         if !self.inner.server.is_same_realm(&callee_realm).await {
-            info!(callee=%callee_uri, "Creating dialplan for external realm");
+            info!(callee=%callee_uri, callee_realm, "Creating dialplan for external realm");
             let mut location = Location {
                 aor: callee_uri.clone(),
                 destination: SipAddr::try_from(&callee_uri).map_err(|e| (anyhow!(e), None))?,
