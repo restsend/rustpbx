@@ -259,23 +259,16 @@ impl AliyunTtsClient {
 async fn event_stream(
     ws_stream: WsSource,
     task_id: String,
-    cache_key: Option<String>,
-) -> BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>> {
+) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)> {
     let stream = ws_stream.filter_map(move |message| {
         let task_id = task_id.clone();
-        let cache_key = cache_key.clone();
         async move {
             match message {
-                Ok(Message::Binary(data)) => Some(Ok((None, SynthesisEvent::AudioChunk(data)))),
+                Ok(Message::Binary(data)) => Some((None, Ok(SynthesisEvent::AudioChunk(data)))),
                 Ok(Message::Text(text)) => {
                     if let Ok(event) = serde_json::from_str::<Event>(&text) {
                         match event.header.event.as_str() {
-                            "task-finished" => Some(Ok((
-                                None,
-                                SynthesisEvent::Finished {
-                                    cache_key: cache_key.clone(),
-                                },
-                            ))),
+                            "task-finished" => Some((None, Ok(SynthesisEvent::Finished))),
                             "task-failed" => {
                                 let error_code = event
                                     .header
@@ -285,12 +278,12 @@ async fn event_stream(
                                     .header
                                     .error_message
                                     .unwrap_or_else(|| "Unknown error message".to_string());
-                                Some(Err(anyhow!(
+                                Some((None, Err(anyhow!(
                                     "Aliyun TTS Task: {} failed: {}, {}",
                                     task_id,
                                     error_code,
                                     error_msg
-                                )))
+                                ))))
                             }
                             _ => {
                                 info!("Aliyun TTS Task: {} event: {:?}", task_id, event);
@@ -298,19 +291,19 @@ async fn event_stream(
                             }
                         }
                     } else {
-                        Some(Err(anyhow!(
+                        Some((None, Err(anyhow!(
                             "Aliyun TTS Task: {} failed to deserialize event: {}",
                             task_id,
                             text
-                        )))
+                        ))))
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    Some(Err(anyhow!("Aliyun TTS Task: {task_id} closed by remote")))
+                    Some((None, Err(anyhow!("Aliyun TTS Task: {task_id} closed by remote"))))
                 }
-                Err(e) => Some(Err(anyhow!(
+                Err(e) => Some((None, Err(anyhow!(
                     "Aliyun TTS Task: {task_id} websocket error: {e}"
-                ))),
+                )))),
                 _ => None,
             }
         }
@@ -327,15 +320,10 @@ impl SynthesisClient for AliyunTtsClient {
 
     async fn start(
         &mut self,
-    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         let ws_stream = self.connect().await?;
         let (ws_sink, ws_source) = ws_stream.split();
-        let stream = event_stream(
-            ws_source,
-            self.task_id.clone(),
-            self.option.cache_key.clone(),
-        )
-        .await;
+        let stream = event_stream(ws_source, self.task_id.clone()).await;
         self.ws_sink.lock().await.replace(ws_sink);
         Ok(stream)
     }

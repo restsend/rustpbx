@@ -231,9 +231,9 @@ async fn main() -> Result<()> {
             let mut audio_stream = tts_client.start().await?;
             tts_client.synthesize(&segment.text, 0, None).await?;
             let mut total_bytes = 0;
-            while let Some(chunk_result) = audio_stream.next().await {
-                match chunk_result {
-                    Ok((_cmd_seq, event)) => match event {
+            while let Some((_cmd_seq, res)) = audio_stream.next().await {
+                match res {
+                    Ok(event) => match event {
                         SynthesisEvent::AudioChunk(chunk) => {
                             debug!("Received chunk of {} bytes", chunk.len());
                             total_bytes += chunk.len();

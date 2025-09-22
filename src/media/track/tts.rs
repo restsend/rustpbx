@@ -15,15 +15,14 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use futures::{StreamExt, future};
+use futures::StreamExt;
 use std::collections::{HashMap, VecDeque};
 use tokio::{
-    select,
     sync::{Mutex, mpsc},
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::warn;
 
 pub struct SynthesisHandle {
     pub play_id: Option<String>,
@@ -52,14 +51,15 @@ impl Default for ChunkEntry {
     }
 }
 
+// Synthesis task for TTS track, handle tts command and synthesis event emit audio chunk to media stream
 struct TtsTask {
     play_id: Option<String>,
     track_id: TrackId,
     session_id: String,
     client: Box<dyn SynthesisClient>,
     command_rx: SynthesisCommandReceiver,
-    event_sender: EventSender,
     packet_sender: TrackPacketSender,
+    event_sender: EventSender,
     cancel_token: CancellationToken,
     processor_chain: ProcessorChain,
     cache_enabled: bool,
@@ -68,40 +68,52 @@ struct TtsTask {
     cache_buffer: BytesMut,
     emit_q: VecDeque<EmitEntry>,
     chunks_map: HashMap<usize, ChunkEntry>,
+    // seq of current progressing tts command, ignore result from cmd_seq less than cur_seq
     cur_seq: usize,
+    streaming: bool,
+    // timeout for each tts command, ignore if last update is more than timeout
+    timeout: Duration,
 }
 
 impl TtsTask {
     async fn run(mut self) -> Result<()> {
-        // chunks for each seq, in streaming mode, all the chunks are stored in the first vec
-        // item: (chunks, last_update, finished)
         let mut stream = self.client.start().await?;
-        // seqence number of next tts command
+        // seqence number of next tts command in stream, used for non streaming mode
         let mut cmd_seq = 0;
         let mut cmd_finished = false;
         let mut tts_finished = false;
         let sample_rate = self.sample_rate;
         let packet_duration_ms = self.ptime.as_millis();
+        // capacity of samples buffer
         let capacity = sample_rate as usize * packet_duration_ms as usize / 500;
         let mut ptimer = tokio::time::interval(self.ptime);
+        // samples buffer, emit all even if it was not fully filled
         let mut samples = vec![0u8; capacity];
-        while !cmd_finished && !tts_finished || !self.emit_q.is_empty() {
+
+        // quit if cmd is finished, tts is finished and all the chunks are emitted
+        while !cmd_finished || !tts_finished || !self.emit_q.is_empty() {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
-                    warn!(self.session_id, self.track_id, "tts task canceled");
+                    warn!(self.session_id, self.play_id, "tts task canceled, {} cmd not completed", cmd_seq - self.cur_seq);
                     break;
                 }
                 _ = ptimer.tick() => {
                     samples.fill(0);
                     let mut i = 0;
+                    // fill samples until it's full or there are no more chunks to emit or current seq is not finished
                     while i < capacity && !self.emit_q.is_empty() {
+                        // first entry is cur_seq
                         let first_entry = &mut self.emit_q[0];
 
+                        // process each chunks
                         while i < capacity && !first_entry.chunks.is_empty() {
                             let first_chunk = &mut first_entry.chunks[0];
-                            let len = first_chunk.len().min(capacity - i);
-                            samples[i..i+len].copy_from_slice(&first_chunk.split_to(len));
+                            let remaining = capacity - i;
+                            let available = first_chunk.len();
+                            let len = usize::min(remaining, available);
+                            let cut = first_chunk.split_to(len);
+                            samples[i..i+len].copy_from_slice(&cut);
                             i += len;
                             if first_chunk.is_empty() {
                                 first_entry.chunks.pop_front();
@@ -109,12 +121,14 @@ impl TtsTask {
                         }
 
                         if first_entry.chunks.is_empty(){
-                            if first_entry.finished || first_entry.last_update.elapsed() > self.ptime {
+                            // if finished or timeout, skip it
+                            if first_entry.finished || first_entry.last_update.elapsed() > self.timeout{
                                 self.emit_q.pop_front();
                                 self.cur_seq += 1;
-                            }else{
-                                break;
+                                continue;
                             }
+
+                            break;
                         }
                     }
 
@@ -141,34 +155,29 @@ impl TtsTask {
                 }
                 cmd = self.command_rx.recv(), if !cmd_finished => {
                     if let Some(cmd) = cmd.as_ref() {
+                        tracing::debug!(self.session_id, self.track_id, "received cmd seq: {}, text: {}, end_of_stream: {}", cmd_seq, cmd.text, cmd.end_of_stream);
                         self.handle_cmd(cmd, cmd_seq).await;
                         cmd_seq += 1;
                     }
 
+                    // set finished if command sender is exhausted or end_of_stream is true
                     if cmd.is_none() || cmd.unwrap().end_of_stream {
                         cmd_finished = true;
                         self.client.stop().await?;
                     }
                 }
-                res = stream.next(), if !tts_finished => {
-                    if let Some(res) = res {
-                        match res {
-                            Ok((cmd_seq, event)) => {
-                                if self.handle_event(cmd_seq.unwrap_or(0), event).await{
-                                    tts_finished = true;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(self.session_id, "error receiving event: {}", e);
-                            }
-                        }
+                item = stream.next(), if !tts_finished => {
+                    if let Some((cmd_seq, res)) = item {
+                        let cmd_seq = cmd_seq.unwrap_or(0);
+                        tts_finished = self.handle_event(cmd_seq, res).await;
                     }else{
                         tts_finished = true;
                     }
                 }
             }
         }
-        tracing::debug!(
+
+        tracing::info!(
             "tts task finished, cur_seq: {}, cmd_finished: {}, tts_finished: {}, emit_q lenth: {}",
             self.cur_seq,
             cmd_finished,
@@ -178,13 +187,11 @@ impl TtsTask {
         Ok(())
     }
 
-    // return true if cmd is finished
     async fn handle_cmd(&mut self, cmd: &SynthesisCommand, cmd_seq: usize) {
         let text = &cmd.text;
         if text.is_empty() {
-            if let Some(entry) = self.get_emit_entry_mut(cmd_seq) {
-                entry.finished = true;
-            }
+            self.get_emit_entry_mut(cmd_seq)
+                .map(|entry| entry.finished = true);
             return;
         }
 
@@ -201,7 +208,7 @@ impl TtsTask {
         }
     }
 
-    // set cache key for each cmd, try to retrieve cached audio, return true if cached and retrieve succeed
+    // set cache key for each cmd, return true if cached and retrieve succeed
     async fn handle_cache(&mut self, cmd: &SynthesisCommand, cmd_seq: usize) -> bool {
         let cache_key = cache::generate_cache_key(
             &format!("tts:{}{}", self.client.provider(), cmd.text),
@@ -210,7 +217,7 @@ impl TtsTask {
             cmd.option.speed,
         );
 
-        // initial chunks map at cmd_seq for tts to save chunks and get cache key
+        // initial chunks map at cmd_seq for tts to save chunks
         self.chunks_map.insert(
             cmd_seq,
             ChunkEntry {
@@ -223,18 +230,21 @@ impl TtsTask {
         if cache::is_cached(&cache_key).await.unwrap_or_default() {
             match cache::retrieve_from_cache_with_buffer(&cache_key, &mut self.cache_buffer).await {
                 Ok(()) => {
-                    debug!(
+                    tracing::debug!(
                         self.session_id,
-                        cmd.text, "using cached audio for {}", cache_key
+                        self.play_id,
+                        cmd_seq,
+                        cmd.text,
+                        "using cached audio for {}",
+                        cache_key
                     );
                     let bytes = self.cache_buffer.split().freeze();
                     let len = bytes.len();
 
-                    // entry should always be some
-                    if let Some(emit_entry) = self.get_emit_entry_mut(cmd_seq) {
-                        emit_entry.chunks.push_back(bytes);
-                        emit_entry.finished = true;
-                    }
+                    self.get_emit_entry_mut(cmd_seq).map(|entry| {
+                        entry.chunks.push_back(bytes);
+                        entry.finished = true;
+                    });
 
                     self.event_sender
                         .send(SessionEvent::Metrics {
@@ -259,11 +269,10 @@ impl TtsTask {
         false
     }
 
-    // return true if cmd is finished, only when on streaming mode and receive finished event
-    async fn handle_event(&mut self, cmd_seq: usize, event: SynthesisEvent) -> bool {
+    // return true if on streaming moden and receive finished event
+    async fn handle_event(&mut self, cmd_seq: usize, event: Result<SynthesisEvent>) -> bool {
         match event {
-            SynthesisEvent::AudioChunk(mut chunk) => {
-                // entry is some only on streaming mode
+            Ok(SynthesisEvent::AudioChunk(mut chunk)) => {
                 let entry = self.chunks_map.entry(cmd_seq).or_default();
 
                 if entry.first_chunk {
@@ -273,46 +282,68 @@ impl TtsTask {
                     }
                 }
 
+                // if cache is enabled, save complete chunks for caching
                 if self.cache_enabled {
                     entry.chunks.push(chunk.clone());
                 }
 
-                // if entry is none, cmd_seq is skipped because of timeout
-                if let Some(emit_entry) = self.get_emit_entry_mut(cmd_seq) {
-                    emit_entry.chunks.push_back(chunk.clone());
-                }
+                self.get_emit_entry_mut(cmd_seq).map(|entry| {
+                    entry.chunks.push_back(chunk.clone());
+                    entry.last_update = Instant::now();
+                });
             }
-            SynthesisEvent::Subtitles(..) => {}
-            SynthesisEvent::Finished { .. } => {
-                if let Some(emit_entry) = self.get_emit_entry_mut(cmd_seq) {
-                    emit_entry.finished = true;
-                }
+            Ok(SynthesisEvent::Subtitles(..)) => {
+                // to-do: handle subtitles
+            }
+            Ok(SynthesisEvent::Finished) => {
+                tracing::debug!(
+                    self.session_id,
+                    self.track_id,
+                    "tts result of cmd seq: {} completely received",
+                    cmd_seq
+                );
+                self.get_emit_entry_mut(cmd_seq)
+                    .map(|entry| entry.finished = true);
 
                 if let Some(entry) = self.chunks_map.remove(&cmd_seq) {
-                    // if cache is enabled, cache key setted in handle_cache
+                    // if cache is enabled, cache key set by handle_cache
                     if self.cache_enabled
                         && !cache::is_cached(&entry.cache_key).await.unwrap_or_default()
                     {
                         if let Err(e) =
-                            cache::store_in_cache_v(&entry.cache_key, &entry.chunks).await
+                            cache::store_in_cache_vectored(&entry.cache_key, &entry.chunks).await
                         {
-                            warn!(self.session_id, "error storing cached audio: {}", e);
+                            warn!(self.session_id, "failed to store cached audio: {}", e);
                         }
                     }
                 }
-                return true;
+                // return true only if on streaming mode
+                return self.streaming;
+            }
+            Err(e) => {
+                warn!(self.session_id, cmd_seq, "error receiving event: {}", e);
+                // set finished to true if cmd_seq failed
+                self.get_emit_entry_mut(cmd_seq)
+                    .map(|entry| entry.finished = true);
             }
         }
         false
     }
 
     // get mutable reference of result at cmd_seq, resize if needed, update the last_update
+    // if cmd_seq is less than cur_seq, return none
     fn get_emit_entry_mut(&mut self, cmd_seq: usize) -> Option<&mut EmitEntry> {
-        // cmd_seq is skipped because of timeout
+        // ignore if cmd_seq is less than cur_seq
         if cmd_seq < self.cur_seq {
+            tracing::warn!(
+                "TTS result is ignored, cmd_seq {}, cur_seq: {}",
+                cmd_seq,
+                self.cur_seq
+            );
             return None;
         }
 
+        // resize emit_q if needed
         let i = cmd_seq - self.cur_seq;
         if i >= self.emit_q.len() {
             self.emit_q.resize_with(i + 1, || EmitEntry {
@@ -321,7 +352,6 @@ impl TtsTask {
                 last_update: Instant::now(),
             });
         }
-        self.emit_q[i].last_update = Instant::now();
         Some(&mut self.emit_q[i])
     }
 }
@@ -450,6 +480,7 @@ impl Track for TtsTrack {
             .await
             .take()
             .ok_or(anyhow!("Command receiver not found"))?;
+
         let task = TtsTask {
             play_id: self.play_id.clone(),
             track_id: self.track_id.clone(),
@@ -467,373 +498,12 @@ impl Track for TtsTrack {
             emit_q: VecDeque::new(),
             chunks_map: HashMap::new(),
             cur_seq: 0,
+            streaming: self.streaming,
+            timeout: Duration::from_secs(1),
         };
-        tokio::spawn(task.run());
+        tracing::debug!(self.session_id, self.track_id, "tts task started");
+        tokio::spawn(async move { task.run().await });
         Ok(())
-        // // command sender is held by tts handle, it will dropped when there is a tts command with new play_id
-        // let mut command_rx = self
-        //     .command_rx
-        //     .lock()
-        //     .await
-        //     .take()
-        //     .ok_or(anyhow!("Command receiver not found"))?;
-
-        // let play_id = self.play_id.clone();
-        // let track_id = self.track_id.clone();
-        // let session_id = self.session_id.clone();
-        // let sample_rate = self.config.samplerate;
-        // let streaming = self.streaming;
-        // let use_cache = self.use_cache;
-        // let cache_enabled = !streaming && use_cache;
-
-        // let mut client = self
-        //     .client
-        //     .lock()
-        //     .await
-        //     .take()
-        //     .ok_or(anyhow!("Synthesis client not found"))?;
-
-        // let mut stream = client.start().await?;
-        // let event_sender_clone = event_sender.clone();
-
-        // // channel for cache,  (seq, chunk)
-        // let (cache_tx, mut cache_rx) = mpsc::channel(5);
-        // // channel for tts result, (seq, Option<chunk>), None indicates seq is finished
-        // let (tts_tx, mut tts_rx) = mpsc::channel(10);
-
-        // let provider_clone = client.provider();
-        // let command_loop = async move {
-        //     let mut cmd_seq = 0;
-        //     let mut end_of_stream = false;
-        //     let mut cache_buffer = BytesMut::new();
-
-        //     // TODO: change to if let chain
-        //     // !end_of_stream && let Some(command) = command_rx.recv().await
-        //     while !end_of_stream {
-        //         let res = command_rx.recv().await;
-        //         if res.is_none() {
-        //             break;
-        //         }
-        //         let mut command = res.unwrap();
-
-        //         // if end_of_stream, quit in next iteration
-        //         end_of_stream = command.end_of_stream;
-        //         let text = command.text;
-
-        //         // skip empty text
-        //         if text.is_empty() {
-        //             continue;
-        //         }
-
-        //         if command.option.speaker.is_none() {
-        //             command.option.speaker = command.speaker;
-        //         }
-
-        //         let cache_key = if cache_enabled {
-        //             Some(cache::generate_cache_key(
-        //                 &format!("tts:{}{}", provider_clone, text),
-        //                 sample_rate,
-        //                 command.option.speaker.as_ref(),
-        //                 command.option.speed,
-        //             ))
-        //         } else {
-        //             None
-        //         };
-
-        //         command.option.cache_key = cache_key.clone();
-
-        //         if let Some(cache_key) = &cache_key {
-        //             if let Ok(true) = cache::is_cached(cache_key).await {
-        //                 cache_buffer.clear();
-        //                 match cache::retrieve_from_cache_with_buffer(cache_key, &mut cache_buffer)
-        //                     .await
-        //                 {
-        //                     Ok(()) => {
-        //                         debug!(session_id, text, "using cached audio for {}", cache_key);
-        //                         let bytes = cache_buffer.split().freeze();
-        //                         let len = bytes.len();
-        //                         cache_tx.send((cmd_seq, bytes)).await.ok();
-        //                         event_sender_clone
-        //                             .send(SessionEvent::Metrics {
-        //                                 timestamp: crate::get_timestamp(),
-        //                                 key: format!("completed.tts.{}", provider_clone),
-        //                                 data: serde_json::json!({
-        //                                         "speaker": command.option.speaker,
-        //                                         "playId": play_id,
-        //                                         "length": len,
-        //                                         "cached": true,
-        //                                 }),
-        //                                 duration: 0,
-        //                             })
-        //                             .ok();
-        //                         cmd_seq += 1;
-        //                         continue;
-        //                     }
-        //                     Err(e) => {
-        //                         warn!(session_id, "error retrieving cached audio: {}", e);
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //         info!(
-        //             %provider_clone,
-        //             session_id,
-        //             text,
-        //             play_id,
-        //             eos = command.end_of_stream,
-        //             streaming = command.streaming,
-        //             "synthesizing",
-        //         );
-        //         if let Err(e) = client
-        //             .synthesize(&text, cmd_seq, Some(command.option))
-        //             .await
-        //         {
-        //             warn!(session_id, "error synthesizing text: {}", e);
-        //             event_sender_clone
-        //                 .send(SessionEvent::Error {
-        //                     timestamp: crate::get_timestamp(),
-        //                     track_id: track_id.clone(),
-        //                     sender: format!("tts.{}", provider_clone),
-        //                     error: e.to_string(),
-        //                     code: None,
-        //                 })
-        //                 .ok();
-        //             break;
-        //         }
-        //         cmd_seq += 1;
-        //     }
-
-        //     // clean up and waiting emit loop quit
-        //     drop(cache_tx);
-        //     drop(cache_buffer);
-        //     client.stop().await.ok();
-        //     future::pending().await
-        // };
-
-        // let session_id = self.session_id.clone();
-        // let recv_loop = async move {
-        //     // chunks for each seq, save for cache if `cache_enabled`
-        //     // TO-DO: merge `complete_audio` and `tts_rx`
-        //     let mut complete_audio = Vec::<Vec<Bytes>>::new();
-
-        //     // flag for streaming mode, check if it is the first chunk
-        //     let mut first_chunk = true;
-        //     while let Some(result) = stream.next().await {
-        //         match result {
-        //             Ok((cmd_seq, event)) => {
-        //                 match event {
-        //                     SynthesisEvent::AudioChunk(mut audio_chunk) => {
-        //                         // for streaming mode seq is None
-        //                         let seq = cmd_seq.unwrap_or(0);
-        //                         // first chunk
-        //                         debug!(cmd_seq, "audio chunk: {}", audio_chunk.len());
-        //                         if first_chunk && streaming
-        //                             || seq >= complete_audio.len()
-        //                             || complete_audio[seq].is_empty()
-        //                         {
-        //                             if audio_chunk.len() > 44
-        //                                 && audio_chunk[..4] == [0x52, 0x49, 0x46, 0x46]
-        //                             {
-        //                                 let _ = audio_chunk.split_to(44);
-        //                             };
-        //                             first_chunk = false;
-        //                         }
-
-        //                         if cache_enabled {
-        //                             if seq >= complete_audio.len() {
-        //                                 complete_audio.resize_with(seq + 1, || Vec::new());
-        //                             }
-
-        //                             complete_audio[seq].push(audio_chunk.clone());
-        //                         }
-
-        //                         if let Err(e) = tts_tx.send((cmd_seq, Some(audio_chunk))).await {
-        //                             warn!(session_id, "error sending cached audio: {}", e);
-        //                             break;
-        //                         }
-        //                     }
-        //                     SynthesisEvent::Subtitles(..) => {}
-        //                     SynthesisEvent::Finished { cache_key } => {
-        //                         tts_tx.send((cmd_seq, None)).await.ok();
-        //                         if let Some(seq) = cmd_seq {
-        //                             if let Some(cache_key) = cache_key {
-        //                                 if cache::is_cached(&cache_key).await.unwrap_or(false) {
-        //                                     let chunks = complete_audio[seq].as_slice();
-        //                                     debug!(
-        //                                         session_id,
-        //                                         "storing cached audio: key: {}, len: {}",
-        //                                         cache_key,
-        //                                         chunks.len()
-        //                                     );
-        //                                     if let Err(e) =
-        //                                         cache::store_in_cache_v(&cache_key, chunks).await
-        //                                     {
-        //                                         warn!(
-        //                                             session_id,
-        //                                             "error storing cached audio: {}", e
-        //                                         );
-        //                                     }
-        //                                 }
-        //                             }
-        //                             complete_audio[seq].clear();
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //             Err(e) => {
-        //                 warn!("error receiving tts result: {}", e);
-        //                 break;
-        //             }
-        //         }
-        //     }
-
-        //     drop(tts_tx);
-        //     drop(complete_audio);
-        //     // waiting emit loop quit
-        //     future::pending().await
-        // };
-
-        // let sample_rate = self.config.samplerate;
-        // let track_id = self.track_id.clone();
-        // let packet_duration_ms = self.config.ptime.as_millis();
-        // // audio frame in bytes size
-        // let capacity = sample_rate as usize * packet_duration_ms as usize / 500;
-        // let processor_chain = self.processor_chain.clone();
-        // let session_id = self.session_id.clone();
-        // let emit_loop = async move {
-        //     let mut ptimer = tokio::time::interval_at(
-        //         Instant::now() + Duration::from_millis(200),
-        //         Duration::from_millis(packet_duration_ms as u64),
-        //     );
-        //     let mut cmd_finished = !cache_enabled;
-        //     let mut tts_finished = false;
-        //     // current processing seq
-        //     let mut cur_seq = 0;
-        //     // in streaming mode, all the chunks stored in the first deque
-        //     // (deque, finished), deque save all the chunks for the seq, finished is true if all the chunks are received
-        //     let mut chunks = VecDeque::<(VecDeque<Bytes>, bool)>::new();
-
-        //     // buffer for sample, if data is not enough, rest of the capacity is filled with 0
-        //     let mut samples = vec![0u8; capacity];
-        //     while !cmd_finished || !tts_finished || !chunks.is_empty() {
-        //         tokio::select! {
-        //             biased;
-        //             _ = ptimer.tick() => {
-        //                 let mut i = 0;
-        //                 samples.fill(0);
-        //                 while i < capacity && !chunks.is_empty() {
-        //                     let (dq, finished) = &mut chunks[0];
-        //                     if dq.is_empty() && !*finished {
-        //                         break;
-        //                     }
-        //                     while i < capacity && !dq.is_empty() {
-        //                         let first = &mut dq[0];
-        //                         let len = first.len().min(capacity - i);
-        //                         samples[i..i+len].copy_from_slice(&first[..len]);
-        //                         i += len;
-        //                         let _ = first.split_to(len);
-        //                         if first.is_empty() {
-        //                             dq.pop_front();
-        //                         }
-        //                     }
-
-        //                     if *finished && dq.is_empty(){
-        //                         debug!("TTS track, cmd seq: {} finished", cur_seq);
-        //                         chunks.pop_front();
-        //                         cur_seq += 1;
-        //                     }
-        //                 }
-
-        //                 let samples = bytes_to_samples(&samples[..]);
-        //                 let samples = Samples::PCM{
-        //                     samples,
-        //                 };
-        //                 let mut frame = AudioFrame {
-        //                     track_id: track_id.clone(),
-        //                     samples,
-        //                     timestamp: crate::get_timestamp(),
-        //                     sample_rate,
-        //                 };
-        //                 if let Err(e) = processor_chain.process_frame(&mut frame) {
-        //                     warn!(track_id, session_id, "error processing frame: {}", e);
-        //                     break;
-        //                 }
-
-        //                 if let Err(_) = packet_sender.send(frame) {
-        //                     warn!(track_id, session_id, "track already closed");
-        //                     break;
-        //                 }
-        //             },
-        //             res = cache_rx.recv() ,if !cmd_finished => {
-        //                 if let Some((seq, chunk)) = res {
-        //                     if seq >= cur_seq + chunks.len(){
-        //                         chunks.resize(seq + 1 - cur_seq, (VecDeque::new(), false));
-        //                     }
-        //                     let (deq, finished) = &mut chunks[seq];
-        //                     debug!(seq, len = chunk.len());
-        //                     deq.push_back(chunk);
-        //                     *finished = true;
-        //                 }else{
-        //                     cmd_finished = true;
-        //                 }
-        //             },
-        //             res = tts_rx.recv() , if !tts_finished => {
-        //                 if let Some((seq, chunk)) = res {
-        //                     tracing::debug!(seq, chunk = chunk.as_ref().map(|c| c.len()).unwrap_or(0));
-        //                     // for streaming mode all the chunks stored in the 0 index
-        //                     let seq = seq.unwrap_or(0);
-        //                     if seq >= cur_seq + chunks.len(){
-        //                         chunks.resize(seq + 1 - cur_seq, (VecDeque::new(), false));
-        //                     }
-
-        //                     let (deq, finished) = &mut chunks[seq];
-        //                     if let Some(chunk) = chunk {
-        //                         deq.push_back(chunk);
-        //                     }else{
-        //                         *finished = true;
-        //                     }
-
-        //                 }else{
-        //                     tts_finished = true;
-        //                 }
-        //             }
-        //         }
-        //     }
-        // };
-
-        // let track_id = self.track_id.clone();
-        // let token = self.cancel_token.clone();
-        // let session_id = self.session_id.clone();
-        // let ssrc = self.ssrc;
-        // let event_sender_clone = event_sender.clone();
-        // tokio::spawn(async move {
-        //     let start_time = crate::get_timestamp();
-        //     select! {
-        //         biased;
-        //         _ = token.cancelled() => {
-        //            info!(session_id, "tts track canceled");
-        //         }
-        //         _ = emit_loop => {
-        //             info!(session_id, "emit loop completed");
-        //         }
-        //         _ = recv_loop => {}
-        //         _ = command_loop => {}
-        //     }
-
-        //     let duration = crate::get_timestamp() - start_time;
-        //     info!(session_id, track_id, duration, "tts track ended");
-        //     let play_id = Some("play".to_string());
-        //     event_sender_clone
-        //         .send(SessionEvent::TrackEnd {
-        //             track_id,
-        //             timestamp: crate::get_timestamp(),
-        //             duration,
-        //             ssrc,
-        //             play_id,
-        //         })
-        //         .ok();
-        // });
-        // Ok(())
     }
 
     async fn stop(&self) -> Result<()> {

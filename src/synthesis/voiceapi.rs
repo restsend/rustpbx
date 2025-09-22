@@ -56,7 +56,6 @@ impl VoiceApiTtsClient {
     }
     // WebSocket-based TTS synthesis
     async fn ws_synthesize(&self, text: &str, option: Option<SynthesisOption>) -> Result<()> {
-        let cache_key = option.as_ref().and_then(|opt| opt.cache_key.clone());
         let option = self.option.merge_with(option);
         let endpoint = option
             .endpoint
@@ -153,7 +152,7 @@ impl VoiceApiTtsClient {
                 _ => {}
             }
         }
-        self.tx.send(Ok(SynthesisEvent::Finished { cache_key }))?;
+        self.tx.send(Ok(SynthesisEvent::Finished))?;
         Ok(())
     }
 }
@@ -165,14 +164,14 @@ impl SynthesisClient for VoiceApiTtsClient {
     }
     async fn start(
         &mut self,
-    ) -> Result<BoxStream<'static, Result<(Option<usize>, SynthesisEvent)>>> {
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("VoiceApiTtsClient: Receiver already taken, cannot start new stream")
         })?;
         Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
             rx.recv()
                 .await
-                .map(|event| (event.map(|event| (None, event)), rx))
+                .map(|event| ((None, event), rx))
         })))
     }
     async fn synthesize(

@@ -103,7 +103,7 @@ pub async fn store_in_cache(key: &str, data: &Vec<u8>) -> Result<()> {
 }
 
 // Store datas in the cache
-pub async fn store_in_cache_v(key: &str, data: &[impl AsRef<[u8]>]) -> Result<()> {
+pub async fn store_in_cache_vectored(key: &str, data: &[impl AsRef<[u8]>]) -> Result<()> {
     ensure_cache_dir().await?;
     let path = get_cache_path(key)?;
     let tmp_path = path.with_extension(".tmp");
@@ -112,9 +112,9 @@ pub async fn store_in_cache_v(key: &str, data: &[impl AsRef<[u8]>]) -> Result<()
         .iter()
         .map(|d| IoSlice::new(d.as_ref()))
         .collect::<Vec<_>>();
-    file.write_vectored(&io_slices).await?;
+    let n = file.write_vectored(&io_slices).await?;
     tokio::fs::rename(&tmp_path, &path).await?;
-    info!("cache: Stored {} -> {} bytes", key, data.len());
+    info!("cache: Stored {} -> {} bytes", key, n);
     Ok(())
 }
 
@@ -214,7 +214,7 @@ mod tests {
         assert!(!is_cached(&key).await?);
 
         // Store using vectored write
-        store_in_cache_v(&key, &data_slices).await?;
+        store_in_cache_vectored(&key, &data_slices).await?;
 
         // Verify it was stored
         assert!(is_cached(&key).await?);
@@ -238,7 +238,7 @@ mod tests {
         delete_from_cache(&key).await.ok();
 
         // Store empty data
-        store_in_cache_v(&key, empty_data).await?;
+        store_in_cache_vectored(&key, empty_data).await?;
 
         // Verify it was stored as empty file
         assert!(is_cached(&key).await?);
@@ -326,7 +326,7 @@ mod tests {
         delete_from_cache(&key).await.ok();
 
         // Store using vectored write
-        store_in_cache_v(&key, &data_parts).await?;
+        store_in_cache_vectored(&key, &data_parts).await?;
 
         // Retrieve using buffer method
         let mut buffer = BytesMut::new();
