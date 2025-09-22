@@ -499,7 +499,7 @@ impl Track for TtsTrack {
             chunks_map: HashMap::new(),
             cur_seq: 0,
             streaming: self.streaming,
-            timeout: Duration::from_secs(1),
+            timeout: Duration::from_secs(2),
         };
         tracing::debug!(self.session_id, self.track_id, "tts task started");
         tokio::spawn(async move { task.run().await });

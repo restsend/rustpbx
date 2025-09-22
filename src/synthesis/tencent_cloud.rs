@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 use unic_emoji::char::{is_emoji, is_emoji_component, is_emoji_modifier, is_emoji_modifier_base};
 use urlencoding;
 use uuid::Uuid;
@@ -223,15 +223,16 @@ where
                             serde_json::from_str(&text).expect("Tencent TTS API changed!");
 
                         if response.code != 0 {
-                            tracing::error!(
-                                "Tencent TTS error, code: {}, message: {}, cmd_seq: {:?}",
-                                response.code,
-                                response.message,
-                                cmd_seq
-                            );
-
                             notify.notify_one();
-                            return None;
+                            return Some((
+                                cmd_seq,
+                                Err(anyhow::anyhow!(
+                                    "Tencent TTS error, code: {}, message: {}, cmd_seq: {:?}",
+                                    response.code,
+                                    response.message,
+                                    cmd_seq
+                                )),
+                            ));
                         }
 
                         if response.heartbeat == 1 {
@@ -254,16 +255,19 @@ where
                     }
                     Ok(Message::Close(_)) => {
                         notify.notify_one();
-                        tracing::error!("Tencent TTS closed by remote, {:?}", cmd_seq);
+                        warn!("Tencent TTS closed by remote, {:?}", cmd_seq);
                         None
                     }
                     Err(e) => {
                         notify.notify_one();
-                        Some((cmd_seq, Err(anyhow::anyhow!(
-                            "Tencent TTS websocket error: {:?}, {:?}",
+                        Some((
                             cmd_seq,
-                            e
-                        ))))
+                            Err(anyhow::anyhow!(
+                                "Tencent TTS websocket error: {:?}, {:?}",
+                                cmd_seq,
+                                e
+                            )),
+                        ))
                     }
                     _ => None,
                 }
