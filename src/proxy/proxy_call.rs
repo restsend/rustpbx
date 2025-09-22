@@ -449,15 +449,20 @@ impl ProxyCall {
             MediaProxyMode::None => false,
             MediaProxyMode::All => true,
             MediaProxyMode::Auto => {
+                let is_webrtc_sdp = Self::is_webrtc_sdp(offer_sdp);
+                let all_webrtc_target = self.dialplan.all_webrtc_target();
+                if is_webrtc_sdp && all_webrtc_target {
+                    return false; // Both offer and all targets are WebRTC, no proxy needed
+                }
+
+                if (is_webrtc_sdp && !all_webrtc_target) || (!is_webrtc_sdp && all_webrtc_target) {
+                    return true;
+                }
+
                 if let Some(ip) = self.dialplan.media.external_ip.as_ref() {
                     if let Ok(ip_addr) = IpAddr::from_str(ip) {
                         return !is_private_ip(&ip_addr) && self.contains_private_ip(offer_sdp);
                     }
-                }
-                let is_webrtc_sdp = Self::is_webrtc_sdp(offer_sdp);
-                let all_webrtc_target = self.dialplan.all_webrtc_target();
-                if (is_webrtc_sdp && !all_webrtc_target) || (!is_webrtc_sdp && all_webrtc_target) {
-                    return true;
                 }
                 return false;
             }
@@ -606,10 +611,8 @@ impl ProxyCall {
 
         for (index, target) in targets.iter().enumerate() {
             info!(
-                session_id = %self.session_id,
-                target_index = index,
-                target = %target.aor,
-                "Trying sequential target"
+                session_id = %self.session_id, index, %target,
+                "trying sequential target"
             );
             match self.try_single_target(session, target).await {
                 Ok(_) => {
@@ -916,8 +919,7 @@ impl ProxyCall {
                 })?;
             match route_result {
                 RouteResult::NotHandled(option) => {
-                    info!(
-                        session_id = self.session_id,
+                    info!(session_id = self.session_id, %target,
                         "Routing function returned NotHandled"
                     );
                     if let Some(ref code) = target.abort_on_route_invite_missing {
@@ -936,9 +938,7 @@ impl ProxyCall {
         };
 
         debug!(
-            session_id = %self.session_id,
-            callee = %target.aor,
-            caller = %caller,
+            session_id = %self.session_id, %caller, %target,
             "Sending INVITE to target"
         );
 
