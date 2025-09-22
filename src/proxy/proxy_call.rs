@@ -112,6 +112,30 @@ struct CallSession {
     use_media_proxy: bool,          // Flag to control whether to use media stream proxy
 }
 
+#[derive(Debug)]
+enum ParallelEvent {
+    Calling {
+        idx: usize,
+        dialog_id: DialogId,
+    },
+    Early {
+        sdp: Option<String>,
+    },
+    Accepted {
+        idx: usize,
+        dialog_id: DialogId,
+        answer: String,
+        aor: String,
+    },
+    Failed {
+        code: StatusCode,
+        reason: Option<String>,
+    },
+    Terminated {
+        idx: usize,
+    },
+    Cancelled,
+}
 impl CallSession {
     fn new(
         cancel_token: CancellationToken,
@@ -632,30 +656,6 @@ impl ProxyCall {
             session.start_ringing(String::new(), self).await;
         }
 
-        #[derive(Debug)]
-        enum ParallelEvent {
-            Calling {
-                idx: usize,
-                dialog_id: DialogId,
-            },
-            Early {
-                sdp: Option<String>,
-            },
-            Accepted {
-                idx: usize,
-                dialog_id: DialogId,
-                answer: String,
-                aor: String,
-            },
-            Failed {
-                code: StatusCode,
-                reason: Option<String>,
-            },
-            Terminated {
-                idx: usize,
-            },
-        }
-
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<ParallelEvent>();
         let dialog_layer = self.dialog_layer.clone();
         let cancel_token = self.cancel_token.clone();
@@ -779,69 +779,78 @@ impl ProxyCall {
             });
         }
 
+        // spawn a cancellation watcher that notifies the main event loop
+        {
+            let ev_tx_c = ev_tx.clone();
+            let cancel_token = cancel_token.clone();
+            join_set.spawn(async move {
+                cancel_token.cancelled().await;
+                let _ = ev_tx_c.send(ParallelEvent::Cancelled);
+            });
+        }
+
         drop(ev_tx);
 
         let mut failures = 0usize;
         let mut accepted_idx: Option<usize> = None;
 
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
+        while let Some(event) = ev_rx.recv().await {
+            match event {
+                ParallelEvent::Calling { idx, dialog_id } => {
+                    known_dialogs[idx] = Some(dialog_id);
+                    if let Some(id) = &known_dialogs[idx] {
+                        session.add_callee_dialog(id.clone());
+                    }
+                }
+                ParallelEvent::Early { sdp } => {
+                    if let Some(answer) = sdp {
+                        session.start_ringing(answer, self).await;
+                    } else if !session.early_media_sent {
+                        session.start_ringing(String::new(), self).await;
+                    }
+                }
+                ParallelEvent::Accepted {
+                    idx,
+                    dialog_id,
+                    answer,
+                    aor,
+                } => {
+                    if accepted_idx.is_none() {
+                        if let Err(e) = session.accept_call(dialog_id.clone(), aor, answer).await {
+                            warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
+                            continue;
+                        }
+                        accepted_idx = Some(idx);
+                        for (j, maybe_id) in known_dialogs.iter().enumerate() {
+                            if j != idx {
+                                if let Some(id) = maybe_id.clone() {
+                                    if let Some(dlg) = self.dialog_layer.get_dialog(&id) {
+                                        dlg.hangup().await.ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ParallelEvent::Failed { code, reason } => {
+                    failures += 1;
+                    session.set_error(code, reason);
+                    if failures >= targets.len() && accepted_idx.is_none() {
+                        return Err(anyhow!("All parallel targets failed"));
+                    }
+                }
+                ParallelEvent::Terminated { idx } => {
+                    if Some(idx) == accepted_idx {
+                        return Ok(());
+                    }
+                }
+                ParallelEvent::Cancelled => {
                     for maybe_id in known_dialogs.iter().filter_map(|o| o.as_ref()) {
                         if let Some(dlg) = self.dialog_layer.get_dialog(maybe_id) {
                             dlg.hangup().await.ok();
                         }
                     }
                     return Err(anyhow!("Caller cancelled"));
-                }
-                ev = ev_rx.recv() => {
-                    if let Some(event) = ev {
-                        match event {
-                            ParallelEvent::Calling { idx, dialog_id } => {
-                                known_dialogs[idx] = Some(dialog_id);
-                                if let Some(id) = &known_dialogs[idx] { session.add_callee_dialog(id.clone()); }
-                            }
-                            ParallelEvent::Early { sdp } => {
-                                if let Some(answer) = sdp {
-                                    session.start_ringing(answer, self).await;
-                                } else if !session.early_media_sent {
-                                    session.start_ringing(String::new(), self).await;
-                                }
-                            }
-                            ParallelEvent::Accepted { idx, dialog_id, answer, aor } => {
-                                if accepted_idx.is_none() {
-                                    if let Err(e) = session.accept_call(dialog_id.clone(), aor, answer).await {
-                                        warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
-                                        continue;
-                                    }
-                                    accepted_idx = Some(idx);
-                                    for (j, maybe_id) in known_dialogs.iter().enumerate() {
-                                        if j != idx {
-                                            if let Some(id) = maybe_id.clone() {
-                                                if let Some(dlg) = self.dialog_layer.get_dialog(&id) {
-                                                    dlg.hangup().await.ok();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            ParallelEvent::Failed { code, reason } => {
-                                failures += 1;
-                                session.set_error(code, reason);
-                                if failures >= targets.len() && accepted_idx.is_none() {
-                                    return Err(anyhow!("All parallel targets failed"));
-                                }
-                            }
-                            ParallelEvent::Terminated { idx } => {
-                                if Some(idx) == accepted_idx {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    } else {
-                        break;
-                    }
                 }
             }
         }

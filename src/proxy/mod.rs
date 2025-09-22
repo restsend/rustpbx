@@ -18,8 +18,6 @@ pub mod registrar;
 pub mod routing;
 pub use routing::RoutingState;
 pub mod server;
-pub mod session;
-pub mod status;
 #[cfg(test)]
 pub mod tests;
 pub mod user;

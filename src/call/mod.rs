@@ -221,11 +221,11 @@ pub enum Command {
 
 #[async_trait]
 pub trait LocationInspector: Send + Sync {
-    async fn inspect_location(
+    async fn inspect_locations(
         &self,
-        location: Location,
+        targets: DialStrategy,
         original: &rsip::Request,
-    ) -> Result<Location, (anyhow::Error, Option<rsip::StatusCode>)>;
+    ) -> Result<DialStrategy, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
 #[derive(Clone, Default)]
@@ -463,6 +463,10 @@ impl Dialplan {
     /// Set the caller URI
     pub fn with_caller(mut self, caller: rsip::Uri) -> Self {
         self.caller = Some(caller);
+        self
+    }
+    pub fn with_targets(mut self, targets: DialStrategy) -> Self {
+        self.targets = targets;
         self
     }
 
