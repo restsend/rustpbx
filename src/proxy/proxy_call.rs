@@ -693,7 +693,7 @@ impl ProxyCall {
                 caller: caller.clone(),
                 content_type,
                 offer,
-                destination: Some(target.destination.clone()),
+                destination: target.destination.clone(),
                 contact: self
                     .dialplan
                     .caller_contact
@@ -888,7 +888,7 @@ impl ProxyCall {
             caller: caller.clone(),
             content_type,
             offer,
-            destination: Some(target.destination.clone()),
+            destination: target.destination.clone(),
             contact: self
                 .dialplan
                 .caller_contact
@@ -901,7 +901,11 @@ impl ProxyCall {
 
         let invite_option = if let Some(ref route_invite) = self.dialplan.route_invite {
             let route_result = route_invite
-                .route_invite(invite_option, &self.dialplan.original)
+                .route_invite(
+                    invite_option,
+                    &self.dialplan.original,
+                    &self.dialplan.direction,
+                )
                 .await
                 .map_err(|e| {
                     warn!(session_id = %self.session_id, error = %e, "Routing function error");

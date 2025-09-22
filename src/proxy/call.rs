@@ -1,4 +1,5 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
+use crate::call::DialDirection;
 use crate::call::DialStrategy;
 use crate::call::Dialplan;
 use crate::call::Location;
@@ -19,7 +20,6 @@ use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::transaction::Transaction;
-use rsipstack::transport::SipAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -58,6 +58,7 @@ impl RouteInvite for DefaultRouteInvite {
         &self,
         option: InviteOption,
         origin: &rsip::Request,
+        direction: &DialDirection,
     ) -> Result<RouteResult> {
         match_invite(
             Some(&self.config.trunks),
@@ -66,6 +67,7 @@ impl RouteInvite for DefaultRouteInvite {
             option,
             origin,
             self.routing_state.clone(),
+            direction,
         )
         .await
     }
@@ -112,7 +114,6 @@ impl CallModule {
             .map_err(|e| (anyhow::anyhow!(e), None))?
             .uri()
             .map_err(|e| (anyhow::anyhow!(e), None))?;
-        let callee = callee_uri.user().unwrap_or_default().to_string();
         let callee_realm = callee_uri.host().to_string();
         let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
         let session_id = format!("{}/{}", dialog_id, rand::random::<u32>());
@@ -128,7 +129,18 @@ impl CallModule {
             .with_rtp_start_port(self.inner.server.app_state.config.rtp_start_port.clone())
             .with_rtp_end_port(self.inner.server.app_state.config.rtp_end_port.clone());
 
-        let mut dialplan = Dialplan::new(session_id, original.clone())
+        let direction = if self
+            .inner
+            .server
+            .is_same_realm(&caller.host().to_string())
+            .await
+        {
+            DialDirection::Outbound
+        } else {
+            DialDirection::Inbound
+        };
+
+        let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
             .with_caller_contact(caller_contact)
             .with_caller(caller)
             .with_media(media_config)
@@ -139,7 +151,6 @@ impl CallModule {
             info!(callee=%callee_uri, callee_realm, "Creating dialplan for external realm");
             DialStrategy::Sequential(vec![Location {
                 aor: callee_uri.clone(),
-                destination: SipAddr::try_from(&callee_uri).map_err(|e| (anyhow!(e), None))?,
                 ..Default::default()
             }])
         } else {
@@ -147,7 +158,7 @@ impl CallModule {
                 .inner
                 .server
                 .locator
-                .lookup(&callee, Some(&callee_realm))
+                .lookup(&callee_uri)
                 .await
                 .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
 
@@ -155,7 +166,6 @@ impl CallModule {
                 info!(%dialog_id, callee = %callee_uri, "user offline in locator");
                 locations.push(Location {
                     aor: callee_uri.clone(),
-                    destination: SipAddr::try_from(&callee_uri).map_err(|e| (anyhow!(e), None))?,
                     abort_on_route_invite_missing: Some(rsip::StatusCode::TemporarilyUnavailable), // abort if route invite is missing
                     ..Default::default()
                 });

@@ -15,7 +15,7 @@ async fn test_db_locator() {
             user: "alice".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("example.com:5060").unwrap(),
+        host_with_port: HostWithPort::try_from("example.com").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -29,7 +29,7 @@ async fn test_db_locator() {
     let location = Location {
         aor: aor.clone(),
         expires: 3600,
-        destination: destination.clone(),
+        destination: Some(destination.clone()),
         last_modified: Some(Instant::now()),
         ..Default::default()
     };
@@ -44,14 +44,17 @@ async fn test_db_locator() {
         .unwrap();
 
     // Test lookup
-    let locations = locator.lookup("alice", Some("example.com")).await.unwrap();
+    let locations = locator
+        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].aor.to_string(), aor.to_string());
     assert_eq!(locations[0].expires, 3600);
 
     // Match the relevant components of the SipAddr
     match &locations[0].destination {
-        SipAddr { r#type, addr } => {
+        Some(SipAddr { r#type, addr }) => {
             assert_eq!(r#type, &Some(rsip::transport::Transport::Udp));
             match &addr.host {
                 rsip::host_with_port::Host::IpAddr(ip) => {
@@ -61,6 +64,7 @@ async fn test_db_locator() {
             }
             assert_eq!(addr.port.as_ref().unwrap().value().to_owned(), 5060);
         }
+        None => panic!("Expected destination to be Some"),
     }
 
     // Test unregister
@@ -70,7 +74,9 @@ async fn test_db_locator() {
         .unwrap();
 
     // Lookup should now return none (empty) or an error, both acceptable
-    let result = locator.lookup("alice", Some("example.com")).await;
+    let result = locator
+        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .await;
     match result {
         Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
         Err(_) => {}
@@ -103,7 +109,7 @@ async fn test_db_locator_with_custom_table() {
     let location = Location {
         aor: aor.clone(),
         expires: 1800,
-        destination: destination.clone(),
+        destination: Some(destination.clone()),
         last_modified: Some(Instant::now()),
         ..Default::default()
     };
@@ -115,14 +121,17 @@ async fn test_db_locator_with_custom_table() {
         .unwrap();
 
     // Test lookup
-    let locations = locator.lookup("bob", Some("example.com")).await.unwrap();
+    let locations = locator
+        .lookup(&"sip:bob@example.com:5080".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].aor.to_string(), aor.to_string());
     assert_eq!(locations[0].expires, 1800);
 
     // Match the relevant components of the SipAddr
     match &locations[0].destination {
-        SipAddr { r#type, addr } => {
+        Some(SipAddr { r#type, addr }) => {
             assert_eq!(r#type, &Some(rsip::transport::Transport::Tcp));
             match &addr.host {
                 rsip::host_with_port::Host::IpAddr(ip) => {
@@ -132,6 +141,7 @@ async fn test_db_locator_with_custom_table() {
             }
             assert_eq!(addr.port.as_ref().unwrap().value().to_owned(), 5080);
         }
+        None => panic!("Expected destination to be Some"),
     }
 
     // Test unregister
@@ -141,7 +151,9 @@ async fn test_db_locator_with_custom_table() {
         .unwrap();
 
     // Lookup should now return none (empty) or an error, both acceptable
-    let result = locator.lookup("bob", Some("example.com")).await;
+    let result = locator
+        .lookup(&"sip:bob@example.com".try_into().expect("invalid uri"))
+        .await;
     match result {
         Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
         Err(_) => {}
@@ -160,7 +172,7 @@ async fn test_db_locator_multiple_lookups() {
             user: "carol".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("example.com:5060").unwrap(),
+        host_with_port: HostWithPort::try_from("example.com").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -174,7 +186,7 @@ async fn test_db_locator_multiple_lookups() {
     let location1 = Location {
         aor: aor1.clone(),
         expires: 3600,
-        destination: destination1.clone(),
+        destination: Some(destination1.clone()),
         last_modified: Some(Instant::now()),
         ..Default::default()
     };
@@ -188,7 +200,10 @@ async fn test_db_locator_multiple_lookups() {
         .unwrap();
 
     // Look up the registered location
-    let locations = locator.lookup("carol", Some("example.com")).await.unwrap();
+    let locations = locator
+        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
     assert_eq!(locations.len(), 1);
 
     // Test with a different realm
@@ -212,7 +227,7 @@ async fn test_db_locator_multiple_lookups() {
     let location2 = Location {
         aor: aor2.clone(),
         expires: 1800,
-        destination: destination2.clone(),
+        destination: Some(destination2.clone()),
         last_modified: Some(Instant::now()),
         ..Default::default()
     };
@@ -224,13 +239,20 @@ async fn test_db_locator_multiple_lookups() {
         .unwrap();
 
     // First realm lookup should still work
-    let locations1 = locator.lookup("carol", Some("example.com")).await.unwrap();
+    let locations1 = locator
+        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
     assert_eq!(locations1.len(), 1);
     assert_eq!(locations1[0].aor.to_string(), aor1.to_string());
 
     // Second realm lookup should also work
     let locations2 = locator
-        .lookup("carol", Some("otherexample.com"))
+        .lookup(
+            &"sip:carol@otherexample.com:5080"
+                .try_into()
+                .expect("invalid uri"),
+        )
         .await
         .unwrap();
     assert_eq!(locations2.len(), 1);
@@ -243,7 +265,9 @@ async fn test_db_locator_multiple_lookups() {
         .unwrap();
 
     // First realm lookup should now be none (empty) or an error, both acceptable
-    let result1 = locator.lookup("carol", Some("example.com")).await;
+    let result1 = locator
+        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .await;
     match result1 {
         Ok(v) => assert!(
             v.is_empty(),
@@ -254,7 +278,11 @@ async fn test_db_locator_multiple_lookups() {
 
     // Second realm lookup should still work
     let locations2 = locator
-        .lookup("carol", Some("otherexample.com"))
+        .lookup(
+            &"sip:carol@otherexample.com:5080"
+                .try_into()
+                .expect("invalid uri"),
+        )
         .await
         .unwrap();
     assert_eq!(locations2.len(), 1);

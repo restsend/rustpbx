@@ -38,7 +38,7 @@ async fn test_registrar_register_success() {
     // Verify that the user was registered in the locator
     let locations = server_inner
         .locator
-        .lookup("alice", Some("example.com"))
+        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
         .await;
 
     assert!(locations.is_ok());
@@ -90,7 +90,7 @@ async fn test_registrar_unregister() {
     // Verify that the user was unregistered
     let locations = server_inner
         .locator
-        .lookup("alice", Some("example.com"))
+        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
         .await;
 
     match locations {
@@ -133,7 +133,7 @@ async fn test_registrar_with_custom_expires() {
     // Verify that the user was registered in the locator with the custom expires value
     let locations = server_inner
         .locator
-        .lookup("alice", Some("example.com"))
+        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
         .await
         .unwrap();
 

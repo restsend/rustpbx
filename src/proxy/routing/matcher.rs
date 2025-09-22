@@ -12,6 +12,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 use crate::{
+    call::DialDirection,
     config::RouteResult,
     proxy::routing::{ActionType, DefaultRoute, RouteRule, RoutingState, TrunkConfig},
 };
@@ -30,6 +31,7 @@ pub async fn match_invite(
     mut option: InviteOption,
     origin: &rsip::Request,
     routing_state: Arc<RoutingState>,
+    direction: &DialDirection,
 ) -> Result<RouteResult> {
     let routes = match routes {
         Some(routes) => routes,
@@ -45,8 +47,8 @@ pub async fn match_invite(
     let request_host = origin.uri.host().clone();
 
     debug!(
-        "Matching INVITE: caller={}@{}, callee={}@{}, request={}@{}",
-        caller_user, caller_host, callee_user, callee_host, request_user, request_host
+        "Matching {:?} INVITE: caller={}@{}, callee={}@{}, request={}@{}",
+        direction, caller_user, caller_host, callee_user, callee_host, request_user, request_host
     );
 
     // Traverse routing rules by priority

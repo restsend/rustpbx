@@ -138,9 +138,16 @@ impl Locator for DbLocator {
         let aor = location.aor.to_string();
         let expires = location.expires as i64;
         let realm_value = realm.unwrap_or_default().to_string();
-
+        let destination = match &location.destination {
+            Some(dest) => dest,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Cannot register location without destination"
+                ));
+            }
+        };
         // Extract SipAddr components
-        let SipAddr { r#type, addr } = &location.destination;
+        let SipAddr { r#type, addr } = destination;
         let (host, transport) = {
             let transport = match r#type {
                 Some(t) => t.to_string(),
@@ -223,12 +230,13 @@ impl Locator for DbLocator {
         Ok(())
     }
 
-    async fn lookup(&self, username: &str, realm: Option<&str>) -> Result<Vec<Location>> {
+    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
         // Default implementation for standard cases
-        let realm_value = realm.unwrap_or_default();
+        let realm = uri.host().to_string();
+        let username = uri.user().unwrap_or_else(|| "");
         let models = Entity::find()
             .filter(Column::Username.eq(username))
-            .filter(Column::Realm.eq(realm_value))
+            .filter(Column::Realm.eq(realm))
             .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
@@ -236,13 +244,10 @@ impl Locator for DbLocator {
         if models.is_empty() {
             return Ok(vec![]);
         }
-
         let mut locations = Vec::new();
         for model in models {
-            // Parse the aor into a Uri
             let aor = rsip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
-
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
                 "UDP" => rsip::transport::Transport::Udp,
@@ -265,7 +270,7 @@ impl Locator for DbLocator {
             locations.push(Location {
                 aor,
                 expires: model.expires as u32,
-                destination,
+                destination: Some(destination),
                 last_modified: None,
                 supports_webrtc: model.supports_webrtc,
                 ..Default::default()

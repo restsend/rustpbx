@@ -232,7 +232,7 @@ pub trait LocationInspector: Send + Sync {
 pub struct Location {
     pub aor: rsip::Uri,
     pub expires: u32,
-    pub destination: SipAddr,
+    pub destination: Option<SipAddr>,
     pub last_modified: Option<Instant>,
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
@@ -243,7 +243,10 @@ pub struct Location {
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
-        write!(f, "({} -> {}{})", self.aor, self.destination, is_webrtc)
+        match &self.destination {
+            Some(d) => write!(f, "({} -> {} {})", self.aor, d, is_webrtc),
+            None => write!(f, "({} -> * {})", self.aor, is_webrtc),
+        }
     }
 }
 
@@ -402,7 +405,13 @@ impl MediaConfig {
     }
 }
 
+#[derive(Debug)]
+pub enum DialDirection {
+    Outbound,
+    Inbound,
+}
 pub struct Dialplan {
+    pub direction: DialDirection,
     pub session_id: Option<String>,
     pub caller_contact: Option<rsip::typed::Contact>,
     pub caller: Option<rsip::Uri>,
@@ -441,8 +450,9 @@ impl Dialplan {
         }
     }
     /// Create a new dialplan with basic configuration
-    pub fn new(session_id: String, original: rsip::Request) -> Self {
+    pub fn new(session_id: String, original: rsip::Request, direction: DialDirection) -> Self {
         Self {
+            direction,
             session_id: Some(session_id),
             original,
             caller: None,
@@ -546,5 +556,6 @@ pub trait RouteInvite: Sync + Send {
         &self,
         option: InviteOption,
         origin: &rsip::Request,
+        direction: &DialDirection,
     ) -> Result<RouteResult>;
 }
