@@ -369,10 +369,6 @@ async fn serve_webrtc_client(
         .send(tungstenite::Message::Text(command_str.into()))
         .await?;
 
-    if rand::random::<u16>() % 10 == 0 {
-        return Err(anyhow::anyhow!("Simulated error"));
-    }
-
     // Wait for transcription event
     let recv_event_loop = async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -551,7 +547,6 @@ async fn main() -> Result<()> {
                         error!(id, "Client session failed: {}", e);
                     }
                 }
-                time::sleep(Duration::from_millis(rand::random::<u64>() % 5000)).await;
             }
         }));
     }
