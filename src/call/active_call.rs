@@ -4,7 +4,10 @@ use crate::{
     app::AppState,
     call::{
         CommandReceiver, CommandSender,
-        sip::{DialogGuard, Invitation, client_dialog_event_loop, server_dialog_event_loop},
+        sip::{
+            DialogGuard, Invitation, client_dialog_event_loop, on_dialog_terminated,
+            server_dialog_event_loop,
+        },
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
@@ -28,7 +31,9 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
+use rsipstack::dialog::{
+    dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -863,6 +868,7 @@ impl ActiveCall {
         self.media_stream.cleanup().await.ok();
         self.cancel_token.cancel();
         if let Some(handle) = caller_jobhandle {
+            handle.abort();
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
         Ok(())
@@ -1350,24 +1356,35 @@ impl ActiveCall {
 
         let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
         let session_id = self.session_id.clone();
+        let session_id_clone = session_id.clone();
         let event_sender = self.event_sender.clone();
         let media_stream = self.media_stream.clone();
         let call_state = call_state_ref.clone();
         let track_id_clone = track_id.clone();
         let dialog_layer = self.invitation.dialog_layer.clone();
         let caller_dlg_handle = tokio::spawn(async move {
-            client_dialog_event_loop(
-                cancel_token,
-                session_id,
-                track_id_clone,
-                event_sender,
-                dlg_state_receiver,
-                call_state,
-                media_stream,
-                dialog_layer,
-            )
-            .await
-            .ok();
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    info!(
+                        session_id=session_id_clone,
+                        track_id=track_id_clone,
+                        "caller_dlg_handle cancelled"
+                    );
+                    on_dialog_terminated(
+                        call_state,
+                        track_id_clone,
+                        TerminatedReason::UacCancel,
+                        event_sender,
+                    );
+                }
+                _ = client_dialog_event_loop(session_id,
+                    track_id_clone.clone(),
+                    event_sender.clone(),
+                    dlg_state_receiver,
+                    call_state.clone(),
+                    media_stream,
+                    dialog_layer) => {}
+            }
         });
 
         let (dialog_id, answer) = self
