@@ -95,18 +95,6 @@ impl WebrtcTrack {
                 payload_type: 111,
                 ..Default::default()
             },
-            #[cfg(feature = "g729")]
-            RTCRtpCodecParameters {
-                capability: RTCRtpCodecCapability {
-                    mime_type: "audio/G729".to_owned(),
-                    clock_rate: 8000,
-                    channels: 1,
-                    sdp_fmtp_line: "".to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 111,
-                ..Default::default()
-            },
             RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
                     mime_type: MIME_TYPE_G722.to_owned(),
@@ -192,11 +180,8 @@ impl WebrtcTrack {
         self.prefered_codec = codec;
         self
     }
-    pub async fn setup_webrtc_track(
-        &mut self,
-        offer: String,
-        timeout: Option<Duration>,
-    ) -> Result<RTCSessionDescription> {
+
+    async fn create(&mut self) -> Result<()> {
         let media_engine = Self::get_media_engine(self.prefered_codec)?;
         let api = APIBuilder::new().with_media_engine(media_engine).build();
         let ice_servers = if let Some(ice_servers) = &self.ice_servers {
@@ -313,19 +298,11 @@ impl WebrtcTrack {
             },
         ));
 
-        let remote_desc = RTCSessionDescription::offer(offer)?;
-        let codec = match self.prefered_codec {
-            Some(codec) => codec,
-            None => {
-                let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
-                    Some(codec) => codec,
-                    None => {
-                        return Err(anyhow::anyhow!("No codec found"));
-                    }
-                };
-                codec
-            }
-        };
+        #[cfg(feature = "opus")]
+        let codec = self.prefered_codec.clone().unwrap_or(CodecType::Opus);
+
+        #[cfg(not(feature = "opus"))]
+        let codec = self.prefered_codec.clone().unwrap_or(CodecType::G722);
 
         let track = Self::create_audio_track(codec, Some(self.track_id.clone()));
         peer_connection
@@ -334,12 +311,31 @@ impl WebrtcTrack {
         self.local_track = Some(track.clone());
         self.track_config.codec = codec;
 
-        info!(
-            track_id = self.track_id,
-            "set remote description codec:{}\noffer:\n{}",
-            codec.mime_type(),
-            remote_desc.sdp,
-        );
+        Ok(())
+    }
+
+    pub async fn setup_webrtc_track(
+        &mut self,
+        offer: String,
+        timeout: Option<Duration>,
+    ) -> Result<RTCSessionDescription> {
+        let remote_desc = RTCSessionDescription::offer(offer)?;
+        if self.prefered_codec.is_none() {
+            let codec = match prefer_audio_codec(&remote_desc.unmarshal()?) {
+                Some(codec) => codec,
+                None => {
+                    return Err(anyhow::anyhow!("No codec found"));
+                }
+            };
+            self.prefered_codec = Some(codec);
+        }
+        self.create().await?;
+
+        let peer_connection = self
+            .peer_connection
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Peer connection is not created"))?;
+
         peer_connection.set_remote_description(remote_desc).await?;
 
         let answer = peer_connection.create_answer(None).await?;
@@ -361,9 +357,35 @@ impl WebrtcTrack {
 
         info!(
             track_id = self.track_id,
-            "Final WebRTC answer from PeerConnection: {}", answer.sdp
+            codec = ?self.prefered_codec,
+            "set remote description and create answer success"
         );
         Ok(answer)
+    }
+
+    pub async fn local_description(&mut self) -> Result<String> {
+        if self.peer_connection.is_none() {
+            self.create().await?;
+            if let Some(peer_connection) = &self.peer_connection {
+                let offer = peer_connection.create_offer(None).await?;
+                peer_connection.set_local_description(offer).await?;
+                peer_connection
+                    .gathering_complete_promise()
+                    .await
+                    .recv()
+                    .await;
+            }
+        }
+        let peer_connection = self
+            .peer_connection
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Peer connection is not created"))?;
+
+        peer_connection
+            .local_description()
+            .await
+            .ok_or(anyhow::anyhow!("Failed to get local description"))
+            .map(|desc| desc.sdp)
     }
 }
 

@@ -189,7 +189,7 @@ impl CallSession {
 
         let mut track: Box<dyn Track> = if Self::is_webrtc_sdp(&orig_offer_sdp) {
             Box::new(WebrtcTrack::new(
-                CancellationToken::new(),
+                self.media_stream.cancel_token.clone(),
                 track_id.clone(),
                 config,
                 None,
@@ -197,6 +197,7 @@ impl CallSession {
         } else {
             Box::new(
                 RtpTrackBuilder::new(track_id.clone(), config)
+                    .with_cancel_token(self.media_stream.cancel_token.clone())
                     .build()
                     .await?,
             )
@@ -217,14 +218,31 @@ impl CallSession {
         Ok(processed_answer)
     }
 
-    async fn create_callee_track(&mut self) -> Result<String> {
+    async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
         let track_id = "callee-track".to_string();
         let config = TrackConfig::default();
-        let track = RtpTrackBuilder::new(track_id.clone(), config)
-            .build()
-            .await?;
-        let offer = track.local_description()?;
-        self.media_stream.update_track(Box::new(track), None).await;
+        let (offer, track) = if !is_webrtc {
+            let track = RtpTrackBuilder::new(track_id.clone(), config)
+                .with_cancel_token(self.media_stream.cancel_token.clone())
+                .build()
+                .await?;
+            (
+                track.local_description()?,
+                Box::new(track) as Box<dyn Track>,
+            )
+        } else {
+            let mut track = WebrtcTrack::new(
+                self.media_stream.cancel_token.clone(),
+                track_id.clone(),
+                config,
+                None,
+            );
+            (
+                track.local_description().await?,
+                Box::new(track) as Box<dyn Track>,
+            )
+        };
+        self.media_stream.update_track(track, None).await;
         Ok(offer)
     }
 
@@ -317,6 +335,10 @@ impl CallSession {
 
     async fn callee_dialog_request(&mut self, _request: rsip::Request) -> Result<()> {
         Ok(())
+    }
+
+    fn has_error(&self) -> bool {
+        self.last_error.is_some()
     }
 
     fn set_error(&mut self, code: StatusCode, reason: Option<String>) {
@@ -503,8 +525,8 @@ impl ProxyCall {
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
         let use_media_proxy = self.needs_media_proxy(&offer_sdp);
-
-        info!(session_id = %self.session_id, use_media_proxy,  "starting proxy call processing");
+        let all_webrtc_target = self.dialplan.all_webrtc_target();
+        info!(session_id = %self.session_id, use_media_proxy, all_webrtc_target,  "starting proxy call processing");
 
         let mut session = CallSession::new(
             self.cancel_token.child_token(),
@@ -515,7 +537,7 @@ impl ProxyCall {
         );
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
-            session.callee_offer = session.create_callee_track().await.ok();
+            session.callee_offer = session.create_callee_track(all_webrtc_target).await.ok();
         } else {
             session.caller_offer = Some(offer_sdp.clone());
             session.callee_offer = Some(offer_sdp);
@@ -936,9 +958,15 @@ impl ProxyCall {
             invite_option
         };
 
+        let destination = invite_option
+            .destination
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "*".to_string());
+
         debug!(
-            session_id = %self.session_id, %caller, %target,
-            "Sending INVITE to target"
+            session_id = %self.session_id, %caller, %target, destination,
+            "Sending INVITE to callee"
         );
 
         self.execute_invite(session, invite_option, &target).await
@@ -1077,7 +1105,9 @@ impl ProxyCall {
                     .as_ref()
                     .cloned()
                     .unwrap_or(StatusCode::ServiceUnavailable);
-                session.set_error(status_code, Some("All targets failed".to_string()));
+                if !session.has_error() {
+                    session.set_error(status_code, None);
+                }
             }
             FailureAction::PlayThenHangup {
                 audio_file,
