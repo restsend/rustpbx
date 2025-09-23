@@ -403,7 +403,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 - `endOfStream` (boolean, optional): **If true, indicates the input text is finished (used with streaming).**
 - `waitInputTimeout` (number, optional): Maximum time to wait for user input in seconds
 - `option` (SynthesisOption, optional): TTS provider specific options
-- `base64` (bool, optional): If true, text is base64 encoded PCM samples of sample rate 16000 hz
+- `base64` (bool, optional): If true, text is base64 encoded PCM samples of sample rate 16000 hz, **DO NOT use this feature in Streaming TTS**
 ```json
 {
   "command": "tts",
