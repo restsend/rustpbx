@@ -569,18 +569,33 @@ impl ProxyCall {
     ) -> Result<()> {
         while let Some(state) = state_rx.recv().await {
             match state {
-                DialogState::Terminated(_, reason) => {
-                    info!(session_id = %self.session_id, reason = ?reason, "Server dialog terminated");
+                DialogState::Terminated(dialog_id, reason) => {
+                    info!(session_id = %self.session_id, reason = ?reason, %dialog_id, "Server dialog terminated");
                     break;
                 }
-                DialogState::Info(_, _request) => {
-                    debug!(session_id = %self.session_id, "Received INFO on server dialog");
+                DialogState::Info(dialog_id, _request) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Received INFO on server dialog");
                 }
-                DialogState::Updated(_, _request) => {
-                    debug!(session_id = %self.session_id, "Received UPDATE on server dialog");
+                DialogState::Updated(dialog_id, _request) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Received UPDATE on server dialog");
                 }
-                DialogState::Notify(_, _request) => {
-                    debug!(session_id = %self.session_id, "Received NOTIFY on server dialog");
+                DialogState::Notify(dialog_id, _request) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Received NOTIFY on server dialog");
+                }
+                DialogState::Calling(dialog_id) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in calling state");
+                }
+                DialogState::Trying(dialog_id) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in trying state");
+                }
+                DialogState::Early(dialog_id, _) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in early state");
+                }
+                DialogState::WaitAck(dialog_id, _) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in wait-ack state");
+                }
+                DialogState::Confirmed(dialog_id, _) => {
+                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in confirmed state");
                 }
                 other_state => {
                     debug!(
@@ -940,7 +955,8 @@ impl ProxyCall {
                 })?;
             match route_result {
                 RouteResult::NotHandled(option) => {
-                    info!(session_id = self.session_id, %target,
+                    let abort = target.abort_on_route_invite_missing.is_some();
+                    info!(session_id = self.session_id, %target, abort,
                         "Routing function returned NotHandled"
                     );
                     if let Some(ref code) = target.abort_on_route_invite_missing {

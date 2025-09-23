@@ -72,7 +72,6 @@ pub struct ActiveCallState {
     pub last_status_code: u16,
     pub option: Option<CallOption>,
     pub answer: Option<String>,
-    pub caller_dlg_handle: Option<tokio::task::JoinHandle<()>>,
     pub dialog: Option<DialogGuard>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
@@ -856,9 +855,7 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        let mut caller_jobhandle = None;
         self.call_state.write().as_mut().ok().map(|cs| {
-            caller_jobhandle = cs.caller_dlg_handle.take();
             cs.dialog.take();
             cs.refer_callstate
                 .as_mut()
@@ -867,10 +864,6 @@ impl ActiveCall {
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
         self.cancel_token.cancel();
-        if let Some(handle) = caller_jobhandle {
-            handle.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
         Ok(())
     }
 
@@ -1362,7 +1355,7 @@ impl ActiveCall {
         let call_state = call_state_ref.clone();
         let track_id_clone = track_id.clone();
         let dialog_layer = self.invitation.dialog_layer.clone();
-        let caller_dlg_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     info!(
@@ -1408,7 +1401,6 @@ impl ActiveCall {
             if cs.answer.is_none() {
                 cs.answer.replace(answer.clone());
             }
-            cs.caller_dlg_handle = Some(caller_dlg_handle);
         });
 
         self.media_stream
