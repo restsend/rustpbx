@@ -329,6 +329,7 @@ impl ActiveCall {
                 end_of_stream,
                 option,
                 wait_input_timeout,
+                base64,
             } => {
                 self.do_tts(
                     text,
@@ -339,6 +340,7 @@ impl ActiveCall {
                     end_of_stream.unwrap_or_default(),
                     option,
                     wait_input_timeout,
+                    base64.unwrap_or_default(),
                 )
                 .await
             }
@@ -563,6 +565,7 @@ impl ActiveCall {
         end_of_stream: bool,
         option: Option<SynthesisOption>,
         wait_input_timeout: Option<u32>,
+        base64: bool,
     ) -> Result<()> {
         let tts_option = match self.call_state.read() {
             Ok(ref call_state) => match call_state.option.clone().unwrap_or_default().tts {
@@ -589,17 +592,19 @@ impl ActiveCall {
             streaming,
             end_of_stream,
             option: tts_option,
+            base64,
         };
         info!(
             session_id = self.session_id,
             provider = ?play_command.option.provider,
-            text = %play_command.text,
+            text = %play_command.text.chars().take(10).collect::<String>(),
             speaker = play_command.speaker.as_deref(),
             auto_hangup = auto_hangup.unwrap_or_default(),
             play_id = play_command.play_id.as_deref(),
             streaming = play_command.streaming,
             eos = play_command.end_of_stream,
             wit = wait_input_timeout.unwrap_or_default(),
+            base64 = play_command.base64,
             "new synthesis"
         );
 

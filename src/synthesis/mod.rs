@@ -21,6 +21,7 @@ pub struct SynthesisCommand {
     pub streaming: bool,
     pub end_of_stream: bool,
     pub option: SynthesisOption,
+    pub base64: bool,
 }
 pub type SynthesisCommandSender = mpsc::UnboundedSender<SynthesisCommand>;
 pub type SynthesisCommandReceiver = mpsc::UnboundedReceiver<SynthesisCommand>;
