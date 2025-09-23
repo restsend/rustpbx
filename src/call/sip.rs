@@ -154,7 +154,7 @@ impl Invitation {
     }
 }
 
-fn on_dialog_terminated(
+pub(super) fn on_dialog_terminated(
     call_state: ActiveCallStateRef,
     track_id: TrackId,
     reason: TerminatedReason,
@@ -218,7 +218,6 @@ fn on_dialog_terminated(
 }
 
 pub async fn client_dialog_event_loop(
-    cancel_token: CancellationToken,
     session_id: String,
     track_id: TrackId,
     event_sender: EventSender,
@@ -288,7 +287,6 @@ pub async fn client_dialog_event_loop(
                     reason,
                     event_sender.clone(),
                 );
-                cancel_token.cancel(); // Cancel the token to stop any ongoing tasks
                 return Ok(dialog_id);
             }
             _ => (),
