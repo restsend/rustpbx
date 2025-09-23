@@ -262,10 +262,11 @@ impl TtsTask {
         tracing::debug!(
             self.session_id,
             self.track_id,
-            "received cmd seq: {}, text: {}, end_of_stream: {}",
             cmd_seq,
-            cmd.text,
-            cmd.end_of_stream
+            text = cmd.text.chars().take(10).collect::<String>(),
+            cmd.base64,
+            cmd.end_of_stream,
+            "tts track: received cmd",
         );
         let text = &cmd.text;
 
@@ -276,6 +277,28 @@ impl TtsTask {
         if text.is_empty() {
             self.get_emit_entry_mut(cmd_seq)
                 .map(|entry| entry.finished = true);
+            return;
+        }
+
+        if cmd.base64 {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+            match STANDARD.decode(text) {
+                Ok(bytes) => {
+                    self.get_emit_entry_mut(cmd_seq).map(|entry| {
+                        entry.chunks.push_back(Bytes::from(bytes));
+                        entry.finished = true;
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        self.session_id,
+                        self.play_id, cmd_seq, "failed to decode base64: {}", e
+                    );
+                    self.get_emit_entry_mut(cmd_seq)
+                        .map(|entry| entry.finished = true);
+                }
+            }
             return;
         }
 
@@ -314,8 +337,7 @@ impl TtsTask {
                         self.play_id,
                         cmd_seq,
                         cmd.text,
-                        "using cached audio for {}",
-                        cache_key
+                        "using cached audio"
                     );
                     let bytes = self.cache_buffer.split().freeze();
                     let len = bytes.len();
