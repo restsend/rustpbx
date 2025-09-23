@@ -443,10 +443,12 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 
 #### Interrupt Command
 **Purpose:** Interrupts current TTS or audio playback.
+- `graceful`: (boolean, optional), currently this option is used with tts, if it is true, tts track will quit until current cmd seq is finished
 
 ```json
 {
-  "command": "interrupt"
+  "command": "interrupt",
+  "graceful": "false"
 }
 ```
 

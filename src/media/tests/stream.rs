@@ -119,7 +119,7 @@ mod tests {
         stream
             .update_track(Box::new(TestTrack::new(track_id.clone())), None)
             .await;
-        stream.remove_track(&track_id).await;
+        stream.remove_track(&track_id,false).await;
     }
 }
 
