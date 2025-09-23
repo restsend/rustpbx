@@ -20,7 +20,7 @@ pub trait UserBackend: Send + Sync {
         }
     }
     async fn is_same_realm(&self, realm: &str) -> bool;
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser>;
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
     }
@@ -131,7 +131,7 @@ impl UserBackend for MemoryUserBackend {
         Self::get_identifier(user, realm)
     }
 
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
         let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
         let mut user = match users.get(&identifier) {
@@ -141,13 +141,13 @@ impl UserBackend for MemoryUserBackend {
                     if user.realm.as_ref().is_some_and(|r| !r.is_empty()) {
                         return Err(anyhow::anyhow!("missing user: {}", identifier));
                     }
-                    return Ok(user.clone());
+                    return Ok(Some(user.clone()));
                 }
-                return Err(anyhow::anyhow!("missing user: {}", identifier));
+                return Ok(None);
             }
         };
         user.realm = realm.map(|r| r.to_string());
-        Ok(user)
+        Ok(Some(user))
     }
 
     async fn create_user(&self, user: SipUser) -> Result<()> {

@@ -217,7 +217,6 @@ impl Default for MediaProxyMode {
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
-    pub external_ip: Option<String>,
     #[serde(default = "default_useragent")]
     pub useragent: Option<String>,
     #[serde(default = "default_callid_suffix")]
@@ -302,7 +301,6 @@ impl Default for ProxyConfig {
                 "registrar".to_string(),
                 "call".to_string(),
             ]),
-            external_ip: None,
             useragent: default_useragent(),
             callid_suffix: default_callid_suffix(),
             ssl_private_key: None,

@@ -30,7 +30,7 @@ pub trait CallRouter: Send + Sync {
         &self,
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
-        contact: rsip::typed::Contact,
+        caller: &SipUser,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
@@ -107,7 +107,7 @@ impl CallModule {
         &self,
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
-        caller_contact: rsip::typed::Contact,
+        caller: &SipUser,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
         let callee_uri = original
             .to_header()
@@ -118,31 +118,53 @@ impl CallModule {
         let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
         let session_id = format!("{}/{}", dialog_id, rand::random::<u32>());
 
-        let caller = original
-            .from_header()
-            .map_err(|e| (anyhow::anyhow!(e), None))?
-            .uri()
-            .map_err(|e| (anyhow::anyhow!(e), None))?;
-
         let media_config = MediaConfig::new()
             .with_external_ip(self.inner.server.app_state.config.external_ip.clone())
             .with_rtp_start_port(self.inner.server.app_state.config.rtp_start_port.clone())
             .with_rtp_end_port(self.inner.server.app_state.config.rtp_end_port.clone());
 
-        let direction = if self
+        let caller_is_same_realm = self
             .inner
             .server
-            .is_same_realm(&caller.host().to_string())
-            .await
-        {
-            DialDirection::Outbound
-        } else {
-            DialDirection::Inbound
+            .is_same_realm(caller.realm.as_deref().unwrap_or_else(|| ""))
+            .await;
+        let callee_is_same_realm = self.inner.server.is_same_realm(&callee_realm).await;
+
+        let direction = match (caller_is_same_realm, callee_is_same_realm) {
+            (true, true) => DialDirection::Internal,
+            (true, false) => DialDirection::Outbound,
+            (false, true) => DialDirection::Inbound,
+            (false, false) => {
+                warn!(%dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+                return Err((
+                    anyhow::anyhow!("Both caller and callee are external realm"),
+                    Some(rsip::StatusCode::Forbidden),
+                ));
+            }
+        };
+
+        let caller_contact = match caller.contact.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                return Err((
+                    anyhow::anyhow!("Missing caller contact"),
+                    Some(rsip::StatusCode::Forbidden),
+                ));
+            }
+        };
+
+        let caller_uri = match caller.from.as_ref() {
+            Some(uri) => uri.clone(),
+            None => original
+                .from_header()
+                .map_err(|e| (anyhow::anyhow!(e), None))?
+                .uri()
+                .map_err(|e| (anyhow::anyhow!(e), None))?,
         };
 
         let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
             .with_caller_contact(caller_contact)
-            .with_caller(caller)
+            .with_caller(caller_uri)
             .with_media(media_config)
             .with_route_invite(route_invite);
 
@@ -163,7 +185,27 @@ impl CallModule {
                 .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
 
             if locations.is_empty() {
-                info!(%dialog_id, callee = %callee_uri, "user offline in locator");
+                match self
+                    .inner
+                    .server
+                    .user_backend
+                    .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        info!(%dialog_id, callee = %callee_uri, "user offline in locator, abort now");
+                        return Err((
+                            anyhow::anyhow!("User offline"),
+                            Some(rsip::StatusCode::TemporarilyUnavailable),
+                        ));
+                    }
+                    Ok(None) => {
+                        info!(%dialog_id, callee = %callee_uri, "user not found in auth backend, continue");
+                    }
+                    Err(e) => {
+                        warn!(%dialog_id, callee=%callee_uri, "failed to lookup user in auth backend: {}", e);
+                    }
+                }
                 locations.push(Location {
                     aor: callee_uri.clone(),
                     abort_on_route_invite_missing: Some(rsip::StatusCode::TemporarilyUnavailable), // abort if route invite is missing
@@ -200,13 +242,6 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
-        let caller_contact = match caller.build_contact_from_invite(&*tx) {
-            Some(contact) => contact,
-            None => {
-                return Err(anyhow::anyhow!("Failed to build caller contact"));
-            }
-        };
-
         let route_invite = match self.inner.server.create_route_invite.as_ref() {
             Some(f) => f(self.inner.server.clone(), self.inner.config.clone())?,
             None => Box::new(DefaultRouteInvite {
@@ -216,11 +251,9 @@ impl CallModule {
         };
 
         let r = if let Some(resolver) = self.inner.server.call_router.as_ref() {
-            resolver
-                .resolve(&tx.original, route_invite, caller_contact)
-                .await
+            resolver.resolve(&tx.original, route_invite, &caller).await
         } else {
-            self.default_resolve(&tx.original, route_invite, caller_contact)
+            self.default_resolve(&tx.original, route_invite, &caller)
                 .await
         };
 

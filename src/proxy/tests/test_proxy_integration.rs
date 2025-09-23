@@ -22,7 +22,6 @@ fn create_test_proxy_config(port: u16) -> ProxyConfig {
         tcp_port: None,
         tls_port: None,
         ws_port: None,
-        external_ip: Some("127.0.0.1".to_string()),
         useragent: Some("RustPBX-Test/0.1.0".to_string()),
         modules: Some(vec![
             "auth".to_string(),

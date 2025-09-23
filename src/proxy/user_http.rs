@@ -57,7 +57,7 @@ impl UserBackend for HttpUserBackend {
     async fn is_same_realm(&self, realm: &str) -> bool {
         self.get_user("", Some(realm)).await.is_ok()
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
         let start_time = Instant::now();
         let mut request_builder = match self.method {
             Method::GET => {
@@ -116,6 +116,7 @@ impl UserBackend for HttpUserBackend {
             .json::<SipUser>()
             .await
             .map_err(|e| anyhow!("HTTP response error: {}", e))
+            .map(|user| Some(user))
     }
 }
 

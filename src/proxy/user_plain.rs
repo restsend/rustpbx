@@ -58,6 +58,8 @@ impl PlainTextBackend {
                 enabled: true,
                 realm: None,
                 origin_contact: None,
+                contact: None,
+                from: None,
                 destination: None,
                 is_support_webrtc: false,
                 departments: None,
@@ -78,15 +80,15 @@ impl UserBackend for PlainTextBackend {
     async fn is_same_realm(&self, realm: &str) -> bool {
         return realm.is_empty();
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
         let mut user = match self.users.lock().unwrap().get(username) {
             Some(user) => user.clone(),
-            None => return Err(anyhow::anyhow!("missing user: {}", username)),
+            None => return Ok(None),
         };
         if !user.enabled {
             return Err(anyhow::anyhow!("User is disabled: {}", username));
         }
         user.realm = realm.map(|r| r.to_string());
-        Ok(user)
+        Ok(Some(user))
     }
 }

@@ -490,10 +490,7 @@ async fn test_auth_no_credentials() {
     let tx = Transaction::new_server(key, request, endpoint_inner, None);
 
     // Should return false because no credentials are provided
-    let result = auth_module
-        .authenticate_request(&tx.original)
-        .await
-        .unwrap();
+    let result = auth_module.authenticate_request(&tx).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -566,10 +563,7 @@ async fn test_auth_disabled_user() {
     let tx = Transaction::new_server(key, request, endpoint_inner, None);
 
     // Should return false because user is disabled
-    let result = auth_module
-        .authenticate_request(&tx.original)
-        .await
-        .unwrap();
+    let result = auth_module.authenticate_request(&tx).await.unwrap();
     println!("Authentication result: {:?}", result);
     assert!(result.is_none());
 }
@@ -643,7 +637,7 @@ async fn test_proxy_auth_invite_success() {
         .await
         .unwrap();
 
-    let auth_result = module.authenticate_request(&tx2.original).await.unwrap();
+    let auth_result = module.authenticate_request(&tx2).await.unwrap();
     assert!(
         auth_result.is_some(),
         "Authentication should succeed with correct credentials"
@@ -753,7 +747,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let (mut tx2, _) = create_transaction(request_with_wrong_auth).await;
 
     // Test authentication
-    let auth_result = module.authenticate_request(&tx.original).await.unwrap();
+    let auth_result = module.authenticate_request(&tx).await.unwrap();
     println!("Direct authentication result: {:?}", auth_result);
 
     let result = module
