@@ -70,7 +70,7 @@ impl UserBackend for DbBackend {
         }
         false
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<SipUser> {
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
         // Build SELECT clause with optional columns
         let mut select_columns = vec![
             self.config.username_column.clone(),
@@ -115,10 +115,15 @@ impl UserBackend for DbBackend {
             sqlx_query = sqlx_query.bind(param);
         }
 
-        let row = sqlx_query
-            .fetch_one(&self.db)
-            .await
-            .map_err(|e| anyhow!("Database query error: {}", e))?;
+        let row = match sqlx_query.fetch_one(&self.db).await {
+            Ok(row) => row,
+            Err(e) => {
+                if let sqlx::Error::RowNotFound = e {
+                    return Ok(None);
+                }
+                return Err(anyhow!("Failed to fetch user: {}", e));
+            }
+        };
 
         // Map the database row to a SipUser
         let id: i64 = if let Some(ref id_col) = self.config.id_column {
@@ -169,13 +174,15 @@ impl UserBackend for DbBackend {
             .as_ref()
             .and_then(|k| row.try_get(k.as_str()).ok());
 
-        Ok(SipUser {
+        Ok(Some(SipUser {
             id: id as u64,
             username: db_username,
             password: Some(password),
             enabled,
             realm: realm.map(|r| r.to_string()).or(db_realm),
             origin_contact: None,
+            contact: None,
+            from: None,
             destination: None,
             is_support_webrtc: false,
             departments: None,
@@ -183,6 +190,6 @@ impl UserBackend for DbBackend {
             email,
             phone,
             note,
-        })
+        }))
     }
 }

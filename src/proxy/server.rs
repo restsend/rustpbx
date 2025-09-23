@@ -195,7 +195,7 @@ impl SipServerBuilder {
             .parse::<IpAddr>()
             .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
-        let external_ip = match config.external_ip {
+        let external_ip = match app_state.config.external_ip {
             Some(ref s) => s
                 .parse::<SocketAddr>()
                 .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
@@ -537,7 +537,7 @@ impl SipServerInner {
         match callee_realm {
             "localhost" | "127.0.0.1" | "::1" => true,
             _ => {
-                if let Some(external_ip) = self.config.external_ip.as_ref() {
+                if let Some(external_ip) = self.app_state.config.external_ip.as_ref() {
                     return external_ip.starts_with(callee_realm);
                 }
                 if let Some(realms) = self.config.realms.as_ref() {

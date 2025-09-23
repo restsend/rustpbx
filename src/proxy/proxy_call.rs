@@ -493,8 +493,6 @@ impl ProxyCall {
     }
 
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
-        info!(session_id = %self.session_id, "Starting proxy call processing");
-
         let (state_tx, state_rx) = mpsc::unbounded_channel();
         let local_contact = self.dialplan.caller_contact.as_ref().map(|c| c.uri.clone());
         let mut server_dialog =
@@ -505,6 +503,8 @@ impl ProxyCall {
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
         let use_media_proxy = self.needs_media_proxy(&offer_sdp);
+
+        info!(session_id = %self.session_id, use_media_proxy,  "starting proxy call processing");
 
         let mut session = CallSession::new(
             self.cancel_token.child_token(),
@@ -631,7 +631,6 @@ impl ProxyCall {
                         reason,
                         "Sequential target failed, trying next"
                     );
-                    session.set_error(code, reason);
                     continue;
                 }
             }

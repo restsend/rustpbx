@@ -78,13 +78,21 @@ async fn test_db_backend() {
         .expect("Failed to create DbBackend");
 
     // Test get_user
-    let user = backend.get_user("testuser", None).await.unwrap();
+    let user = backend
+        .get_user("testuser", None)
+        .await
+        .unwrap()
+        .expect("Failed to get user");
     assert_eq!(user.username, "testuser");
     assert_eq!(user.password, Some("testpass".to_string()));
     assert!(user.enabled);
 
     // Test another user
-    let admin_user = backend.get_user("admin", None).await.unwrap();
+    let admin_user = backend
+        .get_user("admin", None)
+        .await
+        .unwrap()
+        .expect("Failed to get user");
     assert_eq!(admin_user.username, "admin");
     assert_eq!(admin_user.password, Some("adminpass".to_string()));
     assert!(admin_user.enabled);
@@ -107,6 +115,7 @@ async fn test_db_backend() {
     let user = custom_backend
         .get_user("customuser", None)
         .await
+        .unwrap()
         .expect("Failed to get user");
     assert_eq!(user.username, "customuser");
     assert_eq!(user.password, Some("custompass".to_string()));
@@ -116,7 +125,8 @@ async fn test_db_backend() {
     let user_with_realm = custom_backend
         .get_user("customuser", Some("example.com"))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Failed to get user");
     assert_eq!(user_with_realm.username, "customuser");
     assert_eq!(user_with_realm.realm, Some("example.com".to_string()));
 }

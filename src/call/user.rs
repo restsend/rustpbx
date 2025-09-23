@@ -25,8 +25,14 @@ pub struct SipUser {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub note: Option<String>,
+    /// From the original INVITE
     #[serde(skip)]
     pub origin_contact: Option<rsip::typed::Contact>,
+    /// Current contact (may be updated by REGISTER)
+    #[serde(skip)]
+    pub contact: Option<rsip::typed::Contact>,
+    #[serde(skip)]
+    pub from: Option<rsip::Uri>,
     #[serde(skip)]
     pub destination: Option<SipAddr>,
     #[serde(default = "default_is_support_webrtc")]
@@ -60,6 +66,8 @@ impl Default for SipUser {
             password: None,
             realm: None,
             origin_contact: None,
+            contact: None,
+            from: None,
             destination: None,
             is_support_webrtc: false,
             departments: None,
@@ -78,11 +86,51 @@ impl SipUser {
             None => self.username.clone(),
         }
     }
-
-    pub fn build_contact_from_invite(&self, tx: &Transaction) -> Option<rsip::typed::Contact> {
+    pub fn merge_with(&mut self, other: &SipUser) {
+        if self.id == 0 {
+            self.id = other.id;
+        }
+        if self.password.is_none() {
+            self.password = other.password.clone();
+        }
+        if self.realm.is_none() {
+            self.realm = other.realm.clone();
+        }
+        if self.departments.is_none() {
+            self.departments = other.departments.clone();
+        }
+        if self.display_name.is_none() {
+            self.display_name = other.display_name.clone();
+        }
+        if self.email.is_none() {
+            self.email = other.email.clone();
+        }
+        if self.phone.is_none() {
+            self.phone = other.phone.clone();
+        }
+        if self.note.is_none() {
+            self.note = other.note.clone();
+        }
+        if self.origin_contact.is_none() {
+            self.origin_contact = other.origin_contact.clone();
+        }
+        if self.contact.is_none() {
+            self.contact = other.contact.clone();
+        }
+        if self.from.is_none() {
+            self.from = other.from.clone();
+        }
+        if self.destination.is_none() {
+            self.destination = other.destination.clone();
+        }
+        if !self.is_support_webrtc {
+            self.is_support_webrtc = other.is_support_webrtc;
+        }
+    }
+    fn build_contact(&mut self, tx: &Transaction) {
         let addr = match tx.endpoint_inner.get_addrs().first() {
             Some(addr) => addr.clone(),
-            None => return None,
+            None => return,
         };
 
         let mut contact_params = vec![];
@@ -105,7 +153,7 @@ impl SipUser {
             },
             params: contact_params,
         };
-        Some(contact)
+        self.contact = Some(contact);
     }
 
     pub fn auth_digest(&self, algorithm: Algorithm) -> String {
@@ -141,20 +189,16 @@ impl TryFrom<&Transaction> for SipUser {
     type Error = anyhow::Error;
 
     fn try_from(tx: &Transaction) -> Result<Self, Self::Error> {
+        let from_uri = tx.original.from_header()?.uri()?;
         let (username, realm) = match check_authorization_headers(&tx.original) {
             Ok(Some((user, _))) => (user.username, user.realm),
             _ => {
-                let username = tx
-                    .original
-                    .from_header()?
-                    .uri()?
-                    .user()
-                    .unwrap_or_default()
-                    .to_string();
-                let realm = tx.original.uri().host().to_string();
+                let username = from_uri.user().unwrap_or_default().to_string();
+                let realm = from_uri.host().to_string();
                 (username, Some(realm))
             }
         };
+
         let origin_contact = match tx.original.contact_header() {
             Ok(contact) => contact.typed().ok(),
             Err(_) => None,
@@ -172,13 +216,15 @@ impl TryFrom<&Transaction> for SipUser {
             .r#type
             .is_some_and(|t| t == rsip::transport::Transport::Wss);
 
-        Ok(SipUser {
+        let mut u = SipUser {
             id: 0,
             username,
             password: None,
             enabled: true,
             realm,
             origin_contact,
+            contact: None,
+            from: Some(from_uri),
             destination: Some(destination),
             is_support_webrtc,
             departments: None,
@@ -186,7 +232,9 @@ impl TryFrom<&Transaction> for SipUser {
             email: None,
             phone: None,
             note: None,
-        })
+        };
+        u.build_contact(tx);
+        Ok(u)
     }
 }
 
@@ -207,13 +255,13 @@ pub fn check_authorization_headers(
     if let Some(proxy_auth_header) =
         rsip::header_opt!(req.headers.iter(), Header::ProxyAuthorization)
     {
-        let challenge = proxy_auth_header.typed()?;
+        let challenge = proxy_auth_header.typed()?.0;
         let user = SipUser {
-            username: challenge.0.username.to_string(),
-            realm: Some(challenge.0.realm.to_string()),
+            username: challenge.username.to_string(),
+            realm: Some(challenge.realm.to_string()),
             ..Default::default()
         };
-        return Ok(Some((user, challenge.0)));
+        return Ok(Some((user, challenge)));
     }
 
     Ok(None)

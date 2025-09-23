@@ -1,7 +1,6 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::TransactionCookie;
 use crate::call::user::SipUser;
-use crate::call::user::check_authorization_headers;
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,6 +10,7 @@ use rsip::headers::UntypedHeader;
 use rsip::headers::auth::Algorithm;
 use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsip::prelude::HeadersExt;
+use rsip::prelude::ToTypedHeader;
 use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
@@ -38,23 +38,36 @@ impl AuthModule {
         Self { server }
     }
 
-    pub async fn authenticate_request(&self, original: &rsip::Request) -> Result<Option<SipUser>> {
-        // Check for both Authorization and Proxy-Authorization headers
-        // Prioritize Authorization for backward compatibility
-        let (user, auth_inner) = match check_authorization_headers(original)? {
-            Some((user, auth)) => (user, auth),
+    pub async fn authenticate_request(&self, tx: &Transaction) -> Result<Option<SipUser>> {
+        let mut auth_inner: Option<Authorization> = None;
+        for header in tx.original.headers.iter() {
+            match header {
+                Header::Authorization(h) => {
+                    auth_inner = h.typed().ok();
+                    break;
+                }
+                Header::ProxyAuthorization(h) => {
+                    auth_inner = h.typed().ok().map(|a| a.0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let auth_inner = match auth_inner {
+            Some(a) => a,
             None => {
                 return Ok(None);
             }
         };
+        let user = SipUser::try_from(tx)?;
         // Check if user exists and is enabled
         match self
             .server
             .user_backend
             .get_user(&user.username, user.realm.as_deref())
-            .await
+            .await?
         {
-            Ok(stored_user) => {
+            Some(mut stored_user) => {
                 if !stored_user.enabled {
                     info!(username = user.username, realm = ?user.realm, "User is disabled");
                     return Ok(None);
@@ -65,19 +78,19 @@ impl AuthModule {
                         return Ok(None);
                     }
                 }
-
+                stored_user.merge_with(&user);
                 match self.verify_credentials(
                     &stored_user,
-                    &original.uri,
-                    &original.method,
+                    &tx.original.uri,
+                    &tx.original.method,
                     &auth_inner,
                 ) {
                     true => Ok(Some(stored_user)),
                     false => Ok(None),
                 }
             }
-            Err(e) => {
-                info!(username = user.username, realm = ?user.realm, "authenticate_request failed: {}", e);
+            None => {
+                info!(username = user.username, realm = ?user.realm, "authenticate_request missing");
                 Ok(None)
             }
         }
@@ -168,8 +181,10 @@ impl ProxyModule for AuthModule {
         }
 
         if let Some(backend) = self.server.auth_backend.as_ref() {
+            let tx_user = SipUser::try_from(&*tx)?;
             match backend.authenticate(&tx.original).await {
-                Ok(Some(user)) => {
+                Ok(Some(mut user)) => {
+                    user.merge_with(&tx_user);
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
                 }
@@ -180,7 +195,7 @@ impl ProxyModule for AuthModule {
             }
         }
 
-        match self.authenticate_request(&tx.original).await {
+        match self.authenticate_request(tx).await {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
                     cookie.set_user(user);

@@ -34,9 +34,9 @@ pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct SipOption {
-    pub username: String,
-    pub password: String,
-    pub realm: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub realm: Option<String>,
     pub headers: Option<HashMap<String, String>>,
 }
 
@@ -109,9 +109,9 @@ impl CallOption {
 
         if let Some(sip) = &self.sip {
             invite_option.credential = Some(Credential {
-                username: sip.username.clone(),
-                password: sip.password.clone(),
-                realm: Some(sip.realm.clone()),
+                username: sip.username.clone().unwrap_or_default(),
+                password: sip.password.clone().unwrap_or_default(),
+                realm: sip.realm.clone(),
             });
             invite_option.headers = sip.headers.as_ref().map(|h| {
                 h.iter()
@@ -361,7 +361,7 @@ pub enum FailureAction {
 
 impl Default for FailureAction {
     fn default() -> Self {
-        Self::Hangup(Some(rsip::StatusCode::BusyHere)) // Busy Here
+        Self::Hangup(Some(rsip::StatusCode::TemporarilyUnavailable))
     }
 }
 
@@ -407,8 +407,9 @@ impl MediaConfig {
 
 #[derive(Debug)]
 pub enum DialDirection {
-    Outbound,
-    Inbound,
+    Outbound, // 1. Outbound call initiated by us, usually to a PSTN gateway or another relay server
+    Inbound,  // 2. Inbound call received by us, usually from a PSTN gateway
+    Internal, // 3. User to user call, both sides are internal
 }
 pub struct Dialplan {
     pub direction: DialDirection,

@@ -86,6 +86,7 @@ impl ProxyModule for RegistrarModule {
                 contact_params.push(rsip::Param::Transport(t));
             }
         }
+
         let contact = rsip::typed::Contact {
             display_name: None,
             uri: rsip::Uri {
