@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rsip::{
-    Header,
+    Header, Transport,
     headers::auth::Algorithm,
     prelude::{HeadersExt, ToTypedHeader},
     typed::Authorization,
@@ -212,9 +212,8 @@ impl TryFrom<&Transaction> for SipUser {
             r#type: Some(via_transport),
             addr: destination_addr,
         };
-        let is_support_webrtc = destination
-            .r#type
-            .is_some_and(|t| t == rsip::transport::Transport::Wss);
+
+        let is_support_webrtc = matches!(via_transport, Transport::Wss | Transport::Ws);
 
         let mut u = SipUser {
             id: 0,
