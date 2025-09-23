@@ -16,7 +16,8 @@ vad_silero = ["ort", "ort-sys"]
 vad_ten = ["ort", "ort-sys"]
 opus = ["dep:opus"]
 g729 = ["dep:g729-sys"]
-default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729"]
+console = []
+default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729", "console"]
 not_vad = []
 
 [dependencies]
@@ -33,7 +34,7 @@ rubato = "0.16.2"
 rustls = { version = "0.23.31", features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.143"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-tungstenite = { version = "0.27.0", features = [
     "rustls-tls-native-roots",

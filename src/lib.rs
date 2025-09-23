@@ -18,6 +18,8 @@ pub type TrackId = String;
 pub type Sample = i16;
 pub type PcmBuf = Vec<Sample>;
 pub type PayloadBuf = Vec<u8>;
+#[cfg(feature = "console")]
+pub mod console; // Admin console
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Samples {
