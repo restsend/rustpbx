@@ -361,7 +361,7 @@ pub enum FailureAction {
 
 impl Default for FailureAction {
     fn default() -> Self {
-        Self::Hangup(Some(rsip::StatusCode::TemporarilyUnavailable))
+        Self::Hangup(None)
     }
 }
 

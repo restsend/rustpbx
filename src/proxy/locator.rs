@@ -72,14 +72,20 @@ impl Locator for MemoryLocator {
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
         let username = uri.user().unwrap_or_else(|| "");
         let realm = uri.host().to_string();
-        let identifier = self.get_identifier(username, Some(realm.as_str()));
+
+        let identifiers = vec![
+            self.get_identifier(username, Some(realm.as_str())),
+            self.get_identifier(username, Some("localhost")),
+            self.get_identifier(username, None),
+        ];
+
         let locations = self.locations.lock().await;
-        if let Some(mut location) = locations.get(&identifier).cloned() {
-            location.aor = uri.clone();
-            Ok(vec![location])
-        } else {
-            Ok(vec![])
+        for id in identifiers {
+            if let Some(location) = locations.get(&id).cloned() {
+                return Ok(vec![location]);
+            }
         }
+        Ok(vec![])
     }
 }
 

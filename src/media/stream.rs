@@ -21,7 +21,7 @@ use uuid;
 
 pub struct MediaStream {
     id: String,
-    cancel_token: CancellationToken,
+    pub cancel_token: CancellationToken,
     recorder_option: Mutex<Option<RecorderOption>>,
     tracks: Mutex<HashMap<TrackId, (Box<dyn Track>, DtmfDetector)>>,
     event_sender: EventSender,
