@@ -79,6 +79,7 @@ struct WebSocketResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct TencentSubtitle {
+    text: String,
     begin_time: u32,
     end_time: u32,
     begin_index: u32,
@@ -88,6 +89,7 @@ struct TencentSubtitle {
 impl From<&TencentSubtitle> for Subtitle {
     fn from(subtitle: &TencentSubtitle) -> Self {
         Subtitle::new(
+            subtitle.text.clone(),
             subtitle.begin_time,
             subtitle.end_time,
             subtitle.begin_index,

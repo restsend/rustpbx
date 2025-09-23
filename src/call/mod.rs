@@ -194,7 +194,9 @@ pub enum Command {
         auto_hangup: Option<bool>,
         wait_input_timeout: Option<u32>,
     },
-    Interrupt {},
+    Interrupt {
+        graceful: Option<bool>,
+    },
     Pause {},
     Resume {},
     Hangup {

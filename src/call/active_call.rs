@@ -363,7 +363,7 @@ impl ActiveCall {
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
             Command::Pause {} => self.do_pause().await,
             Command::Resume {} => self.do_resume().await,
-            Command::Interrupt {} => self.do_interrupt().await,
+            Command::Interrupt {graceful: passage} => self.do_interrupt(passage.unwrap_or_default()).await,
             Command::History { speaker, text } => self.do_history(speaker, text).await,
         }
     }
@@ -681,10 +681,10 @@ impl ActiveCall {
             .map_err(Into::into)
     }
 
-    async fn do_interrupt(&self) -> Result<()> {
+    async fn do_interrupt(&self, graceful: bool) -> Result<()> {
         self.tts_handle.lock().await.take();
         self.media_stream
-            .remove_track(&self.server_side_track_id)
+            .remove_track(&self.server_side_track_id, graceful)
             .await;
         Ok(())
     }

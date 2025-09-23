@@ -147,6 +147,7 @@ pub enum SynthesisEvent {
 
 #[derive(Debug, Clone)]
 pub struct Subtitle {
+    pub text: String,
     pub begin_time: u32,
     pub end_time: u32,
     pub begin_index: u32,
@@ -154,8 +155,9 @@ pub struct Subtitle {
 }
 
 impl Subtitle {
-    pub fn new(begin_time: u32, end_time: u32, begin_index: u32, end_index: u32) -> Self {
+    pub fn new(text: String, begin_time: u32, end_time: u32, begin_index: u32, end_index: u32) -> Self {
         Self {
+            text,
             begin_time,
             end_time,
             begin_index,
