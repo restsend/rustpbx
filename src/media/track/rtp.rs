@@ -554,6 +554,25 @@ impl RtpTrack {
                 value: Some(format!("{} {}", codec.payload_type(), codec.rtpmap())),
             });
         }
+        if inner
+            .enabled_codecs
+            .iter()
+            .all(|c| *c == CodecType::TelephoneEvent)
+        {
+            media.attributes.push(Attribute {
+                key: "rtpmap".to_string(),
+                value: Some(format!(
+                    "{} {}",
+                    inner.dtmf_payload_type,
+                    CodecType::TelephoneEvent.rtpmap()
+                )),
+            });
+        }
+
+        media.attributes.push(Attribute {
+            key: "fmtp".to_string(),
+            value: Some(format!("{} 0-16", inner.dtmf_payload_type)),
+        });
 
         // Add media-level attributes
         if inner.rtcp_mux {

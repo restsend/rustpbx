@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
@@ -19,6 +21,11 @@ struct Cli {
     /// Path to the configuration file
     #[clap(long, help = "Path to the configuration file (TOML format)")]
     conf: Option<String>,
+    #[clap(
+        long,
+        help = "Tokio console server address, e.g. /tmp/tokio-console or 127.0.0.1:5556"
+    )]
+    tokio_console: Option<String>,
 }
 
 #[tokio::main]
@@ -37,6 +44,7 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     println!("{}", version::get_version_info());
+
     let mut env_filter = EnvFilter::from_default_env();
     if let Some(Ok(level)) = config
         .log_level
@@ -46,7 +54,28 @@ async fn main() -> Result<()> {
         env_filter = env_filter.add_directive(level.into());
     }
 
-    let _guard_holder;
+    let console_enabled = cli.tokio_console.is_some()
+        || std::env::var_os("TOKIO_CONSOLE").is_some()
+        || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();
+    let mut console_layer = None;
+    if console_enabled {
+        use console_subscriber::ServerAddr;
+        let mut builder = console_subscriber::ConsoleLayer::builder()
+            .retention(std::time::Duration::from_secs(60));
+        if let Some(addr) = &cli.tokio_console {
+            if let Ok(sock) = addr.parse() {
+                builder = builder.server_addr(ServerAddr::Tcp(sock));
+            } else {
+                builder = builder.server_addr(Path::new(addr));
+            }
+        } else {
+            builder = builder.server_addr(Path::new("/tmp/tokio-console"));
+        }
+        console_layer = Some(builder.spawn());
+    }
+    let mut file_layer = None;
+    let mut guard_holder = None;
+    let mut fmt_layer = None;
     if let Some(ref log_file) = config.log_file {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -54,33 +83,43 @@ async fn main() -> Result<()> {
             .open(log_file)
             .expect("Failed to open log file");
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
-        _guard_holder = guard;
+        guard_holder = Some(guard);
+        file_layer = Some(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTime::rfc_3339())
+                .with_file(true)
+                .with_line_number(true)
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        );
+    } else {
+        fmt_layer = Some(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTime::rfc_3339())
+                .with_file(true)
+                .with_line_number(true)
+                .with_target(true),
+        );
+    }
 
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_timer(LocalTime::rfc_3339())
-            .with_file(true)
-            .with_line_number(true)
-            .with_target(true)
-            .with_ansi(false)
-            .with_writer(non_blocking);
-
+    if let Some(console_layer) = console_layer {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(console_layer)
+            .try_init()?;
+    } else if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(file_layer)
-            .init();
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_timer(LocalTime::rfc_3339())
-            .with_file(true)
-            .with_line_number(true)
-            .with_target(true);
-
+            .try_init()?;
+    } else if let Some(fmt_layer) = fmt_layer {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt_layer)
-            .init();
-    };
-
+            .try_init()?;
+    }
+    let _ = guard_holder; // keep the guard alive
     let state_builder = AppStateBuilder::new().with_config(config);
     let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
 
