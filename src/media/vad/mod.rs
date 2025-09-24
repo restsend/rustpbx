@@ -15,6 +15,46 @@ mod ten;
 mod tests;
 #[cfg(feature = "vad_webrtc")]
 mod webrtc;
+use std::sync::Mutex;
+
+pub(crate) struct SessionPool<T, F>
+where
+    F: Fn() -> Result<T> + Send + Sync + 'static,
+{
+    max_items: usize,
+    items: Mutex<Vec<T>>,
+    factory: F,
+}
+
+impl<T, F> SessionPool<T, F>
+where
+    F: Fn() -> Result<T> + Send + Sync + 'static,
+{
+    pub fn new(max_items: usize, factory: F) -> Self {
+        Self {
+            max_items,
+            items: Mutex::new(Vec::with_capacity(max_items)),
+            factory,
+        }
+    }
+
+    pub fn pop_or_create(&self) -> Result<T> {
+        let mut guard = self.items.lock().unwrap();
+        match guard.pop() {
+            Some(item) => Ok(item),
+            None => (self.factory)(),
+        }
+    }
+
+    pub fn push(&self, item: T) {
+        let mut guard = self.items.lock().unwrap();
+        if guard.len() < self.max_items {
+            guard.push(item);
+            return;
+        }
+        drop(guard);
+    }
+}
 
 #[skip_serializing_none]
 #[derive(Clone, Debug, Deserialize, Serialize)]
