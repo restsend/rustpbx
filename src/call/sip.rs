@@ -297,6 +297,20 @@ pub async fn client_dialog_event_loop(
                     })
                     .ok();
             }
+            DialogState::Info(dialog_id, req) => {
+                let body_str = String::from_utf8_lossy(req.body());
+                info!(session_id, track_id, %dialog_id, body=%body_str, "client dialog info received");
+                if body_str.starts_with("Signal=") {
+                    let digit = body_str.trim_start_matches("Signal=").chars().next();
+                    if let Some(digit) = digit {
+                        event_sender.send(crate::event::SessionEvent::Dtmf {
+                            track_id: track_id.clone(),
+                            timestamp: crate::get_timestamp(),
+                            digit: digit.to_string(),
+                        })?;
+                    }
+                }
+            }
             DialogState::Terminated(dialog_id, reason) => {
                 info!(
                     session_id,
@@ -382,6 +396,20 @@ pub async fn server_dialog_event_loop(
                 );
                 cancel_token.cancel(); // Cancel the token to stop any ongoing tasks
                 return Ok(dialog_id);
+            }
+            DialogState::Info(dialog_id, req) => {
+                let body_str = String::from_utf8_lossy(req.body());
+                info!(session_id, track_id, %dialog_id, body=%body_str, "server dialog info received");
+                if body_str.starts_with("Signal=") {
+                    let digit = body_str.trim_start_matches("Signal=").chars().next();
+                    if let Some(digit) = digit {
+                        event_sender.send(crate::event::SessionEvent::Dtmf {
+                            track_id: track_id.clone(),
+                            timestamp: crate::get_timestamp(),
+                            digit: digit.to_string(),
+                        })?;
+                    }
+                }
             }
             _ => (),
         }
