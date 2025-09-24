@@ -333,16 +333,18 @@ impl ActiveCall {
                 end_of_stream,
                 option,
                 wait_input_timeout,
+                base64,
             } => {
                 self.do_tts(
                     text,
                     speaker,
                     play_id,
                     auto_hangup,
-                    streaming,
-                    end_of_stream,
+                    streaming.unwrap_or_default(),
+                    end_of_stream.unwrap_or_default(),
                     option,
                     wait_input_timeout,
+                    base64.unwrap_or_default(),
                 )
                 .await
             }
@@ -367,7 +369,7 @@ impl ActiveCall {
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
             Command::Pause {} => self.do_pause().await,
             Command::Resume {} => self.do_resume().await,
-            Command::Interrupt {} => self.do_interrupt().await,
+            Command::Interrupt {graceful: passage} => self.do_interrupt(passage.unwrap_or_default()).await,
             Command::History { speaker, text } => self.do_history(speaker, text).await,
         }
     }
@@ -563,10 +565,11 @@ impl ActiveCall {
         speaker: Option<String>,
         play_id: Option<String>,
         auto_hangup: Option<bool>,
-        streaming: Option<bool>,
-        end_of_stream: Option<bool>,
+        streaming: bool,
+        end_of_stream: bool,
         option: Option<SynthesisOption>,
         wait_input_timeout: Option<u32>,
+        base64: bool,
     ) -> Result<()> {
         let tts_option = match self.call_state.read() {
             Ok(ref call_state) => match call_state.option.clone().unwrap_or_default().tts {
@@ -593,17 +596,19 @@ impl ActiveCall {
             streaming,
             end_of_stream,
             option: tts_option,
+            base64,
         };
         info!(
             session_id = self.session_id,
             provider = ?play_command.option.provider,
-            text = %play_command.text,
+            text = %play_command.text.chars().take(10).collect::<String>(),
             speaker = play_command.speaker.as_deref(),
             auto_hangup = auto_hangup.unwrap_or_default(),
             play_id = play_command.play_id.as_deref(),
             streaming = play_command.streaming,
-            eos = play_command.end_of_stream.unwrap_or_default(),
+            eos = play_command.end_of_stream,
             wit = wait_input_timeout.unwrap_or_default(),
+            base64 = play_command.base64,
             "new synthesis"
         );
 
@@ -632,6 +637,7 @@ impl ActiveCall {
             self.server_side_track_id.clone(),
             ssrc,
             play_id.clone(),
+            streaming,
             &play_command.option,
         )
         .await?;
@@ -684,10 +690,10 @@ impl ActiveCall {
             .map_err(Into::into)
     }
 
-    async fn do_interrupt(&self) -> Result<()> {
+    async fn do_interrupt(&self, graceful: bool) -> Result<()> {
         self.tts_handle.lock().await.take();
         self.media_stream
-            .remove_track(&self.server_side_track_id)
+            .remove_track(&self.server_side_track_id, graceful)
             .await;
         Ok(())
     }

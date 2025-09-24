@@ -184,17 +184,20 @@ pub enum Command {
         /// equivalent to LLM's streaming output to TTS synthesis
         streaming: Option<bool>,
         /// If end_of_stream is true, it means the input text is finished
-        #[serde(rename = "endOfStream")]
         end_of_stream: Option<bool>,
         option: Option<SynthesisOption>,
         wait_input_timeout: Option<u32>,
+        /// if true, the text is base64 encoded pcm samples
+        base64: Option<bool>, 
     },
     Play {
         url: String,
         auto_hangup: Option<bool>,
         wait_input_timeout: Option<u32>,
     },
-    Interrupt {},
+    Interrupt {
+        graceful: Option<bool>,
+    },
     Pause {},
     Resume {},
     Hangup {

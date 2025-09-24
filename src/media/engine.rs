@@ -9,17 +9,12 @@ use super::{
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
-    TrackId,
-    call::{CallOption, EouOption},
-    event::EventSender,
-    synthesis::{
-        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient,
-        VoiceApiTtsClient,
-    },
-    transcription::{
+    call::{CallOption, EouOption}, event::EventSender, synthesis::{
+        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
+    }, transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
         TranscriptionOption, TranscriptionType, VoiceApiAsrClientBuilder,
-    },
+    }, TrackId
 };
 use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -48,7 +43,8 @@ pub type FnCreateAsrClient = Box<
         + Send
         + Sync,
 >;
-pub type FnCreateTtsClient = fn(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>>;
+pub type FnCreateTtsClient =
+    fn(streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>>;
 
 // Define hook types
 pub type CreateProcessorsHook = Box<
@@ -191,13 +187,14 @@ impl StreamEngine {
 
     pub async fn create_tts_client(
         &self,
+        streaming: bool,
         tts_option: &SynthesisOption,
     ) -> Result<Box<dyn SynthesisClient>> {
         match tts_option.provider {
             Some(ref provider) => {
                 let creator = self.tts_creators.get(&provider);
                 if let Some(creator) = creator {
-                    creator(tts_option)
+                    creator(streaming, tts_option)
                 } else {
                     Err(anyhow::anyhow!("TTS type not found: {}", provider))
                 }
@@ -233,12 +230,13 @@ impl StreamEngine {
         track_id: TrackId,
         ssrc: u32,
         play_id: Option<String>,
+        streaming: bool,
         tts_option: &SynthesisOption,
     ) -> Result<(SynthesisHandle, Box<dyn Track>)> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let new_handle = SynthesisHandle::new(tx, play_id);
-        let tts_client = engine.create_tts_client(tts_option).await?;
-        let tts_track = TtsTrack::new(track_id, session_id, rx, tts_client)
+        let new_handle = SynthesisHandle::new(tx, play_id.clone());
+        let tts_client = engine.create_tts_client(streaming, tts_option).await?;
+        let tts_track = TtsTrack::new(track_id, session_id, streaming, play_id, rx, tts_client)
             .with_ssrc(ssrc)
             .with_cancel_token(cancel_token);
         Ok((new_handle, Box::new(tts_track) as Box<dyn Track>))
