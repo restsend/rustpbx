@@ -130,9 +130,14 @@ impl MediaStream {
         self.start_recorder().await.ok();
     }
 
-    pub async fn remove_track(&self, id: &TrackId) {
+    pub async fn remove_track(&self, id: &TrackId, graceful: bool) {
         if let Some((track, _)) = self.tracks.lock().await.remove(id) {
-            match track.stop().await {
+            let res = if !graceful {
+                track.stop().await
+            } else {
+                track.stop_graceful().await
+            };
+            match res {
                 Ok(_) => {}
                 Err(e) => {
                     warn!(session_id = self.id, "failed to stop track: {}", e);
@@ -151,7 +156,7 @@ impl MediaStream {
         Ok(())
     }
     pub async fn update_track(&self, mut track: Box<dyn Track>, play_id: Option<String>) {
-        self.remove_track(track.id()).await;
+        self.remove_track(track.id(), false).await;
         if self.recorder_option.lock().await.is_some() {
             track.insert_processor(Box::new(RecorderProcessor::new(
                 self.recorder_sender.clone(),

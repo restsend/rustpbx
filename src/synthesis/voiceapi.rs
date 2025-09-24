@@ -12,7 +12,6 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 /// https://github.com/ruzhila/voiceapi
 /// A simple and clean voice transcription/synthesis API with sherpa-onnx
@@ -43,7 +42,7 @@ struct TtsResult {
 }
 
 impl VoiceApiTtsClient {
-    pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+    pub fn create(_streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
         let client = Self::new(option.clone());
         Ok(Box::new(client))
     }
@@ -56,13 +55,7 @@ impl VoiceApiTtsClient {
         }
     }
     // WebSocket-based TTS synthesis
-    async fn ws_synthesize(
-        &self,
-        text: &str,
-        end_of_stream: Option<bool>,
-        option: Option<SynthesisOption>,
-    ) -> Result<()> {
-        let cache_key = option.as_ref().and_then(|opt| opt.cache_key.clone());
+    async fn ws_synthesize(&self, text: &str, option: Option<SynthesisOption>) -> Result<()> {
         let option = self.option.merge_with(option);
         let endpoint = option
             .endpoint
@@ -159,10 +152,7 @@ impl VoiceApiTtsClient {
                 _ => {}
             }
         }
-        self.tx.send(Ok(SynthesisEvent::Finished {
-            end_of_stream,
-            cache_key,
-        }))?;
+        self.tx.send(Ok(SynthesisEvent::Finished))?;
         Ok(())
     }
 }
@@ -173,22 +163,26 @@ impl SynthesisClient for VoiceApiTtsClient {
         SynthesisType::VoiceApi
     }
     async fn start(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
+        &mut self,
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
             anyhow!("VoiceApiTtsClient: Receiver already taken, cannot start new stream")
         })?;
         Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
+            rx.recv()
+                .await
+                .map(|event| ((None, event), rx))
         })))
     }
     async fn synthesize(
-        &self,
+        &mut self,
         text: &str,
-        end_of_stream: Option<bool>,
+        _cmd_seq: usize,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
-        self.ws_synthesize(text, end_of_stream, option).await
+        self.ws_synthesize(text, option).await
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
     }
 }

@@ -3,32 +3,28 @@ use crate::synthesis::SynthesisEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{
-    SinkExt, StreamExt,
-    stream::{BoxStream, SplitSink, SplitStream},
+    FutureExt, SinkExt, Stream, StreamExt,
+    stream::{self, BoxStream, SplitSink},
 };
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
-use tokio::{net::TcpStream, sync::Mutex};
+use std::sync::Arc;
+use tokio::{
+    net::TcpStream,
+    sync::{Notify, mpsc},
+};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
-
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type WsSource = SplitStream<WsStream>;
 type WsSink = SplitSink<WsStream, Message>;
 
 /// Aliyun CosyVoice WebSocket API Client
 /// https://help.aliyun.com/zh/model-studio/cosyvoice-websocket-api
-#[derive(Debug)]
-pub struct AliyunTtsClient {
-    task_id: String,
-    option: SynthesisOption,
-    ws_sink: Mutex<Option<WsSink>>,
-}
 
 #[derive(Debug, Serialize)]
 struct Command {
@@ -46,13 +42,6 @@ enum CommandPayload {
 
 impl Command {
     fn run_task(option: &SynthesisOption, task_id: &str) -> Self {
-        let model = option
-            .extra
-            .as_ref()
-            .and_then(|e| e.get("model"))
-            .cloned()
-            .unwrap_or_else(|| "cosyvoice-v2".to_string());
-
         let voice = option
             .speaker
             .clone()
@@ -74,7 +63,7 @@ impl Command {
                 task_group: "audio".to_string(),
                 task: "tts".to_string(),
                 function: "SpeechSynthesizer".to_string(),
-                model,
+                model: "cosyvoice-v2".to_string(),
                 parameters: RunTaskParameters {
                     text_type: "PlainText".to_string(),
                     voice,
@@ -178,103 +167,96 @@ struct EventHeader {
     error_message: Option<String>,
 }
 
-impl AliyunTtsClient {
-    pub fn create(option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-        let client = Self::new(option.clone());
-        Ok(Box::new(client))
-    }
+async fn connect(task_id: String, option: SynthesisOption) -> Result<WsStream> {
+    let api_key = option
+        .secret_key
+        .as_ref()
+        .ok_or_else(|| anyhow!("Aliyun TTS: missing api key"))?;
+    let ws_url = option
+        .endpoint
+        .as_deref()
+        .unwrap_or("wss://dashscope.aliyuncs.com/api-ws/v1/inference");
 
-    pub fn new(option: SynthesisOption) -> Self {
-        let task_id = Uuid::new_v4().to_string();
-        Self {
-            task_id,
-            option,
-            ws_sink: Mutex::new(None),
-        }
-    }
+    let mut request = ws_url.into_client_request()?;
+    let headers = request.headers_mut();
+    headers.insert("Authorization", format!("Bearer {}", api_key).parse()?);
+    headers.insert("X-DashScope-DataInspection", "enable".parse()?);
 
-    pub async fn connect(&self) -> Result<WsStream> {
-        let api_key = self
-            .option
-            .secret_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("Aliyun TTS: missing api key"))?;
-        let ws_url = self
-            .option
-            .endpoint
-            .as_deref()
-            .unwrap_or("wss://dashscope.aliyuncs.com/api-ws/v1/inference");
-
-        let mut request = ws_url.into_client_request()?;
-        let headers = request.headers_mut();
-        headers.insert("Authorization", format!("Bearer {}", api_key).parse()?);
-        headers.insert("X-DashScope-DataInspection", "enable".parse()?);
-
-        let task_id = self.task_id.as_str();
-        let (mut ws_stream, _) = connect_async(request).await?;
-        let run_task_cmd = Command::run_task(&self.option, task_id);
-        let run_task_json = serde_json::to_string(&run_task_cmd)?;
-        ws_stream.send(Message::text(run_task_json)).await?;
-        while let Some(message) = ws_stream.next().await {
-            match message {
-                Ok(Message::Text(text)) => {
-                    let event = serde_json::from_str::<Event>(&text)?;
-                    match event.header.event.as_str() {
-                        "task-started" => {
-                            break;
-                        }
-                        "task-failed" => {
-                            let error_code = event
-                                .header
-                                .error_code
-                                .unwrap_or_else(|| "Unknown error code".to_string());
-                            let error_msg = event
-                                .header
-                                .error_message
-                                .unwrap_or_else(|| "Unknown error message".to_string());
-                            return Err(anyhow!(
-                                "Aliyun TTS Task: {} failed: {}, {}",
-                                task_id,
-                                error_code,
-                                error_msg
-                            ))?;
-                        }
-                        _ => {
-                            warn!("Aliyun TTS Task: {} unexpected event: {:?}", task_id, event);
-                        }
+    let (mut ws_stream, _) = connect_async(request).await?;
+    let run_task_cmd = Command::run_task(&option, task_id.as_str());
+    let run_task_json = serde_json::to_string(&run_task_cmd)?;
+    ws_stream.send(Message::text(run_task_json)).await?;
+    while let Some(message) = ws_stream.next().await {
+        match message {
+            Ok(Message::Text(text)) => {
+                let event = serde_json::from_str::<Event>(&text)?;
+                match event.header.event.as_str() {
+                    "task-started" => {
+                        break;
+                    }
+                    "task-failed" => {
+                        let error_code = event
+                            .header
+                            .error_code
+                            .unwrap_or_else(|| "Unknown error code".to_string());
+                        let error_msg = event
+                            .header
+                            .error_message
+                            .unwrap_or_else(|| "Unknown error message".to_string());
+                        return Err(anyhow!(
+                            "Aliyun TTS Task: {} failed: {}, {}",
+                            task_id,
+                            error_code,
+                            error_msg
+                        ))?;
+                    }
+                    _ => {
+                        warn!("Aliyun TTS Task: {} unexpected event: {:?}", task_id, event);
                     }
                 }
-                Ok(Message::Close(_)) => {
-                    return Err(anyhow!("Aliyun TTS start failed: closed by server"));
-                }
-                Err(e) => {
-                    return Err(anyhow!("Aliyun TTS start failed:: {}", e));
-                }
-                _ => {}
             }
+            Ok(Message::Close(_)) => {
+                return Err(anyhow!("Aliyun TTS start failed: closed by server"));
+            }
+            Err(e) => {
+                return Err(anyhow!("Aliyun TTS start failed:: {}", e));
+            }
+            _ => {}
         }
-        Ok(ws_stream)
     }
+    Ok(ws_stream)
 }
 
-async fn event_stream(
-    ws_stream: WsSource,
-    task_id: String,
-    cache_key: Option<String>,
-) -> BoxStream<'static, Result<SynthesisEvent>> {
-    let stream = ws_stream.filter_map(move |message| {
-        let task_id = task_id.clone();
-        let cache_key = cache_key.clone();
-        async move {
-            match message {
-                Ok(Message::Binary(data)) => Some(Ok(SynthesisEvent::AudioChunk(data.to_vec()))),
-                Ok(Message::Text(text)) => {
-                    if let Ok(event) = serde_json::from_str::<Event>(&text) {
+fn event_stream<T>(
+    ws_stream: T,
+    cmd_seq: Option<usize>,
+) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
+where
+    T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Send
+        + Unpin
+        + 'static,
+{
+    let notify = Arc::new(Notify::new());
+    let notify_clone = notify.clone();
+    let stream = ws_stream
+        .take_until(notify.notified_owned())
+        .filter_map(move |message| {
+            let notify = notify_clone.clone();
+            async move {
+                match message {
+                    Ok(Message::Binary(data)) => {
+                        Some((cmd_seq, Ok(SynthesisEvent::AudioChunk(data))))
+                    }
+                    Ok(Message::Text(text)) => {
+                        let event: Event =
+                            serde_json::from_str(&text).expect("Aliyun TTS API changed!");
+
                         match event.header.event.as_str() {
-                            "task-finished" => Some(Ok(SynthesisEvent::Finished {
-                                end_of_stream: Some(true),
-                                cache_key: cache_key.clone(),
-                            })),
+                            "task-finished" => {
+                                notify.notify_one();
+                                Some((cmd_seq, Ok(SynthesisEvent::Finished)))
+                            }
                             "task-failed" => {
                                 let error_code = event
                                     .header
@@ -284,85 +266,191 @@ async fn event_stream(
                                     .header
                                     .error_message
                                     .unwrap_or_else(|| "Unknown error message".to_string());
-                                Some(Err(anyhow!(
-                                    "Aliyun TTS Task: {} failed: {}, {}",
-                                    task_id,
-                                    error_code,
-                                    error_msg
-                                )))
+                                notify.notify_one();
+                                Some((
+                                    cmd_seq,
+                                    Err(anyhow!(
+                                        "Aliyun TTS Task: {} failed: {}, {}",
+                                        event.header.task_id,
+                                        error_code,
+                                        error_msg
+                                    )),
+                                ))
                             }
-                            _ => {
-                                info!("Aliyun TTS Task: {} event: {:?}", task_id, event);
-                                None
-                            }
+                            _ => None,
                         }
-                    } else {
-                        Some(Err(anyhow!(
-                            "Aliyun TTS Task: {} failed to deserialize event: {}",
-                            task_id,
-                            text
-                        )))
                     }
+                    Ok(Message::Close(_)) => {
+                        notify.notify_one();
+                        warn!("Aliyun TTS: closed by remote, {:?}", cmd_seq);
+                        None
+                    }
+                    Err(e) => {
+                        notify.notify_one();
+                        Some((
+                            cmd_seq,
+                            Err(anyhow!(
+                                "Aliyun TTS: websocket error: {:?}, {:?}",
+                                cmd_seq,
+                                e
+                            )),
+                        ))
+                    }
+                    _ => None,
                 }
-                Ok(Message::Close(_)) => {
-                    Some(Err(anyhow!("Aliyun TTS Task: {task_id} closed by remote")))
-                }
-                Err(e) => Some(Err(anyhow!(
-                    "Aliyun TTS Task: {task_id} websocket error: {e}"
-                ))),
-                _ => None,
             }
-        }
-    });
+        });
 
     Box::pin(stream)
 }
+#[derive(Debug)]
+pub struct StreamingClient {
+    task_id: String,
+    option: SynthesisOption,
+    ws_sink: Option<WsSink>,
+}
+
+impl StreamingClient {
+    pub fn new(option: SynthesisOption) -> Self {
+        Self {
+            task_id: Uuid::new_v4().to_string(),
+            option,
+            ws_sink: None,
+        }
+    }
+}
 
 #[async_trait]
-impl SynthesisClient for AliyunTtsClient {
+impl SynthesisClient for StreamingClient {
     fn provider(&self) -> SynthesisType {
         SynthesisType::Aliyun
     }
 
     async fn start(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<BoxStream<'static, Result<SynthesisEvent>>> {
-        let ws_stream = self.connect().await?;
+        &mut self,
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
+        let ws_stream = connect(self.task_id.clone(), self.option.clone()).await?;
         let (ws_sink, ws_source) = ws_stream.split();
-        let stream = event_stream(
-            ws_source,
-            self.task_id.clone(),
-            self.option.cache_key.clone(),
-        )
-        .await;
-        self.ws_sink.lock().await.replace(ws_sink);
+        self.ws_sink.replace(ws_sink);
+        Ok(event_stream(ws_source, None))
+    }
+
+    async fn synthesize(
+        &mut self,
+        text: &str,
+        _cmd_seq: usize,
+        _option: Option<SynthesisOption>,
+    ) -> Result<()> {
+        if let Some(ws_sink) = self.ws_sink.as_mut() {
+            if !text.is_empty() {
+                let continue_task_cmd = Command::continue_task(self.task_id.as_str(), text);
+                let continue_task_json = serde_json::to_string(&continue_task_cmd)?;
+                ws_sink.send(Message::text(continue_task_json)).await?;
+            }
+        } else {
+            return Err(anyhow!("Aliyun TTS Task: not connected"));
+        }
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        if let Some(ws_sink) = self.ws_sink.as_mut() {
+            let finish_task_cmd = Command::finish_task(self.task_id.as_str());
+            let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
+            ws_sink.send(Message::text(finish_task_json)).await?;
+        }
+
+        Ok(())
+    }
+}
+
+pub struct NonStreamingClient {
+    option: SynthesisOption,
+    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
+}
+
+impl NonStreamingClient {
+    pub fn new(option: SynthesisOption) -> Self {
+        Self { option, tx: None }
+    }
+}
+
+#[async_trait]
+impl SynthesisClient for NonStreamingClient {
+    fn provider(&self) -> SynthesisType {
+        SynthesisType::Aliyun
+    }
+
+    async fn start(
+        &mut self,
+    ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
+        let (tx, rx) = mpsc::channel(10);
+        self.tx.replace(tx);
+        let client_option = self.option.clone();
+        let stream = ReceiverStream::new(rx)
+            .flat_map_unordered(3, move |(text, cmd_seq, option)| {
+                let option = client_option.merge_with(option);
+                let task_id = Uuid::new_v4().to_string();
+                let text_clone = text.clone();
+                let task_id_clone = task_id.clone();
+                connect(task_id, option)
+                    .then(async move |res| match res {
+                        Ok(mut ws_stream) => {
+                            let continue_task_cmd =
+                                Command::continue_task(task_id_clone.as_str(), text_clone.as_str());
+                            let continue_task_json = serde_json::to_string(&continue_task_cmd)
+                                .expect("Aliyun TTS API changed!");
+                            ws_stream.send(Message::text(continue_task_json)).await.ok();
+                            let finish_task_cmd = Command::finish_task(task_id_clone.as_str());
+                            let finish_task_json = serde_json::to_string(&finish_task_cmd)
+                                .expect("Aliyun TTS API changed!");
+                            ws_stream.send(Message::text(finish_task_json)).await.ok();
+                            event_stream(ws_stream, Some(cmd_seq))
+                        }
+                        Err(e) => {
+                            warn!("Aliyun TTS: websocket error: {:?}, {:?}", cmd_seq, e);
+                            stream::empty().boxed()
+                        }
+                    })
+                    .flatten_stream()
+                    .boxed()
+            })
+            .boxed();
         Ok(stream)
     }
 
     async fn synthesize(
-        &self,
+        &mut self,
         text: &str,
-        end_of_stream: Option<bool>,
-        _option: Option<SynthesisOption>,
+        cmd_seq: usize,
+        option: Option<SynthesisOption>,
     ) -> Result<()> {
-        let task_id = self.task_id.as_str();
-        if let Some(ws_sink) = self.ws_sink.lock().await.as_mut() {
-            if !text.is_empty() {
-                let continue_task_cmd = Command::continue_task(task_id, text);
-                let continue_task_json = serde_json::to_string(&continue_task_cmd)?;
-                ws_sink.send(Message::text(continue_task_json)).await?;
-            }
-
-            if let Some(true) = end_of_stream {
-                let finish_task_cmd = Command::finish_task(task_id);
-                let finish_task_json = serde_json::to_string(&finish_task_cmd)?;
-                ws_sink.send(Message::text(finish_task_json)).await?;
-            }
+        if let Some(tx) = &self.tx {
+            tx.send((text.to_string(), cmd_seq, option)).await?;
         } else {
-            return Err(anyhow!("Aliyun TTS Task: {task_id} not connected"));
+            return Err(anyhow!("Aliyun TTS Task: not connected"));
         }
-
         Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        self.tx.take();
+        Ok(())
+    }
+}
+
+pub struct AliyunTtsClient;
+impl AliyunTtsClient {
+    pub fn create(streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+        if streaming {
+            Ok(Box::new(StreamingClient::new(option.clone())))
+        } else {
+            Ok(Box::new(NonStreamingClient::new(option.clone())))
+        }
+    }
+
+    pub fn new(option: SynthesisOption) -> NonStreamingClient {
+        NonStreamingClient::new(option)
     }
 }

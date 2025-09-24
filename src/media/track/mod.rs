@@ -80,5 +80,8 @@ pub trait Track: Send + Sync {
         packet_sender: TrackPacketSender,
     ) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+    async fn stop_graceful(&self) -> Result<()>{
+        self.stop().await        
+    }
     async fn send_packet(&self, packet: &AudioFrame) -> Result<()>;
 }
