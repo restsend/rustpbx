@@ -3,7 +3,6 @@ use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use ort::session::{Session, builder::GraphOptimizationLevel};
-use tracing::debug;
 
 pub struct SileroVad {
     config: VADOption,

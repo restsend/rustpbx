@@ -23,12 +23,32 @@ pub fn router(app_state: AppState) -> Router<AppState> {
 }
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
+    let transactions = state
+        .useragent
+        .as_ref()
+        .map(|ua| ua.endpoint.inner.get_stats())
+        .map(|stats| {
+            serde_json::json!({
+                "running": stats.running_transactions,
+                "finished": stats.finished_transactions,
+                "waiting_ack": stats.waiting_ack,
+            })
+        });
+
+    let dialogs = state
+        .useragent
+        .as_ref()
+        .map(|ua| ua.dialog_layer.len())
+        .unwrap_or_default();
+
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
         "version": crate::version::get_version_info(),
         "total": state.total_calls.load(Ordering::Relaxed),
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
+        "ua.transactions": transactions,
+        "ua.dialogs": dialogs,
         "runnings": state.active_calls.lock().await.len(),
     });
     Json(health).into_response()
