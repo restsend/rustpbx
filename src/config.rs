@@ -8,7 +8,7 @@ use clap::Parser;
 use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -384,9 +384,9 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(path: &str) -> Result<Self, Error> {
+    pub fn load(path: &PathBuf) -> Result<Self, Error> {
         let config = toml::from_str(
-            &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
+            &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {:?}", e, path))?,
         )?;
         Ok(config)
     }

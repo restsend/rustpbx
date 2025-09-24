@@ -1,9 +1,9 @@
-use std::path::Path;
-
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
 use rustpbx::{app::AppStateBuilder, config::Config, version};
+use std::path::Path;
+use std::{path::PathBuf, time::Duration};
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{
@@ -19,10 +19,15 @@ use tracing_subscriber::{
 )]
 struct Cli {
     /// Path to the configuration file
-    #[clap(long, help = "Path to the configuration file (TOML format)")]
-    conf: Option<String>,
-    #[clap(
+    #[arg(
         long,
+        value_name = "FILE",
+        help = "Path to the configuration file (TOML format)"
+    )]
+    conf: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "ADDR",
         help = "Tokio console server address, e.g. /tmp/tokio-console or 127.0.0.1:5556"
     )]
     tokio_console: Option<String>,
@@ -122,6 +127,7 @@ async fn main() -> Result<()> {
     let _ = guard_holder; // keep the guard alive
     let state_builder = AppStateBuilder::new().with_config(config);
     let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
+    let token = state.token.clone();
 
     #[cfg(unix)]
     let sigterm = async {
@@ -140,9 +146,13 @@ async fn main() -> Result<()> {
         _ = rustpbx::app::run(state, sip_server) => {}
         _ = tokio::signal::ctrl_c() => {
             info!("received CTRL+C, shutting down");
+            token.cancel();
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         _ = sigterm => {
             info!("received SIGTERM, shutting down");
+            token.cancel();
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
     Ok(())
