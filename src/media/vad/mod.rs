@@ -103,6 +103,21 @@ impl std::fmt::Display for VadType {
     }
 }
 
+impl TryFrom<&String> for VadType {
+    type Error = String;
+
+    fn try_from(value: &String) -> std::result::Result<Self, Self::Error> {
+        match value.as_str() {
+            #[cfg(feature = "vad_webrtc")]
+            "webrtc" => Ok(VadType::WebRTC),
+            #[cfg(feature = "vad_silero")]
+            "silero" => Ok(VadType::Silero),
+            #[cfg(feature = "vad_ten")]
+            "ten" => Ok(VadType::Ten),
+            other => Ok(VadType::Other(other.to_string())),
+        }
+    }
+}
 struct SpeechBuf {
     samples: PcmBuf,
     timestamp: u64,
