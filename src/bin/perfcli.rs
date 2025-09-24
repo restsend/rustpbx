@@ -85,6 +85,8 @@ struct Cli {
     username: Option<String>,
     #[clap(long, help = "Sip password")]
     password: Option<String>,
+    #[clap(long, help = "Sip realm")]
+    realm: Option<String>,
 
     /// Codec type
     #[clap(long, help = "Codec type", default_value = "g722")]
@@ -151,6 +153,7 @@ async fn serve_sip_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()>
         sip: Some(rustpbx::call::SipOption {
             username: cli.username.clone(),
             password: cli.password.clone(),
+            realm: cli.realm.clone(),
             ..Default::default()
         }),
         ..Default::default()

@@ -15,7 +15,9 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::rsip_ext::RsipResponseExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -37,16 +39,20 @@ impl DialogGuard {
 }
 impl Drop for DialogGuard {
     fn drop(&mut self) {
-        info!(%self.dialog_id, "dialog guard dropped");
         let dialog_layer = self.dialog_layer.clone();
-        match dialog_layer.get_dialog(&self.dialog_id) {
-            Some(dialog) => {
-                tokio::spawn(async move {
-                    dialog.hangup().await.ok();
-                    dialog_layer.remove_dialog(&dialog.id());
-                });
+        let mut trying_dialog_id = self.dialog_id.clone();
+        trying_dialog_id.to_tag = String::new();
+        for id in vec![&self.dialog_id, &trying_dialog_id] {
+            match dialog_layer.get_dialog(&id) {
+                Some(dialog) => {
+                    info!(%id, "dialog guard dropped");
+                    dialog_layer.remove_dialog(&id);
+                    tokio::spawn(async move {
+                        let _ = timeout(Duration::from_secs(4), dialog.hangup()).await;
+                    });
+                }
+                None => {}
             }
-            None => {}
         }
     }
 }
@@ -229,7 +235,16 @@ pub async fn client_dialog_event_loop(
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
             DialogState::Trying(dialog_id) => {
-                info!(session_id, "client dialog trying: {}", dialog_id);
+                call_state
+                    .write()
+                    .as_mut()
+                    .map(|cs| {
+                        if cs.dialog.is_none() {
+                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
+                        }
+                        cs.ring_time.replace(Utc::now())
+                    })
+                    .ok();
             }
             DialogState::Early(dialog_id, resp) => {
                 let body = resp.body();
@@ -239,7 +254,14 @@ pub async fn client_dialog_event_loop(
                 call_state
                     .write()
                     .as_mut()
-                    .and_then(|cs| Ok(cs.ring_time.replace(Utc::now())))
+                    .map(|cs| {
+                        if cs.dialog.is_none() {
+                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
+                        } else {
+                            cs.dialog.as_mut().map(|d| d.dialog_id = dialog_id);
+                        }
+                        cs.ring_time.replace(Utc::now())
+                    })
                     .ok();
 
                 event_sender.send(crate::event::SessionEvent::Ringing {
@@ -266,6 +288,8 @@ pub async fn client_dialog_event_loop(
                     .and_then(|cs| {
                         if cs.dialog.is_none() {
                             cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
+                        } else {
+                            cs.dialog.as_mut().map(|d| d.dialog_id = dialog_id);
                         }
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;

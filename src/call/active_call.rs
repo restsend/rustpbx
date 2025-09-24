@@ -1376,7 +1376,9 @@ impl ActiveCall {
                     dlg_state_receiver,
                     call_state.clone(),
                     media_stream,
-                    dialog_layer) => {}
+                    dialog_layer) => {
+                        cancel_token.cancel();
+                    }
             }
         });
 
