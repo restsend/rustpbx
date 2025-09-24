@@ -93,15 +93,14 @@ struct Cli {
     codec: String,
 
     /// VAD
-    #[clap(long, help = "VAD", default_value = "true")]
-    vad: Option<bool>,
+    #[clap(long, help = "VAD model to use, empty to disable")]
+    vad: Option<String>,
 
-    /// Denoising
-    #[clap(long, help = "Denoising", default_value = "true")]
-    denoise: Option<bool>,
+    #[clap(long, help = "Denoising", action = clap::ArgAction::SetTrue)]
+    denoise: bool,
 
-    #[clap(long, help = "Denoising", default_value = "true")]
-    recorder: Option<bool>,
+    #[clap(long, help = "recorder", action = clap::ArgAction::SetTrue)]
+    recorder: bool,
 }
 
 async fn serve_sip_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()> {
@@ -131,19 +130,19 @@ async fn serve_sip_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()>
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
+    let vad = match cli.vad {
+        Some(ref vad_model) => Some(VADOption {
+            r#type: vad_model.try_into().unwrap_or(VadType::Silero),
+            ..Default::default()
+        }),
+        None => None,
+    };
+    info!(id, "Using VAD: {:?}", vad);
     // Create the invite command with proper options
     let option = CallOption {
-        vad: if cli.vad.unwrap_or(false) {
-            Some(VADOption::default())
-        } else {
-            None
-        },
-        denoise: if cli.denoise.unwrap_or(false) {
-            Some(true)
-        } else {
-            None
-        },
-        recorder: if cli.recorder.unwrap_or(false) {
+        vad,
+        denoise: if cli.denoise { Some(true) } else { None },
+        recorder: if cli.recorder {
             Some(RecorderOption::default())
         } else {
             None
@@ -340,24 +339,19 @@ async fn serve_webrtc_client(
     };
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-
+    let vad = match cli.vad {
+        Some(ref vad_model) => Some(VADOption {
+            r#type: vad_model.try_into().unwrap_or(VadType::Silero),
+            ..Default::default()
+        }),
+        None => None,
+    };
     // Create the invite command with proper options
     let option = CallOption {
         offer: Some(strip_ipv6_candidates(&offer.sdp)),
-        vad: if cli.vad.unwrap_or(false) {
-            Some(VADOption {
-                r#type: VadType::Silero,
-                ..Default::default()
-            })
-        } else {
-            None
-        },
-        denoise: if cli.denoise.unwrap_or(false) {
-            Some(true)
-        } else {
-            None
-        },
-        recorder: if cli.recorder.unwrap_or(false) {
+        vad,
+        denoise: if cli.denoise { Some(true) } else { None },
+        recorder: if cli.recorder {
             Some(RecorderOption::default())
         } else {
             None
@@ -555,11 +549,8 @@ async fn main() -> Result<()> {
     }
 
     println!(
-        "perfcli started, clients: {}, codec: {:?}, vad: {}, denoise: {}",
-        cli.clients,
-        codec,
-        cli.vad.unwrap_or(false),
-        cli.denoise.unwrap_or(false)
+        "perfcli started, clients: {}, codec: {:?}, vad: {:?}, denoise: {}",
+        cli.clients, codec, cli.vad, cli.denoise
     );
     let dump_state_loop = async move {
         let mut last_rx_bytes = 0u64;

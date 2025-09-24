@@ -1,7 +1,7 @@
 use super::{VADOption, VadEngine};
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel};
 
 pub struct SileroVad {
     config: VADOption,
@@ -25,7 +25,7 @@ impl SileroVad {
                 return Err(anyhow::anyhow!(
                     "Unsupported sample rate: {}",
                     config.samplerate
-                ))
+                ));
             }
         };
 
@@ -84,7 +84,7 @@ impl SileroVad {
             ),
             state_data.to_vec(),
         )
-        .map_err(|e|                     ort::Error::new(format!("Failed to reshape state array: {}", e)))?;
+        .map_err(|e| ort::Error::new(format!("Failed to reshape state array: {}", e)))?;
         self.state.assign(&state_array);
 
         Ok(probability)
