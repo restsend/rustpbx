@@ -17,7 +17,6 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
 // A mock synthesis client that supports both streaming and non-streaming modes
 struct MockSynthesisClient {
     // Channel for sending events back to the stream
@@ -554,7 +553,7 @@ async fn test_tts_track_end_of_stream() -> Result<()> {
 
     // Create channels for the test
     let (event_tx, mut event_rx) = broadcast::channel(16);
-    let (packet_tx, mut packet_rx) = mpsc::unbounded_channel();
+    let (packet_tx, _packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
     tts_track.start(event_tx, packet_tx).await?;
