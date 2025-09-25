@@ -113,7 +113,6 @@ impl TtsTask {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled(), if !cancel_received => {
-                    cmd_finished = true;
                     cancel_received = true;
                     let graceful = self.graceful.load(Ordering::Relaxed);
                     let emitted_bytes = self.metadatas.get(&self.cur_seq).map(|entry| entry.emitted_bytes).unwrap_or(0);
@@ -123,6 +122,13 @@ impl TtsTask {
                     //         or passage not set, this is ordinary cancel
                     //         or cur_seq emitted bytes is 0 (cur seq not started)
                     if self.streaming || !graceful || emitted_bytes == 0 {
+                        break;
+                    }
+
+                    // else, stop receiving command
+                    cmd_finished = true;
+                    if let Err(e) = self.client.stop().await {
+                        warn!(self.session_id, self.play_id, self.cur_seq, "failed to stop synthesis client: {}", e);
                         break;
                     }
                 }
@@ -215,7 +221,10 @@ impl TtsTask {
                 cmd = self.command_rx.recv(), if !cmd_finished => {
                     if let Some(cmd) = cmd.as_ref() {
                         self.handle_cmd(cmd, cmd_seq).await;
-                        cmd_seq += 1;
+                        // increment cmd_seq only for non streaming mode
+                        if !self.streaming{
+                            cmd_seq += 1;
+                        }
                     }
 
                     // set finished if command sender is exhausted or end_of_stream is true
