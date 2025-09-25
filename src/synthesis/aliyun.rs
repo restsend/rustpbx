@@ -388,8 +388,10 @@ impl SynthesisClient for NonStreamingClient {
         let (tx, rx) = mpsc::channel(10);
         self.tx.replace(tx);
         let client_option = self.option.clone();
+        let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
+
         let stream = ReceiverStream::new(rx)
-            .flat_map_unordered(3, move |(text, cmd_seq, option)| {
+            .flat_map_unordered(max_concurrent_tasks, move |(text, cmd_seq, option)| {
                 let option = client_option.merge_with(option);
                 let task_id = Uuid::new_v4().to_string();
                 let text_clone = text.clone();

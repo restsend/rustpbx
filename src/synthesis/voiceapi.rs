@@ -1,26 +1,26 @@
-use std::sync::Mutex;
-
-use crate::synthesis::{SynthesisEvent, SynthesisEventReceiver, SynthesisEventSender};
-
 use super::{SynthesisClient, SynthesisOption, SynthesisType};
-use anyhow::{Result, anyhow};
+use crate::synthesis::SynthesisEvent;
+use anyhow::Result;
 use async_trait::async_trait;
-use base64::{Engine, engine::general_purpose::STANDARD};
-use futures::{SinkExt, StreamExt, stream::BoxStream};
-use http::{Request, StatusCode, Uri};
-use rand::random;
+use futures::{
+    FutureExt, SinkExt, Stream, StreamExt,
+    stream::{self, BoxStream},
+};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{Notify, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
+
+const CHANNEL_MAX_SIZE: usize = 10;
 /// https://github.com/ruzhila/voiceapi
 /// A simple and clean voice transcription/synthesis API with sherpa-onnx
 ///
 #[derive(Debug)]
 pub struct VoiceApiTtsClient {
     option: SynthesisOption,
-    tx: SynthesisEventSender,
-    rx: Mutex<Option<SynthesisEventReceiver>>,
+    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
 }
 
 /// VoiceAPI TTS Request structure
@@ -47,16 +47,13 @@ impl VoiceApiTtsClient {
         Ok(Box::new(client))
     }
     pub fn new(option: SynthesisOption) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        Self {
-            option,
-            tx,
-            rx: Mutex::new(Some(rx)),
-        }
+        Self { option, tx: None }
     }
-    // WebSocket-based TTS synthesis
-    async fn ws_synthesize(&self, text: &str, option: Option<SynthesisOption>) -> Result<()> {
-        let option = self.option.merge_with(option);
+
+    // construct request url
+    // for non-streaming client, text is Some
+    // session_id is used for tencent cloud tts service, not the session_id of media session
+    fn construct_request_url(option: &SynthesisOption) -> String {
         let endpoint = option
             .endpoint
             .clone()
@@ -71,92 +68,84 @@ impl VoiceApiTtsClient {
             endpoint
         };
         let chunk_size = 4 * 640;
-        let ws_url = format!("{}/tts?chunk_size={}&split=false", ws_endpoint, chunk_size);
-
-        debug!("Connecting to WebSocket URL: {}", ws_url);
-
-        let ws_url = ws_url.parse::<Uri>()?;
-        // Create WebSocket request
-        let request = Request::builder()
-            .uri(&ws_url)
-            .header("Host", ws_url.host().unwrap_or("localhost"))
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", STANDARD.encode(random::<[u8; 16]>()))
-            .body(())?;
-
-        // Connect to WebSocket
-        let (ws_stream, response) = connect_async(request).await?;
-
-        // Check if the connection was successful
-        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-            self.tx.send(Err(anyhow!(
-                "Failed to establish WebSocket connection: {}",
-                response.status()
-            )))?;
-            return Err(anyhow!(
-                "Failed to establish WebSocket connection: {}",
-                response.status()
-            ));
-        }
-        debug!("WebSocket connection established");
-        // Split WebSocket stream into sender and receiver
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-        // Send the TTS request
-        ws_sender.send(Message::Text(text.into())).await?;
-
-        while let Some(message) = ws_receiver.next().await {
-            match message {
-                Ok(Message::Binary(data)) => {
-                    // Send audio chunk to the event channel
-                    self.tx.send(Ok(SynthesisEvent::AudioChunk(data.into())))?;
-                }
-                Ok(Message::Text(text_data)) => {
-                    match serde_json::from_str::<TtsResult>(&text_data) {
-                        Ok(metadata) => {
-                            debug!(
-                                "Received metadata: progress={}, elapsed={}, duration={}, size={}",
-                                metadata.progress,
-                                metadata.elapsed,
-                                metadata.duration,
-                                metadata.size
-                            );
-
-                            if metadata.progress >= 1.0 {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse metadata: {}", e);
-                            self.tx.send(Err(anyhow!(
-                                "Failed to parse metadata: {}, {}",
-                                text_data,
-                                e
-                            )))?;
-                            return Err(anyhow!("Failed to parse metadata: {}, {}", text_data, e));
-                        }
-                    }
-                }
-                Ok(Message::Close(_)) => {
-                    debug!("WebSocket closed by remote");
-                    self.tx
-                        .send(Err(anyhow!("VoiceAPI TTS websocket closed by remote")))?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!("WebSocket error: {}", e);
-                    self.tx.send(Err(anyhow!("WebSocket error: {}", e)))?;
-                    return Err(anyhow!("WebSocket error: {}", e));
-                }
-                _ => {}
-            }
-        }
-        self.tx.send(Ok(SynthesisEvent::Finished))?;
-        Ok(())
+        format!("{}/tts?chunk_size={}&split=false", ws_endpoint, chunk_size)
     }
 }
 
+// convert websocket to event stream
+// text and cmd_seq and cache key are used for non-streaming mode (realtime client)
+// text is for debuging purpose
+fn ws_to_event_stream<T>(
+    ws_stream: T,
+    cmd_seq: Option<usize>,
+) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
+where
+    T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Send
+        + Unpin
+        + 'static,
+{
+    let notify = Arc::new(Notify::new());
+    let notify_clone = notify.clone();
+    ws_stream
+        .take_until(notify.notified_owned())
+        .filter_map(move |message| {
+            let notify = notify_clone.clone();
+            async move {
+                match message {
+                    Ok(Message::Binary(data)) => {
+                        Some((cmd_seq, Ok(SynthesisEvent::AudioChunk(data))))
+                    }
+                    Ok(Message::Text(text)) => {
+                        match serde_json::from_str::<TtsResult>(&text) {
+                            Ok(metadata) => {
+                                debug!(
+                                    "Received metadata: progress={}, elapsed={}, duration={}, size={}",
+                                    metadata.progress,
+                                    metadata.elapsed,
+                                    metadata.duration,
+                                    metadata.size
+                                );
+
+                                if metadata.progress >= 1.0 {
+                                    notify.notify_one();
+                                    return Some((cmd_seq, Ok(SynthesisEvent::Finished)));
+                                }
+                            }
+                            Err(e) => {
+                                notify.notify_one();
+                                warn!("Failed to parse metadata: {}", e);
+                                return Some((
+                                    cmd_seq,
+                                    Err(anyhow::anyhow!(
+                                        "VoiceAPPI TTS error, Failed to parse metadata: {}, {}", text, e)),
+                                ));
+                            }
+                        }
+                        None
+                    }
+                    Ok(Message::Close(_)) => {
+                        notify.notify_one();
+                        warn!("VoiceAPI TTS closed by remote, {:?}", cmd_seq);
+                        None
+                    }
+                    Err(e) => {
+                        notify.notify_one();
+                        Some((
+                            cmd_seq,
+                            Err(anyhow::anyhow!(
+                                "VoiceAPI TTS websocket error: {:?}, {:?}",
+                                cmd_seq,
+                                e
+                            )),
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+        })
+        .boxed()
+}
 #[async_trait]
 impl SynthesisClient for VoiceApiTtsClient {
     fn provider(&self) -> SynthesisType {
@@ -165,24 +154,49 @@ impl SynthesisClient for VoiceApiTtsClient {
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
-        let rx = self.rx.lock().unwrap().take().ok_or_else(|| {
-            anyhow!("VoiceApiTtsClient: Receiver already taken, cannot start new stream")
-        })?;
-        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv()
-                .await
-                .map(|event| ((None, event), rx))
-        })))
+        let (tx, rx) = mpsc::channel(CHANNEL_MAX_SIZE);
+        self.tx = Some(tx);
+        let client_option = self.option.clone();
+        let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
+        let stream = ReceiverStream::new(rx)
+            .flat_map_unordered(max_concurrent_tasks, move |(text, cmd_seq, option)| {
+                // each reequest have its own session_id
+                let option = client_option.merge_with(option);
+                let url = Self::construct_request_url(&option);
+                connect_async(url)
+                    .then(async move |res| match res {
+                        Ok((mut ws_stream, _)) => {
+                            ws_stream.send(Message::text(text)).await.ok();
+                            ws_to_event_stream(ws_stream, Some(cmd_seq))
+                        }
+                        Err(e) => {
+                            tracing::error!("VoiceAPI TTS websocket error: {}", e);
+                            stream::empty().boxed()
+                        }
+                    })
+                    .flatten_stream()
+                    .boxed()
+            })
+            .boxed();
+        Ok(stream)
     }
+
     async fn synthesize(
         &mut self,
         text: &str,
-        _cmd_seq: usize,
+        cmd_seq: usize,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
-        self.ws_synthesize(text, option).await
+        if let Some(tx) = &self.tx {
+            tx.send((text.to_string(), cmd_seq, option)).await?;
+        } else {
+            return Err(anyhow::anyhow!("VoiceAPI TTS: missing client sender"));
+        };
+        Ok(())
     }
+
     async fn stop(&mut self) -> Result<()> {
+        self.tx.take();
         Ok(())
     }
 }
