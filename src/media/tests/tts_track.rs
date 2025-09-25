@@ -22,7 +22,7 @@ struct MockSynthesisClient {
     // Channel for sending events back to the stream
     event_sender: Option<mpsc::UnboundedSender<(Option<usize>, Result<SynthesisEvent>)>>,
     // Current mode (streaming vs non-streaming)
-    is_streaming: bool,
+    streaming: bool,
     // Track if we should close the stream (for streaming mode)
     should_close: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -31,7 +31,7 @@ impl MockSynthesisClient {
     fn new(streaming: bool) -> Self {
         Self {
             event_sender: None,
-            is_streaming: streaming,
+            streaming,
             should_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -99,7 +99,7 @@ impl SynthesisClient for MockSynthesisClient {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         self.event_sender = Some(event_tx);
 
-        let is_streaming = self.is_streaming;
+        let is_streaming = self.streaming;
         let should_close = Arc::clone(&self.should_close);
 
         let stream = stream! {
@@ -119,7 +119,7 @@ impl SynthesisClient for MockSynthesisClient {
     async fn synthesize(
         &mut self,
         text: &str,
-        cmd_seq: usize,
+        cmd_seq: Option<usize>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         let sample_rate = option
@@ -131,31 +131,16 @@ impl SynthesisClient for MockSynthesisClient {
         let audio_data = Self::generate_audio_sample(text, sample_rate);
         let duration_ms = (audio_data.len() as f32 * 500.0 / sample_rate as f32) as u32;
 
-        if self.is_streaming {
-            // Streaming mode: send events with None cmd_seq
-            self.send_event(None, SynthesisEvent::AudioChunk(Bytes::from(audio_data)))
-                .await;
-            self.send_event(
-                None,
-                SynthesisEvent::Subtitles(Self::generate_subtitles(text, duration_ms)),
-            )
+        self.send_event(cmd_seq, SynthesisEvent::AudioChunk(Bytes::from(audio_data)))
             .await;
-        } else {
-            // Non-streaming mode: send events with specific cmd_seq
-            self.send_event(
-                Some(cmd_seq),
-                SynthesisEvent::AudioChunk(Bytes::from(audio_data)),
-            )
-            .await;
-            self.send_event(
-                Some(cmd_seq),
-                SynthesisEvent::Subtitles(Self::generate_subtitles(text, duration_ms)),
-            )
-            .await;
-            self.send_event(Some(cmd_seq), SynthesisEvent::Finished)
-                .await;
+        self.send_event(
+            cmd_seq,
+            SynthesisEvent::Subtitles(Self::generate_subtitles(text, duration_ms)),
+        )
+        .await;
+        if !self.streaming {
+            self.send_event(cmd_seq, SynthesisEvent::Finished).await;
         }
-
         Ok(())
     }
 

@@ -338,7 +338,7 @@ impl SynthesisClient for StreamingClient {
     async fn synthesize(
         &mut self,
         text: &str,
-        _cmd_seq: usize,
+        _cmd_seq: Option<usize>,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(ws_sink) = self.ws_sink.as_mut() {
@@ -367,7 +367,7 @@ impl SynthesisClient for StreamingClient {
 
 pub struct NonStreamingClient {
     option: SynthesisOption,
-    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 impl NonStreamingClient {
@@ -408,7 +408,7 @@ impl SynthesisClient for NonStreamingClient {
                             let finish_task_json = serde_json::to_string(&finish_task_cmd)
                                 .expect("Aliyun TTS API changed!");
                             ws_stream.send(Message::text(finish_task_json)).await.ok();
-                            event_stream(ws_stream, Some(cmd_seq))
+                            event_stream(ws_stream, cmd_seq)
                         }
                         Err(e) => {
                             warn!("Aliyun TTS: websocket error: {:?}, {:?}", cmd_seq, e);
@@ -425,7 +425,7 @@ impl SynthesisClient for NonStreamingClient {
     async fn synthesize(
         &mut self,
         text: &str,
-        cmd_seq: usize,
+        cmd_seq: Option<usize>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {

@@ -285,7 +285,7 @@ where
 pub struct RealTimeClient {
     option: SynthesisOption,
     //item: (text, option), drop tx if `end_of_stream`
-    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 impl RealTimeClient {
@@ -317,7 +317,7 @@ impl SynthesisClient for RealTimeClient {
                 let url = construct_request_url(&option, &session_id, Some(&text));
                 connect_async(url)
                     .then(async move |res| match res {
-                        Ok((ws_stream, _)) => ws_to_event_stream(ws_stream, Some(cmd_seq)),
+                        Ok((ws_stream, _)) => ws_to_event_stream(ws_stream, cmd_seq),
                         Err(e) => {
                             tracing::error!("Tencent TTS websocket error: {}", e);
                             stream::empty().boxed()
@@ -333,7 +333,7 @@ impl SynthesisClient for RealTimeClient {
     async fn synthesize(
         &mut self,
         text: &str,
-        cmd_seq: usize,
+        cmd_seq: Option<usize>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
@@ -433,7 +433,7 @@ impl SynthesisClient for StreamingClient {
     async fn synthesize(
         &mut self,
         text: &str,
-        _cmd_seq: usize,
+        _cmd_seq: Option<usize>,
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(sink) = &mut self.sink {
