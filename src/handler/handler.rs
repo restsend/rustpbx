@@ -63,7 +63,7 @@ pub async fn call_handler(
     app_state: AppState,
     params: CallParams,
 ) -> Response {
-    let session_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let session_id = params.id.unwrap_or_else(|| format!("s.{}",Uuid::new_v4().to_string()));
     let server_side_track = params.server_side_track.clone();
     let dump_events = params.dump_events.unwrap_or(true);
     let ping_interval = params.ping_interval.unwrap_or(20);
