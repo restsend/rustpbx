@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
         if !segment.text.is_empty() {
             info!("Synthesizing text: {}", segment.text);
             let mut audio_stream = tts_client.start().await?;
-            tts_client.synthesize(&segment.text, 0, None).await?;
+            tts_client.synthesize(&segment.text, None, None).await?;
             let mut total_bytes = 0;
             while let Some((_cmd_seq, res)) = audio_stream.next().await {
                 match res {
