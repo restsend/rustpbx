@@ -369,7 +369,9 @@ impl ActiveCall {
             Command::Unmute { track_id } => self.do_unmute(track_id).await,
             Command::Pause {} => self.do_pause().await,
             Command::Resume {} => self.do_resume().await,
-            Command::Interrupt {graceful: passage} => self.do_interrupt(passage.unwrap_or_default()).await,
+            Command::Interrupt { graceful: passage } => {
+                self.do_interrupt(passage.unwrap_or_default()).await
+            }
             Command::History { speaker, text } => self.do_history(speaker, text).await,
         }
     }
@@ -467,7 +469,17 @@ impl ActiveCall {
     }
 
     async fn do_accept(&self, mut option: CallOption) -> Result<()> {
-        if self.ready_to_answer.lock().await.is_none() {
+        let ready_to_answer = self.ready_to_answer.lock().await.is_none();
+        let has_pending = self
+            .invitation
+            .has_pending_call(&self.session_id)
+            .await
+            .is_some();
+
+        if ready_to_answer {
+            if !has_pending {
+                return Err(anyhow::anyhow!("no pending call to accept"));
+            }
             option = self.invite_or_accept(option, "accept".to_string()).await?;
         } else {
             option.check_default();

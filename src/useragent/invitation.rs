@@ -15,6 +15,7 @@ pub struct PendingDialog {
 pub trait InvitationHandler: Send + Sync {
     async fn on_invite(
         &self,
+        _session_id: String,
         _cancel_token: CancellationToken,
         _dialog: ServerInviteDialog,
     ) -> Result<()> {

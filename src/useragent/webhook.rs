@@ -34,11 +34,11 @@ impl WebhookInvitationHandler {
 impl InvitationHandler for WebhookInvitationHandler {
     async fn on_invite(
         &self,
+        dialog_id: String,
         _cancel_token: CancellationToken,
         dialog: ServerInviteDialog,
     ) -> Result<()> {
         let client = Client::new();
-        let dialog_id = dialog.id().to_string();
         let create_time = Utc::now().to_rfc3339();
 
         let invite_request = dialog.initial_request();

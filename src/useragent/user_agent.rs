@@ -73,10 +73,7 @@ impl UserAgentBuilder {
     }
 
     pub async fn build(mut self) -> Result<UserAgent> {
-        let cancel_token = self
-            .cancel_token
-            .take()
-            .unwrap_or_default();
+        let cancel_token = self.cancel_token.take().unwrap_or_default();
 
         let config = self.config.to_owned().unwrap_or_default();
         let local_ip = if !config.addr.is_empty() {
@@ -177,13 +174,11 @@ impl UserAgent {
                             match tx
                                 .reply_with(
                                     rsip::StatusCode::ServiceUnavailable,
-                                    vec![
-                                        rsip::Header::Other(
-                                            "Reason".into(),
-                                            "SIP;cause=503;text=\"No invite handler configured\""
-                                                .into(),
-                                        ),
-                                    ],
+                                    vec![rsip::Header::Other(
+                                        "Reason".into(),
+                                        "SIP;cause=503;text=\"No invite handler configured\""
+                                            .into(),
+                                    )],
                                     None,
                                 )
                                 .await
@@ -196,13 +191,17 @@ impl UserAgent {
                             continue;
                         }
                     };
-                    let contact = dialog_layer.endpoint.get_addrs().first().map(|addr| rsip::Uri {
-                        scheme: Some(rsip::Scheme::Sip),
-                        auth: None,
-                        host_with_port: addr.addr.clone(),
-                        params: vec![],
-                        headers: vec![],
-                    });
+                    let contact = dialog_layer
+                        .endpoint
+                        .get_addrs()
+                        .first()
+                        .map(|addr| rsip::Uri {
+                            scheme: Some(rsip::Scheme::Sip),
+                            auth: None,
+                            host_with_port: addr.addr.clone(),
+                            params: vec![],
+                            headers: vec![],
+                        });
                     let dialog = match dialog_layer.get_or_create_server_invite(
                         &tx,
                         state_sender,
@@ -225,7 +224,7 @@ impl UserAgent {
                             continue;
                         }
                     };
-                    info!(id=?dialog.id(), "create server dialog");
+                    let dialog_id_str = dialog.id().to_string();
 
                     let token = self.token.child_token();
                     let pending_dialog = PendingDialog {
@@ -233,7 +232,6 @@ impl UserAgent {
                         dialog: dialog.clone(),
                         state_receiver,
                     };
-                    let dialog_id_str = dialog.id().to_string();
                     self.invitation
                         .pending_dialogs
                         .lock()
@@ -247,16 +245,17 @@ impl UserAgent {
                         .and_then(|t| parse_duration(t).ok())
                         .unwrap_or_else(|| Duration::from_secs(60));
                     let pending_dialogs = self.invitation.pending_dialogs.clone();
-                    let dialog_id = dialog.id();
                     let token_ref = token.clone();
-
+                    let dialog_id_str_clone = dialog_id_str.clone();
                     tokio::spawn(async move {
                         select! {
                             _ = token_ref.cancelled() => {}
                             _ = tokio::time::sleep(accept_timeout) => {}
                         }
-                        if let Some(call) = pending_dialogs.lock().await.remove(&dialog_id_str) {
-                            info!(?dialog_id, timeout = ?accept_timeout, "accept timeout, rejecting dialog");
+                        if let Some(call) =
+                            pending_dialogs.lock().await.remove(&dialog_id_str_clone)
+                        {
+                            warn!(dialog_id = %dialog_id_str_clone, timeout = ?accept_timeout, "accept timeout, rejecting dialog");
                             call.dialog
                                 .reject(Some(rsip::StatusCode::BusyHere), None)
                                 .ok();
@@ -268,11 +267,13 @@ impl UserAgent {
 
                     tokio::spawn(async move {
                         let invite_loop = async {
-                            match invitation_handler.on_invite(token, dialog.clone()).await {
+                            match invitation_handler
+                                .on_invite(dialog_id_str.clone(), token, dialog.clone())
+                                .await
+                            {
                                 Ok(_) => (),
                                 Err(e) => {
-                                    info!(id = ?dialog.id(),
-                                        "error handling invite: {:?}", e);
+                                    info!(id = dialog_id_str, "error handling invite: {:?}", e);
                                     dialog
                                         .reject(Some(rsip::StatusCode::ServerInternalError), None)
                                         .ok();

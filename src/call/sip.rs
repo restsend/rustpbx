@@ -79,9 +79,9 @@ impl Invitation {
         pending_dialogs.remove(session_id)
     }
 
-    pub async fn has_pending_call(&self, dialog_id_str: &str) -> Option<DialogId> {
+    pub async fn has_pending_call(&self, session_id: &str) -> Option<DialogId> {
         let pending_dialogs = self.pending_dialogs.lock().await;
-        pending_dialogs.get(dialog_id_str).map(|d| d.dialog.id())
+        pending_dialogs.get(session_id).map(|d| d.dialog.id())
     }
 
     pub async fn hangup(
