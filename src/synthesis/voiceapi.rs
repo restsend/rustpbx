@@ -3,7 +3,7 @@ use crate::synthesis::SynthesisEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{
-    FutureExt, SinkExt, Stream, StreamExt, future,
+    FutureExt, SinkExt, Stream, StreamExt,
     stream::{self, BoxStream},
 };
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,8 @@ const CHANNEL_MAX_SIZE: usize = 10;
 ///
 #[derive(Debug)]
 pub struct VoiceApiTtsClient {
-    streaming: bool,
     option: SynthesisOption,
-    tx: Option<mpsc::Sender<(String, usize, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 /// VoiceAPI TTS Request structure
@@ -43,17 +42,12 @@ struct TtsResult {
 }
 
 impl VoiceApiTtsClient {
-    pub fn create(streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-        let mut client = Self::new(option.clone());
-        client.streaming = streaming;
+    pub fn create(_streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
+        let client = Self::new(option.clone());
         Ok(Box::new(client))
     }
     pub fn new(option: SynthesisOption) -> Self {
-        Self {
-            option,
-            tx: None,
-            streaming: false,
-        }
+        Self { option, tx: None }
     }
 
     // construct request url
@@ -83,7 +77,6 @@ impl VoiceApiTtsClient {
 // text is for debuging purpose
 fn ws_to_event_stream<T>(
     ws_stream: T,
-    streaming: bool,
     cmd_seq: Option<usize>,
 ) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
 where
@@ -116,9 +109,7 @@ where
 
                                 if metadata.progress >= 1.0 {
                                     notify.notify_one();
-                                    if !streaming {
-                                        return Some((cmd_seq, Ok(SynthesisEvent::Finished)));
-                                    }
+                                    return Some((cmd_seq, Ok(SynthesisEvent::Finished)));
                                 }
                             }
                             Err(e) => {
@@ -167,7 +158,6 @@ impl SynthesisClient for VoiceApiTtsClient {
         self.tx = Some(tx);
         let client_option = self.option.clone();
         let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
-        let streaming = self.streaming;
         let stream = ReceiverStream::new(rx).flat_map_unordered(
             max_concurrent_tasks,
             move |(text, cmd_seq, option)| {
@@ -178,7 +168,7 @@ impl SynthesisClient for VoiceApiTtsClient {
                     .then(async move |res| match res {
                         Ok((mut ws_stream, _)) => {
                             ws_stream.send(Message::text(text)).await.ok();
-                            ws_to_event_stream(ws_stream, streaming, Some(cmd_seq))
+                            ws_to_event_stream(ws_stream, cmd_seq)
                         }
                         Err(e) => {
                             tracing::error!("VoiceAPI TTS websocket error: {}", e);
@@ -189,22 +179,13 @@ impl SynthesisClient for VoiceApiTtsClient {
                     .boxed()
             },
         );
-
-        if streaming {
-            return Ok(stream
-                .chain(stream::once(future::ready((
-                    None,
-                    Ok(SynthesisEvent::Finished),
-                ))))
-                .boxed());
-        }
         Ok(stream.boxed())
     }
 
     async fn synthesize(
         &mut self,
         text: &str,
-        cmd_seq: usize,
+        cmd_seq: Option<usize>,
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {

@@ -52,7 +52,7 @@ async fn test_tencent_cloud_tts() {
         .await
         .expect("Failed to start TTS stream");
     realtime_client
-        .synthesize(text, 0, None)
+        .synthesize(text, Some(0), None)
         .await
         .expect("Failed to synthesize text");
 
@@ -92,7 +92,7 @@ async fn test_tencent_cloud_tts() {
         .await
         .expect("Failed to start TTS stream");
     streaming_client
-        .synthesize(text, 0, None)
+        .synthesize(text, None, None)
         .await
         .expect("Failed to synthesize text");
     streaming_client.stop().await.unwrap();
@@ -158,7 +158,7 @@ async fn test_aliyun_tts() {
         .expect("Failed to start Aliyun TTS stream");
 
     non_streaming_client
-        .synthesize("Hello, how are you?", 0, None)
+        .synthesize("Hello, how are you?", Some(0), None)
         .await
         .expect("Failed to synthesize text");
 
@@ -198,7 +198,7 @@ async fn test_aliyun_tts() {
         .await
         .expect("Failed to start Aliyun TTS stream");
     streaming_client
-        .synthesize("Hello, how are you?", 0, None)
+        .synthesize("Hello, how are you?", None, None)
         .await
         .expect("Failed to synthesize text");
     streaming_client.stop().await.unwrap();

@@ -441,7 +441,7 @@ async fn main() -> Result<()> {
                                         .await
                                         .expect("Failed to start TTS stream");
                                     tts_client
-                                        .synthesize(&text, 0, None)
+                                        .synthesize(&text, None, None)
                                         .await
                                         .expect("Failed to synthesize text");
 

@@ -184,16 +184,18 @@ pub trait SynthesisClient: Send {
     fn provider(&self) -> SynthesisType;
 
     // connect to the synthesis service.
+    // (cmd_seq, result), return the cmd_seq that passed from `synthesize`
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>>;
 
     // send text to the synthesis service.
     // `cmd_seq` and `option` are used for non streaming mode
+    // for streaming mode, `cmd_seq` and `option` are None
     async fn synthesize(
         &mut self,
         text: &str,
-        cmd_seq: usize,
+        cmd_seq: Option<usize>,
         option: Option<SynthesisOption>,
     ) -> Result<()>;
 
