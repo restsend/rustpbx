@@ -27,6 +27,7 @@ use uuid::Uuid;
 const HOST: &str = "tts.cloud.tencent.com";
 const NON_STREAMING_PATH: &str = "/stream_ws";
 const STREAMING_PATH: &str = "/stream_wsv2";
+const CHANNEL_MAX_SIZE: usize = 10;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -304,11 +305,12 @@ impl SynthesisClient for RealTimeClient {
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         // Tencent cloud alow 10 - 20 concurrent websocket connections for default setting, dependent on voice type
         // set the number more higher will lead to waiting for unordered results longer
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(CHANNEL_MAX_SIZE);
         self.tx = Some(tx);
         let client_option = self.option.clone();
+        let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
         let stream = ReceiverStream::new(rx)
-            .flat_map_unordered(3, move |(text, cmd_seq, option)| {
+            .flat_map_unordered(max_concurrent_tasks, move |(text, cmd_seq, option)| {
                 // each reequest have its own session_id
                 let session_id = Uuid::new_v4().to_string();
                 let option = client_option.merge_with(option);

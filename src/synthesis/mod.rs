@@ -87,6 +87,7 @@ pub struct SynthesisOption {
     pub emotion: Option<String>,
     pub endpoint: Option<String>,
     pub extra: Option<HashMap<String, String>>,
+    pub max_concurrent_tasks: Option<usize>,
 }
 
 impl SynthesisOption {
@@ -156,7 +157,13 @@ pub struct Subtitle {
 }
 
 impl Subtitle {
-    pub fn new(text: String, begin_time: u32, end_time: u32, begin_index: u32, end_index: u32) -> Self {
+    pub fn new(
+        text: String,
+        begin_time: u32,
+        end_time: u32,
+        begin_index: u32,
+        end_index: u32,
+    ) -> Self {
         Self {
             text,
             begin_time,
@@ -210,6 +217,7 @@ impl Default for SynthesisOption {
             emotion: None,
             endpoint: None,
             extra: None,
+            max_concurrent_tasks: None,
         }
     }
 }
