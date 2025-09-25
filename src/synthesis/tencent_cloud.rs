@@ -100,7 +100,7 @@ impl From<&TencentSubtitle> for Subtitle {
 }
 
 // tencent cloud will crash if text contains emoji
-fn remove_emoji(text: &str) -> String {
+pub fn strip_emoji_chars(text: &str) -> String {
     text.chars()
         .filter(|c| {
             !(is_emoji(*c)
@@ -337,7 +337,7 @@ impl SynthesisClient for RealTimeClient {
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
-            let text = remove_emoji(text);
+            let text = strip_emoji_chars(text);
             tx.send((text, cmd_seq, option)).await?;
         } else {
             return Err(anyhow::anyhow!("TencentCloud TTS: missing client sender"));
@@ -437,7 +437,7 @@ impl SynthesisClient for StreamingClient {
         _option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(sink) = &mut self.sink {
-            let text = remove_emoji(text);
+            let text = strip_emoji_chars(text);
             let request = WebSocketRequest::synthesis_action(&self.session_id, &text);
             let data = serde_json::to_string(&request)?;
             sink.send(Message::Text(data.into())).await?;
