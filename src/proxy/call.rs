@@ -288,6 +288,7 @@ impl CallModule {
         } else {
             DialStrategy::Sequential(new_locations)
         };
+        debug!(session_id = ?dialplan.session_id, targets = ?dialplan.targets, "final dialplan targets");
         Ok(dialplan)
     }
 
