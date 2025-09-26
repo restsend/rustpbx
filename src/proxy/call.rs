@@ -242,7 +242,7 @@ impl CallModule {
             let target_uri = &target.aor;
             let target_realm = target.aor.host().to_string();
             if !self.inner.server.is_same_realm(&target_realm).await {
-                debug!(session_id = ?dialplan.session_id, callee = %target_uri, callee_realm =target_realm, "target is external realm, skip locator");
+                debug!(session_id = ?dialplan.session_id, callee = %target_uri, callee_realm = target_realm, "target is external realm, skip locator");
                 new_locations.push(target);
                 continue;
             }
