@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
+
 #[derive(Default)]
 pub enum SpamResult {
     #[default]
@@ -24,6 +25,7 @@ struct TransactionCookieInner {
     user: Option<SipUser>,
     values: HashMap<String, String>,
     spam_result: SpamResult,
+    source_trunk: Option<String>,
 }
 #[derive(Clone, Default)]
 pub struct TransactionCookie {
@@ -37,6 +39,7 @@ impl From<&TransactionKey> for TransactionCookie {
                 user: None,
                 values: HashMap::new(),
                 spam_result: SpamResult::Nice,
+                source_trunk: None,
             })),
         }
     }
@@ -97,5 +100,30 @@ impl TransactionCookie {
             .map(|inner| inner.spam_result.is_spam())
             .ok()
             .unwrap_or_default()
+    }
+
+    pub fn set_source_trunk(&self, trunk: &str) {
+        self.inner
+            .try_write()
+            .map(|mut inner| {
+                inner.source_trunk = Some(trunk.to_string());
+            })
+            .ok();
+    }
+
+    pub fn is_from_trunk(&self) -> bool {
+        self.inner
+            .try_read()
+            .map(|inner| inner.source_trunk.is_some())
+            .ok()
+            .unwrap_or_default()
+    }
+
+    pub fn get_source_trunk(&self) -> Option<String> {
+        self.inner
+            .try_read()
+            .map(|inner| inner.source_trunk.clone())
+            .ok()
+            .flatten()
     }
 }
