@@ -4,10 +4,9 @@ use super::{
     user::{UserBackend, create_user_backend},
 };
 use crate::{
-    app::AppState,
     call::{LocationInspector, TransactionCookie},
     callrecord::CallRecordSender,
-    config::ProxyConfig,
+    config::{ProxyConfig, RtpConfig},
     proxy::{
         FnCreateRouteInvite,
         auth::AuthBackend,
@@ -18,6 +17,7 @@ use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
 use rsipstack::{
     EndpointBuilder,
+    dialog::dialog_layer::DialogLayer,
     transaction::{
         Endpoint, TransactionReceiver,
         endpoint::{EndpointOption, MessageInspector},
@@ -41,9 +41,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub struct SipServerInner {
-    pub app_state: AppState,
     pub cancel_token: CancellationToken,
-    pub config: Arc<ProxyConfig>,
+    pub rtp_config: RtpConfig,
+    pub proxy_config: Arc<ProxyConfig>,
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Option<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
@@ -52,6 +52,7 @@ pub struct SipServerInner {
     pub locator: Box<dyn Locator>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
+    pub dialog_layer: Arc<DialogLayer>,
     pub location_inspector: Option<Box<dyn LocationInspector>>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
 }
@@ -65,6 +66,7 @@ pub struct SipServer {
 }
 
 pub struct SipServerBuilder {
+    rtp_config: Option<RtpConfig>,
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
     user_backend: Option<Box<dyn UserBackend>>,
@@ -84,6 +86,7 @@ impl SipServerBuilder {
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         Self {
             config,
+            rtp_config: None,
             cancel_token: None,
             user_backend: None,
             auth_backend: None,
@@ -159,8 +162,12 @@ impl SipServerBuilder {
         self.proxycall_inspector = Some(inspector);
         self
     }
+    pub fn with_rtp_config(mut self, config: RtpConfig) -> Self {
+        self.rtp_config = Some(config);
+        self
+    }
 
-    pub async fn build(self, app_state: AppState) -> Result<SipServer> {
+    pub async fn build(self) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
         } else {
@@ -187,6 +194,7 @@ impl SipServerBuilder {
                 }
             }
         };
+        let rtp_config = self.rtp_config.unwrap_or_default();
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         let transport_layer = TransportLayer::new(cancel_token.clone());
@@ -195,7 +203,7 @@ impl SipServerBuilder {
             .parse::<IpAddr>()
             .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
-        let external_ip = match app_state.config.external_ip {
+        let external_ip = match rtp_config.external_ip {
             Some(ref s) => s
                 .parse::<SocketAddr>()
                 .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
@@ -269,9 +277,11 @@ impl SipServerBuilder {
         let location_inspector = self.location_inspector;
         let dialplan_inspector = self.dialplan_inspector;
         let proxycall_inspector = self.proxycall_inspector;
+        let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
+
         let inner = Arc::new(SipServerInner {
-            app_state,
-            config: self.config.clone(),
+            rtp_config,
+            proxy_config: self.config.clone(),
             cancel_token,
             user_backend: user_backend,
             auth_backend: auth_backend,
@@ -280,6 +290,7 @@ impl SipServerBuilder {
             locator: locator,
             callrecord_sender: self.callrecord_sender,
             endpoint,
+            dialog_layer,
             location_inspector: location_inspector,
             dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
@@ -416,7 +427,7 @@ impl SipServer {
 
             let runnings_tx = runnings_tx.clone();
 
-            if let Some(max_concurrency) = self.inner.config.max_concurrency {
+            if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency {
                 if runnings_tx.load(Ordering::Relaxed) >= max_concurrency {
                     info!(
                         key = %tx.key,
@@ -537,10 +548,10 @@ impl SipServerInner {
         match callee_realm {
             "localhost" | "127.0.0.1" | "::1" => true,
             _ => {
-                if let Some(external_ip) = self.app_state.config.external_ip.as_ref() {
+                if let Some(external_ip) = self.rtp_config.external_ip.as_ref() {
                     return external_ip.starts_with(callee_realm);
                 }
-                if let Some(realms) = self.config.realms.as_ref() {
+                if let Some(realms) = self.proxy_config.realms.as_ref() {
                     for item in realms {
                         if item == callee_realm {
                             return true;

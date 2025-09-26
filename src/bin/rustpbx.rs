@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     }
     let _ = guard_holder; // keep the guard alive
     let state_builder = AppStateBuilder::new().with_config(config);
-    let (state, sip_server) = state_builder.build().await.expect("Failed to build app");
+    let state = state_builder.build().await.expect("Failed to build app");
 
     #[cfg(unix)]
     let sigterm = async {
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
 
     info!("starting rustpbx on {}", state.config.http_addr);
     select! {
-        _ = rustpbx::app::run(state, sip_server) => {}
+        _ = rustpbx::app::run(state) => {}
         _ = tokio::signal::ctrl_c() => {
             info!("received CTRL+C, shutting down");
         }

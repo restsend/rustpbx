@@ -23,23 +23,39 @@ pub fn router(app_state: AppState) -> Router<AppState> {
 }
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
-    let transactions = state
-        .useragent
-        .as_ref()
-        .map(|ua| ua.endpoint.inner.get_stats())
-        .map(|stats| {
+    let ua_stats = match state.useragent {
+        Some(ref ua) => {
+            let tx_stats = ua.endpoint.inner.get_stats();
             serde_json::json!({
-                "running": stats.running_transactions,
-                "finished": stats.finished_transactions,
-                "waiting_ack": stats.waiting_ack,
+                "transactions": serde_json::json!({
+                    "running": tx_stats.running_transactions,
+                    "finished": tx_stats.finished_transactions,
+                    "waiting_ack": tx_stats.waiting_ack,
+                }),
+                "dialogs": ua.dialog_layer.len()
             })
-        });
+        }
+        None => {
+            serde_json::json!({})
+        }
+    };
 
-    let dialogs = state
-        .useragent
-        .as_ref()
-        .map(|ua| ua.dialog_layer.len())
-        .unwrap_or_default();
+    let sipserver_stats = match state.sip_server {
+        Some(ref server) => {
+            let tx_stats = server.inner.endpoint.inner.get_stats();
+            serde_json::json!({
+                "transactions": serde_json::json!({
+                    "running": tx_stats.running_transactions,
+                    "finished": tx_stats.finished_transactions,
+                    "waiting_ack": tx_stats.waiting_ack,
+                }),
+                "dialogs": server.inner.dialog_layer.len()
+            })
+        }
+        None => {
+            serde_json::json!({})
+        }
+    };
 
     let health = serde_json::json!({
         "status": "running",
@@ -47,8 +63,8 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "version": crate::version::get_version_info(),
         "total": state.total_calls.load(Ordering::Relaxed),
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
-        "ua.transactions": transactions,
-        "ua.dialogs": dialogs,
+        "useragent": ua_stats,
+        "sipserver": sipserver_stats,
         "runnings": state.active_calls.lock().await.len(),
     });
     Json(health).into_response()

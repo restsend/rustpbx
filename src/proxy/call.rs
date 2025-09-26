@@ -93,7 +93,7 @@ impl CallModule {
     }
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
-        let dialog_layer = Arc::new(DialogLayer::new(server.endpoint.inner.clone()));
+        let dialog_layer = server.dialog_layer.clone();
         let inner = Arc::new(CallModuleInner {
             config,
             server,
@@ -119,9 +119,9 @@ impl CallModule {
         let session_id = format!("{}/{}", dialog_id, rand::random::<u32>());
 
         let media_config = MediaConfig::new()
-            .with_external_ip(self.inner.server.app_state.config.external_ip.clone())
-            .with_rtp_start_port(self.inner.server.app_state.config.rtp_start_port.clone())
-            .with_rtp_end_port(self.inner.server.app_state.config.rtp_end_port.clone());
+            .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
+            .with_rtp_start_port(self.inner.server.rtp_config.start_port.clone())
+            .with_rtp_end_port(self.inner.server.rtp_config.end_port.clone());
 
         let caller_is_same_realm = self
             .inner

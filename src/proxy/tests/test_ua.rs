@@ -529,7 +529,6 @@ mod tests {
     use tracing::Level;
 
     use super::*;
-    use crate::app::AppStateBuilder;
     use crate::config::{MediaProxyMode, ProxyConfig};
     use crate::proxy::{
         auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
@@ -605,18 +604,7 @@ mod tests {
                 .register_module("call", |inner, config| {
                     Ok(Box::new(CallModule::new(config, inner)))
                 });
-
-            let app_state = AppStateBuilder::new()
-                .with_config(crate::config::Config {
-                    ua: None,
-                    ..Default::default()
-                })
-                .build()
-                .await
-                .unwrap()
-                .0;
-            let server = builder.build(app_state).await?;
-
+            let server = builder.build().await?;
             tokio::spawn(async move {
                 server.serve().await.ok();
             });
@@ -1048,24 +1036,20 @@ a=setup:actpass"#.to_string()),
             sleep(Duration::from_millis(100)).await;
 
             let caller_fut = alice.make_call("bob", Some(sdp));
+            // Answer immediately upon receiving the IncomingCall event to avoid consuming it twice
             let callee_fut = async {
-                if wait_for_event(
-                    &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_)),
-                    1000,
-                )
-                .await
-                .unwrap()
-                {
-                    // auto-answer to allow caller to complete
+                let max_wait_ms = 2000u64;
+                let iterations = max_wait_ms / 25;
+                for _ in 0..iterations {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
                         if let TestUaEvent::IncomingCall(incoming_id) = event {
                             bob.answer_call(incoming_id, None).await.ok();
                             println!("  {} processed successfully", test_name);
-                            break;
+                            return;
                         }
                     }
+                    sleep(Duration::from_millis(25)).await;
                 }
             };
             let (caller_res, _) = tokio::join!(caller_fut, callee_fut);

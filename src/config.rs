@@ -213,6 +213,13 @@ impl Default for MediaProxyMode {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+pub struct RtpConfig {
+    pub external_ip: Option<String>,
+    pub start_port: Option<u16>,
+    pub end_port: Option<u16>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
@@ -247,6 +254,7 @@ pub struct ProxyConfig {
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default)]
     pub default: Option<DefaultRoute>,
+    pub rtp_config: Option<RtpConfig>,
 }
 
 pub enum RouteResult {
@@ -319,6 +327,7 @@ impl Default for ProxyConfig {
             routes: None,
             trunks: HashMap::new(),
             default: None,
+            rtp_config: None,
         }
     }
 }
@@ -389,6 +398,14 @@ impl Config {
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
         )?;
         Ok(config)
+    }
+
+    pub fn rtp_config(&self) -> RtpConfig {
+        RtpConfig {
+            external_ip: self.external_ip.clone(),
+            start_port: self.rtp_start_port.clone(),
+            end_port: self.rtp_end_port.clone(),
+        }
     }
 }
 

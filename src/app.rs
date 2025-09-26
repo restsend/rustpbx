@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 pub struct AppStateInner {
     pub config: Arc<Config>,
     pub useragent: Option<Arc<UserAgent>>,
+    pub sip_server: Option<SipServer>,
     pub token: CancellationToken,
     pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
@@ -151,7 +152,7 @@ impl AppStateBuilder {
         self
     }
 
-    pub async fn build(mut self) -> Result<(AppState, Option<SipServer>)> {
+    pub async fn build(mut self) -> Result<AppState> {
         let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
         let token = self
             .cancel_token
@@ -190,42 +191,45 @@ impl AppStateBuilder {
         } else {
             None
         };
-        let app_state = Arc::new(AppStateInner {
-            config: config.clone(),
-            useragent,
-            token: token.clone(),
-            active_calls: Arc::new(Mutex::new(HashMap::new())),
-            stream_engine,
-            callrecord_sender: callrecord_sender.clone(),
-            total_calls: AtomicU64::new(0),
-            total_failed_calls: AtomicU64::new(0),
-            uptime: chrono::Utc::now(),
-        });
 
         let sip_server = match self.proxy_builder {
-            Some(builder) => builder.build(app_state.clone()).await.ok(),
+            Some(builder) => builder.build().await.ok(),
             None => {
                 if let Some(proxy_config) = config.proxy.clone() {
                     let proxy_config = Arc::new(proxy_config);
                     let builder = SipServerBuilder::new(proxy_config)
                         .with_cancel_token(token.child_token())
                         .with_callrecord_sender(callrecord_sender.clone())
+                        .with_rtp_config(config.rtp_config())
                         .register_module("acl", AclModule::create)
                         .register_module("auth", AuthModule::create)
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
-                    builder.build(app_state.clone()).await.ok()
+                    builder.build().await.ok()
                 } else {
                     None
                 }
             }
         };
 
-        Ok((app_state, sip_server))
+        let app_state = Arc::new(AppStateInner {
+            config,
+            useragent,
+            sip_server,
+            token,
+            active_calls: Arc::new(Mutex::new(HashMap::new())),
+            stream_engine,
+            callrecord_sender,
+            total_calls: AtomicU64::new(0),
+            total_failed_calls: AtomicU64::new(0),
+            uptime: chrono::Utc::now(),
+        });
+
+        Ok(app_state)
     }
 }
 
-pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
+pub async fn run(state: AppState) -> Result<()> {
     let token = state.token.clone();
     let mut router = create_router(state.clone());
     let addr: SocketAddr = state.config.http_addr.parse()?;
@@ -237,8 +241,8 @@ pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
         }
     };
 
-    if let Some(sip_server) = sip_server {
-        if let Some(ref ws_handler) = sip_server.inner.config.ws_handler {
+    if let Some(ref sip_server) = state.sip_server {
+        if let Some(ref ws_handler) = sip_server.inner.proxy_config.ws_handler {
             info!(
                 "Registering WebSocket handler to sip server: {}",
                 ws_handler
@@ -257,15 +261,6 @@ pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
                 ),
             );
         }
-        tokio::spawn(async move {
-            info!("Proxy server started");
-            match sip_server.serve().await {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Proxy server error: {}", e);
-                }
-            }
-        });
     }
 
     let http_task = axum::serve(
@@ -293,6 +288,18 @@ pub async fn run(state: AppState, sip_server: Option<SipServer>) -> Result<()> {
             if let Err(e) = ua_result {
                 tracing::error!("User agent server error: {}", e);
                 return Err(anyhow::anyhow!("User agent server error: {}", e));
+            }
+        }
+        prx_result = async {
+            if let Some(sip_server) = &state.sip_server {
+                sip_server.serve().await
+            } else {
+                token.cancelled().await;
+                Ok(())
+            }
+        }  => {
+            if let Err(e) = prx_result {
+                tracing::error!("Sip server error: {}", e);
             }
         }
         _ = token.cancelled() => {

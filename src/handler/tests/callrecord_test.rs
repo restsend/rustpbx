@@ -55,7 +55,7 @@ async fn test_call_record_creation() {
     });
 
     // Build app state
-    let (state, _) = AppStateBuilder::new()
+    let state = AppStateBuilder::new()
         .with_config(config)
         .with_stream_engine(Arc::new(StreamEngine::default()))
         .build()

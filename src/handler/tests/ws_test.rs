@@ -78,8 +78,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
                 .with_config(config)
                 .with_callrecord_sender(callrecord_sender)
                 .build()
-                .await?
-                .0,
+                .await?,
         );
 
     // Start the server
