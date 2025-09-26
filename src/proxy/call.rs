@@ -168,23 +168,10 @@ impl CallModule {
                 .map_err(|e| (anyhow::anyhow!(e), None))?,
         };
 
-        let mut targets = DialStrategy::Sequential(vec![Location {
+        let targets = DialStrategy::Sequential(vec![Location {
             aor: callee_uri.clone(),
             ..Default::default()
         }]);
-
-        if let Some(location_inspector) = self.inner.server.location_inspector.as_ref() {
-            match location_inspector
-                .inspect_locations(targets, original)
-                .await
-            {
-                Ok(t) => targets = t,
-                Err(e) => {
-                    warn!(callee=%callee_uri, "failed to inspect location: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
 
         let dialplan = Dialplan::new(session_id, original.clone(), direction)
             .with_caller_contact(caller_contact)
@@ -225,74 +212,74 @@ impl CallModule {
         } else {
             dialplan
         };
-        self.process_dialplan_targets(dialplan).await
-    }
-
-    async fn process_dialplan_targets(
-        &self,
-        mut dialplan: Dialplan,
-    ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
-        let targets = match dialplan.targets {
-            DialStrategy::Parallel(ref targets) => targets.clone(),
-            DialStrategy::Sequential(ref targets) => targets.clone(),
-        };
-
-        let mut new_locations = vec![];
-        for mut target in targets.into_iter() {
-            let target_uri = &target.aor;
-            let target_realm = target.aor.host().to_string();
-            if !self.inner.server.is_same_realm(&target_realm).await {
-                debug!(session_id = ?dialplan.session_id, callee = %target_uri, callee_realm = target_realm, "target is external realm, skip locator");
-                new_locations.push(target);
-                continue;
-            }
-
-            let locations = self
-                .inner
-                .server
-                .locator
-                .lookup(&target_uri)
-                .await
-                .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
-
-            if locations.is_empty() {
-                match self
-                    .inner
-                    .server
-                    .user_backend
-                    .get_user(&target_uri.user().unwrap_or_default(), Some(&target_realm))
-                    .await
-                {
-                    Ok(Some(_)) => {
-                        info!(session_id = ?dialplan.session_id, callee = %target_uri, "user offline in locator, abort now");
-                        return Err((
-                            anyhow::anyhow!("User offline"),
-                            Some(rsip::StatusCode::TemporarilyUnavailable),
-                        ));
-                    }
-                    Ok(None) => {
-                        info!(session_id = ?dialplan.session_id, callee = %target_uri, "user not found in auth backend, continue");
-                    }
-                    Err(e) => {
-                        warn!(session_id = ?dialplan.session_id, callee = %target_uri, "failed to lookup user in auth backend: {}", e);
-                    }
-                }
-                target.abort_on_route_invite_missing =
-                    Some(rsip::StatusCode::TemporarilyUnavailable); // abort if route invite is missing
-                new_locations.push(target);
-            } else {
-                debug!(session_id = ?dialplan.session_id, callee = %target_uri, "resolved to {} locations", locations.len());
-                new_locations.extend(locations);
-            }
-        }
-
-        dialplan.targets = if let DialStrategy::Parallel(_) = dialplan.targets {
-            DialStrategy::Parallel(new_locations)
-        } else {
-            DialStrategy::Sequential(new_locations)
-        };
         Ok(dialplan)
     }
+
+    // async fn process_dialplan_targets(
+    //     &self,
+    //     mut dialplan: Dialplan,
+    // ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
+    //     let targets = match dialplan.targets {
+    //         DialStrategy::Parallel(ref targets) => targets.clone(),
+    //         DialStrategy::Sequential(ref targets) => targets.clone(),
+    //     };
+
+    //     let mut new_locations = vec![];
+    //     for mut target in targets.into_iter() {
+    //         let target_uri = &target.aor;
+    //         let target_realm = target.aor.host().to_string();
+    //         if !self.inner.server.is_same_realm(&target_realm).await {
+    //             debug!(session_id = ?dialplan.session_id, callee = %target_uri, callee_realm = target_realm, "target is external realm, skip locator");
+    //             new_locations.push(target);
+    //             continue;
+    //         }
+
+    //         let locations = self
+    //             .inner
+    //             .server
+    //             .locator
+    //             .lookup(&target_uri)
+    //             .await
+    //             .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
+
+    //         if locations.is_empty() {
+    //             match self
+    //                 .inner
+    //                 .server
+    //                 .user_backend
+    //                 .get_user(&target_uri.user().unwrap_or_default(), Some(&target_realm))
+    //                 .await
+    //             {
+    //                 Ok(Some(_)) => {
+    //                     info!(session_id = ?dialplan.session_id, callee = %target_uri, "user offline in locator, abort now");
+    //                     return Err((
+    //                         anyhow::anyhow!("User offline"),
+    //                         Some(rsip::StatusCode::TemporarilyUnavailable),
+    //                     ));
+    //                 }
+    //                 Ok(None) => {
+    //                     info!(session_id = ?dialplan.session_id, callee = %target_uri, "user not found in auth backend, continue");
+    //                 }
+    //                 Err(e) => {
+    //                     warn!(session_id = ?dialplan.session_id, callee = %target_uri, "failed to lookup user in auth backend: {}", e);
+    //                 }
+    //             }
+    //             target.abort_on_route_invite_missing =
+    //                 Some(rsip::StatusCode::TemporarilyUnavailable); // abort if route invite is missing
+    //             new_locations.push(target);
+    //         } else {
+    //             debug!(session_id = ?dialplan.session_id, callee = %target_uri, "resolved to {} locations", locations.len());
+    //             new_locations.extend(locations);
+    //         }
+    //     }
+
+    //     dialplan.targets = if let DialStrategy::Parallel(_) = dialplan.targets {
+    //         DialStrategy::Parallel(new_locations)
+    //     } else {
+    //         DialStrategy::Sequential(new_locations)
+    //     };
+    //     Ok(dialplan)
+    // }
 
     pub(crate) async fn handle_invite(
         &self,
@@ -323,7 +310,7 @@ impl CallModule {
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
             .with_cancel_token(cancel_token);
 
-        let proxy_call = builder.build(self.inner.dialog_layer.clone());
+        let proxy_call = builder.build(self.inner.server.clone());
         let proxy_call = if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
             match inspector.on_start(proxy_call).await {
                 Ok(call) => call,

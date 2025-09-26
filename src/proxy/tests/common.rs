@@ -56,7 +56,6 @@ pub async fn create_test_server_with_config(
         callrecord_sender: None,
         endpoint,
         dialog_layer,
-        location_inspector: None,
         dialplan_inspector: None,
         create_route_invite: None,
         proxycall_inspector: None,

@@ -4,7 +4,7 @@ use super::{
     user::{UserBackend, create_user_backend},
 };
 use crate::{
-    call::{LocationInspector, TransactionCookie},
+    call::TransactionCookie,
     callrecord::CallRecordSender,
     config::{ProxyConfig, RtpConfig},
     proxy::{
@@ -53,7 +53,6 @@ pub struct SipServerInner {
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
     pub dialog_layer: Arc<DialogLayer>,
-    pub location_inspector: Option<Box<dyn LocationInspector>>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
 }
 
@@ -76,7 +75,6 @@ pub struct SipServerBuilder {
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
     message_inspector: Option<Box<dyn MessageInspector>>,
-    location_inspector: Option<Box<dyn LocationInspector>>,
     dialplan_inspector: Option<Box<dyn DialplanInspector>>,
     proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
@@ -96,7 +94,6 @@ impl SipServerBuilder {
             locator: None,
             callrecord_sender: None,
             message_inspector: None,
-            location_inspector: None,
             dialplan_inspector: None,
             create_route_invite: None,
         }
@@ -129,10 +126,7 @@ impl SipServerBuilder {
         self.locator = Some(locator);
         self
     }
-    pub fn with_location_inspector(mut self, inspector: Box<dyn LocationInspector>) -> Self {
-        self.location_inspector = Some(inspector);
-        self
-    }
+
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
@@ -274,7 +268,6 @@ impl SipServerBuilder {
         let endpoint = endpoint_builder.build();
 
         let call_router = self.call_router;
-        let location_inspector = self.location_inspector;
         let dialplan_inspector = self.dialplan_inspector;
         let proxycall_inspector = self.proxycall_inspector;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
@@ -291,7 +284,6 @@ impl SipServerBuilder {
             callrecord_sender: self.callrecord_sender,
             endpoint,
             dialog_layer,
-            location_inspector: location_inspector,
             dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
         });
