@@ -36,9 +36,12 @@ pub trait CallRouter: Send + Sync {
 
 #[async_trait]
 pub trait DialplanInspector: Send + Sync {
-    async fn inspect_dialplan(&self, dialplan: Dialplan, _original: &rsip::Request) -> Dialplan {
-        dialplan
-    }
+    async fn inspect_dialplan(
+        &self,
+        dialplan: Dialplan,
+        cookie: &TransactionCookie,
+        original: &rsip::Request,
+    ) -> Dialplan;
 }
 
 #[async_trait]
@@ -271,7 +274,9 @@ impl CallModule {
         };
 
         let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
-            inspector.inspect_dialplan(dialplan, &tx.original).await
+            inspector
+                .inspect_dialplan(dialplan, &cookie, &tx.original)
+                .await
         } else {
             dialplan
         };
