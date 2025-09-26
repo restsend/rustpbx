@@ -8,6 +8,7 @@ use crate::{
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
     },
     net_tool::is_private_ip,
+    proxy::server::SipServerRef,
 };
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -35,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub struct ProxyCall {
+    server: SipServerRef,
     start_time: Instant,
     session_id: String,
     dialplan: Dialplan,
@@ -73,7 +75,7 @@ impl ProxyCallBuilder {
         self
     }
 
-    pub fn build(self, dialog_layer: Arc<DialogLayer>) -> ProxyCall {
+    pub fn build(self, server: SipServerRef) -> ProxyCall {
         let dialplan = self.dialplan;
         let cancel_token = self.cancel_token.unwrap_or_default();
         let session_id = dialplan
@@ -81,8 +83,9 @@ impl ProxyCallBuilder {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
+        let dialog_layer = server.dialog_layer.clone();
         ProxyCall {
+            server,
             start_time: Instant::now(),
             session_id,
             dialplan,
@@ -952,7 +955,7 @@ impl ProxyCall {
             headers: target.headers.clone(),
         };
 
-        let invite_option = if let Some(ref route_invite) = self.dialplan.route_invite {
+        let mut invite_option = if let Some(ref route_invite) = self.dialplan.route_invite {
             let route_result = route_invite
                 .route_invite(
                     invite_option,
@@ -969,13 +972,9 @@ impl ProxyCall {
                 })?;
             match route_result {
                 RouteResult::NotHandled(option) => {
-                    let abort = target.abort_on_route_invite_missing.is_some();
-                    info!(session_id = self.session_id, %target, abort,
+                    info!(session_id = self.session_id, %target,
                         "Routing function returned NotHandled"
                     );
-                    if let Some(ref code) = target.abort_on_route_invite_missing {
-                        return Err((code.clone(), None));
-                    }
                     option
                 }
                 RouteResult::Forward(option) => option,
@@ -988,11 +987,48 @@ impl ProxyCall {
             invite_option
         };
 
+        let callee_uri = &invite_option.callee;
+        let callee_realm = callee_uri.host().to_string();
+        if self.server.is_same_realm(&callee_realm).await {
+            let dialplan = &self.dialplan;
+            match self
+                .server
+                .user_backend
+                .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                .await
+            {
+                Ok(Some(_)) => {
+                    let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
+                        (
+                            rsip::StatusCode::TemporarilyUnavailable,
+                            Some(e.to_string()),
+                        )
+                    })?;
+                    if locations.is_empty() {
+                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user offline in locator, abort now");
+                        return Err((
+                            rsip::StatusCode::TemporarilyUnavailable,
+                            Some("User offline".to_string()),
+                        ));
+                    } else {
+                        invite_option.destination = locations[0].destination.clone();
+                    }
+                }
+                Ok(None) => {
+                    info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, continue");
+                }
+                Err(e) => {
+                    warn!(session_id = ?dialplan.session_id, callee = %callee_uri, "failed to lookup user in auth backend: {}", e);
+                    return Err((rsip::StatusCode::ServerInternalError, Some(e.to_string())));
+                }
+            }
+        }
+
         let destination = invite_option
             .destination
             .as_ref()
             .map(|d| d.to_string())
-            .unwrap_or_else(|| "*".to_string());
+            .unwrap_or_else(|| "?".to_string());
 
         debug!(
             session_id = %self.session_id, %caller, %target, destination,

@@ -5,7 +5,6 @@ use crate::{
     transcription::TranscriptionOption,
 };
 use anyhow::Result;
-use async_trait::async_trait;
 use rsip::StatusCode;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
@@ -222,15 +221,6 @@ pub enum Command {
     },
 }
 
-#[async_trait]
-pub trait LocationInspector: Send + Sync {
-    async fn inspect_locations(
-        &self,
-        targets: DialStrategy,
-        original: &rsip::Request,
-    ) -> Result<DialStrategy, (anyhow::Error, Option<rsip::StatusCode>)>;
-}
-
 #[derive(Clone, Default)]
 pub struct Location {
     pub aor: rsip::Uri,
@@ -240,7 +230,6 @@ pub struct Location {
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
     pub headers: Option<Vec<rsip::Header>>,
-    pub abort_on_route_invite_missing: Option<StatusCode>,
 }
 
 impl std::fmt::Display for Location {
