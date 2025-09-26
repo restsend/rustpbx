@@ -110,6 +110,7 @@ struct CallSession {
     early_media_sent: bool,
     media_stream: Arc<MediaStream>, // Always created now
     use_media_proxy: bool,          // Flag to control whether to use media stream proxy
+    external_addr: Option<IpAddr>,  // Optional external IP address for media
 }
 
 #[derive(Debug)]
@@ -143,6 +144,7 @@ impl CallSession {
         server_dialog: ServerInviteDialog,
         use_media_proxy: bool,
         event_sender: EventSender,
+        external_addr: Option<IpAddr>,
     ) -> Self {
         let stream = MediaStreamBuilder::new(event_sender)
             .with_id(session_id)
@@ -163,6 +165,7 @@ impl CallSession {
             early_media_sent: false,
             media_stream: Arc::new(stream),
             use_media_proxy,
+            external_addr,
         }
     }
 
@@ -186,7 +189,6 @@ impl CallSession {
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
         let track_id = "caller-track".to_string();
         let config = TrackConfig::default();
-
         let mut track: Box<dyn Track> = if Self::is_webrtc_sdp(&orig_offer_sdp) {
             Box::new(WebrtcTrack::new(
                 self.media_stream.cancel_token.clone(),
@@ -195,12 +197,13 @@ impl CallSession {
                 None,
             ))
         } else {
-            Box::new(
-                RtpTrackBuilder::new(track_id.clone(), config)
-                    .with_cancel_token(self.media_stream.cancel_token.clone())
-                    .build()
-                    .await?,
-            )
+            let track = RtpTrackBuilder::new(track_id.clone(), config)
+                .with_cancel_token(self.media_stream.cancel_token.clone());
+            if let Some(ref addr) = self.external_addr {
+                Box::new(track.with_external_addr(addr.clone()).build().await?)
+            } else {
+                Box::new(track.build().await?)
+            }
         };
 
         let processed_answer = if let Some(ref offer) = self.caller_offer {
@@ -218,18 +221,14 @@ impl CallSession {
         Ok(processed_answer)
     }
 
-    async fn create_callee_track(
-        &mut self,
-        is_webrtc: bool,
-        external_addr: Option<IpAddr>,
-    ) -> Result<String> {
+    async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
         let track_id = "callee-track".to_string();
         let config = TrackConfig::default();
         let (offer, track) = if !is_webrtc {
             let track = RtpTrackBuilder::new(track_id.clone(), config)
                 .with_cancel_token(self.media_stream.cancel_token.clone());
-            let track = if let Some(addr) = external_addr {
-                track.with_external_addr(addr).build().await?
+            let track = if let Some(ref addr) = self.external_addr {
+                track.with_external_addr(addr.clone()).build().await?
             } else {
                 track.build().await?
             };
@@ -535,26 +534,24 @@ impl ProxyCall {
         let all_webrtc_target = self.dialplan.all_webrtc_target();
         info!(session_id = %self.session_id, use_media_proxy, all_webrtc_target,  "starting proxy call processing");
 
+        let external_addr = self
+            .dialplan
+            .media
+            .external_ip
+            .as_ref()
+            .map(|ip| ip.parse().ok())
+            .flatten();
         let mut session = CallSession::new(
             self.cancel_token.child_token(),
             self.session_id.clone(),
             server_dialog.clone(),
             use_media_proxy,
             self.event_sender.clone(),
+            external_addr,
         );
         if use_media_proxy {
-            let external_addr = self
-                .dialplan
-                .media
-                .external_ip
-                .as_ref()
-                .map(|ip| ip.parse().ok())
-                .flatten();
             session.caller_offer = Some(offer_sdp);
-            session.callee_offer = session
-                .create_callee_track(all_webrtc_target, external_addr)
-                .await
-                .ok();
+            session.callee_offer = session.create_callee_track(all_webrtc_target).await.ok();
         } else {
             session.caller_offer = Some(offer_sdp.clone());
             session.callee_offer = Some(offer_sdp);
