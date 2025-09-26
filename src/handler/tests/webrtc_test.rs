@@ -87,7 +87,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     tokio::spawn(async move {
         callrecord.serve().await;
     });
-    let (state, _) = AppStateBuilder::new()
+    let state = AppStateBuilder::new()
         .with_config(config)
         .with_callrecord_sender(callrecord_sender)
         .build()

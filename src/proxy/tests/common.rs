@@ -1,6 +1,5 @@
-use crate::app::AppStateBuilder;
-use crate::call::user::SipUser;
-use crate::config::ProxyConfig;
+use crate::call::SipUser;
+use crate::config::{ProxyConfig, RtpConfig};
 use crate::proxy::locator::MemoryLocator;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
@@ -8,6 +7,7 @@ use rsip::Header;
 use rsip::services::DigestGenerator;
 use rsip::{HostWithPort, prelude::*};
 use rsipstack::EndpointBuilder;
+use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
@@ -42,20 +42,12 @@ pub async fn create_test_server_with_config(
     let locator = Box::new(MemoryLocator::new());
     let config = Arc::new(config);
     let endpoint = EndpointBuilder::new().build();
+    let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
     // Create server inner directly
     let server_inner = Arc::new(SipServerInner {
-        app_state: AppStateBuilder::new()
-            .with_config(crate::config::Config {
-                proxy: None,
-                ua: None,
-                ..Default::default()
-            })
-            .build()
-            .await
-            .unwrap()
-            .0,
-        config: config.clone(),
+        rtp_config: RtpConfig::default(),
+        proxy_config: config.clone(),
         cancel_token: CancellationToken::new(),
         user_backend: user_backend,
         auth_backend: None,
@@ -63,6 +55,7 @@ pub async fn create_test_server_with_config(
         locator: locator,
         callrecord_sender: None,
         endpoint,
+        dialog_layer,
         location_inspector: None,
         dialplan_inspector: None,
         create_route_invite: None,

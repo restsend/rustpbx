@@ -1,4 +1,3 @@
-use crate::app::AppStateBuilder;
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::acl::AclModule;
@@ -68,19 +67,7 @@ async fn test_proxy_full_flow() {
         .register_module("registrar", RegistrarModule::create)
         .register_module("call", CallModule::create);
 
-    let app_state = AppStateBuilder::new()
-        .with_config(crate::config::Config {
-            ua: None,
-            ..Default::default()
-        })
-        .build()
-        .await
-        .unwrap()
-        .0;
-    let _proxy = proxy_builder
-        .build(app_state)
-        .await
-        .expect("Failed to build proxy");
+    let _proxy = proxy_builder.build().await.expect("Failed to build proxy");
 
     // Set up communication channel between the tasks
     let (tx, mut rx) = mpsc::channel::<String>(10);

@@ -1,5 +1,4 @@
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::app::AppStateBuilder;
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::{
@@ -91,16 +90,6 @@ impl TestProxyServer {
 
         let locator = MemoryLocator::new();
         let cancel_token = CancellationToken::new();
-
-        let app_state = AppStateBuilder::new()
-            .with_config(crate::config::Config {
-                ua: None,
-                ..Default::default()
-            })
-            .build()
-            .await
-            .unwrap()
-            .0;
         // Build server
         let mut builder = SipServerBuilder::new(config)
             .with_user_backend(Box::new(user_backend))
@@ -118,7 +107,7 @@ impl TestProxyServer {
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
             });
-        let server = builder.build(app_state).await?;
+        let server = builder.build().await?;
 
         // Start server
         tokio::spawn(async move {
