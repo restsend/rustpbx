@@ -55,12 +55,13 @@ pub struct CallParams {
     pub server_side_track: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveCallType {
     Webrtc,
     B2bua,
     WebSocket,
+    #[default]
     Sip,
 }
 #[derive(Default)]
