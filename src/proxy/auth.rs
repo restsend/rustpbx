@@ -180,6 +180,12 @@ impl ProxyModule for AuthModule {
             return Ok(ProxyAction::Continue);
         }
 
+        if cookie.is_from_trunk() {
+            let tx_user = SipUser::try_from(&*tx)?;
+            cookie.set_user(tx_user);
+            return Ok(ProxyAction::Continue);
+        }
+
         if let Some(backend) = self.server.auth_backend.as_ref() {
             let tx_user = SipUser::try_from(&*tx)?;
             match backend.authenticate(&tx.original).await {

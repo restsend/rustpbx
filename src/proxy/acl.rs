@@ -102,6 +102,7 @@ impl AclRule {
 }
 
 struct AclModuleInner {
+    config: Arc<ProxyConfig>,
     rules: Vec<AclRule>,
     ua_white_list: HashSet<String>,
     ua_black_list: HashSet<String>,
@@ -137,11 +138,25 @@ impl AclModule {
         let acl_rules = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
         Self {
             inner: Arc::new(AclModuleInner {
+                config,
                 rules: acl_rules,
                 ua_white_list,
                 ua_black_list,
             }),
         }
+    }
+
+    pub fn is_from_trunk(&self, addr: &IpAddr) -> Option<&String> {
+        for (name, trunk) in &self.inner.config.trunks {
+            let dest_addr: rsip::Uri = match trunk.dest.as_str().try_into() {
+                Ok(uri) => uri,
+                Err(_) => continue,
+            };
+            if dest_addr.host_with_port.host.try_into().ok() == Some(*addr) {
+                return Some(name);
+            }
+        }
+        None
     }
 
     pub fn is_allowed(&self, addr: &IpAddr) -> bool {
@@ -280,7 +295,19 @@ impl ProxyModule for AclModule {
         let via = tx.original.via_header()?;
         let (_, target) =
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
-        if self.is_allowed(&target.host.try_into()?) {
+
+        let from_addr = target.host.try_into()?;
+        if let Some(trunk_name) = self.is_from_trunk(&from_addr) {
+            debug!(
+                method = tx.original.method().to_string(),
+                via = via.value(),
+                "IP is from trunk, bypassing acl check"
+            );
+            cookie.set_source_trunk(trunk_name);
+            return Ok(ProxyAction::Continue);
+        }
+
+        if self.is_allowed(&from_addr) {
             return Ok(ProxyAction::Continue);
         }
         info!(
