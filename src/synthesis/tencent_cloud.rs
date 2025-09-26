@@ -79,7 +79,7 @@ struct WebSocketResult {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct TencentSubtitle {
+pub(super) struct TencentSubtitle {
     text: String,
     begin_time: u32,
     end_time: u32,
