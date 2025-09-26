@@ -549,7 +549,9 @@ impl SipServerInner {
             "localhost" | "127.0.0.1" | "::1" => true,
             _ => {
                 if let Some(external_ip) = self.rtp_config.external_ip.as_ref() {
-                    return external_ip.starts_with(callee_realm);
+                    if external_ip.starts_with(callee_realm) {
+                        return true;
+                    }
                 }
                 if let Some(realms) = self.proxy_config.realms.as_ref() {
                     for item in realms {
