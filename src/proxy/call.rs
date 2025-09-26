@@ -41,7 +41,7 @@ pub trait DialplanInspector: Send + Sync {
         dialplan: Dialplan,
         cookie: &TransactionCookie,
         original: &rsip::Request,
-    ) -> Dialplan;
+    ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
 #[async_trait]
@@ -274,9 +274,21 @@ impl CallModule {
         };
 
         let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
-            inspector
+            match inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
                 .await
+            {
+                Ok(d) => d,
+                Err((e, code)) => {
+                    let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
+                    let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
+                    warn!(%code, key = %tx.key,"failed to inspect dialplan: {}", reason_phrase);
+                    tx.reply_with(code, vec![reason_phrase], None)
+                        .await
+                        .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
+                    return Err(e);
+                }
+            }
         } else {
             dialplan
         };
