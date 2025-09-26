@@ -188,7 +188,7 @@ pub enum Command {
         option: Option<SynthesisOption>,
         wait_input_timeout: Option<u32>,
         /// if true, the text is base64 encoded pcm samples
-        base64: Option<bool>, 
+        base64: Option<bool>,
     },
     Play {
         url: String,

@@ -72,7 +72,7 @@ impl<'a> CallRecordEvent<'a> {
     }
 }
 #[skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
     pub option: Option<CallOption>,

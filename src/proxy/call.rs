@@ -7,6 +7,8 @@ use crate::call::MediaConfig;
 use crate::call::RouteInvite;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
+use crate::callrecord::CallRecord;
+use crate::callrecord::CallRecordHangupReason;
 use crate::config::ProxyConfig;
 use crate::config::RouteResult;
 use crate::proxy::proxy_call::ProxyCall;
@@ -15,6 +17,7 @@ use crate::proxy::routing::matcher::match_invite;
 use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use chrono::Utc;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
@@ -165,58 +168,10 @@ impl CallModule {
                 .map_err(|e| (anyhow::anyhow!(e), None))?,
         };
 
-        let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
-            .with_caller_contact(caller_contact)
-            .with_caller(caller_uri)
-            .with_media(media_config)
-            .with_route_invite(route_invite);
-
-        // Check if this is an external realm
-        let mut targets = if !self.inner.server.is_same_realm(&callee_realm).await {
-            info!(callee=%callee_uri, callee_realm, "Creating dialplan for external realm");
-            DialStrategy::Sequential(vec![Location {
-                aor: callee_uri.clone(),
-                ..Default::default()
-            }])
-        } else {
-            let mut locations = self
-                .inner
-                .server
-                .locator
-                .lookup(&callee_uri)
-                .await
-                .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
-
-            if locations.is_empty() {
-                match self
-                    .inner
-                    .server
-                    .user_backend
-                    .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
-                    .await
-                {
-                    Ok(Some(_)) => {
-                        info!(%dialog_id, callee = %callee_uri, "user offline in locator, abort now");
-                        return Err((
-                            anyhow::anyhow!("User offline"),
-                            Some(rsip::StatusCode::TemporarilyUnavailable),
-                        ));
-                    }
-                    Ok(None) => {
-                        info!(%dialog_id, callee = %callee_uri, "user not found in auth backend, continue");
-                    }
-                    Err(e) => {
-                        warn!(%dialog_id, callee=%callee_uri, "failed to lookup user in auth backend: {}", e);
-                    }
-                }
-                locations.push(Location {
-                    aor: callee_uri.clone(),
-                    abort_on_route_invite_missing: Some(rsip::StatusCode::TemporarilyUnavailable), // abort if route invite is missing
-                    ..Default::default()
-                });
-            }
-            DialStrategy::Sequential(locations)
-        };
+        let mut targets = DialStrategy::Sequential(vec![Location {
+            aor: callee_uri.clone(),
+            ..Default::default()
+        }]);
 
         if let Some(location_inspector) = self.inner.server.location_inspector.as_ref() {
             match location_inspector
@@ -231,7 +186,108 @@ impl CallModule {
             }
         }
 
-        dialplan = dialplan.with_targets(targets);
+        let dialplan = Dialplan::new(session_id, original.clone(), direction)
+            .with_caller_contact(caller_contact)
+            .with_caller(caller_uri)
+            .with_media(media_config)
+            .with_route_invite(route_invite)
+            .with_targets(targets);
+        Ok(dialplan)
+    }
+
+    async fn build_dialplan(
+        &self,
+        tx: &mut Transaction,
+        cookie: TransactionCookie,
+        caller: &SipUser,
+    ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
+        let route_invite = match self.inner.server.create_route_invite.as_ref() {
+            Some(f) => {
+                f(self.inner.server.clone(), self.inner.config.clone()).map_err(|e| (e, None))?
+            }
+            None => Box::new(DefaultRouteInvite {
+                routing_state: self.inner.routing_state.clone(),
+                config: self.inner.config.clone(),
+            }) as Box<dyn RouteInvite>,
+        };
+
+        let dialplan = if let Some(resolver) = self.inner.server.call_router.as_ref() {
+            resolver.resolve(&tx.original, route_invite, &caller).await
+        } else {
+            self.default_resolve(&tx.original, route_invite, &caller)
+                .await
+        }?;
+
+        let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
+            inspector
+                .inspect_dialplan(dialplan, &cookie, &tx.original)
+                .await?
+        } else {
+            dialplan
+        };
+        self.process_dialplan_targets(dialplan).await
+    }
+
+    async fn process_dialplan_targets(
+        &self,
+        mut dialplan: Dialplan,
+    ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
+        let targets = match dialplan.targets {
+            DialStrategy::Parallel(ref targets) => targets.clone(),
+            DialStrategy::Sequential(ref targets) => targets.clone(),
+        };
+
+        let mut new_locations = vec![];
+        for mut target in targets.into_iter() {
+            let target_uri = &target.aor;
+            let target_realm = target.aor.host().to_string();
+            if !self.inner.server.is_same_realm(&target_realm).await {
+                new_locations.push(target);
+                continue;
+            }
+
+            let locations = self
+                .inner
+                .server
+                .locator
+                .lookup(&target_uri)
+                .await
+                .map_err(|e| (e, Some(rsip::StatusCode::TemporarilyUnavailable)))?;
+
+            if locations.is_empty() {
+                match self
+                    .inner
+                    .server
+                    .user_backend
+                    .get_user(&target_uri.user().unwrap_or_default(), Some(&target_realm))
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        info!(session_id = ?dialplan.session_id, callee = %target_uri, "user offline in locator, abort now");
+                        return Err((
+                            anyhow::anyhow!("User offline"),
+                            Some(rsip::StatusCode::TemporarilyUnavailable),
+                        ));
+                    }
+                    Ok(None) => {
+                        info!(session_id = ?dialplan.session_id, callee = %target_uri, "user not found in auth backend, continue");
+                    }
+                    Err(e) => {
+                        warn!(session_id = ?dialplan.session_id, callee = %target_uri, "failed to lookup user in auth backend: {}", e);
+                    }
+                }
+                target.abort_on_route_invite_missing =
+                    Some(rsip::StatusCode::TemporarilyUnavailable); // abort if route invite is missing
+                new_locations.push(target);
+            } else {
+                new_locations.extend(locations);
+            }
+        }
+        dialplan.targets = if let DialStrategy::Parallel(_) = dialplan.targets {
+            DialStrategy::Parallel(new_locations)
+        } else {
+            DialStrategy::Sequential(new_locations)
+        };
         Ok(dialplan)
     }
 
@@ -245,52 +301,18 @@ impl CallModule {
             .get_user()
             .ok_or_else(|| anyhow::anyhow!("Missing caller user in transaction cookie"))?;
 
-        let route_invite = match self.inner.server.create_route_invite.as_ref() {
-            Some(f) => f(self.inner.server.clone(), self.inner.config.clone())?,
-            None => Box::new(DefaultRouteInvite {
-                routing_state: self.inner.routing_state.clone(),
-                config: self.inner.config.clone(),
-            }) as Box<dyn RouteInvite>,
-        };
-
-        let r = if let Some(resolver) = self.inner.server.call_router.as_ref() {
-            resolver.resolve(&tx.original, route_invite, &caller).await
-        } else {
-            self.default_resolve(&tx.original, route_invite, &caller)
-                .await
-        };
-
-        let dialplan = match r {
-            Ok(dialplan) => dialplan,
+        let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
+            Ok(d) => d,
             Err((e, code)) => {
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
-                warn!(%code, key = %tx.key,"failed to resolve dialplan: {}", reason_phrase);
+                warn!(%code, key = %tx.key,"failed to build dialplan: {}", reason_phrase);
+                self.record_failed_call(tx, code.clone()).await.ok();
                 tx.reply_with(code, vec![reason_phrase], None)
                     .await
                     .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
                 return Err(e);
             }
-        };
-
-        let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
-            match inspector
-                .inspect_dialplan(dialplan, &cookie, &tx.original)
-                .await
-            {
-                Ok(d) => d,
-                Err((e, code)) => {
-                    let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
-                    let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
-                    warn!(%code, key = %tx.key,"failed to inspect dialplan: {}", reason_phrase);
-                    tx.reply_with(code, vec![reason_phrase], None)
-                        .await
-                        .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
-                    return Err(e);
-                }
-            }
-        } else {
-            dialplan
         };
 
         // Create event sender for media stream events
@@ -304,6 +326,7 @@ impl CallModule {
                 Ok(call) => call,
                 Err((code, reason_phrase)) => {
                     warn!(%code, key = %tx.key,"failed to proxy call {}", reason_phrase);
+                    self.record_failed_call(tx, code.clone()).await.ok();
                     let reason_phrase = rsip::Header::Other("Reason".into(), reason_phrase);
                     tx.reply_with(code, vec![reason_phrase], None)
                         .await
@@ -342,6 +365,37 @@ impl CallModule {
             }
         };
         dialog.handle(tx).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn record_failed_call(
+        &self,
+        tx: &Transaction,
+        status_code: rsip::StatusCode,
+    ) -> Result<()> {
+        if let Some(sender) = self.inner.server.callrecord_sender.as_ref() {
+            let dialog_id = DialogId::try_from(&tx.original)?;
+            let now = Utc::now();
+            let caller = tx.original.from_header()?.uri()?.to_string();
+            let callee = tx.original.to_header()?.uri()?.to_string();
+            let offer = Some(String::from_utf8_lossy(&tx.original.body).to_string());
+            let record = CallRecord {
+                call_type: crate::call::ActiveCallType::Sip,
+                call_id: dialog_id.to_string(),
+                start_time: now.clone(),
+                end_time: now,
+                caller,
+                callee,
+                status_code: status_code.into(),
+                offer,
+                hangup_reason: Some(CallRecordHangupReason::BySystem),
+                ..Default::default()
+            };
+
+            if let Err(e) = sender.send(record) {
+                warn!(error=%e, "failed to send call record");
+            }
+        }
+        Ok(())
     }
 }
 
