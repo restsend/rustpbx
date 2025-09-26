@@ -9,12 +9,17 @@ use super::{
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
-    call::{CallOption, EouOption}, event::EventSender, synthesis::{
-        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsClient, VoiceApiTtsClient,
-    }, transcription::{
+    TrackId,
+    call::{CallOption, EouOption},
+    event::EventSender,
+    synthesis::{
+        AliyunTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
+        TencentCloudTtsBasicClient, TencentCloudTtsClient, VoiceApiTtsClient,
+    },
+    transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
         TranscriptionOption, TranscriptionType, VoiceApiAsrClientBuilder,
-    }, TrackId
+    },
 };
 use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -92,6 +97,10 @@ impl Default for StreamEngine {
         engine.register_tts(SynthesisType::Aliyun, AliyunTtsClient::create);
         engine.register_tts(SynthesisType::TencentCloud, TencentCloudTtsClient::create);
         engine.register_tts(SynthesisType::VoiceApi, VoiceApiTtsClient::create);
+        engine.register_tts(
+            SynthesisType::Other("tencent_basic".to_string()),
+            TencentCloudTtsBasicClient::create,
+        );
         engine
     }
 }
