@@ -1,10 +1,11 @@
 use crate::synthesis::{
     AliyunTtsClient, SynthesisOption, SynthesisType, tencent_cloud::TencentCloudTtsClient,
 };
-use crate::synthesis::{SynthesisEvent, strip_emoji_chars};
+use crate::synthesis::{SynthesisEvent, TencentCloudTtsBasicClient, strip_emoji_chars};
 use dotenv::dotenv;
 use futures::StreamExt;
 use std::env;
+use tracing::level_filters::LevelFilter;
 
 fn get_tencent_credentials() -> Option<(String, String, String)> {
     dotenv().ok();
@@ -92,7 +93,15 @@ async fn test_tencent_cloud_tts() {
         .await
         .expect("Failed to start TTS stream");
     streaming_client
-        .synthesize(text, None, None)
+        .synthesize(text, Some(0), None)
+        .await
+        .expect("Failed to synthesize text");
+    streaming_client
+        .synthesize(text, Some(1), None)
+        .await
+        .expect("Failed to synthesize text");
+    streaming_client
+        .synthesize(text, Some(2), None)
         .await
         .expect("Failed to synthesize text");
     streaming_client.stop().await.unwrap();
@@ -125,6 +134,87 @@ async fn test_tencent_cloud_tts() {
     assert!(subtitles_count > 0);
     assert!(finished);
     assert!(last_cmd_seq.is_none());
+}
+
+#[tokio::test]
+async fn test_tencent_cloud_tts_basic() {
+    tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::DEBUG)
+        .try_init()
+        .ok();
+    // Initialize crypto provider
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider()).ok();
+
+    let (secret_id, secret_key, app_id) = match get_tencent_credentials() {
+        Some(creds) => creds,
+        None => {
+            println!("Skipping test_tencent_cloud_tts: No credentials found in .env file");
+            return;
+        }
+    };
+
+    let config = SynthesisOption {
+        secret_id: Some(secret_id),
+        secret_key: Some(secret_key),
+        app_id: Some(app_id),
+        speaker: Some("501001".to_string()), // Standard female voice
+        volume: Some(0),                     // Medium volume
+        speed: Some(0.0),                    // Normal speed
+        codec: Some("pcm".to_string()),      // PCM format for easy verification
+        ..Default::default()
+    };
+
+
+    // test stereaming client
+    let mut streaming_client = TencentCloudTtsBasicClient::create(true, &config).unwrap();
+    let text = "Hello, this is a test of Tencent Cloud TTS.";
+    let mut stream = streaming_client
+        .start()
+        .await
+        .expect("Failed to start TTS stream");
+    streaming_client
+        .synthesize(text, Some(0), None)
+        .await
+        .expect("Failed to synthesize text");
+    streaming_client
+        .synthesize(text, Some(1), None)
+        .await
+        .expect("Failed to synthesize text");
+    streaming_client
+        .synthesize(text, Some(2), None)
+        .await
+        .expect("Failed to synthesize text");
+    streaming_client.stop().await.unwrap();
+
+    // Collect all chunks from the stream
+    let mut finished_task = 0;
+    let mut total_chunks = 0;
+    let mut error_occurred = false;
+    while let Some((_, chunk_result)) = stream.next().await {
+        match chunk_result {
+            Ok(SynthesisEvent::AudioChunk(audio)) => {
+                total_chunks += audio.len();
+            }
+            Ok(SynthesisEvent::Finished { .. }) => {
+                finished_task += 1;
+            }
+            Ok(SynthesisEvent::Subtitles(_)) => {}
+            Err(_) => {
+                error_occurred = true;
+                break;
+            }
+        }
+    }
+
+    tracing::info!(
+        "finished_task: {}, total_chunks: {}, error_occurred: {}",
+        finished_task,
+        total_chunks,
+        error_occurred
+    );
+    assert_eq!(finished_task, 3);
+    assert!(total_chunks > 30000);
+    assert!(!error_occurred);
 }
 
 #[tokio::test]
