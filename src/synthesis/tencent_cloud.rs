@@ -20,7 +20,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
 use tracing::{debug, warn};
-use unic_emoji::char::{is_emoji, is_emoji_component, is_emoji_modifier, is_emoji_modifier_base};
+use unic_emoji::char::is_emoji;
 use urlencoding;
 use uuid::Uuid;
 
@@ -100,14 +100,12 @@ impl From<&TencentSubtitle> for Subtitle {
 }
 
 // tencent cloud will crash if text contains emoji
+// Only remove non-ASCII emoji characters. Keep all ASCII (digits, letters, punctuation),
+// since some ASCII (e.g., '0'..'9', '#', '*') are marked with the Unicode Emoji property
+// due to keycap sequences but are safe and expected in text.
 pub fn strip_emoji_chars(text: &str) -> String {
     text.chars()
-        .filter(|c| {
-            !(is_emoji(*c)
-                || is_emoji_component(*c)
-                || is_emoji_modifier(*c)
-                || is_emoji_modifier_base(*c))
-        })
+        .filter(|&c| c.is_ascii() || !is_emoji(c))
         .collect()
 }
 

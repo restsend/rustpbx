@@ -1,7 +1,7 @@
-use crate::synthesis::SynthesisEvent;
 use crate::synthesis::{
     AliyunTtsClient, SynthesisOption, SynthesisType, tencent_cloud::TencentCloudTtsClient,
 };
+use crate::synthesis::{SynthesisEvent, strip_emoji_chars};
 use dotenv::dotenv;
 use futures::StreamExt;
 use std::env;
@@ -226,4 +226,15 @@ async fn test_aliyun_tts() {
     assert!(total_size > 0);
     assert!(finished);
     assert!(last_cmd_seq.is_none());
+}
+
+#[tokio::test]
+async fn test_emoji_strip() {
+    let text = "Hello, world! 😊 This is a test with emojis( 🚀🔥.)";
+    let stripped = strip_emoji_chars(text);
+    assert_eq!(stripped, "Hello, world!  This is a test with emojis( .)");
+
+    let text = "2025-09-25， 18点02分41秒";
+    let stripped_no_emoji = strip_emoji_chars(text);
+    assert_eq!(stripped_no_emoji, "2025-09-25， 18点02分41秒");
 }
