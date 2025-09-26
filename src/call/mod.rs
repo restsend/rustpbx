@@ -248,7 +248,7 @@ impl std::fmt::Display for Location {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
         match &self.destination {
             Some(d) => write!(f, "({} -> {} {})", self.aor, d, is_webrtc),
-            None => write!(f, "({} -> * {})", self.aor, is_webrtc),
+            None => write!(f, "({} -> ? {})", self.aor, is_webrtc),
         }
     }
 }
