@@ -280,15 +280,16 @@ impl CallModule {
                     Some(rsip::StatusCode::TemporarilyUnavailable); // abort if route invite is missing
                 new_locations.push(target);
             } else {
+                debug!(session_id = ?dialplan.session_id, callee = %target_uri, "resolved to {} locations", locations.len());
                 new_locations.extend(locations);
             }
         }
+
         dialplan.targets = if let DialStrategy::Parallel(_) = dialplan.targets {
             DialStrategy::Parallel(new_locations)
         } else {
             DialStrategy::Sequential(new_locations)
         };
-        debug!(session_id = ?dialplan.session_id, targets = ?dialplan.targets, "final dialplan targets");
         Ok(dialplan)
     }
 
