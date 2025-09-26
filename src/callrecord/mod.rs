@@ -73,6 +73,7 @@ impl<'a> CallRecordEvent<'a> {
 }
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
     pub option: Option<CallOption>,
@@ -95,6 +96,7 @@ pub struct CallRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct CallRecordMedia {
     pub track_id: String,
     pub path: String,
@@ -118,7 +120,7 @@ pub enum CallRecordHangupReason {
     Canceled,
     Rejected,
     Failed,
-    Other,
+    Other(String),
 }
 
 impl FromStr for CallRecordHangupReason {
@@ -131,14 +133,14 @@ impl FromStr for CallRecordHangupReason {
             "refer" => Ok(Self::ByRefer),
             "system" => Ok(Self::BySystem),
             "autohangup" => Ok(Self::Autohangup),
-            "no_answer" => Ok(Self::NoAnswer),
-            "no_balance" => Ok(Self::NoBalance),
-            "answer_machine" => Ok(Self::AnswerMachine),
-            "server_unavailable" => Ok(Self::ServerUnavailable),
+            "noAnswer" => Ok(Self::NoAnswer),
+            "noBalance" => Ok(Self::NoBalance),
+            "answerMachine" => Ok(Self::AnswerMachine),
+            "serverUnavailable" => Ok(Self::ServerUnavailable),
             "canceled" => Ok(Self::Canceled),
             "rejected" => Ok(Self::Rejected),
             "failed" => Ok(Self::Failed),
-            _ => Ok(Self::Other),
+            _ => Ok(Self::Other(s.to_string())),
         }
     }
 }
@@ -150,14 +152,14 @@ impl ToString for CallRecordHangupReason {
             Self::ByRefer => "refer".to_string(),
             Self::BySystem => "system".to_string(),
             Self::Autohangup => "autohangup".to_string(),
-            Self::NoAnswer => "no_answer".to_string(),
-            Self::NoBalance => "no_balance".to_string(),
-            Self::AnswerMachine => "answer_machine".to_string(),
-            Self::ServerUnavailable => "server_unavailable".to_string(),
+            Self::NoAnswer => "noAnswer".to_string(),
+            Self::NoBalance => "noBalance".to_string(),
+            Self::AnswerMachine => "answerMachine".to_string(),
+            Self::ServerUnavailable => "serverUnavailable".to_string(),
             Self::Canceled => "canceled".to_string(),
             Self::Rejected => "rejected".to_string(),
             Self::Failed => "failed".to_string(),
-            Self::Other => "other".to_string(),
+            Self::Other(s) => s.to_string(),
         }
     }
 }
