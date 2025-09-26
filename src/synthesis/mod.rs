@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 mod aliyun;
 mod tencent_cloud;
+mod tencent_cloud_basic;
 mod voiceapi;
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 // pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
+pub use tencent_cloud_basic::TencentCloudTtsBasicClient;
 
 #[derive(Clone, Default)]
 pub struct SynthesisCommand {
