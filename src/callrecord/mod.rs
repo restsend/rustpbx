@@ -73,7 +73,7 @@ impl<'a> CallRecordEvent<'a> {
 }
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct CallRecord {
     pub call_type: ActiveCallType,
     pub option: Option<CallOption>,
@@ -96,7 +96,7 @@ pub struct CallRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct CallRecordMedia {
     pub track_id: String,
     pub path: String,
@@ -106,7 +106,7 @@ pub struct CallRecordMedia {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub enum CallRecordHangupReason {
     ByCaller,
     ByCallee,

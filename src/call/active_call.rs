@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallParams {
     pub id: Option<String>,
     #[serde(rename = "dump")]
@@ -56,7 +57,7 @@ pub struct CallParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub enum ActiveCallType {
     Webrtc,
     B2bua,
