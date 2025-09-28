@@ -432,19 +432,23 @@ impl CallSession {
 
         // Only send a reject if the call was NOT answered
         if !call_answered {
-            if let Some((code, reason)) = &self.last_error {
-                if let Err(e) = self
-                    .server_dialog
-                    .reject(Some(code.clone()), reason.clone())
-                {
-                    info!(error = %e, "Failed to send rejection to caller");
-                }
+            let (code, reason) = self
+                .last_error
+                .clone()
+                .unwrap_or((StatusCode::Decline, None));
+
+            info!(code = %code, reason = ?reason, id = %self.server_dialog.id(), "Call not answered, sending rejection if possible");
+            if let Err(e) = self
+                .server_dialog
+                .reject(Some(code.clone()), reason.clone())
+            {
+                info!(error = %e, "Failed to send rejection to caller");
             }
         }
-
         if let Err(e) = self.server_dialog.bye().await {
             info!(error = %e, "Failed to send BYE to server dialog");
         }
+        dialog_layer.remove_dialog(&self.server_dialog.id());
 
         for dialog_id in &self.callee_dialogs {
             if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
@@ -991,36 +995,37 @@ impl ProxyCall {
         let callee_realm = callee_uri.host().to_string();
         if self.server.is_same_realm(&callee_realm).await {
             let dialplan = &self.dialplan;
-            match self
-                .server
-                .user_backend
-                .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
-                .await
-            {
-                Ok(Some(_)) => {
-                    let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
-                        (
-                            rsip::StatusCode::TemporarilyUnavailable,
-                            Some(e.to_string()),
-                        )
-                    })?;
-                    if locations.is_empty() {
+            let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
+                (
+                    rsip::StatusCode::TemporarilyUnavailable,
+                    Some(e.to_string()),
+                )
+            })?;
+
+            if locations.is_empty() {
+                match self
+                    .server
+                    .user_backend
+                    .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                    .await
+                {
+                    Ok(Some(_)) => {
                         info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user offline in locator, abort now");
                         return Err((
                             rsip::StatusCode::TemporarilyUnavailable,
                             Some("User offline".to_string()),
                         ));
-                    } else {
-                        invite_option.destination = locations[0].destination.clone();
+                    }
+                    Ok(None) => {
+                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, continue");
+                    }
+                    Err(e) => {
+                        warn!(session_id = ?dialplan.session_id, callee = %callee_uri, "failed to lookup user in auth backend: {}", e);
+                        return Err((rsip::StatusCode::ServerInternalError, Some(e.to_string())));
                     }
                 }
-                Ok(None) => {
-                    info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, continue");
-                }
-                Err(e) => {
-                    warn!(session_id = ?dialplan.session_id, callee = %callee_uri, "failed to lookup user in auth backend: {}", e);
-                    return Err((rsip::StatusCode::ServerInternalError, Some(e.to_string())));
-                }
+            } else {
+                invite_option.destination = locations[0].destination.clone();
             }
         }
 
