@@ -122,7 +122,7 @@ impl CallModule {
             .map_err(|e| (anyhow::anyhow!(e), None))?;
         let callee_realm = callee_uri.host().to_string();
         let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
-        let session_id = format!("{}/{}", dialog_id, rand::random::<u32>());
+        let session_id: String = format!("{}-{}", rand::random::<u32>(), dialog_id);
 
         let media_config = MediaConfig::new()
             .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
