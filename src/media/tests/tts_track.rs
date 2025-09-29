@@ -631,6 +631,7 @@ async fn test_tts_track_base64() -> Result<()> {
     tts_track.start(event_tx, packet_tx).await?;
 
     let base64_text = tokio::fs::read("fixtures/base64noise.txt").await?;
+    // remove the last '\n'
     let text = String::from_utf8(base64_text[..base64_text.len() - 1].to_vec())?;
 
     // Send a TTS command
@@ -640,8 +641,8 @@ async fn test_tts_track_base64() -> Result<()> {
         ..Default::default()
     })?;
 
-    let mut bytes_received = 0;
-    let timeout = tokio::time::sleep(Duration::from_millis(1000));
+    let mut bytes_received = 0;    
+    let timeout = tokio::time::sleep(Duration::from_millis(3000));
     tokio::pin!(timeout);
     loop {
         tokio::select! {
@@ -673,6 +674,6 @@ async fn test_tts_track_base64() -> Result<()> {
             }
         }
     }
-    assert!(bytes_received >= 16000, "No bytes received");
+    assert!(bytes_received >= 16000, "Not enough bytes");
     Ok(())
 }

@@ -443,8 +443,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 
 #### Interrupt Command
 **Purpose:** Interrupts current TTS or audio playback.
-- `graceful`: (boolean, optional), currently this option is used with tts, if it is true, tts track will quit until current cmd seq is finished
-
+- `graceful`: (boolean, optional), if it is true, tts track will wait until playing tts command complete.
 ```json
 {
   "command": "interrupt",
@@ -735,7 +734,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   - `emotion` (string, optional): Speech emotion ("neutral", "sad", "happy", "angry", "fear", "news", "story", "radio", "poetry", "call", "sajiao", "disgusted", "amaze", "peaceful", "exciting", "aojiao", "jieshuo")
   - `endpoint` (string, optional): Custom TTS service endpoint URL
   - `extra` (object, optional): Additional provider-specific parameters
-  - `cacheKey` (string, optional): Cache key for TTS result caching
+  - `maxConcurrentTasks` (number,optional): Max Concurrent tasks for non streaming tts cmd
 - `mediaPass` (MediaPassOption, optional): Media pass-through configuration for external audio processing
   - `url` (string): WebSocket URL for media streaming
   - `inputSampleRate` (number): Sample rate of audio received from WebSocket server
