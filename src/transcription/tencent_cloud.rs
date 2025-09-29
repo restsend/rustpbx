@@ -6,8 +6,7 @@ use crate::transcription::{
 use crate::{Sample, TrackId};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono;
 use futures::{SinkExt, StreamExt};
 use http::{Request, StatusCode, Uri};
@@ -27,7 +26,8 @@ use urlencoding;
 use uuid::Uuid;
 
 /// Type alias to simplify complex return type
-type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+type TranscriptionClientFuture =
+    Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
 
 /// API Tencent Cloud streaming ASR
 /// https://cloud.tencent.com/document/api/1093/48982
@@ -224,7 +224,7 @@ impl TencentCloudAsrClientInner {
 
         let url_to_sign = format!("{}{}", host, request_body);
         let hmac = hmac::sign(&key, url_to_sign.as_bytes());
-        let base64_sig = STANDARD.encode(hmac.as_ref());
+        let base64_sig = BASE64_STANDARD.encode(hmac.as_ref());
         Ok(urlencoding::encode(&base64_sig).into_owned())
     }
 
@@ -317,7 +317,10 @@ impl TencentCloudAsrClientInner {
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", STANDARD.encode(random::<[u8; 16]>()))
+            .header(
+                "Sec-WebSocket-Key",
+                BASE64_STANDARD.encode(random::<[u8; 16]>()),
+            )
             .header("X-TC-Version", "2019-06-14")
             .header("X-TC-Region", "ap-guangzhou")
             .header("Content-Type", "application/json")
