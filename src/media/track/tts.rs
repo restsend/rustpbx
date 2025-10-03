@@ -14,6 +14,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use base64::{prelude::BASE64_STANDARD, Engine};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use std::{
@@ -292,8 +293,7 @@ impl TtsTask {
         }
 
         if cmd.base64 {
-            use base64::{Engine as _, engine::general_purpose::STANDARD};
-            match STANDARD.decode(text) {
+            match BASE64_STANDARD.decode(text) {
                 Ok(bytes) => {
                     emit_entry.map(|entry| {
                         entry.chunks.push_back(Bytes::from(bytes));

@@ -104,7 +104,7 @@ impl<'de> Deserialize<'de> for TranscriptionType {
 }
 
 impl TranscriptionOption {
-    pub fn check_default(&mut self) -> &Self {
+    pub fn check_default(&mut self) {
         match self.provider {
             Some(TranscriptionType::TencentCloud) => {
                 if self.app_id.is_none() {
@@ -130,7 +130,6 @@ impl TranscriptionOption {
             }
             _ => {}
         }
-        self
     }
 }
 pub type TranscriptionSender = mpsc::UnboundedSender<AudioFrame>;

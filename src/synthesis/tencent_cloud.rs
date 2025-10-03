@@ -2,7 +2,7 @@ use super::{SynthesisClient, SynthesisOption, SynthesisType};
 use crate::synthesis::{Subtitle, SynthesisEvent};
 use anyhow::Result;
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Duration;
 use futures::{
     FutureExt, SinkExt, Stream, StreamExt,
@@ -178,7 +178,7 @@ fn construct_request_url(option: &SynthesisOption, session_id: &str, text: Optio
     // Calculate signature using HMAC-SHA1
     let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
     let tag = hmac::sign(&key, string_to_sign.as_bytes());
-    let signature: String = STANDARD.encode(tag.as_ref());
+    let signature: String = BASE64_STANDARD.encode(tag.as_ref());
     // URL encode parameters for final URL
     let encoded_query_string = query_params
         .iter()
