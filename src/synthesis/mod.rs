@@ -12,8 +12,8 @@ mod voiceapi;
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 // pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
-pub use voiceapi::VoiceApiTtsClient;
 pub use tencent_cloud_basic::TencentCloudTtsBasicClient;
+pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Clone, Default)]
 pub struct SynthesisCommand {
@@ -93,49 +93,26 @@ pub struct SynthesisOption {
 
 impl SynthesisOption {
     pub fn merge_with(&self, option: Option<SynthesisOption>) -> Self {
-        let mut merged = self.clone();
-        if let Some(option) = option {
-            if option.samplerate.is_some() {
-                merged.samplerate = option.samplerate;
+        if let Some(other) = option {
+            Self {
+                samplerate: other.samplerate.or(self.samplerate),
+                provider: other.provider.or(self.provider.clone()),
+                speed: other.speed.or(self.speed),
+                app_id: other.app_id.or(self.app_id.clone()),
+                secret_id: other.secret_id.or(self.secret_id.clone()),
+                secret_key: other.secret_key.or(self.secret_key.clone()),
+                volume: other.volume.or(self.volume),
+                speaker: other.speaker.or(self.speaker.clone()),
+                codec: other.codec.or(self.codec.clone()),
+                subtitle: other.subtitle.or(self.subtitle),
+                emotion: other.emotion.or(self.emotion.clone()),
+                endpoint: other.endpoint.or(self.endpoint.clone()),
+                extra: other.extra.or(self.extra.clone()),
+                max_concurrent_tasks: other.max_concurrent_tasks.or(self.max_concurrent_tasks),
             }
-            if option.speed.is_some() {
-                merged.speed = option.speed;
-            }
-            if option.volume.is_some() {
-                merged.volume = option.volume;
-            }
-            if option.speaker.is_some() {
-                merged.speaker = option.speaker;
-            }
-            if option.codec.is_some() {
-                merged.codec = option.codec;
-            }
-            if option.subtitle.is_some() {
-                merged.subtitle = option.subtitle;
-            }
-            if option.emotion.is_some() {
-                merged.emotion = option.emotion;
-            }
-            if option.endpoint.is_some() {
-                merged.endpoint = option.endpoint;
-            }
-            if option.provider.is_some() {
-                merged.provider = option.provider;
-            }
-            if option.app_id.is_some() {
-                merged.app_id = option.app_id;
-            }
-            if option.secret_id.is_some() {
-                merged.secret_id = option.secret_id;
-            }
-            if option.secret_key.is_some() {
-                merged.secret_key = option.secret_key;
-            }
-            if option.extra.is_some() {
-                merged.extra = option.extra;
-            }
+        } else {
+            self.clone()
         }
-        merged
     }
 }
 
@@ -226,41 +203,42 @@ impl Default for SynthesisOption {
 }
 
 impl SynthesisOption {
-    pub fn check_default(&mut self) -> &Self {
-        match self.provider {
-            Some(SynthesisType::TencentCloud) => {
-                if self.app_id.is_none() {
-                    self.app_id = std::env::var("TENCENT_APPID").ok();
+    pub fn check_default(&mut self) {
+        if let Some(provider) = &self.provider {
+            match provider.to_string().as_str() {
+                "tencent" | "tencent_basic" => {
+                    if self.app_id.is_none() {
+                        self.app_id = std::env::var("TENCENT_APPID").ok();
+                    }
+                    if self.secret_id.is_none() {
+                        self.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
+                    }
+                    if self.secret_key.is_none() {
+                        self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
+                    }
                 }
-                if self.secret_id.is_none() {
-                    self.secret_id = std::env::var("TENCENT_SECRET_ID").ok();
+                "voiceapi" => {
+                    // Set the endpoint from environment variable if not already set
+                    if self.endpoint.is_none() {
+                        self.endpoint = std::env::var("VOICEAPI_ENDPOINT")
+                            .ok()
+                            .or_else(|| Some("http://localhost:8000".to_string()));
+                    }
+                    // Set speaker ID from environment variable if not already set
+                    if self.speaker.is_none() {
+                        self.speaker = std::env::var("VOICEAPI_SPEAKER_ID")
+                            .ok()
+                            .or_else(|| Some("0".to_string()));
+                    }
                 }
-                if self.secret_key.is_none() {
-                    self.secret_key = std::env::var("TENCENT_SECRET_KEY").ok();
+                "aliyun" => {
+                    if self.secret_key.is_none() {
+                        self.secret_key = std::env::var("DASHSCOPE_API_KEY").ok();
+                    }
                 }
+                _ => {}
             }
-            Some(SynthesisType::VoiceApi) => {
-                // Set the endpoint from environment variable if not already set
-                if self.endpoint.is_none() {
-                    self.endpoint = std::env::var("VOICEAPI_ENDPOINT")
-                        .ok()
-                        .or_else(|| Some("http://localhost:8000".to_string()));
-                }
-                // Set speaker ID from environment variable if not already set
-                if self.speaker.is_none() {
-                    self.speaker = std::env::var("VOICEAPI_SPEAKER_ID")
-                        .ok()
-                        .or_else(|| Some("0".to_string()));
-                }
-            }
-            Some(SynthesisType::Aliyun) => {
-                if self.secret_key.is_none() {
-                    self.secret_key = std::env::var("DASHSCOPE_API_KEY").ok();
-                }
-            }
-            _ => {}
         }
-        self
     }
 }
 

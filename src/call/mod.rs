@@ -83,14 +83,13 @@ impl Default for CallOption {
 }
 
 impl CallOption {
-    pub fn check_default(&mut self) -> &CallOption {
+    pub fn check_default(&mut self) {
         if let Some(tts) = &mut self.tts {
             tts.check_default();
         }
         if let Some(asr) = &mut self.asr {
             asr.check_default();
         }
-        self
     }
 
     pub fn build_invite_option(&self) -> Result<InviteOption> {

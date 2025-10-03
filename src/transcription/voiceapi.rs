@@ -8,8 +8,7 @@ use crate::event::{EventSender, SessionEvent};
 use crate::{Sample, TrackId};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::{Engine, prelude::BASE64_STANDARD};
 use futures::{SinkExt, StreamExt};
 use http::{Request, StatusCode, Uri};
 use rand::random;
@@ -22,7 +21,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Type alias to simplify complex return type
-type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+type TranscriptionClientFuture =
+    Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
 
 use super::{TranscriptionClient, TranscriptionOption};
 
@@ -180,7 +180,10 @@ impl VoiceApiAsrClientInner {
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", STANDARD.encode(random::<[u8; 16]>()))
+            .header(
+                "Sec-WebSocket-Key",
+                BASE64_STANDARD.encode(random::<[u8; 16]>()),
+            )
             .body(())?;
 
         let (ws_stream, response) = connect_async(request).await?;

@@ -2,7 +2,7 @@ use super::{SynthesisClient, SynthesisOption, SynthesisType};
 use crate::synthesis::{SynthesisEvent, tencent_cloud::TencentSubtitle};
 use anyhow::Result;
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use bytes::Bytes;
 use futures::{
     FutureExt, StreamExt, future,
@@ -87,7 +87,6 @@ fn construct_request_url(option: &SynthesisOption, session_id: &str, text: &str)
         ("Codec", &codec),
         ("EnableSubtitle", "true"),
     ];
-    tracing::info!("Tencent TTS query params: {:?}", query_params);
 
     // Sort query parameters by key
     query_params.sort_by_key(|(k, _)| *k);
@@ -102,8 +101,7 @@ fn construct_request_url(option: &SynthesisOption, session_id: &str, text: &str)
     // Calculate signature using HMAC-SHA1
     let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret_key.as_bytes());
     let tag = hmac::sign(&key, string_to_sign.as_bytes());
-    let signature: String = STANDARD.encode(tag.as_ref());
-    tracing::info!("Tencent TTS signature: {}", signature);
+    let signature: String = BASE64_STANDARD.encode(tag.as_ref());
     query_params.push(("Signature", &signature));
 
     // URL encode parameters for final URL
@@ -141,7 +139,6 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
                 let session_id = Uuid::new_v4().to_string();
                 let option = client_option.merge_with(option);
                 let url = construct_request_url(&option, &session_id, &text);
-                tracing::info!("Tencent TTS url: {}", url);
                 reqwest::get(url)
                     .then(async move |res| match res {
                         Ok(resp) => match resp.json::<Response>().await {
@@ -157,7 +154,7 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
                                     )))
                                     .boxed();
                                 }
-                                match STANDARD.decode(resp.response.audio) {
+                                match BASE64_STANDARD.decode(resp.response.audio) {
                                     Ok(audio) => {
                                         let mut events = Vec::new();
                                         events.push((
