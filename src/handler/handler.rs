@@ -1,17 +1,20 @@
-use std::{sync::Arc, time::{Duration}};
 use super::middleware::clientaddr::ClientAddr;
 use crate::{
-    app::{AppState},
-    call::{
-        active_call::{ CallParams}, ActiveCall, ActiveCallType, Command
-    },
-    event::SessionEvent, media::track::TrackConfig,
+    app::AppState,
+    call::{ActiveCall, ActiveCallType, Command, active_call::CallParams},
+    event::SessionEvent,
+    media::track::TrackConfig,
 };
-use axum::{extract::{ ws::Message, Query, State, WebSocketUpgrade}, response::{IntoResponse, Response}, routing::get, Json, Router
+use axum::{
+    Json, Router,
+    extract::{Query, State, WebSocketUpgrade, ws::Message},
+    response::{IntoResponse, Response},
+    routing::get,
 };
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
+use std::{sync::Arc, time::Duration};
 use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -26,7 +29,6 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/iceservers", get(super::webrtc::get_iceservers))
         .route("/health", get(super::ami::health_handler))
         .nest("/ami/v1", super::ami::router(app_state))
-
 }
 
 pub async fn ws_handler(
@@ -63,24 +65,26 @@ pub async fn call_handler(
     app_state: AppState,
     params: CallParams,
 ) -> Response {
-    let session_id = params.id.unwrap_or_else(|| format!("s.{}",Uuid::new_v4().to_string()));
+    let session_id = params
+        .id
+        .unwrap_or_else(|| format!("s.{}", Uuid::new_v4().to_string()));
     let server_side_track = params.server_side_track.clone();
     let dump_events = params.dump_events.unwrap_or(true);
     let ping_interval = params.ping_interval.unwrap_or(20);
     let useragent = match app_state.useragent.clone() {
         Some(ua) => ua,
         None => {
-                return Json(serde_json::json!({
-                    "error": "User agent not initialized",
-                    "message": "User agent must be initialized in app state for WebSocket calls"
-                })).into_response();
+            return Json(serde_json::json!({
+                "error": "User agent not initialized",
+                "message": "User agent must be initialized in app state for WebSocket calls"
+            }))
+            .into_response();
         }
     };
 
     let resp = ws.on_upgrade(move |socket| async move {
         let (mut ws_sender, mut ws_receiver) = socket.split();
         let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-        
         let cancel_token = CancellationToken::new();
         let track_config = TrackConfig::default();
         let active_call = Arc::new(ActiveCall::new(
@@ -95,7 +99,6 @@ pub async fn call_handler(
             server_side_track,
             None, // No extra data for now
         ));
-        
         let recv_from_ws_loop = async {
             while let Some(Ok(message)) = ws_receiver.next().await {
                 match message {
@@ -192,7 +195,7 @@ pub async fn call_handler(
                         cancel_token.cancel()
                     },
                 }
-            }, 
+            }
         };
 
         match r {

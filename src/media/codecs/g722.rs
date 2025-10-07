@@ -200,7 +200,7 @@ fn block4(band: &mut G722Band, d: i32) {
     // Update each zero filter coefficient
     for i in 1..7 {
         band.sign_bits[i] = band.difference_signal[i] >> 15; // Extract sign
-                                                             // Apply sign correlation logic for adaptation direction
+        // Apply sign correlation logic for adaptation direction
         let adj = if band.sign_bits[i] == band.sign_bits[0] {
             step_size
         } else {

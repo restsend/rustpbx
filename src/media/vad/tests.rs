@@ -1,8 +1,8 @@
 use super::*;
-use crate::event::{create_event_sender, SessionEvent};
-use crate::{media::processor::Processor, Samples};
+use crate::event::{SessionEvent, create_event_sender};
+use crate::{Samples, media::processor::Processor};
 use tokio::sync::broadcast;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[test]
 fn test_vadtype_deserialization() {

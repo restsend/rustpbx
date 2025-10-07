@@ -215,7 +215,12 @@ impl AliyunAsrClient {
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::get_timestamp();
-        let start_msg = RunTaskCommand::new(ctx.track_id.clone(), ctx.sample_rate, ctx.model, ctx.language_hints);
+        let start_msg = RunTaskCommand::new(
+            ctx.track_id.clone(),
+            ctx.sample_rate,
+            ctx.model,
+            ctx.language_hints,
+        );
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -368,7 +373,8 @@ pub struct AliyunAsrClientBuilder {
 }
 
 /// Type alias to simplify complex return type
-type TranscriptionClientFuture = Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
+type TranscriptionClientFuture =
+    Pin<Box<dyn Future<Output = Result<Box<dyn TranscriptionClient>>> + Send>>;
 
 impl AliyunAsrClientBuilder {
     pub fn create(

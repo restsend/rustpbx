@@ -207,7 +207,6 @@ async fn test_rtp_codec_encode_decode() -> Result<()> {
     Ok(())
 }
 
-
 // Test DTMF sending
 #[tokio::test]
 async fn test_rtp_track_send_dtmf() -> Result<()> {

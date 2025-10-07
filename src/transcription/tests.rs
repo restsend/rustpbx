@@ -2,15 +2,15 @@ use crate::{
     event::SessionEvent,
     media::track::file::read_wav_file,
     transcription::{
-        aliyun::AliyunAsrClientBuilder, tencent_cloud::TencentCloudAsrClientBuilder,
-        TranscriptionClient, TranscriptionOption,
+        TranscriptionClient, TranscriptionOption, aliyun::AliyunAsrClientBuilder,
+        tencent_cloud::TencentCloudAsrClientBuilder,
     },
 };
 use dotenv::dotenv;
 use once_cell::sync::OnceCell;
 use rustls::crypto::ring::default_provider;
 use std::env;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 static CRYPTO_PROVIDER: OnceCell<()> = OnceCell::new();
 
