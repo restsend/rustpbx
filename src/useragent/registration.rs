@@ -92,7 +92,9 @@ impl UserAgent {
             let check_loop = async move {
                 loop {
                     let is_empty = {
-                        let users = live_users.read().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
+                        let users = live_users
+                            .read()
+                            .map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
                         users.is_empty()
                     };
                     if is_empty {

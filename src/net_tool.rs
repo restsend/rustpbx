@@ -1,6 +1,6 @@
 use anyhow::Result;
 use get_if_addrs::get_if_addrs;
-use rsipstack::transport::{udp::UdpConnection, SipAddr};
+use rsipstack::transport::{SipAddr, udp::UdpConnection};
 use std::{
     io::BufReader,
     net::{IpAddr, SocketAddr},
@@ -9,7 +9,7 @@ use std::{
 use tracing::info;
 use webrtc::stun::{
     agent::TransactionId,
-    message::{Getter, Message, BINDING_REQUEST},
+    message::{BINDING_REQUEST, Getter, Message},
     xoraddr::XorMappedAddress,
 };
 

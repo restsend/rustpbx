@@ -1,4 +1,4 @@
-use super::{server::SipServerRef, ProxyModule};
+use super::{ProxyModule, server::SipServerRef};
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;

@@ -1,7 +1,7 @@
 use super::{VADOption, VadEngine};
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel};
 use tracing::debug;
 
 pub struct TenVad {

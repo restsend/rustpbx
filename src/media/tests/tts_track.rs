@@ -641,7 +641,7 @@ async fn test_tts_track_base64() -> Result<()> {
         ..Default::default()
     })?;
 
-    let mut bytes_received = 0;    
+    let mut bytes_received = 0;
     let timeout = tokio::time::sleep(Duration::from_millis(3000));
     tokio::pin!(timeout);
     loop {

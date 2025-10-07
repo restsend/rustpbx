@@ -164,7 +164,6 @@ async fn test_tencent_cloud_tts_basic() {
         ..Default::default()
     };
 
-
     // test stereaming client
     let mut streaming_client = TencentCloudTtsBasicClient::create(true, &config).unwrap();
     let text = "Hello, this is a test of Tencent Cloud TTS.";
