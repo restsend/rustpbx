@@ -33,6 +33,18 @@ fn default_config_http_addr() -> String {
     "0.0.0.0:8080".to_string()
 }
 
+fn default_console_database_url() -> String {
+    "sqlite://rustpbx.sqlite3".to_string()
+}
+
+fn default_console_session_secret() -> String {
+    "change-me-console-secret".to_string()
+}
+
+fn default_console_base_path() -> String {
+    "/console".to_string()
+}
+
 fn default_config_rtp_start_port() -> Option<u16> {
     Some(12000)
 }
@@ -73,6 +85,30 @@ pub struct Config {
     pub restsend_token: Option<String>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub ami: Option<AmiConfig>,
+    pub console: Option<ConsoleConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ConsoleConfig {
+    #[serde(default = "default_console_database_url")]
+    pub database_url: String,
+    #[serde(default = "default_console_session_secret")]
+    pub session_secret: String,
+    #[serde(default = "default_console_base_path")]
+    pub base_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_code: Option<String>,
+}
+
+impl Default for ConsoleConfig {
+    fn default() -> Self {
+        Self {
+            database_url: default_console_database_url(),
+            session_secret: default_console_session_secret(),
+            base_path: default_console_base_path(),
+            invite_code: None,
+        }
+    }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -388,6 +424,7 @@ impl Default for Config {
             external_ip: None,
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
+            console: Some(ConsoleConfig::default()),
         }
     }
 }

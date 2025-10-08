@@ -14,6 +14,7 @@ use crate::{
     },
     useragent::{UserAgent, invitation::FnCreateInvitationHandler},
 };
+
 use anyhow::Result;
 use axum::{
     Router,
@@ -45,6 +46,8 @@ pub struct AppStateInner {
     pub total_calls: AtomicU64,
     pub total_failed_calls: AtomicU64,
     pub uptime: DateTime<Utc>,
+    #[cfg(feature = "console")]
+    pub console: Option<Arc<crate::console::ConsoleState>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -192,6 +195,14 @@ impl AppStateBuilder {
             None
         };
 
+        #[cfg(feature = "console")]
+        let console_state = match config.console.clone() {
+            Some(console_config) => {
+                Some(crate::console::ConsoleState::initialize(console_config).await?)
+            }
+            None => None,
+        };
+
         let sip_server = match self.proxy_builder {
             Some(builder) => builder.build().await.ok(),
             None => {
@@ -223,6 +234,8 @@ impl AppStateBuilder {
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),
             uptime: chrono::Utc::now(),
+            #[cfg(feature = "console")]
+            console: console_state,
         });
 
         Ok(app_state)
@@ -354,11 +367,18 @@ fn create_router(state: AppState) -> Router {
         ]);
 
     // Merge call and WebSocket handlers with static file serving
-    let call_routes = crate::handler::router(state.clone()).with_state(state);
+    let call_routes = crate::handler::router(state.clone()).with_state(state.clone());
 
-    router
+    let mut router = router
         .route("/", get(index_handler))
         .nest_service("/static", static_files_service)
         .merge(call_routes)
-        .layer(cors)
+        .layer(cors);
+
+    #[cfg(feature = "console")]
+    if let Some(console_state) = state.console.clone() {
+        router = router.merge(crate::console::handlers::router(console_state));
+    }
+
+    router
 }

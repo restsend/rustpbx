@@ -1,0 +1,91 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Sign up · RustPBX Admin{% endblock %}
+
+{% block content %}
+<section class="flex items-center justify-center py-16 px-4">
+    <div class="w-full max-w-2xl overflow-hidden rounded-2xl bg-white/90 shadow-xl ring-1 ring-black/5 backdrop-blur">
+        <div class="grid gap-0 md:grid-cols-2">
+            <div class="hidden bg-gradient-to-br from-sky-500 via-blue-500 to-indigo-500 p-8 text-white md:block">
+                <h2 class="text-2xl font-semibold">RustPBX Admin</h2>
+                <p class="mt-4 text-sm text-sky-50/90">
+                    Manage SIP endpoints, routing policies, users, and voice services through a modern web console
+                    powered by Tailwind CSS and Alpine.js.
+                </p>
+                <ul class="mt-6 space-y-3 text-sm text-sky-50/90">
+                    <li class="flex items-start gap-3">
+                        <span
+                            class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">1</span>
+                        <span>Create an administrator account with your email and username.</span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span
+                            class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">2</span>
+                        <span>Access call routing, user management, and media configuration after signing in.</span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span
+                            class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">3</span>
+                        <span>Enjoy a responsive interface that works well across devices.</span>
+                    </li>
+                </ul>
+            </div>
+            <div class="space-y-6 p-8">
+                <div>
+                    <h1 class="text-2xl font-semibold text-slate-900">Create your administrator account</h1>
+                    <p class="mt-1 text-sm text-slate-500">
+                        Already registered? <a href="{{ login_url }}"
+                            class="font-medium text-sky-600 hover:text-sky-500">Sign in instead</a>
+                    </p>
+                </div>
+                {% if error_message.is_some() %}
+                <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                    {{ error_message.as_deref().unwrap_or("") }}
+                </div>
+                {% endif %}
+                <form action="{{ register_action }}" method="post" class="space-y-5">
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium text-slate-700">Email</label>
+                        <input type="email" name="email" value="{{ email }}" required
+                            class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="you@example.com" />
+                    </div>
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium text-slate-700">Username</label>
+                        <input type="text" name="username" value="{{ username }}" minlength="3" required
+                            class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Choose a username" />
+                    </div>
+                    {% if invite_required %}
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium text-slate-700">Invite code</label>
+                        <input type="text" name="invite_code" value="{{ invite_value }}" required
+                            class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Enter the invite code provided by an administrator" />
+                    </div>
+                    {% endif %}
+                    <div class="space-y-2" x-data="{ reveal: false }">
+                        <label class="block text-sm font-medium text-slate-700">Password</label>
+                        <div class="relative flex items-center">
+                            <input :type="reveal ? 'text' : 'password'" name="password" minlength="8" required
+                                class="w-full rounded-xl border border-slate-200 px-4 py-3 pr-12 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Use at least 8 characters" />
+                            <button type="button" @click="reveal = !reveal" x-text="reveal ? 'Hide' : 'Show'"
+                                class="absolute right-3 text-xs font-medium text-slate-500"></button>
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium text-slate-700">Confirm password</label>
+                        <input type="password" name="confirm_password" minlength="8" required
+                            class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Type the password again" />
+                    </div>
+                    <button type="submit"
+                        class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Create
+                        account</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

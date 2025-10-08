@@ -1,0 +1,44 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Sign in · RustPBX Admin{% endblock %}
+
+{% block content %}
+<section class="flex items-center justify-center py-16 px-4">
+    <div class="w-full max-w-md space-y-8 rounded-2xl bg-white/80 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
+        <div class="space-y-2 text-center">
+            <h1 class="text-2xl font-semibold text-slate-900">Welcome back</h1>
+            <p class="text-sm text-slate-500">Sign in to manage your RustPBX instance.</p>
+        </div>
+        {% if error_message.is_some() %}
+        <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+            {{ error_message.as_deref().unwrap_or("") }}
+        </div>
+        {% endif %}
+        <form action="{{ login_action }}" method="post" class="space-y-6">
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-slate-700">Email or username</label>
+                <input type="text" name="identifier" value="{{ identifier }}" required
+                    class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="you@example.com or username" />
+            </div>
+            <div class="space-y-2" x-data="{ reveal: false }">
+                <label class="block text-sm font-medium text-slate-700">Password</label>
+                <div class="relative flex items-center">
+                    <input :type="reveal ? 'text' : 'password'" name="password" required
+                        class="w-full rounded-xl border border-slate-200 px-4 py-3 pr-12 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="Enter your password" />
+                    <button type="button" @click="reveal = !reveal" x-text="reveal ? 'Hide' : 'Show'"
+                        class="absolute right-3 text-xs font-medium text-slate-500"></button>
+                </div>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+                <a href="{{ forgot_url }}" class="font-medium text-sky-600 hover:text-sky-500">Forgot password?</a>
+                <a href="{{ register_url }}" class="text-slate-500 hover:text-slate-700">Create account</a>
+            </div>
+            <button type="submit"
+                class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Sign
+                in</button>
+        </form>
+    </div>
+</section>
+{% endblock %}

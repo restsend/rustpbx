@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }" class="bg-slate-100">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}RustPBX Admin{% endblock %}</title>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+</head>
+
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div class="min-h-screen flex flex-col">
+        <main class="flex-1">
+            {% block content %}{% endblock %}
+        </main>
+        <footer class="py-6 text-center text-xs text-slate-500">
+            RustPBX Admin · Powered by Askama, Alpine.js, and Tailwind CSS
+        </footer>
+    </div>
+</body>
+
+</html>
