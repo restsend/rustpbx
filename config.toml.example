@@ -10,6 +10,12 @@ recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
 # external_ip = "1.2.3.4"
 
+[console]
+database_url = "sqlite://rustpbx.sqlite3"
+session_secret = "please-change-this-session-secret"
+base_path = "/console"
+# invite_code = "join-me"
+
 [ua]
 addr="0.0.0.0"
 udp_port=13050 # don't use 5060

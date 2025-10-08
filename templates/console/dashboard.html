@@ -1,0 +1,62 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Dashboard · RustPBX{% endblock %}
+
+{% block content %}
+<div class="min-h-[70vh] bg-gradient-to-br from-slate-100 via-slate-50 to-white py-12">
+    <div class="mx-auto max-w-6xl px-4">
+        <header
+            class="mb-8 flex flex-col gap-4 rounded-3xl bg-white/80 p-8 shadow-lg ring-1 ring-black/5 backdrop-blur md:flex-row md:items-center md:justify-between">
+            <div>
+                <p class="text-sm uppercase tracking-wide text-sky-500">RustPBX Admin</p>
+                <h1 class="mt-2 text-3xl font-semibold text-slate-900">Hello, {{ username }}</h1>
+                <p class="mt-1 text-sm text-slate-500">Signed in as {{ email }}</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <button
+                    class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+                    x-data="{}" @click="window.location.reload()">Refresh</button>
+                <a href="{{ logout_url }}"
+                    class="rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-rose-400">Sign
+                    out</a>
+            </div>
+        </header>
+        <section class="grid gap-6 md:grid-cols-3">
+            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
+                <h2 class="text-sm font-semibold text-slate-500">Quick links</h2>
+                <ul class="mt-4 space-y-3 text-sm text-slate-600">
+                    <li class="flex items-center gap-2">
+                        <span class="inline-flex h-2 w-2 rounded-full bg-sky-500"></span>
+                        SIP users and registration records
+                    </li>
+                    <li class="flex items-center gap-2">
+                        <span class="inline-flex h-2 w-2 rounded-full bg-indigo-500"></span>
+                        Call routing and policy management
+                    </li>
+                    <li class="flex items-center gap-2">
+                        <span class="inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+                        Speech synthesis and transcription integrations
+                    </li>
+                </ul>
+            </article>
+            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
+                <h2 class="text-sm font-semibold text-slate-500">Suggested tasks</h2>
+                <ul class="mt-4 space-y-3 text-sm text-slate-600">
+                    <li class="rounded-lg bg-slate-50 px-4 py-3">Review active call statistics.</li>
+                    <li class="rounded-lg bg-slate-50 px-4 py-3">Sync operational metrics to your monitoring stack.</li>
+                    <li class="rounded-lg bg-slate-50 px-4 py-3">Audit the latest endpoint registrations.</li>
+                </ul>
+            </article>
+            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
+                <h2 class="text-sm font-semibold text-slate-500">System status</h2>
+                <div class="mt-4 space-y-4 text-sm text-slate-600">
+                    <div class="rounded-lg bg-emerald-50 px-4 py-3 text-emerald-700">All systems operational.</div>
+                    <div class="rounded-lg bg-slate-50 px-4 py-3">Built with Askama, Alpine.js, and Tailwind CSS.</div>
+                    <div class="rounded-lg bg-slate-50 px-4 py-3">Extend this dashboard to match your operational needs.
+                    </div>
+                </div>
+            </article>
+        </section>
+    </div>
+</div>
+{% endblock %}

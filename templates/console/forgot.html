@@ -1,0 +1,45 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Forgot password · RustPBX Admin{% endblock %}
+
+{% block content %}
+<section class="flex items-center justify-center py-16 px-4">
+    <div class="w-full max-w-lg space-y-8 rounded-2xl bg-white/90 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
+        <div class="space-y-2 text-center">
+            <h1 class="text-2xl font-semibold text-slate-900">Reset your password</h1>
+            <p class="text-sm text-slate-500">Enter the email address linked to your account and we will send a reset
+                link.</p>
+        </div>
+        {% if error_message.is_some() %}
+        <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+            {{ error_message.as_deref().unwrap_or("") }}
+        </div>
+        {% endif %}
+        {% if info_message.is_some() %}
+        <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+            {{ info_message.as_deref().unwrap_or("") }}
+        </div>
+        {% endif %}
+        {% if reset_link.is_some() %}
+        <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+            Development hint: <a href="{{ reset_link.as_deref().unwrap_or("") }}" class="font-medium underline">open the
+                reset link directly</a>
+        </div>
+        {% endif %}
+        <form action="{{ forgot_action }}" method="post" class="space-y-5">
+            <div class="space-y-2">
+                <label class="block text-sm font-medium text-slate-700">Email address</label>
+                <input type="email" name="email" required
+                    class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="you@example.com" />
+            </div>
+            <button type="submit"
+                class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Send
+                reset link</button>
+        </form>
+        <div class="text-center text-sm text-slate-500">
+            <a href="{{ login_url }}" class="font-medium text-sky-600 hover:text-sky-500">Back to sign in</a>
+        </div>
+    </div>
+</section>
+{% endblock %}
