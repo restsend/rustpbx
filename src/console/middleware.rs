@@ -69,7 +69,10 @@ impl IntoResponse for RenderTemplate<'_> {
             Ok(tmpl) => match tmpl.render(self.context) {
                 Ok(body) => Html(body).into_response(),
                 Err(err) => {
-                    warn!("failed to render template {}: {}", self.template_name, err);
+                    warn!(
+                        "failed to render template {}: {:?}",
+                        self.template_name, err
+                    );
                     (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                         format!("Internal Server Error: {}", err),

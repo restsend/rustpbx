@@ -3,61 +3,303 @@
 {% block title %}Dashboard · RustPBX{% endblock %}
 
 {% block content %}
-<div class="min-h-[70vh] bg-gradient-to-br from-slate-100 via-slate-50 to-white py-12">
-    <div class="mx-auto max-w-6xl px-4">
-        <header
-            class="mb-8 flex flex-col gap-4 rounded-3xl bg-white/80 p-8 shadow-lg ring-1 ring-black/5 backdrop-blur md:flex-row md:items-center md:justify-between">
-            <div>
-                <p class="text-sm uppercase tracking-wide text-sky-500">RustPBX Admin</p>
-                <h1 class="mt-2 text-3xl font-semibold text-slate-900">Hello, {{ username }}</h1>
-                <p class="mt-1 text-sm text-slate-500">Signed in as {{ email }}</p>
-            </div>
-            <div class="flex items-center gap-3">
-                <button
-                    class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
-                    x-data="{}" @click="window.location.reload()">Refresh</button>
-                <a href="{{ logout_url }}"
-                    class="rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-rose-400">Sign
-                    out</a>
-            </div>
-        </header>
-        <section class="grid gap-6 md:grid-cols-3">
-            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
-                <h2 class="text-sm font-semibold text-slate-500">Quick links</h2>
-                <ul class="mt-4 space-y-3 text-sm text-slate-600">
-                    <li class="flex items-center gap-2">
-                        <span class="inline-flex h-2 w-2 rounded-full bg-sky-500"></span>
-                        SIP users and registration records
-                    </li>
-                    <li class="flex items-center gap-2">
-                        <span class="inline-flex h-2 w-2 rounded-full bg-indigo-500"></span>
-                        Call routing and policy management
-                    </li>
-                    <li class="flex items-center gap-2">
-                        <span class="inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-                        Speech synthesis and transcription integrations
-                    </li>
-                </ul>
-            </article>
-            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
-                <h2 class="text-sm font-semibold text-slate-500">Suggested tasks</h2>
-                <ul class="mt-4 space-y-3 text-sm text-slate-600">
-                    <li class="rounded-lg bg-slate-50 px-4 py-3">Review active call statistics.</li>
-                    <li class="rounded-lg bg-slate-50 px-4 py-3">Sync operational metrics to your monitoring stack.</li>
-                    <li class="rounded-lg bg-slate-50 px-4 py-3">Audit the latest endpoint registrations.</li>
-                </ul>
-            </article>
-            <article class="rounded-2xl bg-white/90 p-6 shadow-sm ring-1 ring-black/5 backdrop-blur">
-                <h2 class="text-sm font-semibold text-slate-500">System status</h2>
-                <div class="mt-4 space-y-4 text-sm text-slate-600">
-                    <div class="rounded-lg bg-emerald-50 px-4 py-3 text-emerald-700">All systems operational.</div>
-                    <div class="rounded-lg bg-slate-50 px-4 py-3">Built with MiniJinja, Alpine.js, and Tailwind CSS.
-                    </div>
-                    <div class="rounded-lg bg-slate-50 px-4 py-3">Extend this dashboard to match your operational needs.
+<div class="min-h-[70vh] py-6">
+    <div class="mx-auto max-w-7xl px-4">
+        <!-- Time range selector -->
+        <div class="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-end">
+                <div class="flex items-center gap-3">
+                    <label for="time-range" class="text-xs font-medium uppercase tracking-wide text-slate-500">Time
+                        range</label>
+                    <div class="relative w-48">
+                        <select id="time-range" name="time-range"
+                            class="block w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="10m">Last 10 minutes</option>
+                            <option value="today">Today</option>
+                            <option value="yesterday">Yesterday</option>
+                            <option value="week">This week</option>
+                            <option value="7days">Last 7 days</option>
+                            <option value="30days">Last 30 days</option>
+                        </select>
+                        <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                                class="h-4 w-4">
+                                <path fill-rule="evenodd"
+                                    d="M5.23 7.21a.75.75 0 011.06.02L10 10.939l3.71-3.71a.75.75 0 111.06 1.062l-4.24 4.242a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z"
+                                    clip-rule="evenodd" />
+                            </svg>
+                        </span>
                     </div>
                 </div>
-            </article>
+            </div>
+        </div>
+
+        <!-- Metrics with emphasis on last 10 minutes -->
+        <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Calls in last 10m</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div class="text-3xl font-semibold">{{ metrics.recent10.total | default(0) }}</div>
+                    <div class="text-xs text-emerald-600">{{ metrics.recent10.trend | default('+0%') }}</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div class="h-full bg-sky-500"
+                        style="--v: {{ metrics.recent10.util | default(0) }}; width: calc(var(--v) * 1%);"></div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Answered in last 10m</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div class="text-3xl font-semibold">{{ metrics.recent10.answered | default(0) }}</div>
+                    <div class="text-xs text-emerald-600">{{ metrics.recent10.asr | default('—') }}</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div class="h-full bg-emerald-500"
+                        style="--v: {{ metrics.recent10.ans_util | default(0) }}; width: calc(var(--v) * 1%);"></div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Avg call duration (10m)</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div class="text-3xl font-semibold">{{ metrics.recent10.acd | default('0s') }}</div>
+                    <div class="text-xs text-slate-500">{{ metrics.today.acd | default('0s') }} today</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div class="h-full bg-indigo-500"
+                        style="--v: {{ metrics.recent10.acd_util | default(0) }}; width: calc(var(--v) * 1%);"></div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Active calls</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div class="text-3xl font-semibold">{{ metrics.active | default(0) }}</div>
+                    <div class="text-xs text-slate-500">capacity {{ metrics.capacity | default(0) }}</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div class="h-full bg-amber-500"
+                        style="--v: {{ metrics.active_util | default(0) }}; width: calc(var(--v) * 1%);"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Lower grid: left charts, right summaries -->
+        <section class="mt-6 grid gap-6 lg:grid-cols-3">
+            <div class="lg:col-span-2 rounded-2xl bg-white p-6 ring-1 ring-black/5">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-slate-600">Last 10 minutes timeline</h2>
+                </div>
+                <div class="mt-4">
+                    <canvas id="timelineChart" class="h-40 w-full"></canvas>
+                </div>
+            </div>
+            <div class="rounded-2xl bg-white p-6 ring-1 ring-black/5">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-slate-600">Call direction</h2>
+                </div>
+                <div class="mt-4">
+                    <canvas id="callDirectionChart" class="h-44 w-full"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Active calls mock list -->
+        {% set active_calls_preview = active_calls | default([
+        {"caller": "+1 202-555-0110", "callee": "1001", "status": "Talking", "started_at": "09:21", "duration":
+        "00:03:42"},
+        {"caller": "+86 138-0000-1002", "callee": "1002", "status": "Bridged", "started_at": "09:18", "duration":
+        "00:05:10"},
+        {"caller": "400-820-8820", "callee": "Sales", "status": "Ringing", "started_at": "09:24", "duration":
+        "00:00:24"},
+        {"caller": "SIP/trunk-003", "callee": "Support", "status": "Talking", "started_at": "09:16", "duration":
+        "00:08:17"},
+        {"caller": "+1 415-555-0145", "callee": "Demo Bot", "status": "AI Handoff", "started_at": "09:12", "duration":
+        "00:12:03"},
+        {"caller": "sip:alice@example.com", "callee": "1010", "status": "Muted", "started_at": "09:23", "duration":
+        "00:01:11"},
+        {"caller": "+44 20 7946 0958", "callee": "London", "status": "Talking", "started_at": "09:05", "duration":
+        "00:17:48"},
+        {"caller": "PBX Test", "callee": "IVR", "status": "Listening", "started_at": "09:19", "duration": "00:02:56"},
+        {"caller": "+81 3-4510-2211", "callee": "Tokyo", "status": "Talking", "started_at": "09:20", "duration":
+        "00:04:29"},
+        {"caller": "+33 1 42 68 53 00", "callee": "Paris", "status": "Talking", "started_at": "09:09", "duration":
+        "00:14:05"}
+        ]) %}
+        <section class="mt-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-600">Active calls · latest 10</h2>
+                    <p class="text-xs text-slate-500">Preview list with sample data, hook up to live metrics later.</p>
+                </div>
+                <span class="text-xs text-slate-400">Updated just now</span>
+            </div>
+            <div class="mt-4 overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Caller</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Callee</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Status</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Started</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        {% for call in active_calls_preview %}
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-3 py-2 font-medium text-slate-700">{{ call.caller }}</td>
+                            <td class="px-3 py-2 text-slate-600">{{ call.callee }}</td>
+                            <td class="px-3 py-2">
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                                    {{ call.status }}
+                                </span>
+                            </td>
+                            <td class="px-3 py-2 text-slate-500">{{ call.started_at }}</td>
+                            <td class="px-3 py-2 text-slate-500">{{ call.duration }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the
+                                moment.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </section>
     </div>
 </div>
+{% set timeline_series = metrics.recent10.timeline | default([2, 5, 7, 4, 9, 6, 3, 5, 8, 4]) %}
+{% set call_direction_series = call_direction | default({"Inbound": 28, "Outbound": 17, "Internal": 9}) %}
+<div id="dashboard-data" class="hidden" data-timeline='{{ timeline_series | safe }}'
+    data-direction='{{ call_direction_series | safe }}'></div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+    (function () {
+        const fallbackTimeline = [2, 5, 7, 4, 9, 6, 3, 5, 8, 4];
+        const dataNode = document.getElementById('dashboard-data');
+        let timelineValuesRaw = [];
+        let callDirectionRaw = {};
+
+        if (dataNode) {
+            try {
+                timelineValuesRaw = JSON.parse(dataNode.dataset.timeline || '[]');
+            } catch (err) {
+                timelineValuesRaw = [];
+            }
+            try {
+                callDirectionRaw = JSON.parse(dataNode.dataset.direction || '{}');
+            } catch (err) {
+                callDirectionRaw = {};
+            }
+        }
+
+        const timelineData = Array.isArray(timelineValuesRaw) && timelineValuesRaw.length ? timelineValuesRaw : fallbackTimeline;
+        const timelineLabels = timelineData.map((_, idx) => {
+            const minutesAgo = timelineData.length - 1 - idx;
+            return minutesAgo === 0 ? 'Now' : `${minutesAgo}m ago`;
+        });
+
+        const ctxTimeline = document.getElementById('timelineChart');
+        if (ctxTimeline && window.Chart) {
+            new Chart(ctxTimeline, {
+                type: 'line',
+                data: {
+                    labels: timelineLabels,
+                    datasets: [{
+                        label: 'Calls',
+                        data: timelineData,
+                        fill: true,
+                        tension: 0.35,
+                        borderColor: '#0284c7',
+                        backgroundColor: 'rgba(2, 132, 199, 0.15)',
+                        pointRadius: 3,
+                        pointBackgroundColor: '#0284c7',
+                        pointBorderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                color: '#64748b'
+                            },
+                            grid: {
+                                color: 'rgba(148, 163, 184, 0.2)'
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                color: '#64748b'
+                            },
+                            grid: {
+                                display: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+
+        const fallbackDirection = { Inbound: 28, Outbound: 17, Internal: 9 };
+        const directionKeys = Object.keys(callDirectionRaw);
+        const directionLabels = directionKeys.length ? directionKeys : Object.keys(fallbackDirection);
+        const directionData = directionKeys.length ? Object.values(callDirectionRaw) : Object.values(fallbackDirection);
+
+        const ctxDirection = document.getElementById('callDirectionChart');
+        if (ctxDirection && window.Chart) {
+            new Chart(ctxDirection, {
+                type: 'bar',
+                data: {
+                    labels: directionLabels,
+                    datasets: [{
+                        label: 'Calls',
+                        data: directionData,
+                        backgroundColor: ['#0ea5e9', '#22c55e', '#a855f7'],
+                        borderRadius: 6,
+                        barPercentage: 0.6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0,
+                                color: '#64748b'
+                            },
+                            grid: {
+                                color: 'rgba(148, 163, 184, 0.2)'
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                color: '#64748b'
+                            },
+                            grid: {
+                                display: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+    })();
+</script>
 {% endblock %}

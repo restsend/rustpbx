@@ -377,7 +377,7 @@ fn create_router(state: AppState) -> Router {
 
     #[cfg(feature = "console")]
     if let Some(console_state) = state.console.clone() {
-        router = router.merge(crate::console::handlers::router(console_state));
+        router = router.merge(crate::console::router(console_state));
     }
 
     router

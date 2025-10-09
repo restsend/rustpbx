@@ -1,0 +1,399 @@
+{% extends "console/layout.html" %}
+{% block title %}Extensions · RustPBX{% endblock %}
+{% block content %}
+<div class="p-6">
+    <div class="mx-auto max-w-7xl space-y-6">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <h1 class="text-xl font-semibold text-slate-900">Extensions</h1>
+                <p class="mt-2 text-sm text-slate-500">Search, review, and manage every extension in your PBX.</p>
+            </div>
+            <div class="flex gap-3">
+                <a href="{{ create_url }}"
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                    </svg>
+                    New extension
+                </a>
+            </div>
+        </div>
+
+        <div x-data="extensionFilters({{filters|escape}})" class="rounded-xl bg-white p-6 ring-1 ring-black/5">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Filters</h2>
+                    <p class="text-sm text-slate-500">Add or remove filters to narrow down the list.</p>
+                </div>
+                <div class="flex gap-2">
+                    <button type="button"
+                        class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                        @click="reset()">
+                        Clear all
+                    </button>
+                </div>
+            </div>
+
+            <div class="mt-4 flex flex-wrap gap-2">
+                <template x-if="!activeFilters.length">
+                    <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">No filters
+                        applied</span>
+                </template>
+                <template x-for="filter in activeFilters" :key="filter.id">
+                    <span
+                        class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+                        <span x-text="filter.label"></span>
+                        <template x-if="filter.type === 'select'">
+                            <span class="flex gap-1 text-slate-400">
+                                <template x-for="value in filter.value" :key="value">
+                                    <span
+                                        class="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
+                                        x-text="value"></span>
+                                </template>
+                            </span>
+                        </template>
+                        <template x-if="filter.type === 'single'">
+                            <span class="text-slate-400" x-text="filter.value || filter.default || 'All'"></span>
+                        </template>
+                        <template x-if="filter.type === 'daterange'">
+                            <span class="text-slate-400">
+                                <span x-text="filter.value.start || 'Start'"></span>
+                                <span class="mx-1">→</span>
+                                <span x-text="filter.value.end || 'End'"></span>
+                            </span>
+                        </template>
+                        <button type="button"
+                            class="rounded-full p-1 text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                            @click="removeFilter(filter.id)">
+                            <span class="sr-only">Remove filter</span>
+                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                            </svg>
+                        </button>
+                    </span>
+                </template>
+            </div>
+
+            <div class="mt-5 flex flex-wrap items-start gap-4">
+                <div class="relative" x-data="{ open: false }">
+                    <button type="button"
+                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 shadow-sm transition hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                        @click="open = !open">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                        </svg>
+                        Add filter
+                    </button>
+                    <div x-cloak x-show="open" x-transition.origin.top.left @click.away="open = false"
+                        class="absolute z-10 mt-2 w-52 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-lg">
+                        <template x-for="option in availableFilters" :key="option.id">
+                            <button type="button"
+                                class="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-slate-600 hover:bg-slate-100"
+                                :disabled="activeFilters.find(f => f.id === option.id)"
+                                :class="{ 'opacity-40 cursor-not-allowed': activeFilters.find(f => f.id === option.id) }"
+                                @click.prevent="addFilter(option); open = false;">
+                                <span>
+                                    <span class="block text-sm font-semibold text-slate-700"
+                                        x-text="option.label"></span>
+                                    <span class="block text-xs text-slate-400"
+                                        x-text="option.type === 'select' ? 'Select one or more values' : (option.type === 'single' ? 'Choose one' : 'Choose a date range')"></span>
+                                </span>
+                                <svg class="h-4 w-4 text-slate-400" viewBox="0 0 20 20" fill="none"
+                                    stroke="currentColor" stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M7 10l2 2 4-4" />
+                                </svg>
+                            </button>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <template x-for="filter in activeFilters" :key="filter.id + '-controls'">
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <div class="text-sm font-semibold text-slate-700" x-text="filter.label"></div>
+                        <template x-if="filter.type === 'select'">
+                            <div>
+                                <select multiple size="4"
+                                    class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    @change="updateSelect(filter, $event)">
+                                    <template x-for="option in filter.options" :key="option">
+                                        <option :value="option" x-text="option"
+                                            :selected="filter.value.includes(option)"></option>
+                                    </template>
+                                </select>
+                                <p class="mt-2 text-xs text-slate-400">Hold Command to select multiple values.</p>
+                            </div>
+                        </template>
+                        <template x-if="filter.type === 'single'">
+                            <div>
+                                <select
+                                    class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    @change="updateSingle(filter, $event)">
+                                    <template x-for="option in filter.options" :key="option">
+                                        <option :value="option" x-text="option"
+                                            :selected="(filter.value || filter.default || 'All') === option"></option>
+                                    </template>
+                                </select>
+                            </div>
+                        </template>
+                        <template x-if="filter.type === 'daterange'">
+                            <div class="mt-3 space-y-3">
+                                <label class="block text-xs font-medium text-slate-500">
+                                    Start date
+                                    <input type="date"
+                                        class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        :value="filter.value.start"
+                                        @input="updateRange(filter, 'start', $event.target.value)">
+                                </label>
+                                <label class="block text-xs font-medium text-slate-500">
+                                    End date
+                                    <input type="date"
+                                        class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        :value="filter.value.end"
+                                        @input="updateRange(filter, 'end', $event.target.value)">
+                                </label>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+        <div class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                    <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                        <tr>
+                            <th scope="col" class="px-6 py-3 font-semibold">Extension</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Department</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Status</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Enabled</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Created</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Registered</th>
+                            <th scope="col" class="px-6 py-3 font-semibold">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 bg-white text-sm text-slate-600">
+                        {% for extension in extensions %}
+                        <tr class="hover:bg-slate-50">
+                            <td class="whitespace-nowrap px-6 py-4">
+                                <div class="font-medium text-slate-900">{{ extension.display_name | default('—') }}
+                                </div>
+                                <div class="text-xs text-slate-400">Ext {{ extension.extension }}</div>
+                            </td>
+                            <td class="whitespace-nowrap px-6 py-4">
+                                {% if extension.department is string %}
+                                <span
+                                    class="mr-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200">{{
+                                    extension.department }}</span>
+                                {% elif extension.department %}
+                                {% for dept in extension.department %}
+                                <span
+                                    class="mr-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200">{{
+                                    dept }}</span>
+                                {% endfor %}
+                                {% else %}
+                                <span class="text-slate-400">—</span>
+                                {% endif %}
+                            </td>
+                            <td class="whitespace-nowrap px-6 py-4">
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold {{ 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' if extension.status == 'Online' else ('bg-amber-50 text-amber-600 ring-1 ring-amber-100' if extension.status == 'Ringing' or extension.status == 'Idle' else 'bg-slate-100 text-slate-600 ring-1 ring-slate-200') }}">
+                                    <span
+                                        class="h-1.5 w-1.5 rounded-full {{ 'bg-emerald-400' if extension.status == 'Online' else ('bg-amber-400' if extension.status == 'Ringing' or extension.status == 'Idle' else 'bg-slate-400') }}"></span>
+                                    {{ extension.status }}
+                                </span>
+                            </td>
+                            <td class="whitespace-nowrap px-6 py-4">
+                                {% if extension.login_allowed %}
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-600 ring-1 ring-emerald-100">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8" />
+                                    </svg>
+                                    Enabled
+                                </span>
+                                {% else %}
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-medium text-rose-600 ring-1 ring-rose-100">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                                    </svg>
+                                    Disabled
+                                </span>
+                                {% endif %}
+                            </td>
+                            <td class="whitespace-nowrap px-6 py-4 text-slate-500">{{ extension.created_at }}</td>
+                            <td class="whitespace-nowrap px-6 py-4 text-slate-600">
+                                {% if extension.registered_at %}
+                                <div class="flex items-start gap-2">
+                                    <span
+                                        class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-200">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l3 3 7-7" />
+                                        </svg>
+                                    </span>
+                                    <div class="leading-tight">
+                                        <div class="text-sm text-slate-700">{{ extension.registrar | default('Unknown
+                                            device') }}</div>
+                                        <div class="text-xs text-slate-400">{{ extension.registered_at }}</div>
+                                    </div>
+                                </div>
+                                {% else %}
+                                <div class="flex items-center gap-2 text-slate-400">
+                                    <span
+                                        class="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500 ring-1 ring-slate-200">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 6l8 8M6 14l8-8" />
+                                        </svg>
+                                    </span>
+                                    <span class="text-xs">Not registered</span>
+                                </div>
+                                {% endif %}
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="flex items-center gap-2">
+                                    <a href="{{ extension.edit_url }}" title="Edit extension"
+                                        class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600">
+                                        <span class="sr-only">Edit</span>
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
+                                        </svg>
+                                    </a>
+                                    <a href="{{ extension.delete_url }}" title="Delete extension"
+                                        class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-rose-300 hover:text-rose-600">
+                                        <span class="sr-only">Delete</span>
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 7h8m-7 0v8m3-8v8m3-8v8M4 7h12M8 4h4a1 1 0 011 1v2H7V5a1 1 0 011-1z" />
+                                        </svg>
+                                    </a>
+                                    {% set toggle_label = 'Disable login' if extension.login_allowed else 'Enable login'
+                                    %}
+                                    <a href="{{ extension.toggle_url }}" title="{{ toggle_label }}"
+                                        class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-amber-300 hover:text-amber-600">
+                                        <span class="sr-only">{{ toggle_label }}</span>
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M7 5h6a2 2 0 012 2v6a2 2 0 01-2 2H7a2 2 0 01-2-2V7a2 2 0 012-2z" />
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 10h2" />
+                                        </svg>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div
+                class="flex flex-col gap-4 border-t border-slate-200 px-6 py-4 text-sm text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    Showing
+                    <span class="font-semibold text-slate-700">{{ pagination.showing_from }}</span>
+                    to
+                    <span class="font-semibold text-slate-700">{{ pagination.showing_to }}</span>
+                    of
+                    <span class="font-semibold text-slate-700">{{ pagination.total_records }}</span>
+                    extensions
+                </div>
+                <div class="flex items-center gap-2">
+                    <a href="?page={{ pagination.prev_page }}"
+                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium {{ 'pointer-events-none opacity-40' if not pagination.has_prev else 'hover:bg-slate-100' }}"
+                        aria-disabled="{{ 'true' if not pagination.has_prev else 'false' }}">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
+                        </svg>
+                        Prev
+                    </a>
+                    <span class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600">
+                        Page {{ pagination.current_page }} of {{ pagination.total_pages }}
+                    </span>
+                    <a href="?page={{ pagination.next_page }}"
+                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium {{ 'pointer-events-none opacity-40' if not pagination.has_next else 'hover:bg-slate-100' }}"
+                        aria-disabled="{{ 'true' if not pagination.has_next else 'false' }}">
+                        Next
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 5l4 5-4 5" />
+                        </svg>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('extensionFilters', (filters) => ({
+            availableFilters: (filters?.available || []).map((item) => ({
+                ...item,
+                options: item.options || [],
+            })),
+            activeFilters: (filters?.active || []).map((item) => {
+                const found = (filters?.available || []).find((opt) => opt.id === item.id) || {};
+                const type = item.type || found.type || 'select';
+                const options = found.options || [];
+                let value = item.value;
+                if (type === 'select') {
+                    value = Array.isArray(value) ? value : [];
+                } else if (type === 'single') {
+                    value = typeof value === 'string' ? value : (found.default || 'All');
+                } else {
+                    // daterange (unused now)
+                    value = value && typeof value === 'object' ? value : { start: '', end: '' };
+                }
+                return {
+                    ...found,
+                    ...item,
+                    type,
+                    options,
+                    value,
+                };
+            }),
+            showAddMenu: false,
+            addFilter(option) {
+                if (this.activeFilters.find((filter) => filter.id === option.id)) {
+                    return;
+                }
+                let value;
+                if (option.type === 'select') {
+                    value = [];
+                } else if (option.type === 'single') {
+                    value = option.default || (option.options?.[0] || 'All');
+                } else {
+                    value = { start: '', end: '' };
+                }
+                this.activeFilters.push({ ...option, options: option.options || [], value });
+            },
+            removeFilter(id) {
+                this.activeFilters = this.activeFilters.filter((filter) => filter.id !== id);
+            },
+            updateSelect(filter, event) {
+                const selected = Array.from(event.target.selectedOptions).map((option) => option.value);
+                filter.value = selected;
+            },
+            updateSingle(filter, event) {
+                filter.value = event.target.value;
+            },
+            updateRange(filter, key, value) {
+                filter.value = { ...(filter.value || { start: '', end: '' }), [key]: value };
+            },
+            reset() {
+                this.activeFilters = [];
+            },
+        }));
+    });
+</script>
+
+{% endblock %}
