@@ -96,8 +96,6 @@ pub struct ConsoleConfig {
     pub session_secret: String,
     #[serde(default = "default_console_base_path")]
     pub base_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invite_code: Option<String>,
 }
 
 impl Default for ConsoleConfig {
@@ -106,7 +104,6 @@ impl Default for ConsoleConfig {
             database_url: default_console_database_url(),
             session_secret: default_console_session_secret(),
             base_path: default_console_base_path(),
-            invite_code: None,
         }
     }
 }

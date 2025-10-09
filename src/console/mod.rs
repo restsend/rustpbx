@@ -1,11 +1,15 @@
 use crate::config::ConsoleConfig;
+use crate::console::middleware::RenderTemplate;
 use anyhow::{Context, Result};
+use axum::response::{IntoResponse, Response};
+use minijinja::{Environment, path_loader};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
+use tracing::debug;
 
 pub mod auth;
 pub mod handlers;
@@ -56,7 +60,6 @@ pub struct ConsoleState {
     db: DatabaseConnection,
     session_key: Arc<Vec<u8>>,
     base_path: String,
-    invite_code: Option<String>,
 }
 
 impl ConsoleState {
@@ -65,7 +68,6 @@ impl ConsoleState {
             database_url,
             session_secret,
             base_path,
-            invite_code,
         } = config;
 
         prepare_sqlite_database(&database_url)?;
@@ -82,22 +84,33 @@ impl ConsoleState {
         let session_key = Arc::new(key_material.to_vec());
 
         let base_path = normalize_base_path(&base_path);
-        let invite_code = invite_code
-            .map(|code| code.trim().to_string())
-            .filter(|c| !c.is_empty());
-
         Ok(Arc::new(Self {
             db,
             session_key,
             base_path,
-            invite_code,
         }))
+    }
+
+    pub fn render<T: serde::Serialize>(&self, template: &str, ctx: T) -> Response {
+        let start_time = std::time::Instant::now();
+        let mut tmpl_env = Environment::new();
+        tmpl_env.set_loader(path_loader("templates"));
+
+        let r = RenderTemplate {
+            tmpl_env: &tmpl_env,
+            template_name: template,
+            context: &serde_json::to_value(ctx).unwrap_or(serde_json::Value::Null),
+        }
+        .into_response();
+        let elapsed = start_time.elapsed();
+        debug!("rendered template '{}' in {:?}", template, elapsed);
+        r
     }
 
     pub fn url_for(&self, suffix: &str) -> String {
         let trimmed = suffix.trim();
         if trimmed.is_empty() || trimmed == "/" {
-            return self.base_path.clone();
+            return format!("{}/", self.base_path);
         }
         if trimmed.starts_with('/') {
             if self.base_path == "/" {
@@ -116,10 +129,6 @@ impl ConsoleState {
         &self.base_path
     }
 
-    pub fn invite_code(&self) -> Option<&str> {
-        self.invite_code.as_deref()
-    }
-
     pub fn login_url(&self, next: Option<String>) -> String {
         let mut url = self.url_for("/login");
         if let Some(next) = next {
@@ -127,6 +136,7 @@ impl ConsoleState {
         }
         url
     }
+
     pub fn register_url(&self, next: Option<String>) -> String {
         let mut url = self.url_for("/register");
         if let Some(next) = next {
@@ -134,6 +144,7 @@ impl ConsoleState {
         }
         url
     }
+
     pub fn forgot_url(&self) -> String {
         self.url_for("/forgot")
     }

@@ -16,7 +16,7 @@ vad_silero = ["ort", "ort-sys"]
 vad_ten = ["ort", "ort-sys"]
 opus = ["dep:opus"]
 g729 = ["dep:g729-sys"]
-console = ["dep:askama"]
+console = ["dep:minijinja"]
 default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729", "console"]
 not_vad = []
 
@@ -32,7 +32,10 @@ futures = "0.3.31"
 nnnoiseless = { version = "0.5", features = ["default"] }
 rubato = "0.16.2"
 rustls = { version = "0.23.32", features = ["ring"] }
-askama = { version = "0.14.0", optional = true }
+minijinja = { version = "2.0.1", features = [
+    "loader",
+    "json",
+], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.143"
 tokio = { version = "1.47.1", features = ["full", "tracing"] }

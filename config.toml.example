@@ -14,7 +14,6 @@ media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 session_secret = "please-change-this-session-secret"
 base_path = "/console"
-# invite_code = "join-me"
 
 [ua]
 addr="0.0.0.0"
