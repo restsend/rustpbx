@@ -23,6 +23,7 @@ pub struct VoiceApiTtsClient {
     tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
+#[allow(dead_code)]
 /// VoiceAPI TTS Request structure
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TtsRequest {
