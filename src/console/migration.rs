@@ -1,5 +1,4 @@
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
-
 pub struct Migrator;
 
 #[async_trait::async_trait]

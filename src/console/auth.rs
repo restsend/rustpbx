@@ -2,12 +2,12 @@ use super::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
 use crate::console::ConsoleState;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use axum::http::{HeaderMap, HeaderValue, header::COOKIE};
+use axum::http::HeaderValue;
 use base64::engine::{Engine, general_purpose::STANDARD_NO_PAD};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -17,28 +17,12 @@ use sha2::Sha256;
 use std::time::Duration;
 use tracing::warn;
 
-const SESSION_COOKIE_NAME: &str = "rustpbx_console_session";
+pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_console_session";
 const SESSION_TTL_HOURS: u64 = 12;
 const RESET_TOKEN_VALID_MINUTES: u64 = 30;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookie_str| {
-            cookie_str.split(';').find_map(|pair| {
-                let mut parts = pair.trim().splitn(2, '=');
-                let key = parts.next()?.trim();
-                if key == SESSION_COOKIE_NAME {
-                    Some(parts.next().unwrap_or("").trim().to_string())
-                } else {
-                    None
-                }
-            })
-        })
-}
 impl ConsoleState {
     fn sign(&self, payload: &str) -> Option<String> {
         let mut mac = HmacSha256::new_from_slice(self.session_key.as_slice()).ok()?;
@@ -254,10 +238,82 @@ impl ConsoleState {
             .context("failed to update password")
     }
 
-    pub async fn mark_login(&self, user: &UserModel) -> Result<()> {
+    pub async fn upsert_super_user(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<UserModel> {
+        let username = username.trim();
+        let email = email.trim().to_lowercase();
+        ensure!(!username.is_empty(), "username is required");
+        ensure!(!email.is_empty(), "email is required");
+        ensure!(!password.is_empty(), "password is required");
+
+        let salt = SaltString::generate(&mut OsRng);
+        let hashed = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
+            .to_string();
+
+        let now = Utc::now().naive_utc();
+
+        let mut user = UserEntity::find()
+            .filter(UserColumn::Username.eq(username))
+            .one(&self.db)
+            .await
+            .with_context(|| format!("failed to lookup user by username: {}", username))?;
+
+        if user.is_none() {
+            if let Some(existing) = UserEntity::find()
+                .filter(UserColumn::Email.eq(email.clone()))
+                .one(&self.db)
+                .await
+                .with_context(|| format!("failed to lookup user by email: {}", email))?
+            {
+                user = Some(existing);
+            }
+        }
+
+        if let Some(user) = user {
+            let mut model: UserActiveModel = user.into();
+            model.username = Set(username.to_string());
+            model.email = Set(email.clone());
+            model.password_hash = Set(hashed);
+            model.is_active = Set(true);
+            model.is_staff = Set(true);
+            model.is_superuser = Set(true);
+            model.reset_token = Set(None);
+            model.reset_token_expires = Set(None);
+            model.updated_at = Set(now);
+            model
+                .update(&self.db)
+                .await
+                .context("failed to update super user")
+        } else {
+            let mut model: UserActiveModel = Default::default();
+            model.username = Set(username.to_string());
+            model.email = Set(email.clone());
+            model.password_hash = Set(hashed);
+            model.created_at = Set(now);
+            model.updated_at = Set(now);
+            model.is_active = Set(true);
+            model.is_staff = Set(true);
+            model.is_superuser = Set(true);
+            model.reset_token = Set(None);
+            model.reset_token_expires = Set(None);
+            model
+                .insert(&self.db)
+                .await
+                .context("failed to create super user")
+        }
+    }
+
+    pub async fn mark_login(&self, user: &UserModel, last_login_ip: String) -> Result<()> {
         let mut model: UserActiveModel = user.clone().into();
         let now = Utc::now().naive_utc();
         model.last_login_at = Set(Some(now));
+        model.last_login_ip = Set(Some(last_login_ip));
         model.updated_at = Set(now);
         model
             .update(&self.db)
@@ -265,6 +321,7 @@ impl ConsoleState {
             .context("failed to update last_login_at")?;
         Ok(())
     }
+
     pub async fn current_user(&self, cookie_value: Option<&str>) -> Result<Option<UserModel>> {
         if let Some(user_id) = self.session_user_id(cookie_value) {
             let user = UserEntity::find_by_id(user_id)
