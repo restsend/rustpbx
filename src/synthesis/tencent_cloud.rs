@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Duration;
 use futures::{
-    FutureExt, SinkExt, Stream, StreamExt,
+    SinkExt, Stream, StreamExt, future,
     stream::{self, BoxStream, SplitSink},
 };
 use ring::hmac;
@@ -200,8 +200,7 @@ fn construct_request_url(option: &SynthesisOption, session_id: &str, text: Optio
 // text is for debuging purpose
 fn ws_to_event_stream<T>(
     ws_stream: T,
-    cmd_seq: Option<usize>,
-) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
+) -> impl Stream<Item = Result<SynthesisEvent>> + Send + 'static
 where
     T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Send
@@ -216,24 +215,18 @@ where
             let notify = notify_clone.clone();
             async move {
                 match message {
-                    Ok(Message::Binary(data)) => {
-                        Some((cmd_seq, Ok(SynthesisEvent::AudioChunk(data))))
-                    }
+                    Ok(Message::Binary(data)) => Some(Ok(SynthesisEvent::AudioChunk(data))),
                     Ok(Message::Text(text)) => {
                         let response: WebSocketResponse =
                             serde_json::from_str(&text).expect("Tencent TTS API changed!");
 
                         if response.code != 0 {
                             notify.notify_one();
-                            return Some((
-                                cmd_seq,
-                                Err(anyhow::anyhow!(
-                                    "Tencent TTS error, code: {}, message: {}, cmd_seq: {:?}",
-                                    response.code,
-                                    response.message,
-                                    cmd_seq
-                                )),
-                            ));
+                            return Some(Err(anyhow::anyhow!(
+                                "Tencent TTS error, code: {}, message: {}",
+                                response.code,
+                                response.message
+                            )));
                         }
 
                         if response.heartbeat == 1 {
@@ -243,38 +236,30 @@ where
                         if let Some(subtitles) = response.result.subtitles {
                             let subtitles: Vec<Subtitle> =
                                 subtitles.iter().map(Into::into).collect();
-                            return Some((cmd_seq, Ok(SynthesisEvent::Subtitles(subtitles))));
+                            return Some(Ok(SynthesisEvent::Subtitles(subtitles)));
                         }
 
                         // final == 1 means the synthesis is finished, should close the websocket
                         if response.r#final == 1 {
                             notify.notify_one();
-                            return Some((cmd_seq, Ok(SynthesisEvent::Finished)));
+                            return Some(Ok(SynthesisEvent::Finished));
                         }
 
                         None
                     }
                     Ok(Message::Close(_)) => {
                         notify.notify_one();
-                        warn!("Tencent TTS closed by remote, {:?}", cmd_seq);
+                        warn!("Tencent TTS closed by remote");
                         None
                     }
                     Err(e) => {
                         notify.notify_one();
-                        Some((
-                            cmd_seq,
-                            Err(anyhow::anyhow!(
-                                "Tencent TTS websocket error: {:?}, {:?}",
-                                cmd_seq,
-                                e
-                            )),
-                        ))
+                        Some(Err(anyhow::anyhow!("Tencent TTS websocket error: {:?}", e)))
                     }
                     _ => None,
                 }
             }
         })
-        .boxed()
 }
 
 // tencent cloud realtime tts client, non-streaming
@@ -313,15 +298,12 @@ impl SynthesisClient for RealTimeClient {
                 let session_id = Uuid::new_v4().to_string();
                 let option = client_option.merge_with(option);
                 let url = construct_request_url(&option, &session_id, Some(&text));
-                connect_async(url)
-                    .then(async move |res| match res {
-                        Ok((ws_stream, _)) => ws_to_event_stream(ws_stream, cmd_seq),
-                        Err(e) => {
-                            tracing::error!("Tencent TTS websocket error: {}", e);
-                            stream::empty().boxed()
-                        }
+                stream::once(connect_async(url))
+                    .flat_map(move |res| match res {
+                        Ok((ws_stream, _)) => ws_to_event_stream(ws_stream).boxed(),
+                        Err(e) => stream::once(future::ready(Err(e.into()))).boxed(),
                     })
-                    .flatten_stream()
+                    .map(move |x| (cmd_seq, x))
                     .boxed()
             })
             .boxed();
@@ -425,7 +407,10 @@ impl SynthesisClient for StreamingClient {
         let stream = self.connect().await?;
         let (ws_sink, ws_stream) = stream.split();
         self.sink = Some(ws_sink);
-        Ok(ws_to_event_stream(ws_stream, None))
+        let stream = ws_to_event_stream(ws_stream)
+            .map(move |event| (None, event))
+            .boxed();
+        Ok(stream)
     }
 
     async fn synthesize(

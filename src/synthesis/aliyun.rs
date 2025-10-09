@@ -3,7 +3,7 @@ use crate::synthesis::SynthesisEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::{
-    FutureExt, SinkExt, Stream, StreamExt,
+    FutureExt, SinkExt, Stream, StreamExt, future,
     stream::{self, BoxStream, SplitSink},
 };
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Message, client::IntoClientRequest},
+    tungstenite::{self, Message, client::IntoClientRequest},
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -227,27 +227,19 @@ async fn connect(task_id: String, option: SynthesisOption) -> Result<WsStream> {
     Ok(ws_stream)
 }
 
-fn event_stream<T>(
-    ws_stream: T,
-    cmd_seq: Option<usize>,
-) -> BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>
+fn event_stream<T>(ws_stream: T) -> impl Stream<Item = Result<SynthesisEvent>> + Send + 'static
 where
-    T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Send
-        + Unpin
-        + 'static,
+    T: Stream<Item = Result<Message, tungstenite::Error>> + Send + 'static,
 {
     let notify = Arc::new(Notify::new());
     let notify_clone = notify.clone();
-    let stream = ws_stream
+    ws_stream
         .take_until(notify.notified_owned())
         .filter_map(move |message| {
             let notify = notify_clone.clone();
             async move {
                 match message {
-                    Ok(Message::Binary(data)) => {
-                        Some((cmd_seq, Ok(SynthesisEvent::AudioChunk(data))))
-                    }
+                    Ok(Message::Binary(data)) => Some(Ok(SynthesisEvent::AudioChunk(data))),
                     Ok(Message::Text(text)) => {
                         let event: Event =
                             serde_json::from_str(&text).expect("Aliyun TTS API changed!");
@@ -255,7 +247,7 @@ where
                         match event.header.event.as_str() {
                             "task-finished" => {
                                 notify.notify_one();
-                                Some((cmd_seq, Ok(SynthesisEvent::Finished)))
+                                Some(Ok(SynthesisEvent::Finished))
                             }
                             "task-failed" => {
                                 let error_code = event
@@ -267,41 +259,29 @@ where
                                     .error_message
                                     .unwrap_or_else(|| "Unknown error message".to_string());
                                 notify.notify_one();
-                                Some((
-                                    cmd_seq,
-                                    Err(anyhow!(
-                                        "Aliyun TTS Task: {} failed: {}, {}",
-                                        event.header.task_id,
-                                        error_code,
-                                        error_msg
-                                    )),
-                                ))
+                                Some(Err(anyhow!(
+                                    "Aliyun TTS Task: {} failed: {}, {}",
+                                    event.header.task_id,
+                                    error_code,
+                                    error_msg
+                                )))
                             }
                             _ => None,
                         }
                     }
                     Ok(Message::Close(_)) => {
                         notify.notify_one();
-                        warn!("Aliyun TTS: closed by remote, {:?}", cmd_seq);
+                        warn!("Aliyun TTS: closed by remote");
                         None
                     }
                     Err(e) => {
                         notify.notify_one();
-                        Some((
-                            cmd_seq,
-                            Err(anyhow!(
-                                "Aliyun TTS: websocket error: {:?}, {:?}",
-                                cmd_seq,
-                                e
-                            )),
-                        ))
+                        Some(Err(anyhow!("Aliyun TTS: websocket error: {:?}", e)))
                     }
                     _ => None,
                 }
             }
-        });
-
-    Box::pin(stream)
+        })
 }
 #[derive(Debug)]
 pub struct StreamingClient {
@@ -332,7 +312,7 @@ impl SynthesisClient for StreamingClient {
         let ws_stream = connect(self.task_id.clone(), self.option.clone()).await?;
         let (ws_sink, ws_source) = ws_stream.split();
         self.ws_sink.replace(ws_sink);
-        Ok(event_stream(ws_source, None))
+        Ok(event_stream(ws_source).map(move |x| (None, x)).boxed())
     }
 
     async fn synthesize(
@@ -408,14 +388,15 @@ impl SynthesisClient for NonStreamingClient {
                             let finish_task_json = serde_json::to_string(&finish_task_cmd)
                                 .expect("Aliyun TTS API changed!");
                             ws_stream.send(Message::text(finish_task_json)).await.ok();
-                            event_stream(ws_stream, cmd_seq)
+                            event_stream(ws_stream).boxed()
                         }
                         Err(e) => {
                             warn!("Aliyun TTS: websocket error: {:?}, {:?}", cmd_seq, e);
-                            stream::empty().boxed()
+                            stream::once(future::ready(Err(e.into()))).boxed()
                         }
                     })
                     .flatten_stream()
+                    .map(move |x| (cmd_seq, x))
                     .boxed()
             })
             .boxed();

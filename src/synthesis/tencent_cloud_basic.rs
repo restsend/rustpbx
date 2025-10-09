@@ -139,68 +139,37 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
                 let session_id = Uuid::new_v4().to_string();
                 let option = client_option.merge_with(option);
                 let url = construct_request_url(&option, &session_id, &text);
-                reqwest::get(url)
-                    .then(async move |res| match res {
-                        Ok(resp) => match resp.json::<Response>().await {
-                            Ok(resp) => {
-                                if let Some(e) = resp.response.error {
-                                    return stream::once(future::ready((
-                                        seq,
-                                        Err(anyhow::anyhow!(
-                                            "Tencent TTS error: code: {}, message: {}",
-                                            e.code,
-                                            e.message
-                                        )),
-                                    )))
-                                    .boxed();
-                                }
-                                match BASE64_STANDARD.decode(resp.response.audio) {
-                                    Ok(audio) => {
-                                        let mut events = Vec::new();
-                                        events.push((
-                                            seq,
-                                            Ok(SynthesisEvent::AudioChunk(Bytes::from(audio))),
-                                        ));
-                                        if !resp.response.subtitles.is_empty() {
-                                            let subtitles = resp
-                                                .response
-                                                .subtitles
-                                                .iter()
-                                                .map(Into::into)
-                                                .collect();
-                                            events.push((
-                                                seq,
-                                                Ok(SynthesisEvent::Subtitles(subtitles)),
-                                            ));
-                                        }
-                                        events.push((seq, Ok(SynthesisEvent::Finished)));
-                                        stream::iter(events).boxed()
-                                    }
-                                    Err(e) => stream::once(future::ready((
-                                        seq,
-                                        Err(anyhow::anyhow!(
-                                            "Tencent TTS failde to decode base64 audio: {}",
-                                            e
-                                        )),
-                                    )))
-                                    .boxed(),
-                                }
+                // request tencent cloud tts
+                let fut = reqwest::get(url).then(async |res| {
+                    let resp = res?.json::<Response>().await?;
+                    if let Some(error) = resp.response.error {
+                        return Err(anyhow::anyhow!(
+                            "Tencent TTS error, code: {}, message: {}",
+                            error.code,
+                            error.message
+                        ));
+                    }
+                    let audio = BASE64_STANDARD.decode(resp.response.audio)?;
+                    Ok((audio, resp.response.subtitles))
+                });
+                
+                // convert result to events
+                stream::once(fut)
+                    .flat_map(|res| match res {
+                        Ok((audio, subtitles)) => {
+                            let mut events = Vec::new();
+                            events.push(Ok(SynthesisEvent::AudioChunk(Bytes::from(audio))));
+                            if !subtitles.is_empty() {
+                                events.push(Ok(SynthesisEvent::Subtitles(
+                                    subtitles.iter().map(Into::into).collect(),
+                                )));
                             }
-                            Err(e) => stream::once(future::ready((
-                                seq,
-                                Err(anyhow::anyhow!(
-                                    "Tencent TTS failed to deserialize response: {e}"
-                                )),
-                            )))
-                            .boxed(),
-                        },
-                        Err(e) => stream::once(future::ready((
-                            seq,
-                            Err(anyhow::anyhow!("Tencent TTS http request failed: {e}")),
-                        )))
-                        .boxed(),
+                            events.push(Ok(SynthesisEvent::Finished));
+                            stream::iter(events).boxed()
+                        }
+                        Err(e) => stream::once(future::ready(Err(e))).boxed(),
                     })
-                    .flatten_stream()
+                    .map(move |x| (seq, x))
                     .boxed()
             })
             .boxed();
