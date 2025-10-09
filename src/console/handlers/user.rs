@@ -1,97 +1,36 @@
 use crate::{
-    console::{ConsoleState, middleware::AuthRequired},
+    console::{
+        ConsoleState,
+        handlers::forms::{ForgotForm, LoginForm, LoginQuery, RegisterForm, ResetForm},
+    },
     handler::middleware::clientaddr::ClientAddr,
 };
 use axum::{
-    Router,
     extract::{Form, Path as AxumPath, Query, State},
     http::{StatusCode, header::SET_COOKIE},
     response::{IntoResponse, Redirect, Response},
-    routing::get,
 };
-use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[derive(Deserialize, Default, Clone)]
-struct LoginQuery {
-    next: Option<String>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct LoginForm {
-    identifier: String,
-    password: String,
-    next: Option<String>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct RegisterForm {
-    email: String,
-    username: String,
-    password: String,
-    confirm_password: String,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct ForgotForm {
-    email: String,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct ResetForm {
-    password: String,
-    confirm_password: String,
-}
-
-use serde_json::json;
-
-pub fn router(state: Arc<ConsoleState>) -> Router {
-    let base_path = state.base_path().to_string();
-    let routes = Router::new()
-        .route("/login", get(login_page).post(login_post))
-        .route("/logout", get(logout))
-        .route("/register", get(register_page).post(register_post))
-        .route("/forgot", get(forgot_page).post(forgot_post))
-        .route("/reset/{token}", get(reset_page).post(reset_post));
-
-    Router::new()
-        .route(&format!("{base_path}/"), get(dashboard))
-        .nest(&base_path, routes)
-        .with_state(state)
-}
-
-async fn dashboard(
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(current_user): AuthRequired,
-) -> Response {
-    state.render(
-        "console/dashboard.html",
-        json!({
-            "logout_url": state.url_for("/logout"),
-            "username": current_user.username,
-            "email": current_user.email,
-        }),
-    )
-}
-
-async fn login_page(
+pub async fn login_page(
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
     state.render(
         "console/login.html",
         json!({
+            "show_shell": false,
             "login_action": state.login_url(query.next.clone()),
             "register_url": state.register_url(query.next),
-            "forgot_url": state.forgot_url(),
             "error_message": null,
             "identifier": "",
         }),
     )
 }
 
-async fn login_post(
+pub async fn login_post(
     client_addr: ClientAddr,
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<LoginForm>,
@@ -103,9 +42,9 @@ async fn login_post(
         return state.render(
             "console/login.html",
             json!({
+                "show_shell": false,
                 "login_action": state.login_url(next.clone()),
                 "register_url": state.register_url(next),
-                "forgot_url": state.forgot_url(),
                 "error_message": "Please provide both username/email and password",
                 "identifier": identifier,
             }),
@@ -126,9 +65,9 @@ async fn login_post(
         Ok(None) => state.render(
             "console/login.html",
             json!({
+                "show_shell": false,
                 "login_action": state.login_url(next.clone()),
                 "register_url": state.register_url(next),
-                "forgot_url": state.forgot_url(),
                 "error_message": "Invalid credentials",
                 "identifier": identifier,
             }),
@@ -140,7 +79,7 @@ async fn login_post(
     }
 }
 
-async fn logout(
+pub async fn logout(
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
@@ -152,10 +91,11 @@ async fn logout(
     response
 }
 
-async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
+pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
     state.render(
         "console/register.html",
         json!({
+            "show_shell": false,
             "register_action": state.url_for("/register"),
             "login_url": state.url_for("/login"),
             "error_message": null,
@@ -165,7 +105,7 @@ async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
     )
 }
 
-async fn register_post(
+pub async fn register_post(
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<RegisterForm>,
 ) -> Response {
@@ -211,6 +151,7 @@ async fn register_post(
         return state.render(
             "console/register.html",
             json!({
+                "show_shell": false,
                 "register_action": state.url_for("/register"),
                 "login_url": state.url_for("/login"),
                 "error_message": error,
@@ -235,12 +176,11 @@ async fn register_post(
     }
 }
 
-async fn forgot_page(State(state): State<Arc<ConsoleState>>) -> Response {
+pub async fn forgot_page(State(state): State<Arc<ConsoleState>>) -> Response {
     state.render(
         "console/forgot.html",
         json!({
-            "forgot_action": state.url_for("/forgot"),
-            "login_url": state.url_for("/login"),
+            "show_shell": false,
             "info_message": null,
             "error_message": null,
             "reset_link": null,
@@ -248,7 +188,7 @@ async fn forgot_page(State(state): State<Arc<ConsoleState>>) -> Response {
     )
 }
 
-async fn forgot_post(
+pub async fn forgot_post(
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<ForgotForm>,
 ) -> Response {
@@ -258,8 +198,7 @@ async fn forgot_post(
         return state.render(
             "console/forgot.html",
             json!({
-                "forgot_action": state.url_for("/forgot"),
-                "login_url": state.url_for("/login"),
+                "show_shell": false,
                 "info_message": null,
                 "error_message": "Please enter your registered email address",
                 "reset_link": null,
@@ -298,8 +237,8 @@ async fn forgot_post(
     state.render(
         "console/forgot.html",
         json!({
+            "show_shell": false,
             "forgot_action": state.url_for("/forgot"),
-            "login_url": state.url_for("/login"),
             "info_message": "If the account exists, we've sent a reset link",
             "error_message": null,
             "reset_link": reset_link,
@@ -307,7 +246,7 @@ async fn forgot_post(
     )
 }
 
-async fn reset_page(
+pub async fn reset_page(
     State(state): State<Arc<ConsoleState>>,
     AxumPath(token): AxumPath<String>,
 ) -> Response {
@@ -317,8 +256,8 @@ async fn reset_page(
                 state.render(
                     "console/forgot.html",
                     json!({
+                        "show_shell": false,
                         "forgot_action": state.url_for("/forgot"),
-                        "login_url": state.url_for("/login"),
                         "info_message": null,
                         "error_message": "Reset link has expired. Please request a new one.",
                         "reset_link": null,
@@ -328,8 +267,8 @@ async fn reset_page(
                 state.render(
                     "console/reset.html",
                     json!({
+                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
-                        "login_url": state.url_for("/login"),
                         "token": token,
                         "error_message": null,
                     }),
@@ -339,8 +278,8 @@ async fn reset_page(
         Ok(None) => state.render(
             "console/forgot.html",
             json!({
+                "show_shell": false,
                 "forgot_action": state.url_for("/forgot"),
-                "login_url": state.url_for("/login"),
                 "info_message": null,
                 "error_message": "Reset link is invalid",
                 "reset_link": null,
@@ -357,7 +296,7 @@ async fn reset_page(
     }
 }
 
-async fn reset_post(
+pub async fn reset_post(
     State(state): State<Arc<ConsoleState>>,
     AxumPath(token): AxumPath<String>,
     Form(form): Form<ResetForm>,
@@ -369,7 +308,6 @@ async fn reset_post(
                     "console/forgot.html",
                     json!({
                         "forgot_action": state.url_for("/forgot"),
-                        "login_url": state.url_for("/login"),
                         "info_message": null,
                         "error_message": "Reset link has expired. Please request a new one.",
                         "reset_link": null,
@@ -382,8 +320,8 @@ async fn reset_post(
                 return state.render(
                     "console/reset.html",
                     json!({
+                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
-                        "login_url": state.url_for("/login"),
                         "token": token,
                         "error_message": "Password must be at least 8 characters",
                     }),
@@ -393,8 +331,8 @@ async fn reset_post(
                 return state.render(
                     "console/reset.html",
                     json!({
+                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
-                        "login_url": state.url_for("/login"),
                         "token": token,
                         "error_message": "Passwords do not match",
                     }),
@@ -422,8 +360,8 @@ async fn reset_post(
         Ok(None) => state.render(
             "console/forgot.html",
             json!({
+                "show_shell": false,
                 "forgot_action": state.url_for("/forgot"),
-                "login_url": state.url_for("/login"),
                 "info_message": null,
                 "error_message": "Reset link is invalid",
                 "reset_link": null,

@@ -306,16 +306,14 @@ impl AmiConfig {
         if let Some(allows) = &self.allows {
             allows.iter().any(|a| a == addr || a == "*")
         } else {
-            false
+            addr == "127.0.0.1" || addr == "::1" || addr == "localhost"
         }
     }
 }
 
 impl Default for AmiConfig {
     fn default() -> Self {
-        Self {
-            allows: Some(vec!["127.0.0.1".to_string(), "::1".to_string()]), // Default to allow localhost
-        }
+        Self { allows: None }
     }
 }
 

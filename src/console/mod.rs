@@ -12,10 +12,11 @@ use std::sync::Arc;
 use tracing::debug;
 
 pub mod auth;
-pub mod handlers;
+mod handlers;
 pub mod middleware;
 pub mod migration;
 pub mod models;
+pub use handlers::router;
 
 fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     let Some(path_part) = database_url.strip_prefix("sqlite://") else {
@@ -91,7 +92,49 @@ impl ConsoleState {
         }))
     }
 
-    pub fn render<T: serde::Serialize>(&self, template: &str, ctx: T) -> Response {
+    pub fn render(&self, template: &str, ctx: serde_json::Value) -> Response {
+        let mut ctx = ctx;
+        if ctx.is_object() {
+            if let Some(map) = ctx.as_object_mut() {
+                map.entry("base_path")
+                    .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
+                map.entry("logout_url")
+                    .or_insert_with(|| serde_json::Value::String(self.url_for("/logout")));
+                map.entry("forgot_url")
+                    .or_insert_with(|| serde_json::Value::String(self.forgot_url()));
+                map.entry("login_url")
+                    .or_insert_with(|| serde_json::Value::String(self.url_for("/login")));
+                map.entry("register_url")
+                    .or_insert_with(|| serde_json::Value::String(self.register_url(None)));
+                map.entry("username").or_insert(serde_json::Value::Null);
+                map.entry("email").or_insert(serde_json::Value::Null);
+                map.entry("show_shell")
+                    .or_insert(serde_json::Value::Bool(true));
+                map.entry("version").or_insert_with(|| {
+                    serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())
+                });
+                map.entry("site_name")
+                    .or_insert_with(|| serde_json::Value::String("RustPBX".to_string()));
+                map.entry("page_title")
+                    .or_insert_with(|| serde_json::Value::String("RustPBX".to_string()));
+                map.entry("site_description").or_insert_with(|| {
+                    serde_json::Value::String("RustPBX - A Rust-based PBX system".to_string())
+                });
+                map.entry("site_footer").or_insert_with(|| {
+                    serde_json::Value::String("© 2025 RustPBX. All rights reserved.".to_string())
+                });
+                map.entry("site_logo").or_insert_with(|| {
+                    serde_json::Value::String("/static/images/logo.png".to_string())
+                });
+                map.entry("site_logo_mini").or_insert_with(|| {
+                    serde_json::Value::String("/static/images/logo-mini.png".to_string())
+                });
+                map.entry("site_favicon").or_insert_with(|| {
+                    serde_json::Value::String("/static/images/favicon.png".to_string())
+                });
+            }
+        }
+
         let start_time = std::time::Instant::now();
         let mut tmpl_env = Environment::new();
         tmpl_env.set_loader(path_loader("templates"));

@@ -5,18 +5,179 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}RustPBX Admin{% endblock %}</title>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+    {% block js_head %}
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    {% for js in js_files %}
+    <script src="{{ js }}" defer></script>
+    {% endfor %}
+    {% endblock %}
+    <style>
+        [x-cloak] {
+            display: none !important;
+        }
+    </style>
 </head>
 
 <body class="min-h-screen bg-slate-100 text-slate-900">
-    <div class="min-h-screen flex flex-col">
-        <main class="flex-1">
-            {% block content %}{% endblock %}
-        </main>
-        <footer class="py-6 text-center text-xs text-slate-500">
-            RustPBX Admin · Powered by <a href="https://rustpbx.com" class="underline hover:text-slate-700">RustPBX</a>
-        </footer>
+    <div x-data="{ sidebarOpen: false, sidebarCollapsed: false }" class="min-h-screen">
+        <!-- Off-canvas overlay -->
+        {% if show_shell %}
+        <div x-show="sidebarOpen" x-transition.opacity class="fixed inset-0 z-30 bg-black/40 lg:hidden"
+            @click="sidebarOpen=false"></div>
+        {% endif %}
+
+        <!-- Sidebar -->
+        {% if show_shell %}
+        <aside
+            class="fixed inset-y-0 left-0 z-40 w-72 transform bg-white ring-1 ring-black/5 shadow-xl transition-all duration-300 ease-in-out lg:translate-x-0 lg:shadow-none lg:ring-0 lg:w-72"
+            :class="{ '-translate-x-full': !sidebarOpen, 'lg:w-24': sidebarCollapsed }" x-transition>
+            <div class="flex h-full flex-col">
+                <div class="flex h-16 items-center justify-between gap-2 border-b border-slate-100 px-6">
+                    <div class="flex items-center gap-2">
+                        <div class="h-8 w-8 rounded-lg bg-sky-600 text-white grid place-content-center font-bold">R
+                        </div>
+                        <div class="font-semibold" x-show="!sidebarCollapsed" x-transition.opacity x-cloak>RustPBX</div>
+                    </div>
+                    <button class="hidden rounded-lg p-2 hover:bg-slate-100 lg:inline-flex"
+                        @click="sidebarCollapsed = !sidebarCollapsed" aria-label="Toggle sidebar">
+                        <svg x-show="!sidebarCollapsed" x-transition.opacity class="h-5 w-5 text-slate-600"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7" />
+                        </svg>
+                        <svg x-show="sidebarCollapsed" x-transition.opacity class="h-5 w-5 text-slate-600"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+                        </svg>
+                    </button>
+                </div>
+                <!-- Nav -->
+                <nav class="flex-1 overflow-y-auto px-3 py-4 text-sm transition-all duration-300"
+                    :class="{ 'px-2': sidebarCollapsed }">
+                    {% set bp = base_path | default('/console') %}
+                    <a href="{{ bp }}/"
+                        class="group flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='dashboard' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Dashboard">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='dashboard' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 12l9-9 9 9M4.5 10.5V21h15V10.5" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Dashboard</span>
+                    </a>
+                    <a href="{{ bp }}/extensions"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='extensions' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Extensions">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='extensions' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Extensions</span>
+                    </a>
+                    <a href="{{ bp }}/routing"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='routing' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Routing">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='routing' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4 6h8a4 4 0 010 8H8m8-4h4M8 14v4" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Routing</span>
+                    </a>
+                    <a href="{{ bp }}/sip"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='sip' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="SIP Trunk / DID">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='sip' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M2 8l10-5 10 5-10 5L2 8zm10 5l10-5v8l-10 5-10-5V8l10 5z" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>SIP Trunk / DID</span>
+                    </a>
+                    <a href="{{ bp }}/call-records"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='call-records' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Call Records">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='call-records' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <circle cx="12" cy="12" r="3" />
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M2 12a10 10 0 1020 0 10 10 0 10-20 0z" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Call Records</span>
+                    </a>
+                    <a href="{{ bp }}/test"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='test' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Test">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='test' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M9 3v2m6-2v2M4 7h16M5 10h14l-1 9H6l-1-9z" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Test</span>
+                    </a>
+                    <a href="{{ bp }}/settings"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Settings">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='settings' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M10.325 4.317l.564-1.13a1 1 0 011.788 0l.564 1.13a1 1 0 00.707.547l1.248.249a1 1 0 01.57 1.64l-.862.94a1 1 0 00-.254.8l.147 1.266a1 1 0 01-1.45 1.028l-1.17-.52a1 1 0 00-.84 0l-1.17.52a1 1 0 01-1.45-1.027l.147-1.267a1 1 0 00-.254-.8l-.862-.94a1 1 0 01.57-1.64l1.248-.25a1 1 0 00.707-.546z" />
+                            <circle cx="12" cy="12" r="3" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Settings</span>
+                    </a>
+                </nav>
+                <div class="border-t border-slate-100 p-4 text-xs text-slate-500" x-show="!sidebarCollapsed"
+                    x-transition.opacity x-cloak>
+                    <div>RustPBX Admin</div>
+                    <a href="https://rustpbx.com" class="underline hover:text-slate-700">rustpbx.com</a>
+                </div>
+            </div>
+        </aside>
+        {% endif %}
+
+        <!-- Main area -->
+        <div class="transition-all duration-300 ease-in-out {% if show_shell %}lg:pl-72{% endif %}" {% if show_shell
+            %}x-bind:class="sidebarCollapsed ? 'lg:pl-24' : 'lg:pl-72'" {% endif %}>
+            <!-- Top bar -->
+            {% if show_shell %}
+            <header
+                class="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 px-6 backdrop-blur">
+                <div class="flex items-center gap-2">
+                    <button class="rounded-lg p-2 hover:bg-slate-100 lg:hidden" @click="sidebarOpen = true"
+                        aria-label="Open sidebar">
+                        <svg class="h-5 w-5 text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button class="rounded-lg p-2 hover:bg-slate-100" title="Notifications">
+                        <svg class="h-5 w-5 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                        </svg>
+                    </button>
+                    {% if logout_url %}
+                    <a href="{{ logout_url }}"
+                        class="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400">Sign
+                        out</a>
+                    {% endif %}
+                </div>
+            </header>
+            {% endif %}
+
+            <main class="min-h-[calc(100vh-64px)] bg-slate-50">
+                {% block content %}{% endblock %}
+            </main>
+
+            <footer class="py-6 text-center text-xs text-slate-500">
+                RustPBX Admin · Powered by <a href="https://rustpbx.com"
+                    class="underline hover:text-slate-700">RustPBX</a>
+            </footer>
+        </div>
     </div>
 </body>
 
