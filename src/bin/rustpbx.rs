@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
+#[cfg(feature = "console")]
+use rustpbx::console::ConsoleState;
 use rustpbx::{app::AppStateBuilder, config::Config, version};
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
@@ -26,6 +28,27 @@ struct Cli {
         help = "Tokio console server address, e.g. /tmp/tokio-console or 127.0.0.1:5556"
     )]
     tokio_console: Option<String>,
+    #[cfg(feature = "console")]
+    #[clap(
+        long,
+        requires = "super_password",
+        help = "Create or update a console super user before starting the server"
+    )]
+    super_username: Option<String>,
+    #[cfg(feature = "console")]
+    #[clap(
+        long,
+        requires = "super_username",
+        help = "Password for the console super user"
+    )]
+    super_password: Option<String>,
+    #[cfg(feature = "console")]
+    #[clap(
+        long,
+        requires = "super_username",
+        help = "Email for the console super user (defaults to username@localhost)"
+    )]
+    super_email: Option<String>,
 }
 
 #[tokio::main]
@@ -44,6 +67,33 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     println!("{}", version::get_version_info());
+
+    #[cfg(feature = "console")]
+    if let Some(super_username) = cli.super_username.as_deref() {
+        let super_password = cli
+            .super_password
+            .as_deref()
+            .expect("super_password is required when super_username is provided");
+        let super_email = cli
+            .super_email
+            .as_deref()
+            .map(|email| email.to_string())
+            .unwrap_or_else(|| format!("{}@localhost", super_username));
+
+        let console_config = config.console.clone().unwrap_or_default();
+        let console_state = ConsoleState::initialize(console_config)
+            .await
+            .expect("Failed to initialize console state");
+        console_state
+            .upsert_super_user(super_username, &super_email, super_password)
+            .await
+            .expect("Failed to create or update super user");
+        println!(
+            "Console super user '{}' ensured with email '{}'",
+            super_username, super_email
+        );
+        return Ok(());
+    }
 
     let mut env_filter = EnvFilter::from_default_env();
     if let Some(Ok(level)) = config
@@ -119,6 +169,7 @@ async fn main() -> Result<()> {
             .with(fmt_layer)
             .try_init()?;
     }
+
     let _ = guard_holder; // keep the guard alive
     let state_builder = AppStateBuilder::new().with_config(config);
     let state = state_builder.build().await.expect("Failed to build app");

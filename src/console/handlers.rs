@@ -1,9 +1,12 @@
-use crate::console::{ConsoleState, auth::extract_session_cookie};
+use crate::{
+    console::{ConsoleState, middleware::AuthRequired},
+    handler::middleware::clientaddr::ClientAddr,
+};
 use askama::Template;
 use axum::{
     Router,
-    extract::{Form, Path as AxumPath, State},
-    http::{HeaderMap, StatusCode, header::SET_COOKIE},
+    extract::{Form, Path as AxumPath, Query, State},
+    http::{StatusCode, header::SET_COOKIE},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
@@ -12,9 +15,15 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 #[derive(Deserialize, Default, Clone)]
+struct LoginQuery {
+    next: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
 struct LoginForm {
     identifier: String,
     password: String,
+    next: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -111,68 +120,57 @@ struct DashboardTemplate {
 pub fn router(state: Arc<ConsoleState>) -> Router {
     let base_path = state.base_path().to_string();
     let routes = Router::new()
-        .route("/", get(dashboard))
         .route("/login", get(login_page).post(login_post))
         .route("/logout", get(logout))
         .route("/register", get(register_page).post(register_post))
         .route("/forgot", get(forgot_page).post(forgot_post))
-        .route("/reset/{token}", get(reset_page).post(reset_post))
-        .with_state(state);
+        .route("/reset/{token}", get(reset_page).post(reset_post));
 
-    Router::new().nest(&base_path, routes)
+    Router::new()
+        .route(&format!("{base_path}/"), get(dashboard))
+        .nest(&base_path, routes)
+        .with_state(state)
 }
 
-async fn dashboard(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
-    let session_cookie = extract_session_cookie(&headers);
-    match state.current_user(session_cookie.as_deref()).await {
-        Ok(Some(user)) => HtmlTemplate(DashboardTemplate {
-            logout_url: state.url_for("/logout"),
-            username: user.username,
-            email: user.email,
-        })
-        .into_response(),
-        Ok(None) => Redirect::to(&state.url_for("/login")).into_response(),
-        Err(err) => {
-            warn!("failed to load dashboard: {}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load console").into_response()
-        }
-    }
+async fn dashboard(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(current_user): AuthRequired,
+) -> Response {
+    HtmlTemplate(DashboardTemplate {
+        logout_url: state.url_for("/logout"),
+        username: current_user.username,
+        email: current_user.email,
+    })
+    .into_response()
 }
 
-async fn login_page(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
-    let session_cookie = extract_session_cookie(&headers);
-    match state.current_user(session_cookie.as_deref()).await {
-        Ok(Some(_)) => Redirect::to(&state.url_for("/")).into_response(),
-        Ok(None) => HtmlTemplate(LoginTemplate {
-            login_action: state.url_for("/login"),
-            register_url: state.url_for("/register"),
-            forgot_url: state.url_for("/forgot"),
-            error_message: None,
-            identifier: String::new(),
-        })
-        .into_response(),
-        Err(err) => {
-            warn!("failed to render login page: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load sign-in page",
-            )
-                .into_response()
-        }
-    }
+async fn login_page(
+    State(state): State<Arc<ConsoleState>>,
+    Query(query): Query<LoginQuery>,
+) -> Response {
+    HtmlTemplate(LoginTemplate {
+        login_action: state.login_url(query.next.clone()),
+        register_url: state.register_url(query.next),
+        forgot_url: state.forgot_url(),
+        error_message: None,
+        identifier: String::new(),
+    })
+    .into_response()
 }
 
 async fn login_post(
+    client_addr: ClientAddr,
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let identifier = form.identifier.trim();
     let password = form.password.trim();
+    let next = form.next.clone();
     if identifier.is_empty() || password.is_empty() {
         return HtmlTemplate(LoginTemplate {
-            login_action: state.url_for("/login"),
-            register_url: state.url_for("/register"),
-            forgot_url: state.url_for("/forgot"),
+            login_action: state.login_url(next.clone()),
+            register_url: state.register_url(next),
+            forgot_url: state.forgot_url(),
             error_message: Some("Please provide both username/email and password".to_string()),
             identifier: identifier.to_string(),
         })
@@ -181,7 +179,7 @@ async fn login_post(
 
     match state.authenticate(identifier, password).await {
         Ok(Some(user)) => {
-            if let Err(err) = state.mark_login(&user).await {
+            if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
                 warn!("failed to update last_login: {}", err);
             }
             let mut response = Redirect::to(&state.url_for("/")).into_response();
@@ -191,9 +189,9 @@ async fn login_post(
             response
         }
         Ok(None) => HtmlTemplate(LoginTemplate {
-            login_action: state.url_for("/login"),
-            register_url: state.url_for("/register"),
-            forgot_url: state.url_for("/forgot"),
+            login_action: state.login_url(next.clone()),
+            register_url: state.register_url(next),
+            forgot_url: state.forgot_url(),
             error_message: Some("Invalid credentials".to_string()),
             identifier: identifier.to_string(),
         })
@@ -205,37 +203,29 @@ async fn login_post(
     }
 }
 
-async fn logout(State(state): State<Arc<ConsoleState>>) -> Response {
-    let mut response = Redirect::to(&state.url_for("/login")).into_response();
+async fn logout(
+    State(state): State<Arc<ConsoleState>>,
+    Query(next): Query<Option<String>>,
+) -> Response {
+    let next = next.unwrap_or_else(|| state.url_for("/"));
+    let mut response = Redirect::to(&next).into_response();
     if let Some(header) = state.clear_session_cookie() {
         response.headers_mut().append(SET_COOKIE, header);
     }
     response
 }
 
-async fn register_page(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
-    let session_cookie = extract_session_cookie(&headers);
-    match state.current_user(session_cookie.as_deref()).await {
-        Ok(Some(_)) => Redirect::to(&state.url_for("/")).into_response(),
-        Ok(None) => HtmlTemplate(RegisterTemplate {
-            register_action: state.url_for("/register"),
-            login_url: state.url_for("/login"),
-            invite_required: state.invite_code().is_some(),
-            error_message: None,
-            email: String::new(),
-            username: String::new(),
-            invite_value: String::new(),
-        })
-        .into_response(),
-        Err(err) => {
-            warn!("failed to load register page: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load sign-up page",
-            )
-                .into_response()
-        }
-    }
+async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
+    HtmlTemplate(RegisterTemplate {
+        register_action: state.url_for("/register"),
+        login_url: state.url_for("/login"),
+        invite_required: state.invite_code().is_some(),
+        error_message: None,
+        email: String::new(),
+        username: String::new(),
+        invite_value: String::new(),
+    })
+    .into_response()
 }
 
 async fn register_post(

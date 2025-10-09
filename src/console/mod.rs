@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub mod auth;
 pub mod handlers;
+pub mod middleware;
 pub mod migration;
 pub mod models;
 
@@ -117,6 +118,24 @@ impl ConsoleState {
 
     pub fn invite_code(&self) -> Option<&str> {
         self.invite_code.as_deref()
+    }
+
+    pub fn login_url(&self, next: Option<String>) -> String {
+        let mut url = self.url_for("/login");
+        if let Some(next) = next {
+            url.push_str(&format!("?next={}", next));
+        }
+        url
+    }
+    pub fn register_url(&self, next: Option<String>) -> String {
+        let mut url = self.url_for("/register");
+        if let Some(next) = next {
+            url.push_str(&format!("?next={}", next));
+        }
+        url
+    }
+    pub fn forgot_url(&self) -> String {
+        self.url_for("/forgot")
     }
 }
 

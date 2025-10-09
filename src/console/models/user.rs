@@ -2,7 +2,9 @@ use anyhow::Result;
 use chrono::Utc;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{boolean, pk_auto, string, timestamp};
+use sea_orm_migration::schema::{
+    boolean, pk_auto, string, string_null, string_uniq, timestamp, timestamp_null,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "rustpbx_users")]
@@ -17,9 +19,12 @@ pub struct Model {
     pub reset_token: Option<String>,
     pub reset_token_expires: Option<DateTime>,
     pub last_login_at: Option<DateTime>,
+    pub last_login_ip: Option<String>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
     pub is_active: bool,
+    pub is_staff: bool,
+    pub is_superuser: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -48,20 +53,18 @@ impl MigrationTrait for Migration {
                     .table(Entity)
                     .if_not_exists()
                     .col(pk_auto(Column::Id))
-                    .col(string(Column::Email).char_len(255).not_null().unique_key())
-                    .col(
-                        string(Column::Username)
-                            .char_len(100)
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(string(Column::PasswordHash).char_len(255).not_null())
-                    .col(string(Column::ResetToken).char_len(128).null())
-                    .col(timestamp(Column::ResetTokenExpires).null())
-                    .col(timestamp(Column::LastLoginAt).null())
-                    .col(timestamp(Column::CreatedAt).not_null())
-                    .col(timestamp(Column::UpdatedAt).not_null())
-                    .col(boolean(Column::IsActive).not_null().default(true))
+                    .col(string_uniq(Column::Email).char_len(255))
+                    .col(string_uniq(Column::Username).char_len(100))
+                    .col(string(Column::PasswordHash).char_len(255))
+                    .col(string_null(Column::ResetToken).char_len(128))
+                    .col(timestamp_null(Column::ResetTokenExpires))
+                    .col(timestamp_null(Column::LastLoginAt))
+                    .col(string_null(Column::LastLoginIp).char_len(128))
+                    .col(timestamp(Column::CreatedAt))
+                    .col(timestamp(Column::UpdatedAt))
+                    .col(boolean(Column::IsActive).default(true))
+                    .col(boolean(Column::IsStaff).default(false))
+                    .col(boolean(Column::IsSuperuser).default(false))
                     .to_owned(),
             )
             .await?;
