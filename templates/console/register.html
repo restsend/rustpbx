@@ -38,9 +38,9 @@
                             class="font-medium text-sky-600 hover:text-sky-500">Sign in instead</a>
                     </p>
                 </div>
-                {% if error_message.is_some() %}
+                {% if error_message %}
                 <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                    {{ error_message.as_deref().unwrap_or("") }}
+                    {{ error_message | default("") }}
                 </div>
                 {% endif %}
                 <form action="{{ register_action }}" method="post" class="space-y-5">

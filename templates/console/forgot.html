@@ -10,19 +10,19 @@
             <p class="text-sm text-slate-500">Enter the email address linked to your account and we will send a reset
                 link.</p>
         </div>
-        {% if error_message.is_some() %}
+        {% if error_message %}
         <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-            {{ error_message.as_deref().unwrap_or("") }}
+            {{ error_message | default("") }}
         </div>
         {% endif %}
-        {% if info_message.is_some() %}
+        {% if info_message %}
         <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
-            {{ info_message.as_deref().unwrap_or("") }}
+            {{ info_message | default("") }}
         </div>
         {% endif %}
-        {% if reset_link.is_some() %}
+        {% if reset_link %}
         <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-            Development hint: <a href="{{ reset_link.as_deref().unwrap_or("") }}" class="font-medium underline">open the
+            Development hint: <a href="{{ reset_link | default("") }}" class="font-medium underline">open the
                 reset link directly</a>
         </div>
         {% endif %}

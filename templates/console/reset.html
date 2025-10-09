@@ -9,9 +9,9 @@
             <h1 class="text-2xl font-semibold text-slate-900">Choose a new password</h1>
             <p class="text-sm text-slate-500">Enter and confirm a new password to finish resetting your account.</p>
         </div>
-        {% if error_message.is_some() %}
+        {% if error_message %}
         <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-            {{ error_message.as_deref().unwrap_or("") }}
+            {{ error_message | default("") }}
         </div>
         {% endif %}
         <form action="{{ reset_action }}" method="post" class="space-y-5">
