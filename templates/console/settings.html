@@ -15,16 +15,6 @@
                     Last reload · <span class="font-semibold text-slate-700"
                         x-text="formatDateTime(server.last_reload)"></span>
                 </div>
-                <button type="button" @click="refreshOverview"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v4h4" />
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M16 16v-4h-4" />
-                        <path stroke-linecap="round" stroke-linejoin="round"
-                            d="M5 9a6 6 0 0110-3.35M15 11a6 6 0 01-10 3.35" />
-                    </svg>
-                    Refresh preview
-                </button>
             </div>
         </header>
 
@@ -66,6 +56,21 @@
                                 <div class="mt-1 rounded-lg bg-slate-50 px-3 py-1 font-mono text-xs text-slate-600"
                                     x-text="server.media_bind"></div>
                             </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Release channel</div>
+                                <div class="mt-1 font-semibold text-slate-800"
+                                    x-text="server.release_channel || 'stable'"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Storage mode</div>
+                                <div class="mt-1 font-semibold text-slate-800"
+                                    x-text="storageModeLabel(server.storage?.mode)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Last reload</div>
+                                <div class="mt-1 font-mono text-xs text-slate-600"
+                                    x-text="formatDateTime(server.last_reload)"></div>
+                            </div>
                         </div>
                     </div>
 
@@ -76,17 +81,21 @@
                         </div>
                         <p class="mt-2 text-xs text-slate-500">Execute reloads and restarts without leaving the console
                             preview.</p>
-                        <ul class="mt-4 space-y-2 text-sm text-slate-600">
+                        <ul class="mt-4 space-y-3 text-sm text-slate-600">
                             <template x-for="action in server.operations || []" :key="action.id">
-                                <li>
+                                <li class="rounded-lg border border-slate-200 p-3">
                                     <button type="button" @click="triggerOperation(action)"
-                                        class="flex w-full items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-left font-semibold text-slate-700 transition hover:border-sky-200 hover:text-sky-600">
+                                        class="flex w-full items-center justify-between rounded-md bg-slate-900 px-3 py-2 text-left text-xs font-semibold text-white shadow-sm transition hover:bg-slate-700">
                                         <span x-text="action.label"></span>
                                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                             stroke-width="1.6">
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
                                         </svg>
                                     </button>
+                                    <p class="mt-2 text-xs text-slate-500" x-show="action.description"
+                                        x-text="action.description"></p>
+                                    <p class="mt-2 text-[11px] text-slate-400" x-show="action.note"
+                                        x-text="action.note"></p>
                                 </li>
                             </template>
                         </ul>
@@ -125,31 +134,6 @@
                         </dl>
                     </div>
 
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-base font-semibold text-slate-900">Runtime status</h2>
-                        <dl class="mt-4 space-y-3 text-sm text-slate-600">
-                            <div class="flex items-center justify-between">
-                                <dt class="text-slate-500">Release channel</dt>
-                                <dd class="font-semibold text-slate-800" x-text="server.release_channel || 'stable'">
-                                </dd>
-                            </div>
-                            <div class="flex items-center justify-between">
-                                <dt class="text-slate-500">Storage mode</dt>
-                                <dd class="font-semibold text-slate-800"
-                                    x-text="storageModeLabel(server.storage?.mode)"></dd>
-                            </div>
-                            <div>
-                                <dt class="text-slate-500">Media network</dt>
-                                <dd class="mt-1 rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600"
-                                    x-text="server.media_bind"></dd>
-                            </div>
-                            <div>
-                                <dt class="text-slate-500">Last reload</dt>
-                                <dd class="mt-1 font-mono text-xs text-slate-600"
-                                    x-text="formatDateTime(server.last_reload)"></dd>
-                            </div>
-                        </dl>
-                    </div>
                 </aside>
             </div>
         </section>
@@ -206,200 +190,48 @@
                             </div>
                         </div>
                     </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-base font-semibold text-slate-900">Lifecycle automation</h2>
-                        <p class="mt-1 text-xs text-slate-500">Mirror and archive media safely across hot and cold
-                            tiers.</p>
-                        <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
-                            <div class="rounded-lg border border-slate-200 p-4">
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Local path</div>
-                                <div class="mt-1 font-mono text-xs text-slate-600"
-                                    x-text="server.storage?.local_path || '—'"></div>
-                            </div>
-                            <div class="rounded-lg border border-slate-200 p-4">
-                                <div
-                                    class="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
-                                    <span>Remote target</span>
-                                    <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="server.storage?.s3?.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-500'"
-                                        x-text="server.storage?.s3?.enabled ? 'Enabled' : 'Disabled'"></span>
-                                </div>
-                                <dl class="mt-2 space-y-1 text-xs">
-                                    <div class="flex justify-between">
-                                        <dt class="text-slate-500">Bucket</dt>
-                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.bucket || '—'">
-                                        </dd>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <dt class="text-slate-500">Region</dt>
-                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.region || '—'">
-                                        </dd>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <dt class="text-slate-500">Prefix</dt>
-                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.prefix || '—'">
-                                        </dd>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <dt class="text-slate-500">Endpoint</dt>
-                                        <dd class="font-mono text-slate-600 truncate"
-                                            x-text="server.storage?.s3?.endpoint || '—'"></dd>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <dt class="text-slate-500">Access key</dt>
-                                        <dd class="font-mono text-slate-600"
-                                            x-text="server.storage?.s3?.access_key || '—'"></dd>
-                                    </div>
-                                </dl>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <aside class="space-y-6">
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-base font-semibold text-slate-900">Snapshot</h2>
-                        <dl class="mt-4 space-y-3 text-sm text-slate-600">
-                            <div class="flex items-center justify-between">
-                                <dt class="text-slate-500">Current mode</dt>
-                                <dd class="font-semibold text-slate-800"
-                                    x-text="storageModeLabel(server.storage?.mode)"></dd>
-                            </div>
-                            <div class="flex items-center justify-between">
-                                <dt class="text-slate-500">Release channel</dt>
-                                <dd class="font-semibold text-slate-800" x-text="server.release_channel || 'stable'">
-                                </dd>
-                            </div>
-                            <div>
-                                <dt class="text-slate-500">Last reload</dt>
-                                <dd class="mt-1 font-mono text-xs text-slate-600"
-                                    x-text="formatDateTime(server.last_reload)"></dd>
-                            </div>
-                        </dl>
-                    </div>
-                </aside>
-            </div>
-
-            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-base font-semibold text-slate-900">Retention policy</h2>
-                <p class="mt-1 text-xs text-slate-500">Control how long we retain call metadata, recordings, and
-                    exported archives.</p>
-                <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
-                    <div class="rounded-lg border border-slate-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-slate-400">Call detail records</div>
-                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
-                                x-text="retention.call_records_days"></span> days</div>
-                        <p class="mt-2 text-xs text-slate-500">CDR rows are purged from the primary database after this
-                            period.</p>
-                    </div>
-                    <div class="rounded-lg border border-slate-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-slate-400">Recordings</div>
-                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
-                                x-text="retention.recordings_days"></span> days</div>
-                        <p class="mt-2 text-xs text-slate-500">Audio files are transitioned to cold storage or removed
-                            afterwards.</p>
-                    </div>
-                    <div class="rounded-lg border border-slate-200 p-4">
-                        <div class="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
-                            <span>CDR export</span>
-                            <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                :class="retention.cdr_export?.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-500'"
-                                x-text="retention.cdr_export?.enabled ? 'Enabled' : 'Disabled'"></span>
-                        </div>
-                        <dl class="mt-2 space-y-1 text-xs">
-                            <div class="flex justify-between">
-                                <dt class="text-slate-500">Frequency</dt>
-                                <dd class="font-semibold text-slate-700"
-                                    x-text="capitalize(retention.cdr_export?.frequency)"></dd>
-                            </div>
-                            <div class="flex justify-between">
-                                <dt class="text-slate-500">Target</dt>
-                                <dd class="font-mono text-slate-600" x-text="retention.cdr_export?.target"></dd>
-                            </div>
-                        </dl>
-                    </div>
-                    <div class="rounded-lg border border-slate-200 p-4">
-                        <div class="text-xs uppercase tracking-wide text-slate-400">PII anonymisation</div>
-                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
-                                x-text="retention.anonymise_after_days"></span> days</div>
-                        <p class="mt-2 text-xs text-slate-500">Caller IDs are obfuscated for analytics past this
-                            timeframe.</p>
-                    </div>
                 </div>
             </div>
+
         </section>
 
         <section x-show="activeTab === 'security'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <h2 class="text-base font-semibold text-slate-900">Network guardrails</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
-                    <div>
-                        <div class="text-xs uppercase tracking-wide text-slate-400">Trusted IP ranges</div>
-                        <ul class="mt-2 space-y-1">
-                            <template x-for="ip in security.trusted_ips || []" :key="ip">
-                                <li class="rounded-lg bg-emerald-50 px-3 py-1 font-mono text-xs text-emerald-700 ring-1 ring-emerald-200"
-                                    x-text="ip"></li>
-                            </template>
-                        </ul>
-                    </div>
-                    <div>
-                        <div class="text-xs uppercase tracking-wide text-slate-400">Blocked user agents</div>
-                        <ul class="mt-2 space-y-1">
-                            <template x-for="ua in security.blocked_user_agents || []" :key="ua">
-                                <li class="rounded-lg bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-600 ring-1 ring-rose-200"
-                                    x-text="ua"></li>
-                            </template>
-                        </ul>
-                    </div>
+                <div class="mt-4 space-y-3 text-sm text-slate-600">
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs uppercase tracking-wide text-slate-400">ACL rules</span>
+                        <textarea rows="6" spellcheck="false"
+                            class="resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            x-model="security.acl_rules"
+                            placeholder="allow all\ndeny 10.0.0.0/8\nallow 192.168.0.0/16"></textarea>
+                    </label>
+                    <p class="text-xs text-slate-500">Define one rule per line. Supported directives include
+                        <span class="font-mono">allow</span>, <span class="font-mono">deny</span>, and
+                        <span class="font-mono">rate</span> with CIDR or wildcard hosts.
+                    </p>
                 </div>
             </div>
 
-            <div class="grid gap-6 lg:grid-cols-3">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Rate limits</h2>
-                    <p class="mt-1 text-xs text-slate-500">Per-minute guardrails across signalling entry points.</p>
-                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
-                        <template x-for="(value, key) in security.rate_limits || {}" :key="key">
-                            <li class="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-base font-semibold text-slate-900">Rate limits</h2>
+                <p class="mt-1 text-xs text-slate-500">Configure per-minute guardrails across signalling entry points.
+                </p>
+                <div class="mt-4 space-y-3 text-sm text-slate-600">
+                    <template x-for="(value, key) in security.rate_limits || {}" :key="key">
+                        <div class="rounded-lg border border-slate-200 p-3">
+                            <div class="flex items-center justify-between gap-3">
                                 <span class="font-medium text-slate-700" x-text="labelize(key)"></span>
-                                <span class="font-mono text-slate-600" x-text="value"></span>
-                            </li>
-                        </template>
-                    </ul>
-                </div>
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Threat intelligence</h2>
-                    <p class="mt-1 text-xs text-slate-500">External feeds synced into the SIP firewall.</p>
-                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
-                        <template x-for="feed in security.threat_feed || []" :key="feed.source">
-                            <li class="rounded-lg border border-slate-200 px-3 py-2">
-                                <div class="flex items-center justify-between">
-                                    <span class="font-semibold text-slate-800" x-text="feed.source"></span>
-                                    <span class="text-xs text-slate-400" x-text="formatDateTime(feed.last_sync)"></span>
-                                </div>
-                                <div class="mt-1 text-xs text-slate-500">
-                                    <span class="font-semibold text-slate-700" x-text="feed.entries"></span> indicators
-                                    loaded
-                                </div>
-                            </li>
-                        </template>
-                    </ul>
-                </div>
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Audit summary</h2>
-                    <dl class="mt-4 space-y-3 text-sm text-slate-600">
-                        <div>
-                            <dt class="text-slate-500">Last failed login</dt>
-                            <dd class="mt-1 font-mono text-xs text-slate-600"
-                                x-text="formatDateTime(security.audit?.last_failed_login)"></dd>
+                                <input type="number" min="0"
+                                    class="w-32 rounded-md border border-slate-200 px-2 py-1 text-right font-mono text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :value="value"
+                                    @input="security.rate_limits[key] = Number($event.target.value || 0)">
+                            </div>
+                            <p class="mt-2 text-[11px] text-slate-400">Requests per minute</p>
                         </div>
-                        <div class="flex items-center justify-between">
-                            <dt class="text-slate-500">Policy version</dt>
-                            <dd class="font-semibold text-slate-800" x-text="security.audit?.policy_version || '—'">
-                            </dd>
-                        </div>
-                    </dl>
+                    </template>
+                    <p class="text-[11px] text-slate-400" x-show="!Object.keys(security.rate_limits || {}).length">No
+                        rate limits configured.</p>
                 </div>
             </div>
         </section>
@@ -483,7 +315,7 @@
             </div>
         </section>
 
-        <section x-show="activeTab === 'directory'" x-cloak x-transition.opacity class="space-y-6">
+        <section x-show="activeTab === 'departments'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                     <div>
@@ -540,7 +372,9 @@
                     </div>
                 </div>
             </div>
+        </section>
 
+        <section x-show="activeTab === 'users'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                     <div>
@@ -615,23 +449,6 @@
                     </div>
                 </div>
             </div>
-
-            <template x-if="directory.pending_invites?.length">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Pending invites</h2>
-                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
-                        <template x-for="invite in directory.pending_invites" :key="invite.id">
-                            <li class="rounded-lg border border-slate-200 px-3 py-2">
-                                <div class="font-semibold text-slate-800" x-text="invite.email"></div>
-                                <div class="mt-1 text-xs text-slate-500">
-                                    <span x-text="invite.role"></span> · Sent
-                                    <span x-text="formatDateTime(invite.sent_at)"></span>
-                                </div>
-                            </li>
-                        </template>
-                    </ul>
-                </div>
-            </template>
         </section>
     </div>
 </div>
@@ -645,6 +462,21 @@
                 this.retention = data.retention || {};
                 this.directory = data.directory || { departments: [], users: [], pending_invites: [] };
                 this.security = data.security || { trusted_ips: [], blocked_user_agents: [], rate_limits: {}, threat_feed: [], audit: {} };
+                if (!this.security || typeof this.security !== 'object') {
+                    this.security = {};
+                }
+                if (!this.security.rate_limits || typeof this.security.rate_limits !== 'object') {
+                    this.security.rate_limits = {};
+                }
+                if (typeof this.security.acl_rules !== 'string') {
+                    if (Array.isArray(this.security.acl)) {
+                        this.security.acl_rules = this.security.acl.join('\n');
+                    } else if (typeof this.security.acl === 'string') {
+                        this.security.acl_rules = this.security.acl;
+                    } else {
+                        this.security.acl_rules = 'allow all';
+                    }
+                }
                 this.asr = data.asr || { providers: [], languages: [], callback: {} };
                 this.selectedProvider = this.asr.active_provider || (this.asr.providers?.[0]?.id || '');
                 this.selectedStorageProfile = this.server.storage?.mode || (this.server.storage_profiles?.[0]?.id || '');
@@ -662,7 +494,8 @@
                 { id: 'storage', label: 'Storage & retention' },
                 { id: 'security', label: 'Security posture' },
                 { id: 'asr', label: 'ASR integrations' },
-                { id: 'directory', label: 'Users & departments' },
+                { id: 'departments', label: 'Departments' },
+                { id: 'users', label: 'Users' },
             ],
             activeTab: 'platform',
             server: {},
@@ -787,9 +620,6 @@
                         timestamp: new Date().toLocaleTimeString(),
                     };
                 }, 900);
-            },
-            refreshOverview() {
-                this.server.last_reload = new Date().toISOString();
             },
         }));
     });
