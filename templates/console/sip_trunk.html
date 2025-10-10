@@ -28,88 +28,26 @@
             </div>
         </header>
 
-        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total trunks</div>
-                <div class="mt-2 flex items-baseline gap-2">
-                    <span class="text-2xl font-semibold text-slate-900" x-text="summary.total"></span>
-                    <span class="text-xs text-slate-500">configured</span>
-                </div>
-            </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction mix</div>
-                <div class="mt-2 space-y-1 text-xs text-slate-600">
-                    <div class="flex items-center justify-between">
-                        <span>Inbound</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.inbound"></span>
-                    </div>
-                    <div class="flex items-center justify-between">
-                        <span>Outbound</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.outbound"></span>
-                    </div>
-                    <div class="flex items-center justify-between">
-                        <span>Bi-directional</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.bidirectional"></span>
-                    </div>
-                </div>
-            </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Access surface</div>
-                <div class="mt-2 space-y-1 text-xs text-slate-600">
-                    <div class="flex items-center justify-between">
-                        <span>IP addresses</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.total_allowed_ips"></span>
-                    </div>
-                    <div class="flex items-center justify-between">
-                        <span>DID numbers</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.total_dids"></span>
-                    </div>
-                </div>
-            </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Capacity snapshot</div>
-                <div class="mt-2 space-y-1 text-xs text-slate-600">
-                    <div class="flex items-center justify-between">
-                        <span>Avg CPS</span>
-                        <span class="font-semibold text-slate-900" x-text="formatNumber(summary.avg_cps)"></span>
-                    </div>
-                    <div class="flex items-center justify-between">
-                        <span>Avg concurrency</span>
-                        <span class="font-semibold text-slate-900"
-                            x-text="formatNumber(summary.avg_concurrency)"></span>
-                    </div>
-                    <div class="flex items-center justify-between">
-                        <span>Avg utilisation</span>
-                        <span class="font-semibold text-slate-900" x-text="summary.avg_utilisation + '%' "></span>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-            <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-                <div>
-                    <h2 class="text-base font-semibold text-slate-900">Inventory</h2>
-                    <p class="text-xs text-slate-500">Filter by status, direction, or billing template to locate a
-                        specific carrier trunk.</p>
-                </div>
-                <div class="flex flex-wrap items-center gap-3 text-xs">
-                    <button type="button"
-                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                        @click="clearFilters">
-                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                            stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
-                        </svg>
-                        Reset filters
-                    </button>
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+        <section class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
                         x-text="filteredTrunks.length + ' results'"></span>
+                    <span class="text-slate-400" x-show="appliedFilters.length"
+                        x-text="appliedFilters.length + ' filters'"></span>
                 </div>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                    @click="clearFilters">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
+                    </svg>
+                    Reset filters
+                </button>
             </div>
 
-            <div class="mt-4 grid gap-4 lg:grid-cols-4">
-                <label class="lg:col-span-2 flex flex-col gap-2">
+            <div class="mt-3 grid gap-3 lg:grid-cols-5">
+                <label class="lg:col-span-2 flex flex-col gap-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Search</span>
                     <div class="relative">
                         <input type="search" x-model.debounce.300ms="search"
@@ -122,7 +60,7 @@
                         </svg>
                     </div>
                 </label>
-                <label class="flex flex-col gap-2">
+                <label class="flex flex-col gap-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Status</span>
                     <select x-model="statusFilter"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -131,7 +69,7 @@
                         </template>
                     </select>
                 </label>
-                <label class="flex flex-col gap-2">
+                <label class="flex flex-col gap-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Direction</span>
                     <select x-model="directionFilter"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -140,7 +78,7 @@
                         </template>
                     </select>
                 </label>
-                <label class="flex flex-col gap-2">
+                <label class="flex flex-col gap-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Billing
                         template</span>
                     <select x-model="billingFilter"
@@ -153,7 +91,7 @@
                 </label>
             </div>
 
-            <div class="mt-4 flex flex-wrap gap-2" x-show="appliedFilters.length">
+            <div class="mt-3 flex flex-wrap gap-2" x-show="appliedFilters.length">
                 <template x-for="chip in appliedFilters" :key="chip.id">
                     <span
                         class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">
@@ -170,7 +108,7 @@
                     </span>
                 </template>
             </div>
-            <p class="mt-4 text-xs text-slate-400" x-show="!appliedFilters.length">No filters applied.</p>
+            <p class="mt-3 text-xs text-slate-400" x-show="!appliedFilters.length">No filters applied.</p>
 
             <template x-if="!filteredTrunks.length">
                 <div
