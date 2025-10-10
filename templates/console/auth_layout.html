@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }" class="bg-slate-100">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
+    <meta name="author" content="RustPBX" />
+    <link rel="icon" href="{{favicon_url|default('/static/favicon.ico')}}" />
+    <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
+    {% block js_head %}
+    <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
+    <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
+    {% for js in js_files %}
+    <script src="{{ js }}" defer></script>
+    {% endfor %}
+    {% endblock %}
+    <style>
+        [x-cloak] {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div class="min-h-screen">
+        <!-- Main area -->
+        <div class="transition-all duration-300 ease-in-out">
+            <main class="min-h-[calc(100vh-64px)] bg-slate-50">
+                {% block content %}{% endblock %}
+            </main>
+
+            <footer class="py-6 text-center text-xs text-slate-500">
+                {{site_name|default('RustPBX')}} · {{site_footer}}
+            </footer>
+        </div>
+    </div>
+</body>
+
+</html>
