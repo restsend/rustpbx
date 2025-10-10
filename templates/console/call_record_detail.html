@@ -1,0 +1,651 @@
+{% extends "console/layout.html" %}
+{% block title %}Call Record Detail · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6">
+    <div class="mx-auto max-w-6xl space-y-6" x-data="callRecordDetail({{ call_data | escape }})">
+        <header class="flex flex-col gap-4 border-b border-slate-200 pb-4 md:flex-row md:items-end md:justify-between">
+            <div class="space-y-2">
+                <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-sky-600">
+                    <a :href="backUrl"
+                        class="inline-flex items-center gap-1 text-slate-500 transition hover:text-sky-600">
+                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-5 5 5 5" />
+                        </svg>
+                        Back
+                    </a>
+                    <span>/</span>
+                    <span x-text="record.display_id || record.id"></span>
+                </div>
+                <h1 class="text-3xl font-semibold text-slate-900" x-text="record.display_id || record.id"></h1>
+                <p class="text-sm text-slate-500" x-text="formatDateTime(record.started_at)"></p>
+                <div class="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                    <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
+                        :class="statusClasses(record.status)">
+                        <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
+                        <span x-text="statusLabel(record.status)"></span>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
+                        :class="directionClasses(record.direction)">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5l5 5-5 5" />
+                        </svg>
+                        <span x-text="directionLabel(record.direction)"></span>
+                    </span>
+                    <span
+                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
+                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 4v12M12 8h4" />
+                        </svg>
+                        <span x-text="record.sip_gateway || '—'"></span>
+                    </span>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-sm">
+                <a :href="actions.download_metadata || '#'"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 12l6 6 6-6" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 18V4" />
+                    </svg>
+                    Metadata JSON
+                </a>
+                <a :href="actions.download_sip_flow || '#'"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8h8M6 12h4" />
+                    </svg>
+                    SIP trace JSON
+                </a>
+            </div>
+        </header>
+
+        <section class="grid gap-4 sm:grid-cols-3">
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Duration</div>
+                <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="formatDuration(record.duration_secs)">
+                </div>
+                <p class="mt-1 text-xs text-slate-500" x-text="durationHint"></p>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Quality (MOS)</div>
+                <div class="mt-2 text-2xl font-semibold" :class="qualityTone(record.quality?.mos)"
+                    x-text="formatNumber(record.quality?.mos)"></div>
+                <p class="mt-1 text-xs text-slate-500">Packet loss <span class="font-semibold"
+                        x-text="formatNumber(record.quality?.packet_loss) + '%'"></span> · Jitter <span
+                        class="font-semibold" x-text="formatNumber(record.quality?.jitter_ms) + ' ms'"></span></p>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Transcript</div>
+                <div class="mt-2 flex items-center gap-2 text-2xl font-semibold"
+                    :class="transcript.available || transcriptVisible ? 'text-emerald-600' : 'text-slate-400'">
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 12l5 5L20 7" />
+                    </svg>
+                    <span x-text="transcript.available || transcriptVisible ? 'Ready' : 'Pending'"></span>
+                </div>
+                <p class="mt-1 text-xs text-slate-500"
+                    x-text="transcript.available || transcriptVisible ? 'Generated '+(transcript.generated_at || '') : 'Request on demand to analyse conversation outcome.'">
+                </p>
+            </div>
+        </section>
+
+        <section class="space-y-5">
+            <div
+                class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-600">
+                <button type="button" class="rounded-md px-3 py-1.5 transition"
+                    :class="detailTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    @click="detailTab = 'overview'">
+                    Overview
+                </button>
+                <button type="button" class="rounded-md px-3 py-1.5 transition"
+                    :class="detailTab === 'diagnostics' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    @click="detailTab = 'diagnostics'">
+                    Diagnostics
+                </button>
+            </div>
+
+            <div x-show="detailTab === 'overview'" x-cloak x-transition.opacity class="space-y-4">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Recording & participants</h2>
+                    <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
+                        the original media stream.</p>
+                    <template x-if="record.recording && record.recording.url">
+                        <audio class="mt-4 w-full" controls preload="none" :src="record.recording.url"></audio>
+                    </template>
+                    <template x-if="!record.recording || !record.recording.url">
+                        <div
+                            class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                            No media recording stored for this session.
+                        </div>
+                    </template>
+                    <div class="mt-6 grid gap-3 sm:grid-cols-2">
+                        <template x-for="participant in participants" :key="participant.role">
+                            <div class="rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
+                                <div class="flex items-center justify-between text-xs text-slate-400">
+                                    <span x-text="participant.label"></span>
+                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                        x-text="participant.network"></span>
+                                </div>
+                                <div class="mt-1 text-sm font-semibold text-slate-900" x-text="participant.name || '—'">
+                                </div>
+                                <div class="font-mono text-xs text-slate-500" x-text="participant.number || '—'"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 lg:grid-cols-2">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Tags</h2>
+                                <p class="text-xs text-slate-500">Label conversations for follow-up workflows.</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <input type="text" x-model.trim="tagInput"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Add tag">
+                                <button type="button"
+                                    class="inline-flex items-center rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                                    @click="addTag">Add</button>
+                            </div>
+                        </div>
+                        <div class="mt-3 flex flex-wrap gap-2">
+                            <template x-for="(tag, index) in (record.tags || [])" :key="tag + index">
+                                <span
+                                    class="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">
+                                    <span x-text="tag"></span>
+                                    <button type="button" class="text-slate-400 transition hover:text-rose-500"
+                                        @click="removeTag(index)">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 6l8 8M6 14L14 6" />
+                                        </svg>
+                                    </button>
+                                </span>
+                            </template>
+                            <template x-if="!(record.tags || []).length">
+                                <span class="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-400">No tags
+                                    yet</span>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Call notes</h2>
+                                <p class="text-xs text-slate-500">Document commitments, escalations, or customer
+                                    sentiment.</p>
+                            </div>
+                            <button type="button"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                @click="saveNotes">
+                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 10h8M6 14h5M6 6h8" />
+                                </svg>
+                                Save note
+                            </button>
+                        </div>
+                        <textarea x-model="noteDraft" rows="6"
+                            class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Add internal remark or follow-up task..."></textarea>
+                        <p class="mt-2 text-xs text-slate-400" x-show="notes.updated_at">
+                            Last updated <span x-text="formatDateTime(notes.updated_at)"></span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Interaction insights</h2>
+                            <p class="text-xs text-slate-500">Switch between speech analytics and SIP signalling for
+                                faster troubleshooting.</p>
+                        </div>
+                        <div
+                            class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-600">
+                            <button type="button" class="rounded-md px-3 py-1.5 transition"
+                                :class="insightTab === 'transcription' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                @click="insightTab = 'transcription'">
+                                ASR transcription
+                            </button>
+                            <button type="button" class="rounded-md px-3 py-1.5 transition"
+                                :class="insightTab === 'sip-flow' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                @click="insightTab = 'sip-flow'">
+                                SIP message flow
+                            </button>
+                        </div>
+                    </div>
+
+                    <div x-show="insightTab === 'transcription'" x-cloak x-transition.opacity class="space-y-4">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <p class="text-xs text-slate-500">Generate speech-to-text to accelerate QA and analytics.
+                            </p>
+                            <button type="button"
+                                class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="asrProcessing" x-show="!transcriptVisible" @click="requestTranscript">
+                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                </svg>
+                                <span x-text="asrProcessing ? 'Processing…' : 'Request transcript'"></span>
+                            </button>
+                        </div>
+
+                        <template x-if="transcriptVisible">
+                            <div class="space-y-3 text-sm text-slate-600">
+                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                                    <span>Language</span>
+                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                        x-text="transcript.language || '—'"></span>
+                                    <span x-show="transcript.generated_at"
+                                        x-text="'Generated ' + formatDateTime(transcript.generated_at)"></span>
+                                </div>
+                                <div class="space-y-2">
+                                    <template x-for="segment in (transcript.segments || [])"
+                                        :key="segment.start + segment.speaker">
+                                        <div class="rounded-lg border border-slate-200 p-3 text-xs">
+                                            <div class="flex items-center justify-between text-slate-400">
+                                                <span class="font-semibold text-slate-600"
+                                                    x-text="segment.speaker"></span>
+                                                <span x-text="segment.start"></span>
+                                            </div>
+                                            <p class="mt-1 text-slate-700" x-text="segment.text"></p>
+                                        </div>
+                                    </template>
+                                    <template x-if="!(transcript.segments || []).length">
+                                        <div
+                                            class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                                            Transcript generated without segment breakdown.
+                                        </div>
+                                    </template>
+                                </div>
+                                <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700"
+                                    x-text="transcript.text || 'Transcript ready.'"></div>
+                            </div>
+                        </template>
+                        <template x-if="!transcriptVisible && !asrProcessing">
+                            <div
+                                class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                                No transcript generated yet.
+                            </div>
+                        </template>
+                        <template x-if="asrProcessing">
+                            <div
+                                class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                                Invoking ASR pipeline…
+                            </div>
+                        </template>
+                    </div>
+
+                    <div x-show="insightTab === 'sip-flow'" x-cloak x-transition.opacity>
+                        <p class="text-xs text-slate-500">Inspect signalling direction, status codes, and raw payloads
+                            to debug call setup.</p>
+                        <div class="mt-4 divide-y divide-slate-100">
+                            <template x-for="(entry, index) in sipFlow" :key="index">
+                                <div class="flex flex-col gap-2 py-3">
+                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                        <div class="flex flex-col">
+                                            <div class="text-xs text-slate-400"
+                                                x-text="formatDateTime(entry.timestamp) + ' · ' + (entry.offset || '')">
+                                            </div>
+                                            <div
+                                                class="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
+                                                <span
+                                                    class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+                                                    x-text="directionLabel(entry.direction)"></span>
+                                                <span x-text="entry.summary"></span>
+                                            </div>
+                                            <div class="text-xs text-slate-500">
+                                                <span class="font-semibold" x-text="entry.method"></span>
+                                                <span class="ml-2"
+                                                    x-text="entry.status_code ? ('Code ' + entry.status_code) : ''"></span>
+                                            </div>
+                                        </div>
+                                        <button type="button"
+                                            class="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 transition hover:text-sky-600"
+                                            @click="toggleSipRaw(index)">
+                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                stroke="currentColor" stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 7l6 6-6 6" />
+                                            </svg>
+                                            <span x-text="isSipExpanded(index) ? 'Hide raw' : 'View raw'"></span>
+                                        </button>
+                                    </div>
+                                    <pre x-show="isSipExpanded(index)" x-collapse
+                                        class="overflow-x-auto rounded-lg border border-slate-200 bg-slate-950/90 p-3 text-[10px] text-emerald-100"><code x-text="entry.raw || 'No raw payload captured.'"></code></pre>
+                                </div>
+                            </template>
+                            <template x-if="!sipFlow.length">
+                                <div class="py-8 text-center text-xs text-slate-400">No SIP trace captured for this
+                                    session.</div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Call metadata</h2>
+                        <dl class="mt-3 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Caller</dt>
+                                <dd class="font-mono" x-text="record.from || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Destination</dt>
+                                <dd class="font-mono" x-text="record.to || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Agent</dt>
+                                <dd class="font-semibold text-slate-800" x-text="record.agent || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Queue</dt>
+                                <dd class="font-semibold text-slate-800" x-text="record.queue || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Codec</dt>
+                                <dd class="font-semibold text-slate-800" x-text="record.codec || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between" x-show="record.csat">
+                                <dt class="text-slate-500">CSAT</dt>
+                                <dd class="font-semibold text-amber-600" x-text="record.csat"></dd>
+                            </div>
+                        </dl>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Media diagnostics</h2>
+                        <dl class="mt-3 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Audio codec</dt>
+                                <dd class="font-semibold text-slate-800" x-text="mediaMetrics.audio_codec || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">RTP packets</dt>
+                                <dd class="font-semibold text-slate-800"
+                                    x-text="formatNumber(mediaMetrics.rtp_packets)"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Avg jitter</dt>
+                                <dd class="font-semibold text-slate-800"
+                                    x-text="formatNumber(mediaMetrics.avg_jitter_ms) + ' ms'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Packet loss</dt>
+                                <dd class="font-semibold text-slate-800"
+                                    x-text="formatNumber(mediaMetrics.packet_loss_percent) + '%'"></dd>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                                <div class="font-semibold text-slate-600">RTCP snapshots</div>
+                                <ul class="mt-2 space-y-1">
+                                    <template x-for="report in (mediaMetrics.rtcp_observations || [])"
+                                        :key="report.time + report.rtt_ms">
+                                        <li class="flex items-center justify-between">
+                                            <span x-text="report.time"></span>
+                                            <span x-text="report.rtt_ms + ' ms · loss ' + report.fraction_lost"></span>
+                                        </li>
+                                    </template>
+                                    <template x-if="!(mediaMetrics.rtcp_observations || []).length">
+                                        <li>No RTCP data.</li>
+                                    </template>
+                                </ul>
+                            </div>
+                        </dl>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Downloads</h2>
+                        <ul class="mt-3 space-y-2 text-sm text-sky-700">
+                            <template x-if="record.recording && record.recording.url">
+                                <li>
+                                    <a :href="record.recording.url" target="_blank" rel="noopener"
+                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sky-700 transition hover:border-sky-300 hover:bg-sky-50">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 12l6 6 6-6" />
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 18V4" />
+                                        </svg>
+                                        <span>Audio file (<span
+                                                x-text="(record.recording && record.recording.format) || 'wav'"></span>)</span>
+                                    </a>
+                                </li>
+                            </template>
+                            <li>
+                                <a :href="actions.download_metadata || '#'"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sky-700 transition hover:border-sky-300 hover:bg-sky-50">
+                                    Metadata JSON
+                                </a>
+                            </li>
+                            <li>
+                                <a :href="actions.download_sip_flow || '#'"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sky-700 transition hover:border-sky-300 hover:bg-sky-50">
+                                    SIP flow JSON
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('callRecordDetail', (payload) => ({
+            init() {
+                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                this.record = data.record || {};
+                this.sipFlow = Array.isArray(data.sip_flow) ? data.sip_flow : [];
+                this.mediaMetrics = data.media_metrics || {};
+                this.transcript = data.transcript || { available: false, segments: [] };
+                this.transcriptPreview = data.transcript_preview || null;
+                this.transcriptVisible = Boolean(this.transcript.available);
+                this.notes = data.notes || { text: '', updated_at: null };
+                this.noteDraft = this.notes.text || '';
+                this.participants = Array.isArray(data.participants) ? data.participants : [];
+                this.actions = data.actions || {};
+                this.backUrl = data.back_url || '/console/call-records';
+                this.durationHint = this.record.ended_at ? `Ended ${this.formatDateTime(this.record.ended_at)}` : 'No hangup timestamp recorded';
+                this.detailTab = 'overview';
+                this.insightTab = (this.transcriptVisible || (this.transcript && this.transcript.available))
+                    ? 'transcription'
+                    : (this.sipFlow.length ? 'sip-flow' : 'transcription');
+            },
+            record: {},
+            sipFlow: [],
+            mediaMetrics: {},
+            transcript: {},
+            transcriptPreview: null,
+            transcriptVisible: false,
+            notes: {},
+            noteDraft: '',
+            participants: [],
+            actions: {},
+            backUrl: '/console/call-records',
+            tagInput: '',
+            asrProcessing: false,
+            durationHint: '',
+            detailTab: 'overview',
+            insightTab: 'transcription',
+            expandedSip: [],
+            addTag() {
+                const value = (this.tagInput || '').trim();
+                if (!value) {
+                    return;
+                }
+                const tags = Array.isArray(this.record.tags) ? this.record.tags : [];
+                if (!tags.includes(value)) {
+                    tags.push(value);
+                    this.record.tags = tags;
+                }
+                this.tagInput = '';
+            },
+            removeTag(index) {
+                const tags = Array.isArray(this.record.tags) ? [...this.record.tags] : [];
+                if (index >= 0 && index < tags.length) {
+                    tags.splice(index, 1);
+                    this.record.tags = tags;
+                }
+            },
+            saveNotes() {
+                this.notes = this.notes || {};
+                this.notes.text = this.noteDraft || '';
+                this.notes.updated_at = new Date().toISOString();
+            },
+            requestTranscript() {
+                if (this.transcriptVisible) {
+                    return;
+                }
+                this.asrProcessing = true;
+                window.setTimeout(() => {
+                    if (this.transcriptPreview) {
+                        this.transcript = Object.assign({ available: true, generated_at: new Date().toISOString() }, this.transcriptPreview);
+                    } else {
+                        this.transcript = {
+                            available: true,
+                            language: 'en-US',
+                            generated_at: new Date().toISOString(),
+                            segments: [],
+                            text: 'Transcript generated successfully. No preview data available in sample payload.',
+                        };
+                    }
+                    this.transcriptVisible = true;
+                    this.record.has_transcript = true;
+                    this.asrProcessing = false;
+                }, 1200);
+            },
+            toggleSipRaw(index) {
+                const set = new Set(this.expandedSip);
+                if (set.has(index)) {
+                    set.delete(index);
+                } else {
+                    set.add(index);
+                }
+                this.expandedSip = Array.from(set);
+            },
+            isSipExpanded(index) {
+                return this.expandedSip.includes(index);
+            },
+            statusLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'completed':
+                        return 'Completed';
+                    case 'missed':
+                        return 'Missed';
+                    case 'failed':
+                        return 'Failed';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
+            directionLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'inbound':
+                        return 'Inbound';
+                    case 'outbound':
+                        return 'Outbound';
+                    case 'internal':
+                        return 'Internal';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
+            statusClasses(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'completed':
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    case 'missed':
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    case 'failed':
+                        return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+            },
+            statusDot(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'completed':
+                        return 'bg-emerald-500';
+                    case 'missed':
+                        return 'bg-amber-500';
+                    case 'failed':
+                        return 'bg-rose-500';
+                    default:
+                        return 'bg-slate-400';
+                }
+            },
+            directionClasses(direction) {
+                switch ((direction || '').toLowerCase()) {
+                    case 'inbound':
+                        return 'border border-sky-100 bg-sky-50 text-sky-700';
+                    case 'outbound':
+                        return 'border border-emerald-100 bg-emerald-50 text-emerald-700';
+                    case 'internal':
+                        return 'border border-slate-200 bg-slate-50 text-slate-700';
+                    default:
+                        return 'border border-slate-200 bg-slate-50 text-slate-700';
+                }
+            },
+            qualityTone(value) {
+                const mos = Number(value || 0);
+                if (mos >= 4.3) {
+                    return 'text-emerald-600';
+                }
+                if (mos >= 3.8) {
+                    return 'text-amber-600';
+                }
+                if (mos > 0) {
+                    return 'text-rose-600';
+                }
+                return 'text-slate-400';
+            },
+            formatNumber(value) {
+                if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                    return '—';
+                }
+                return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            },
+            formatDuration(value) {
+                const seconds = Number(value || 0);
+                if (!seconds) {
+                    return '00:00';
+                }
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = Math.floor(seconds % 60);
+                const pad = (num) => String(num).padStart(2, '0');
+                if (hours > 0) {
+                    return `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
+                }
+                return `${pad(minutes)}:${pad(secs)}`;
+            },
+            formatDateTime(value) {
+                if (!value) {
+                    return '—';
+                }
+                try {
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) {
+                        return value;
+                    }
+                    return date.toLocaleString();
+                } catch (err) {
+                    return value;
+                }
+            },
+        }));
+    });
+</script>
+{% endblock %}

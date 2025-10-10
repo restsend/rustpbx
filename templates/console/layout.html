@@ -7,11 +7,11 @@
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     {% block js_head %}
-    <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
-    <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
+    <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
+    <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
     {% endblock %}
     <style>
         [x-cloak] {
@@ -60,7 +60,7 @@
                         <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='dashboard' else 'text-slate-400 group-hover:text-slate-600' }}"
                             fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M3 12l9-9 9 9M4.5 10.5V21h15V10.5" />
+                                d="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Dashboard</span>
                     </a>
@@ -69,7 +69,8 @@
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Extensions">
                         <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='extensions' else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 0 0 2.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 0 1-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 0 0-1.091-.852H4.5A2.25 2.25 0 0 0 2.25 4.5v2.25Z" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Extensions</span>
                     </a>
@@ -79,17 +80,17 @@
                         <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='routing' else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M4 6h8a4 4 0 010 8H8m8-4h4M8 14v4" />
+                                d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Routing</span>
                     </a>
-                    <a href="{{ bp }}/sip"
-                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='sip' else 'text-slate-700' }}"
+                    <a href="{{ bp }}/sip-trunk"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active in ['sip-trunk', 'sip-trunk-detail'] else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="SIP Trunk / DID">
-                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='sip' else 'text-slate-400 group-hover:text-slate-600' }}"
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active in ['sip-trunk', 'sip-trunk-detail'] else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M2 8l10-5 10 5-10 5L2 8zm10 5l10-5v8l-10 5-10-5V8l10 5z" />
+                                d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582m15.686 0A11.953 11.953 0 0 1 12 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0 1 21 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0 1 12 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 0 1 3 12c0-1.605.42-3.113 1.157-4.418" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>SIP Trunk / DID</span>
                     </a>
@@ -98,21 +99,20 @@
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Call Records">
                         <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='call-records' else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <circle cx="12" cy="12" r="3" />
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M2 12a10 10 0 1020 0 10 10 0 10-20 0z" />
+                                d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Call Records</span>
                     </a>
-                    <a href="{{ bp }}/test"
-                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='test' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Test">
-                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='test' else 'text-slate-400 group-hover:text-slate-600' }}"
+                    <a href="{{ bp }}/diagnostics"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='diagnostics' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Diagnostics">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='diagnostics' else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M9 3v2m6-2v2M4 7h16M5 10h14l-1 9H6l-1-9z" />
+                                d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
                         </svg>
-                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Test</span>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Diagnostics</span>
                     </a>
                     <a href="{{ bp }}/settings"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
@@ -120,8 +120,7 @@
                         <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='settings' else 'text-slate-400 group-hover:text-slate-600' }}"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M10.325 4.317l.564-1.13a1 1 0 011.788 0l.564 1.13a1 1 0 00.707.547l1.248.249a1 1 0 01.57 1.64l-.862.94a1 1 0 00-.254.8l.147 1.266a1 1 0 01-1.45 1.028l-1.17-.52a1 1 0 00-.84 0l-1.17.52a1 1 0 01-1.45-1.027l.147-1.267a1 1 0 00-.254-.8l-.862-.94a1 1 0 01.57-1.64l1.248-.25a1 1 0 00.707-.546z" />
-                            <circle cx="12" cy="12" r="3" />
+                                d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" />
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Settings</span>
                     </a>

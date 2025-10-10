@@ -2,12 +2,796 @@
 {% block title %}Settings · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl">
-        <h1 class="text-xl font-semibold text-slate-900">Settings</h1>
-        <p class="mt-2 text-sm text-slate-500">Instance configuration.</p>
-        <div class="mt-6 rounded-xl bg-white p-6 ring-1 ring-black/5">
-            <div class="text-sm text-slate-500">Placeholder content.</div>
-        </div>
+    <div class="mx-auto max-w-7xl space-y-6" x-data="settingsConsole({{ settings_data | escape }})">
+        <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div class="space-y-1">
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Platform configuration</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Settings</h1>
+                <p class="text-sm text-slate-500">Review runtime configuration, integrations, retention policies, and
+                    directory access.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                <div>
+                    Last reload · <span class="font-semibold text-slate-700"
+                        x-text="formatDateTime(server.last_reload)"></span>
+                </div>
+                <button type="button" @click="refreshOverview"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v4h4" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16 16v-4h-4" />
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M5 9a6 6 0 0110-3.35M15 11a6 6 0 01-10 3.35" />
+                    </svg>
+                    Refresh preview
+                </button>
+            </div>
+        </header>
+
+        <nav
+            class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
+            <template x-for="tab in tabs" :key="tab.id">
+                <button type="button" @click="activeTab = tab.id" class="rounded-md px-4 py-2 transition"
+                    :class="activeTab === tab.id ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
+                    <span x-text="tab.label"></span>
+                </button>
+            </template>
+        </nav>
+
+        <section x-show="activeTab === 'platform'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                <div class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Voice cluster</h2>
+                        <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Cluster name</div>
+                                <div class="mt-1 font-semibold text-slate-800" x-text="server.cluster_name"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">External FQDN</div>
+                                <div class="mt-1 font-mono text-xs" x-text="server.external_fqdn"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">SIP bind addresses</div>
+                                <ul class="mt-1 space-y-1">
+                                    <template x-for="item in server.bind_addresses || []" :key="item">
+                                        <li class="rounded-lg bg-slate-50 px-3 py-1 font-mono text-xs text-slate-600"
+                                            x-text="item"></li>
+                                    </template>
+                                </ul>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Media network</div>
+                                <div class="mt-1 rounded-lg bg-slate-50 px-3 py-1 font-mono text-xs text-slate-600"
+                                    x-text="server.media_bind"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex items-center justify-between">
+                            <h2 class="text-base font-semibold text-slate-900">Critical operations</h2>
+                            <span class="text-[11px] uppercase tracking-wide text-slate-400">Simulated</span>
+                        </div>
+                        <p class="mt-2 text-xs text-slate-500">Execute reloads and restarts without leaving the console
+                            preview.</p>
+                        <ul class="mt-4 space-y-2 text-sm text-slate-600">
+                            <template x-for="action in server.operations || []" :key="action.id">
+                                <li>
+                                    <button type="button" @click="triggerOperation(action)"
+                                        class="flex w-full items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-left font-semibold text-slate-700 transition hover:border-sky-200 hover:text-sky-600">
+                                        <span x-text="action.label"></span>
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                        </svg>
+                                    </button>
+                                </li>
+                            </template>
+                        </ul>
+                        <template x-if="lastOperation">
+                            <div
+                                class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                                <div class="font-semibold text-slate-700" x-text="lastOperation.label"></div>
+                                <div x-text="lastOperation.timestamp"></div>
+                                <div class="mt-1" x-text="lastOperation.status"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <aside class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Database</h2>
+                        <dl class="mt-4 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Provider</dt>
+                                <dd class="font-semibold text-slate-800" x-text="server.database?.provider"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-slate-500">DSN</dt>
+                                <dd class="mt-1 rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600"
+                                    x-text="server.database?.dsn"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Pool size</dt>
+                                <dd class="font-semibold text-slate-800" x-text="server.database?.pool_size"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Read replica</dt>
+                                <dd class="font-mono text-xs text-slate-600" x-text="server.database?.replica"></dd>
+                            </div>
+                        </dl>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Runtime status</h2>
+                        <dl class="mt-4 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Release channel</dt>
+                                <dd class="font-semibold text-slate-800" x-text="server.release_channel || 'stable'">
+                                </dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Storage mode</dt>
+                                <dd class="font-semibold text-slate-800"
+                                    x-text="storageModeLabel(server.storage?.mode)"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-slate-500">Media network</dt>
+                                <dd class="mt-1 rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600"
+                                    x-text="server.media_bind"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-slate-500">Last reload</dt>
+                                <dd class="mt-1 font-mono text-xs text-slate-600"
+                                    x-text="formatDateTime(server.last_reload)"></dd>
+                            </div>
+                        </dl>
+                    </div>
+                </aside>
+            </div>
+        </section>
+
+        <section x-show="activeTab === 'storage'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                <div class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Storage destinations</h2>
+                                <p class="text-xs text-slate-500">Choose between local disk and S3-compatible buckets
+                                    for recordings and diagnostics.</p>
+                            </div>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                Active profile · <span class="text-sky-600"
+                                    x-text="selectedStorageProfileData?.label || storageModeLabel(server.storage?.mode)"></span>
+                            </span>
+                        </div>
+                        <div class="mt-4 grid gap-4 md:grid-cols-2">
+                            <template x-for="profile in storageProfiles" :key="profile.id">
+                                <button type="button" @click="selectStorageProfile(profile.id)"
+                                    class="group flex flex-col gap-2 rounded-lg border px-4 py-3 text-left transition"
+                                    :class="selectedStorageProfile === profile.id ? 'border-sky-300 bg-sky-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'">
+                                    <div class="flex items-center justify-between">
+                                        <span class="font-semibold text-slate-800" x-text="profile.label"></span>
+                                        <span class="text-[11px] font-semibold uppercase tracking-wide"
+                                            :class="selectedStorageProfile === profile.id ? 'text-sky-600' : 'text-slate-400'">
+                                            <span
+                                                x-text="selectedStorageProfile === profile.id ? 'Active' : 'Preview'"></span>
+                                        </span>
+                                    </div>
+                                    <p class="text-xs text-slate-500" x-text="profile.description"></p>
+                                    <dl class="mt-2 space-y-1 text-xs text-slate-500">
+                                        <template x-for="item in profileConfig(profile)"
+                                            :key="profile.id + '-' + item.key">
+                                            <div class="flex items-center justify-between">
+                                                <dt class="text-slate-400" x-text="item.label"></dt>
+                                                <dd class="font-mono text-slate-600" x-text="item.value"></dd>
+                                            </div>
+                                        </template>
+                                    </dl>
+                                </button>
+                            </template>
+                        </div>
+                        <div class="mt-4 rounded-lg border border-dashed border-slate-200 p-4 text-xs text-slate-500"
+                            x-show="selectedStorageProfileData">
+                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Profile notes
+                            </div>
+                            <p class="mt-2" x-text="selectedStorageProfileData?.description"></p>
+                            <div class="mt-3 text-[11px] text-slate-400">
+                                Selected profile ID · <span class="font-mono text-slate-600"
+                                    x-text="selectedStorageProfileData?.id"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Lifecycle automation</h2>
+                        <p class="mt-1 text-xs text-slate-500">Mirror and archive media safely across hot and cold
+                            tiers.</p>
+                        <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
+                            <div class="rounded-lg border border-slate-200 p-4">
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Local path</div>
+                                <div class="mt-1 font-mono text-xs text-slate-600"
+                                    x-text="server.storage?.local_path || '—'"></div>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 p-4">
+                                <div
+                                    class="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
+                                    <span>Remote target</span>
+                                    <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="server.storage?.s3?.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-500'"
+                                        x-text="server.storage?.s3?.enabled ? 'Enabled' : 'Disabled'"></span>
+                                </div>
+                                <dl class="mt-2 space-y-1 text-xs">
+                                    <div class="flex justify-between">
+                                        <dt class="text-slate-500">Bucket</dt>
+                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.bucket || '—'">
+                                        </dd>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <dt class="text-slate-500">Region</dt>
+                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.region || '—'">
+                                        </dd>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <dt class="text-slate-500">Prefix</dt>
+                                        <dd class="font-mono text-slate-600" x-text="server.storage?.s3?.prefix || '—'">
+                                        </dd>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <dt class="text-slate-500">Endpoint</dt>
+                                        <dd class="font-mono text-slate-600 truncate"
+                                            x-text="server.storage?.s3?.endpoint || '—'"></dd>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <dt class="text-slate-500">Access key</dt>
+                                        <dd class="font-mono text-slate-600"
+                                            x-text="server.storage?.s3?.access_key || '—'"></dd>
+                                    </div>
+                                </dl>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-base font-semibold text-slate-900">Snapshot</h2>
+                        <dl class="mt-4 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Current mode</dt>
+                                <dd class="font-semibold text-slate-800"
+                                    x-text="storageModeLabel(server.storage?.mode)"></dd>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <dt class="text-slate-500">Release channel</dt>
+                                <dd class="font-semibold text-slate-800" x-text="server.release_channel || 'stable'">
+                                </dd>
+                            </div>
+                            <div>
+                                <dt class="text-slate-500">Last reload</dt>
+                                <dd class="mt-1 font-mono text-xs text-slate-600"
+                                    x-text="formatDateTime(server.last_reload)"></dd>
+                            </div>
+                        </dl>
+                    </div>
+                </aside>
+            </div>
+
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-base font-semibold text-slate-900">Retention policy</h2>
+                <p class="mt-1 text-xs text-slate-500">Control how long we retain call metadata, recordings, and
+                    exported archives.</p>
+                <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-400">Call detail records</div>
+                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
+                                x-text="retention.call_records_days"></span> days</div>
+                        <p class="mt-2 text-xs text-slate-500">CDR rows are purged from the primary database after this
+                            period.</p>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-400">Recordings</div>
+                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
+                                x-text="retention.recordings_days"></span> days</div>
+                        <p class="mt-2 text-xs text-slate-500">Audio files are transitioned to cold storage or removed
+                            afterwards.</p>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <div class="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
+                            <span>CDR export</span>
+                            <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                :class="retention.cdr_export?.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-500'"
+                                x-text="retention.cdr_export?.enabled ? 'Enabled' : 'Disabled'"></span>
+                        </div>
+                        <dl class="mt-2 space-y-1 text-xs">
+                            <div class="flex justify-between">
+                                <dt class="text-slate-500">Frequency</dt>
+                                <dd class="font-semibold text-slate-700"
+                                    x-text="capitalize(retention.cdr_export?.frequency)"></dd>
+                            </div>
+                            <div class="flex justify-between">
+                                <dt class="text-slate-500">Target</dt>
+                                <dd class="font-mono text-slate-600" x-text="retention.cdr_export?.target"></dd>
+                            </div>
+                        </dl>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-400">PII anonymisation</div>
+                        <div class="mt-2 text-2xl font-semibold text-slate-900"><span
+                                x-text="retention.anonymise_after_days"></span> days</div>
+                        <p class="mt-2 text-xs text-slate-500">Caller IDs are obfuscated for analytics past this
+                            timeframe.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section x-show="activeTab === 'security'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-base font-semibold text-slate-900">Network guardrails</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2 text-sm text-slate-600">
+                    <div>
+                        <div class="text-xs uppercase tracking-wide text-slate-400">Trusted IP ranges</div>
+                        <ul class="mt-2 space-y-1">
+                            <template x-for="ip in security.trusted_ips || []" :key="ip">
+                                <li class="rounded-lg bg-emerald-50 px-3 py-1 font-mono text-xs text-emerald-700 ring-1 ring-emerald-200"
+                                    x-text="ip"></li>
+                            </template>
+                        </ul>
+                    </div>
+                    <div>
+                        <div class="text-xs uppercase tracking-wide text-slate-400">Blocked user agents</div>
+                        <ul class="mt-2 space-y-1">
+                            <template x-for="ua in security.blocked_user_agents || []" :key="ua">
+                                <li class="rounded-lg bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-600 ring-1 ring-rose-200"
+                                    x-text="ua"></li>
+                            </template>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid gap-6 lg:grid-cols-3">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Rate limits</h2>
+                    <p class="mt-1 text-xs text-slate-500">Per-minute guardrails across signalling entry points.</p>
+                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
+                        <template x-for="(value, key) in security.rate_limits || {}" :key="key">
+                            <li class="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
+                                <span class="font-medium text-slate-700" x-text="labelize(key)"></span>
+                                <span class="font-mono text-slate-600" x-text="value"></span>
+                            </li>
+                        </template>
+                    </ul>
+                </div>
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Threat intelligence</h2>
+                    <p class="mt-1 text-xs text-slate-500">External feeds synced into the SIP firewall.</p>
+                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
+                        <template x-for="feed in security.threat_feed || []" :key="feed.source">
+                            <li class="rounded-lg border border-slate-200 px-3 py-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-semibold text-slate-800" x-text="feed.source"></span>
+                                    <span class="text-xs text-slate-400" x-text="formatDateTime(feed.last_sync)"></span>
+                                </div>
+                                <div class="mt-1 text-xs text-slate-500">
+                                    <span class="font-semibold text-slate-700" x-text="feed.entries"></span> indicators
+                                    loaded
+                                </div>
+                            </li>
+                        </template>
+                    </ul>
+                </div>
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Audit summary</h2>
+                    <dl class="mt-4 space-y-3 text-sm text-slate-600">
+                        <div>
+                            <dt class="text-slate-500">Last failed login</dt>
+                            <dd class="mt-1 font-mono text-xs text-slate-600"
+                                x-text="formatDateTime(security.audit?.last_failed_login)"></dd>
+                        </div>
+                        <div class="flex items-center justify-between">
+                            <dt class="text-slate-500">Policy version</dt>
+                            <dd class="font-semibold text-slate-800" x-text="security.audit?.policy_version || '—'">
+                            </dd>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+        </section>
+
+        <section x-show="activeTab === 'asr'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">ASR providers</h2>
+                        <p class="text-xs text-slate-500">Manage speech-to-text integrations and authentication tokens.
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-3 text-xs text-slate-500">
+                        <span>Callback:</span>
+                        <span class="rounded-lg bg-slate-50 px-3 py-1 font-mono" x-text="asr.callback?.url"></span>
+                    </div>
+                </div>
+
+                <div class="mt-5 grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+                    <div class="space-y-4">
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Active
+                                provider</span>
+                            <select x-model="selectedProvider"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="provider in asr.providers || []" :key="provider.id">
+                                    <option :value="provider.id" x-text="provider.name"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
+                            x-show="activeProvider">
+                            <div class="flex items-center justify-between">
+                                <div class="text-base font-semibold text-slate-800" x-text="activeProvider.name"></div>
+                                <span
+                                    class="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">Connected</span>
+                            </div>
+                            <div class="mt-2 text-xs text-slate-500">Token hint: <span class="font-mono"
+                                    x-text="activeProvider.token_hint"></span></div>
+                            <div class="mt-3 text-xs text-slate-500">Supported languages</div>
+                            <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                <template x-for="lang in asr.languages || []" :key="lang">
+                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                        x-text="lang"></span>
+                                </template>
+                            </div>
+                            <div class="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                <span class="font-semibold text-slate-700">Callback auth:</span>
+                                <span class="rounded-lg bg-slate-50 px-2 py-0.5 font-mono text-xs"
+                                    x-text="asr.callback?.auth_header"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="space-y-4">
+                        <div class="rounded-lg border border-dashed border-slate-200 p-4 text-xs text-slate-500">
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Run connectivity
+                                test</h3>
+                            <p class="mt-2">Send a short prompt to confirm that the ASR provider is reachable and the
+                                token has sufficient quota.</p>
+                            <button type="button" @click="runAsrTest"
+                                class="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700">
+                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.8">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5l5 5-5 5" />
+                                </svg>
+                                Trigger test transcription
+                            </button>
+                            <template x-if="asrProbe">
+                                <div class="mt-4 rounded-lg border px-3 py-2"
+                                    :class="asrProbe.success ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'">
+                                    <div class="flex items-center justify-between">
+                                        <span class="font-semibold" x-text="asrProbe.message"></span>
+                                        <span class="text-xs" x-text="asrProbe.timestamp"></span>
+                                    </div>
+                                    <p class="mt-1 text-xs" x-text="asrProbe.detail"></p>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section x-show="activeTab === 'directory'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Departments</h2>
+                        <p class="text-xs text-slate-500">Review ownership, service-level expectations, and extension
+                            blocks.</p>
+                    </div>
+                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400"
+                        x-text="(directory.departments?.length || 0) + ' total'"></span>
+                </div>
+                <div class="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)]">
+                    <div class="space-y-2">
+                        <template x-for="dept in directory.departments || []" :key="dept.id">
+                            <button type="button" @click="selectDepartment(dept.id)"
+                                class="flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition"
+                                :class="selectedDepartmentId === dept.id ? 'border-sky-300 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                <div>
+                                    <div class="font-semibold text-slate-800" x-text="dept.name"></div>
+                                    <div class="text-xs text-slate-400">Lead · <span x-text="dept.lead"></span></div>
+                                </div>
+                                <span
+                                    class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+                                    x-text="dept.members + ' members'"></span>
+                            </button>
+                        </template>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
+                        x-show="selectedDepartment">
+                        <template x-if="selectedDepartment">
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <div class="text-xs uppercase tracking-wide text-slate-400">Department</div>
+                                        <div class="mt-1 text-base font-semibold text-slate-900"
+                                            x-text="selectedDepartment.name"></div>
+                                    </div>
+                                    <span
+                                        class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+                                        x-text="selectedDepartment.extension_range"></span>
+                                </div>
+                                <div class="text-xs text-slate-500" x-text="selectedDepartment.description"></div>
+                                <div class="flex flex-wrap gap-2 text-[11px]">
+                                    <template x-for="tag in selectedDepartment.tags || []" :key="tag">
+                                        <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                            x-text="tag"></span>
+                                    </template>
+                                </div>
+                                <div class="flex items-center justify-between text-xs text-slate-500">
+                                    <span>SLA</span>
+                                    <span class="font-semibold text-slate-700" x-text="selectedDepartment.sla"></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Users</h2>
+                        <p class="text-xs text-slate-500">Assign roles, enforce MFA, and map staff to extensions.</p>
+                    </div>
+                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400"
+                        x-text="(directory.users?.length || 0) + ' users'"></span>
+                </div>
+                <div class="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <div class="space-y-2">
+                        <template x-for="user in directory.users || []" :key="user.id">
+                            <button type="button" @click="selectUser(user.id)"
+                                class="flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition"
+                                :class="selectedUserId === user.id ? 'border-sky-300 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                <div>
+                                    <div class="font-semibold text-slate-800" x-text="user.name"></div>
+                                    <div class="text-xs text-slate-400" x-text="user.email"></div>
+                                </div>
+                                <div class="flex flex-col items-end gap-1 text-right">
+                                    <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="userStatusClasses(user.status)" x-text="user.status"></span>
+                                    <span class="text-[11px] text-slate-400"
+                                        x-text="'Last login · ' + formatDateTime(user.last_login)"></span>
+                                </div>
+                            </button>
+                        </template>
+                    </div>
+                    <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600" x-show="selectedUser">
+                        <template x-if="selectedUser">
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <div class="text-xs uppercase tracking-wide text-slate-400">User</div>
+                                        <div class="mt-1 text-base font-semibold text-slate-900"
+                                            x-text="selectedUser.name"></div>
+                                        <div class="text-xs text-slate-500" x-text="selectedUser.email"></div>
+                                    </div>
+                                    <div class="flex flex-col items-end gap-1">
+                                        <span
+                                            class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+                                            x-text="selectedUser.role"></span>
+                                        <span class="text-[11px] text-slate-400">Dept · <span
+                                                x-text="selectedUser.department"></span></span>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-2 text-xs text-slate-500">
+                                    <span class="font-semibold text-slate-700">MFA:</span>
+                                    <span x-text="selectedUser.mfa ? 'Enabled' : 'Disabled'"></span>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Extensions</div>
+                                    <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                        <template x-for="ext in selectedUser.extensions || []" :key="ext">
+                                            <span
+                                                class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                x-text="ext"></span>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Permissions</div>
+                                    <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                        <template x-for="perm in selectedUser.permissions || []" :key="perm">
+                                            <span class="rounded-full bg-sky-50 px-2 py-0.5 font-semibold text-sky-700"
+                                                x-text="perm"></span>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <template x-if="directory.pending_invites?.length">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Pending invites</h2>
+                    <ul class="mt-4 space-y-2 text-sm text-slate-600">
+                        <template x-for="invite in directory.pending_invites" :key="invite.id">
+                            <li class="rounded-lg border border-slate-200 px-3 py-2">
+                                <div class="font-semibold text-slate-800" x-text="invite.email"></div>
+                                <div class="mt-1 text-xs text-slate-500">
+                                    <span x-text="invite.role"></span> · Sent
+                                    <span x-text="formatDateTime(invite.sent_at)"></span>
+                                </div>
+                            </li>
+                        </template>
+                    </ul>
+                </div>
+            </template>
+        </section>
     </div>
 </div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('settingsConsole', (payload) => ({
+            init() {
+                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                this.server = data.server || {};
+                this.retention = data.retention || {};
+                this.directory = data.directory || { departments: [], users: [], pending_invites: [] };
+                this.security = data.security || { trusted_ips: [], blocked_user_agents: [], rate_limits: {}, threat_feed: [], audit: {} };
+                this.asr = data.asr || { providers: [], languages: [], callback: {} };
+                this.selectedProvider = this.asr.active_provider || (this.asr.providers?.[0]?.id || '');
+                this.selectedStorageProfile = this.server.storage?.mode || (this.server.storage_profiles?.[0]?.id || '');
+                if (this.storageProfiles.length) {
+                    const exists = this.storageProfiles.find((profile) => profile.id === this.selectedStorageProfile);
+                    if (!exists) {
+                        this.selectedStorageProfile = this.storageProfiles[0].id;
+                    }
+                }
+                this.selectedDepartmentId = this.directory.departments?.[0]?.id || '';
+                this.selectedUserId = this.directory.users?.[0]?.id || '';
+            },
+            tabs: [
+                { id: 'platform', label: 'Platform overview' },
+                { id: 'storage', label: 'Storage & retention' },
+                { id: 'security', label: 'Security posture' },
+                { id: 'asr', label: 'ASR integrations' },
+                { id: 'directory', label: 'Users & departments' },
+            ],
+            activeTab: 'platform',
+            server: {},
+            retention: {},
+            directory: { departments: [], users: [], pending_invites: [] },
+            security: {},
+            asr: {},
+            selectedProvider: '',
+            selectedStorageProfile: '',
+            selectedDepartmentId: '',
+            selectedUserId: '',
+            lastOperation: null,
+            asrProbe: null,
+            get storageProfiles() {
+                return Array.isArray(this.server.storage_profiles) ? this.server.storage_profiles : [];
+            },
+            selectStorageProfile(id) {
+                this.selectedStorageProfile = id;
+            },
+            get selectedStorageProfileData() {
+                return this.storageProfiles.find((item) => item.id === this.selectedStorageProfile) || null;
+            },
+            profileConfig(profile) {
+                if (!profile || typeof profile.config !== 'object') {
+                    return [];
+                }
+                return Object.entries(profile.config).map(([key, value]) => ({
+                    key,
+                    label: this.labelize(key),
+                    value: typeof value === 'number' ? value.toString() : String(value),
+                }));
+            },
+            labelize(key) {
+                return String(key)
+                    .replace(/[_-]/g, ' ')
+                    .replace(/\b\w/g, (match) => match.toUpperCase());
+            },
+            storageModeLabel(mode) {
+                switch ((mode || '').toLowerCase()) {
+                    case 'local':
+                        return 'Local only';
+                    case 'hybrid':
+                        return 'Hybrid';
+                    case 's3':
+                    case 'remote':
+                        return 'Remote (S3)';
+                    default:
+                        return mode || 'Unknown';
+                }
+            },
+            get selectedDepartment() {
+                return (this.directory.departments || []).find((dept) => dept.id === this.selectedDepartmentId) || null;
+            },
+            selectDepartment(id) {
+                this.selectedDepartmentId = id;
+            },
+            get selectedUser() {
+                return (this.directory.users || []).find((user) => user.id === this.selectedUserId) || null;
+            },
+            selectUser(id) {
+                this.selectedUserId = id;
+            },
+            userStatusClasses(status) {
+                const key = (status || '').toLowerCase();
+                if (key === 'active') {
+                    return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                }
+                if (key === 'suspended' || key === 'disabled') {
+                    return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                }
+                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+            },
+            get activeProvider() {
+                return this.asr.providers?.find((provider) => provider.id === this.selectedProvider) || null;
+            },
+            formatDateTime(value) {
+                if (!value) {
+                    return '—';
+                }
+                try {
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) {
+                        return value;
+                    }
+                    return date.toLocaleString();
+                } catch (err) {
+                    return value;
+                }
+            },
+            capitalize(input) {
+                if (!input) {
+                    return '';
+                }
+                return String(input).charAt(0).toUpperCase() + String(input).slice(1);
+            },
+            triggerOperation(action) {
+                if (!action) {
+                    return;
+                }
+                const timestamp = new Date().toLocaleTimeString();
+                this.lastOperation = {
+                    label: action.label,
+                    timestamp,
+                    status: 'Request queued for next maintenance window (preview mode).',
+                };
+            },
+            runAsrTest() {
+                this.asrProbe = {
+                    running: true,
+                    success: false,
+                    message: 'Contacting provider…',
+                    detail: '',
+                    timestamp: new Date().toLocaleTimeString(),
+                };
+                window.setTimeout(() => {
+                    const success = Math.random() > 0.1;
+                    this.asrProbe = {
+                        running: false,
+                        success,
+                        message: success ? 'ASR connectivity ok' : 'ASR connectivity failed',
+                        detail: success ? 'Latency 420 ms · cost estimate $0.0004 / minute' : 'HTTP 401 · token expired (simulated)',
+                        timestamp: new Date().toLocaleTimeString(),
+                    };
+                }, 900);
+            },
+            refreshOverview() {
+                this.server.last_reload = new Date().toISOString();
+            },
+        }));
+    });
+</script>
 {% endblock %}
