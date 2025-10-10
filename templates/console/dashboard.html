@@ -1,6 +1,6 @@
 {% extends "console/layout.html" %}
 
-{% block title %}Dashboard · RustPBX{% endblock %}
+{% block title %}Dashboard · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <div class="min-h-[70vh] py-6">

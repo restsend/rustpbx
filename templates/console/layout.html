@@ -4,10 +4,11 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{% block title %}RustPBX Admin{% endblock %}</title>
+    <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
+    <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     {% block js_head %}
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
+    <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
@@ -22,16 +23,14 @@
 <body class="min-h-screen bg-slate-100 text-slate-900">
     <div x-data="{ sidebarOpen: false, sidebarCollapsed: false }" class="min-h-screen">
         <!-- Off-canvas overlay -->
-        {% if show_shell %}
         <div x-show="sidebarOpen" x-transition.opacity class="fixed inset-0 z-30 bg-black/40 lg:hidden"
             @click="sidebarOpen=false"></div>
-        {% endif %}
 
         <!-- Sidebar -->
-        {% if show_shell %}
         <aside
-            class="fixed inset-y-0 left-0 z-40 w-72 transform bg-white ring-1 ring-black/5 shadow-xl transition-all duration-300 ease-in-out lg:translate-x-0 lg:shadow-none lg:ring-0 lg:w-72"
-            :class="{ '-translate-x-full': !sidebarOpen, 'lg:w-24': sidebarCollapsed }" x-transition>
+            class="fixed inset-y-0 left-0 z-40 w-72 transform bg-white ring-1 ring-black/5 shadow-xl transition-all duration-300 ease-in-out lg:translate-x-0 lg:shadow-none lg:ring-0"
+            :class="{ '-translate-x-full': !sidebarOpen, 'lg:w-24': sidebarCollapsed, 'lg:w-72': !sidebarCollapsed }"
+            x-transition>
             <div class="flex h-full flex-col">
                 <div class="flex h-16 items-center justify-between gap-2 border-b border-slate-100 px-6">
                     <div class="flex items-center gap-2">
@@ -129,18 +128,16 @@
                 </nav>
                 <div class="border-t border-slate-100 p-4 text-xs text-slate-500" x-show="!sidebarCollapsed"
                     x-transition.opacity x-cloak>
-                    <div>RustPBX Admin</div>
-                    <a href="https://rustpbx.com" class="underline hover:text-slate-700">rustpbx.com</a>
+                    <a href="https://rustpbx.com?version={{site_version}}&utm_source={{site_url}}" target="_blank"
+                        class="underline hover:text-slate-700">{{site_name|default('RustPBX')}} -
+                        {{site_version}}</a>
                 </div>
             </div>
         </aside>
-        {% endif %}
 
         <!-- Main area -->
-        <div class="transition-all duration-300 ease-in-out {% if show_shell %}lg:pl-72{% endif %}" {% if show_shell
-            %}x-bind:class="sidebarCollapsed ? 'lg:pl-24' : 'lg:pl-72'" {% endif %}>
+        <div class="transition-all duration-300 ease-in-out" x-bind:class="sidebarCollapsed ? 'lg:pl-24' : 'lg:pl-72'">
             <!-- Top bar -->
-            {% if show_shell %}
             <header
                 class="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 px-6 backdrop-blur">
                 <div class="flex items-center gap-2">
@@ -167,15 +164,13 @@
                     {% endif %}
                 </div>
             </header>
-            {% endif %}
 
             <main class="min-h-[calc(100vh-64px)] bg-slate-50">
                 {% block content %}{% endblock %}
             </main>
 
             <footer class="py-6 text-center text-xs text-slate-500">
-                RustPBX Admin · Powered by <a href="https://rustpbx.com"
-                    class="underline hover:text-slate-700">RustPBX</a>
+                {{site_name|default('RustPBX')}} · {{site_footer}}
             </footer>
         </div>
     </div>

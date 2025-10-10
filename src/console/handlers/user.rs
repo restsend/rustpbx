@@ -21,7 +21,6 @@ pub async fn login_page(
     state.render(
         "console/login.html",
         json!({
-            "show_shell": false,
             "login_action": state.login_url(query.next.clone()),
             "register_url": state.register_url(query.next),
             "error_message": null,
@@ -42,7 +41,6 @@ pub async fn login_post(
         return state.render(
             "console/login.html",
             json!({
-                "show_shell": false,
                 "login_action": state.login_url(next.clone()),
                 "register_url": state.register_url(next),
                 "error_message": "Please provide both username/email and password",
@@ -65,7 +63,6 @@ pub async fn login_post(
         Ok(None) => state.render(
             "console/login.html",
             json!({
-                "show_shell": false,
                 "login_action": state.login_url(next.clone()),
                 "register_url": state.register_url(next),
                 "error_message": "Invalid credentials",
@@ -95,7 +92,6 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
     state.render(
         "console/register.html",
         json!({
-            "show_shell": false,
             "register_action": state.url_for("/register"),
             "login_url": state.url_for("/login"),
             "error_message": null,
@@ -151,7 +147,6 @@ pub async fn register_post(
         return state.render(
             "console/register.html",
             json!({
-                "show_shell": false,
                 "register_action": state.url_for("/register"),
                 "login_url": state.url_for("/login"),
                 "error_message": error,
@@ -180,7 +175,6 @@ pub async fn forgot_page(State(state): State<Arc<ConsoleState>>) -> Response {
     state.render(
         "console/forgot.html",
         json!({
-            "show_shell": false,
             "info_message": null,
             "error_message": null,
             "reset_link": null,
@@ -198,7 +192,6 @@ pub async fn forgot_post(
         return state.render(
             "console/forgot.html",
             json!({
-                "show_shell": false,
                 "info_message": null,
                 "error_message": "Please enter your registered email address",
                 "reset_link": null,
@@ -237,7 +230,6 @@ pub async fn forgot_post(
     state.render(
         "console/forgot.html",
         json!({
-            "show_shell": false,
             "forgot_action": state.url_for("/forgot"),
             "info_message": "If the account exists, we've sent a reset link",
             "error_message": null,
@@ -256,7 +248,6 @@ pub async fn reset_page(
                 state.render(
                     "console/forgot.html",
                     json!({
-                        "show_shell": false,
                         "forgot_action": state.url_for("/forgot"),
                         "info_message": null,
                         "error_message": "Reset link has expired. Please request a new one.",
@@ -267,7 +258,6 @@ pub async fn reset_page(
                 state.render(
                     "console/reset.html",
                     json!({
-                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": null,
@@ -278,7 +268,6 @@ pub async fn reset_page(
         Ok(None) => state.render(
             "console/forgot.html",
             json!({
-                "show_shell": false,
                 "forgot_action": state.url_for("/forgot"),
                 "info_message": null,
                 "error_message": "Reset link is invalid",
@@ -320,7 +309,6 @@ pub async fn reset_post(
                 return state.render(
                     "console/reset.html",
                     json!({
-                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": "Password must be at least 8 characters",
@@ -331,7 +319,6 @@ pub async fn reset_post(
                 return state.render(
                     "console/reset.html",
                     json!({
-                        "show_shell": false,
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": "Passwords do not match",
@@ -360,7 +347,6 @@ pub async fn reset_post(
         Ok(None) => state.render(
             "console/forgot.html",
             json!({
-                "show_shell": false,
                 "forgot_action": state.url_for("/forgot"),
                 "info_message": null,
                 "error_message": "Reset link is invalid",

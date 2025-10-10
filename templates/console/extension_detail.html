@@ -63,11 +63,69 @@
         <form action="{{ form_action }}" method="post" class="space-y-6" x-data="{
                 loginAllowed: {{ 'true' if extension.login_allowed else 'false' }},
                 voicemailEnabled: {{ 'true' if extension.voicemail_enabled else 'false' }},
-            }">
+                callForwardingMode: 'none',
+                callForwardingDestination: '',
+        activeTab: 'profile',
+            }"
+            x-init="callForwardingMode = ($el.dataset.forwardingMode || 'none'); callForwardingDestination = $el.dataset.forwardingDestination || ''"
+            x-effect="if (callForwardingMode === 'none') { callForwardingDestination = ''; }"
+            data-forwarding-mode="{{ extension.call_forwarding_mode | default('none') }}"
+            data-forwarding-destination="{{ extension.call_forwarding_destination | default('') }}">
             <input type="hidden" name="login_allowed" :value="loginAllowed ? 'true' : 'false'">
             <input type="hidden" name="voicemail_enabled" :value="voicemailEnabled ? 'true' : 'false'">
+            <input type="hidden" name="call_forwarding_mode" :value="callForwardingMode">
+            <input type="hidden" name="call_forwarding_destination" :value="callForwardingDestination">
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
+                <nav class="flex flex-wrap gap-2">
+                    <button type="button"
+                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
+                        :class="activeTab === 'profile' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'profile'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M3 12l9-9 9 9M4.5 10.5V21h15V10.5" />
+                        </svg>
+                        Profile
+                    </button>
+                    <button type="button"
+                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
+                        :class="activeTab === 'access' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'access'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        Access & Forwarding
+                    </button>
+                    <button type="button"
+                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
+                        :class="activeTab === 'telephony' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'telephony'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M22 16.92V21a1 1 0 01-1.09 1 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 11.72 19.79 19.79 0 010 3.09 1 1 0 011 2h4.09a1 1 0 011 .75 12.4 12.4 0 00.7 2.27 1 1 0 01-.23 1L5.21 7.79a16 16 0 006 6l1.74-1.57a1 1 0 011-.24 12.4 12.4 0 002.27.7 1 1 0 01.75 1V22a1 1 0 01-1 1z" />
+                        </svg>
+                        Telephony
+                    </button>
+                    <button type="button"
+                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
+                        :class="activeTab === 'notes' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'notes'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 14h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h3v12H3z" />
+                        </svg>
+                        Notes
+                    </button>
+                </nav>
+            </div>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'profile'"
+                x-transition.opacity x-cloak>
                 <header class="flex flex-col gap-1">
                     <h2 class="text-lg font-semibold text-slate-900">Profile</h2>
                     <p class="text-sm text-slate-500">Key identity details that appear in call control and logs.</p>
@@ -108,7 +166,8 @@
                 </div>
             </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'access'"
+                x-transition.opacity x-cloak>
                 <header class="flex flex-col gap-1">
                     <h2 class="text-lg font-semibold text-slate-900">Access control</h2>
                     <p class="text-sm text-slate-500">Toggle who can authenticate and whether voicemail is available.
@@ -149,7 +208,81 @@
                 </div>
             </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'access'"
+                x-transition.opacity x-cloak>
+                <header class="flex flex-col gap-1">
+                    <h2 class="text-lg font-semibold text-slate-900">Call forwarding</h2>
+                    <p class="text-sm text-slate-500">Choose how incoming calls are diverted for this extension.</p>
+                </header>
+                <div class="mt-6 space-y-5">
+                    <div class="grid gap-3 md:grid-cols-2">
+                        <label
+                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                            :class="callForwardingMode === 'none' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                            <input type="radio" name="call_forwarding_mode_choice" value="none"
+                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="callForwardingMode">
+                            <span>
+                                <span class="font-semibold text-slate-900">None</span>
+                                <span class="block text-xs text-slate-500">All calls ring this extension without
+                                    forwarding.</span>
+                            </span>
+                        </label>
+                        <label
+                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                            :class="callForwardingMode === 'when_busy' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                            <input type="radio" name="call_forwarding_mode_choice" value="when_busy"
+                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="callForwardingMode">
+                            <span>
+                                <span class="font-semibold text-slate-900">When busy</span>
+                                <span class="block text-xs text-slate-500">Forward calls when the extension is already
+                                    on a call.</span>
+                            </span>
+                        </label>
+                        <label
+                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                            :class="callForwardingMode === 'always' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                            <input type="radio" name="call_forwarding_mode_choice" value="always"
+                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="callForwardingMode">
+                            <span>
+                                <span class="font-semibold text-slate-900">Always</span>
+                                <span class="block text-xs text-slate-500">Forward every inbound call to the specified
+                                    destination immediately.</span>
+                            </span>
+                        </label>
+                        <label
+                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                            :class="callForwardingMode === 'when_not_answered' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                            <input type="radio" name="call_forwarding_mode_choice" value="when_not_answered"
+                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="callForwardingMode">
+                            <span>
+                                <span class="font-semibold text-slate-900">When not answered</span>
+                                <span class="block text-xs text-slate-500">Ring this extension first, then forward if
+                                    unanswered.</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="rounded-lg border px-4 py-4 transition"
+                        :class="callForwardingMode !== 'none' ? 'border-sky-200 bg-sky-50/60' : 'border-slate-200 bg-white'">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Forward destination
+                            <input type="text" x-model="callForwardingDestination"
+                                placeholder="e.g. sip:1002@example.com or +1 555 010 2000"
+                                class="rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 transition"
+                                :class="callForwardingMode !== 'none' ? 'border-sky-300 text-slate-700 focus:border-sky-300 focus:ring-sky-200' : 'border-slate-200 bg-slate-100 text-slate-400 focus:ring-0'"
+                                :readonly="callForwardingMode === 'none'">
+                            <span class="text-xs font-normal text-slate-400">Supports SIP URIs, external PSTN
+                                numbers, or internal extensions.</span>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
+                x-transition.opacity x-cloak>
                 <header class="flex flex-col gap-1">
                     <h2 class="text-lg font-semibold text-slate-900">SIP credentials</h2>
                     <p class="text-sm text-slate-500">Keep these private—use regenerate after onboarding devices.</p>
@@ -172,7 +305,8 @@
                 </div>
             </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
+                x-transition.opacity x-cloak>
                 <header class="flex flex-col gap-1">
                     <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
                     <p class="text-sm text-slate-500">Customize how recipients perceive this extension on outbound
@@ -209,7 +343,8 @@
                 </div>
             </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
+                x-transition.opacity x-cloak>
                 <header class="flex flex-col gap-1">
                     <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
                     <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or escalation
