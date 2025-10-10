@@ -7,24 +7,25 @@ use crate::{
     },
 };
 use anyhow::Result;
-use async_stream::stream;
 use async_trait::async_trait;
+use bytes::BufMut;
 use bytes::Bytes;
+use futures::StreamExt;
 use futures::stream::BoxStream;
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
 };
+use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
+
 // A mock synthesis client that supports both streaming and non-streaming modes
 struct MockSynthesisClient {
     // Channel for sending events back to the stream
     event_sender: Option<mpsc::UnboundedSender<(Option<usize>, Result<SynthesisEvent>)>>,
     // Current mode (streaming vs non-streaming)
     streaming: bool,
-    // Track if we should close the stream (for streaming mode)
-    should_close: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockSynthesisClient {
@@ -32,12 +33,11 @@ impl MockSynthesisClient {
         Self {
             event_sender: None,
             streaming,
-            should_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     // Generate a simple sine wave audio sample for testing
-    fn generate_audio_sample(text: &str, sample_rate: u32) -> Vec<u8> {
+    fn generate_audio_sample(text: &str, sample_rate: u32) -> (Vec<u8>, u32) {
         let frequency = 440.0; // A4 note
         // Duration based on text length (roughly 100ms per character)
         let duration_seconds = (text.len() as f64 * 0.1).max(0.5).min(3.0);
@@ -49,13 +49,10 @@ impl MockSynthesisClient {
             let t = i as f64 / sample_rate as f64;
             let amplitude = 16384.0; // Half of 16-bit range (32768/2)
             let sample = (amplitude * (2.0 * std::f64::consts::PI * frequency * t).sin()) as i16;
-
-            // Convert to bytes (little endian)
-            audio_data.push((sample & 0xFF) as u8);
-            audio_data.push(((sample >> 8) & 0xFF) as u8);
+            audio_data.put_i16_le(sample);
         }
 
-        audio_data
+        (audio_data, duration_seconds as u32)
     }
 
     // Generate subtitles for the given text
@@ -75,16 +72,6 @@ impl MockSynthesisClient {
             let _ = sender.send((cmd_seq, Ok(event)));
         }
     }
-
-    // Close the stream (for streaming mode)
-    async fn close_stream(&mut self) {
-        self.should_close
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(sender) = &self.event_sender {
-            let _ = sender.send((None, Ok(SynthesisEvent::Finished)));
-        }
-        self.event_sender.take();
-    }
 }
 
 #[async_trait]
@@ -96,24 +83,9 @@ impl SynthesisClient for MockSynthesisClient {
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.event_sender = Some(event_tx);
-
-        let is_streaming = self.streaming;
-        let should_close = Arc::clone(&self.should_close);
-
-        let stream = stream! {
-            while let Some((cmd_seq, event)) = event_rx.recv().await {
-                yield (cmd_seq, event);
-
-                // In streaming mode, check if we should close
-                if is_streaming && should_close.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-            }
-        };
-
-        Ok(Box::pin(stream))
+        Ok(UnboundedReceiverStream::new(event_rx).boxed())
     }
 
     async fn synthesize(
@@ -128,8 +100,7 @@ impl SynthesisClient for MockSynthesisClient {
             .unwrap_or(16000) as u32;
 
         // Generate audio data
-        let audio_data = Self::generate_audio_sample(text, sample_rate);
-        let duration_ms = (audio_data.len() as f32 * 500.0 / sample_rate as f32) as u32;
+        let (audio_data, duration_ms) = Self::generate_audio_sample(text, sample_rate);
 
         self.send_event(cmd_seq, SynthesisEvent::AudioChunk(Bytes::from(audio_data)))
             .await;
@@ -145,8 +116,11 @@ impl SynthesisClient for MockSynthesisClient {
     }
 
     async fn stop(&mut self) -> Result<()> {
-        // In streaming mode, close the stream
-        self.close_stream().await;
+        if let Some(sender) = &self.event_sender {
+            // sending finished for streaming mode
+            let _ = sender.send((None, Ok(SynthesisEvent::Finished)));
+        }
+        self.event_sender.take();
         Ok(())
     }
 }
@@ -411,7 +385,7 @@ async fn test_tts_track_interrupt() -> Result<()> {
     .with_cancel_token(cancel_token.clone());
 
     // Create channels for the test
-    let (event_tx, mut event_rx) = broadcast::channel(16);
+    let (event_tx, event_rx) = broadcast::channel(16);
     let (packet_tx, mut _packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
@@ -424,35 +398,28 @@ async fn test_tts_track_interrupt() -> Result<()> {
     })?;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    cancel_token.cancel();
+    tts_track.stop().await?;
     // Wait for at least one audio frame
     let timeout = tokio::time::sleep(Duration::from_millis(3000));
-    tokio::pin!(timeout);
+    let results = BroadcastStream::new(event_rx)
+        .take_until(timeout)
+        .collect::<Vec<_>>()
+        .await;
     let mut interrupted = false;
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                break;
+    let mut track_end = false;
+    for result in results {
+        match result {
+            Ok(SessionEvent::Interruption { .. }) => {
+                interrupted = true;
             }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(SessionEvent::Interruption { .. }) => {
-                        interrupted = true;
-                        break;
-                    }
-                    Ok(SessionEvent::TrackEnd { .. }) => {
-                        break;
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                    _ => {}
-                }
+            Ok(SessionEvent::TrackEnd { .. }) => {
+                track_end = true;
             }
+            _ => {}
         }
     }
-
     assert!(interrupted, "Track was not interrupted");
+    assert!(track_end, "Track end event not received");
     Ok(())
 }
 
@@ -476,7 +443,7 @@ async fn test_tts_track_interrupt_graceful() -> Result<()> {
     .with_cancel_token(cancel_token.clone());
 
     // Create channels for the test
-    let (event_tx, mut event_rx) = broadcast::channel(16);
+    let (event_tx, event_rx) = broadcast::channel(16);
     let (packet_tx, mut _packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
@@ -493,29 +460,29 @@ async fn test_tts_track_interrupt_graceful() -> Result<()> {
     tts_track.stop_graceful().await?;
     // Wait for at least one audio frame
     let timeout = tokio::time::sleep(Duration::from_millis(3000));
-    tokio::pin!(timeout);
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                break;
+    let results = BroadcastStream::new(event_rx)
+        .take_until(timeout)
+        .collect::<Vec<_>>()
+        .await;
+    let mut interrupted = false;
+    let mut track_end = false;
+    for result in results {
+        match result {
+            Ok(SessionEvent::Interruption { .. }) => {
+                interrupted = true;
             }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(SessionEvent::TrackEnd { .. }) => {
-                        break;
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                    _ => {}
-                }
+            Ok(SessionEvent::TrackEnd { .. }) => {
+                track_end = true;
             }
+            _ => {}
         }
     }
     assert!(
         now.elapsed() > Duration::from_millis(100),
         "Track was interrupted too early"
     );
+    assert!(interrupted, "Track was not interrupted");
+    assert!(track_end, "Track end event not received");
     Ok(())
 }
 
@@ -537,7 +504,7 @@ async fn test_tts_track_end_of_stream() -> Result<()> {
     );
 
     // Create channels for the test
-    let (event_tx, mut event_rx) = broadcast::channel(16);
+    let (event_tx, event_rx) = broadcast::channel(16);
     let (packet_tx, _packet_rx) = mpsc::unbounded_channel();
 
     // Start the track
@@ -546,62 +513,26 @@ async fn test_tts_track_end_of_stream() -> Result<()> {
     // Send a TTS command
     command_tx.send(SynthesisCommand {
         text: "Test".to_string(),
-        ..Default::default()
-    })?;
-
-    let mut track_end = false;
-    let timeout = tokio::time::sleep(Duration::from_millis(1000));
-    tokio::pin!(timeout);
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                tracing::debug!("timeout");
-                break;
-            }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(SessionEvent::TrackEnd { .. }) => {
-                        track_end = true;
-                        break;
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    assert!(!track_end, "Track end received too early");
-
-    command_tx.send(SynthesisCommand {
-        text: "Test".to_string(),
         end_of_stream: true,
         ..Default::default()
     })?;
 
-    let timeout = tokio::time::sleep(Duration::from_millis(1000));
-    tokio::pin!(timeout);
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                break;
+    let timeout = tokio::time::sleep(Duration::from_millis(3000));
+    let results = BroadcastStream::new(event_rx)
+        .take_until(timeout)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut track_end = false;
+    for result in results {
+        match result {
+            Ok(SessionEvent::TrackEnd { .. }) => {
+                track_end = true;
             }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(SessionEvent::TrackEnd { .. }) => {
-                        track_end = true;
-                        break;
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
+            _ => {}
         }
     }
+
     assert!(track_end, "Track end event not received");
     Ok(())
 }
