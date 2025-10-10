@@ -1,0 +1,664 @@
+{% extends "console/layout.html" %}
+{% block title %}{{ page_title }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6">
+    <div class="mx-auto max-w-5xl space-y-6" data-direction-options='{{ direction_options | tojson  }}'
+        data-status-options='{{ status_options | tojson  }}'
+        x-data='routingForm({{ route_data | tojson }}, {{ trunk_options | tojson }}, {{ selection_algorithms | tojson }})'>
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <nav class="text-xs font-medium text-slate-400">
+                    <a href="{{ back_url }}" class="hover:text-slate-600">Routing</a>
+                    <span class="mx-1">/</span>
+                    <span class="text-slate-600" x-text="mode === 'edit' ? 'Edit rule' : 'Create rule'"></span>
+                </nav>
+                <h1 class="text-2xl font-semibold text-slate-900"
+                    x-text="mode === 'edit' ? 'Edit routing rule' : 'Create routing rule'"></h1>
+                <p class="mt-2 text-sm text-slate-500">Define match expressions, rewrite rules, and trunk strategy
+                    for this route.</p>
+            </div>
+            <div class="flex gap-3">
+                <a href="{{ back_url }}"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    Cancel
+                </a>
+                <button type="submit" form="routing-form"
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    {{ submit_label }}
+                </button>
+            </div>
+        </div>
+
+        <form id="routing-form" action="{{ form_action }}" method="post" class="space-y-6">
+            <input type="hidden" name="disabled" :value="route.disabled">
+            <input type="hidden" name="payload" :value="jsonPreview">
+
+            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
+                <nav class="flex flex-wrap gap-2 text-sm font-medium">
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'overview' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'overview'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5V21h15V10.5" />
+                        </svg>
+                        Overview
+                    </button>
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'matching' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'matching'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h16v4H4z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h16v4H4z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16h16v4H4z" />
+                        </svg>
+                        Match & rewrite
+                    </button>
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'delivery' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'delivery'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h8" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8l4 4-4 4" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h16v16H4z" />
+                        </svg>
+                        Trunks & delivery
+                    </button>
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'notes' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'notes'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 14h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8h9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h3v12H3z" />
+                        </svg>
+                        Notes & payload
+                    </button>
+                </nav>
+            </div>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'overview'"
+                x-transition.opacity x-cloak>
+                <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Basics</h2>
+                        <p class="text-xs text-slate-500">Set the identity, priority, and rollout status.</p>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
+                        <span class="rounded-full border border-slate-200 px-2 py-1"
+                            x-text="route.id ? 'Rule ID: ' + route.id : 'New rule'"></span>
+                        <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
+                    </div>
+                </div>
+
+                <div class="mt-6 grid gap-4 md:grid-cols-2">
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Name</label>
+                        <input type="text" name="name" x-model="route.name"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Outbound Hong Kong" required>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Owner</label>
+                        <input type="text" name="owner" x-model="route.owner"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Voice Ops">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Direction</label>
+                        <select name="direction" x-model="route.direction"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="direction in directionOptions" :key="direction">
+                                <option :value="direction" x-text="direction"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Priority</label>
+                        <input type="number" min="0" name="priority" x-model.number="route.priority"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</label>
+                        <div class="flex gap-2">
+                            <template x-for="option in statusOptions" :key="option.value">
+                                <button type="button"
+                                    class="flex-1 rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                    :class="route.disabled === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                    @click="route.disabled = option.value">
+                                    <span x-text="option.label"></span>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+                    <div class="space-y-2 md:col-span-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
+                        <textarea name="description" x-model="route.description"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            rows="3" placeholder="Explain what this route handles and any rollout notes."></textarea>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'matching'"
+                x-transition.opacity x-cloak>
+                <div class="flex flex-col gap-2">
+                    <h2 class="text-base font-semibold text-slate-900">Match expressions</h2>
+                    <p class="text-xs text-slate-500">Regular expressions applied to SIP headers before routing takes
+                        effect.</p>
+                </div>
+
+                <div class="mt-6 grid gap-4 md:grid-cols-2">
+                    <template x-for="field in matchFields" :key="field.key">
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                                x-text="field.label"></label>
+                            <input type="text" :name="'match[' + field.key + ']'" x-model="route.match[field.key]"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="field.placeholder">
+                        </div>
+                    </template>
+                </div>
+
+                <div class="mt-6 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Header matchers</h3>
+                        <button type="button" @click="addMatchHeader()"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                            Add header
+                        </button>
+                    </div>
+                    <template x-if="!matchHeaders.length">
+                        <p class="text-xs text-slate-400">No header-based regex. Add one if needed.</p>
+                    </template>
+                    <div class="space-y-2">
+                        <template x-for="(header, index) in matchHeaders" :key="index">
+                            <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                                <input type="text" :name="'match_headers[' + index + '][name]'" x-model="header.name"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="X-Account-Code">
+                                <input type="text" :name="'match_headers[' + index + '][value]'" x-model="header.value"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="^sales-.*$">
+                                <button type="button" @click="removeMatchHeader(index)"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                    Remove
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'matching'"
+                x-transition.opacity x-cloak>
+                <div class="flex flex-col gap-2">
+                    <h2 class="text-base font-semibold text-slate-900">Rewrite rules</h2>
+                    <p class="text-xs text-slate-500">Rewrite portions of the SIP request before it reaches the
+                        destination.</p>
+                </div>
+
+                <div class="mt-6 grid gap-4 md:grid-cols-2">
+                    <template x-for="field in rewriteFields" :key="field.key">
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                                x-text="field.label"></label>
+                            <input type="text" :name="'rewrite[' + field.key + ']'" x-model="route.rewrite[field.key]"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="field.placeholder">
+                        </div>
+                    </template>
+                </div>
+
+                <div class="mt-6 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Set headers</h3>
+                        <button type="button" @click="addRewriteHeader()"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                            Add header
+                        </button>
+                    </div>
+                    <template x-if="!rewriteHeaders.length">
+                        <p class="text-xs text-slate-400">No header rewrites defined.</p>
+                    </template>
+                    <div class="space-y-2">
+                        <template x-for="(header, index) in rewriteHeaders" :key="index">
+                            <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                                <input type="text" :name="'rewrite_headers[' + index + '][name]'" x-model="header.name"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="X-Account-Code">
+                                <input type="text" :name="'rewrite_headers[' + index + '][value]'"
+                                    x-model="header.value"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="sales-apac">
+                                <button type="button" @click="removeRewriteHeader(index)"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                    Remove
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'delivery'"
+                x-transition.opacity x-cloak>
+                <div class="flex flex-col gap-2">
+                    <h2 class="text-base font-semibold text-slate-900">Action & trunks</h2>
+                    <p class="text-xs text-slate-500">Choose how destinations are selected and how weights are
+                        distributed across trunks.</p>
+                </div>
+
+                <div class="mt-6 space-y-6">
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
+                            algorithm</label>
+                        <div class="flex flex-wrap gap-2">
+                            <template x-for="option in algorithmOptions" :key="option.value">
+                                <button type="button"
+                                    class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                    :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                    @click="setAlgorithm(option.value)">
+                                    <span x-text="option.label"></span>
+                                </button>
+                            </template>
+                        </div>
+                        <template x-if="route.action.select === 'hash'">
+                            <div class="mt-3 space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
+                                    key</label>
+                                <input type="text" name="hash_key" x-model="route.action.hash_key"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="caller">
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk pool</h3>
+                            <button type="button" @click="addTrunkAssignment()"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                Add trunk
+                            </button>
+                        </div>
+                        <template x-if="!route.action.trunks.length">
+                            <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
+                                fallback will be used.</p>
+                        </template>
+                        <div class="space-y-3">
+                            <template x-for="(trunk, index) in route.action.trunks" :key="index">
+                                <div
+                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
+                                    <select x-model="trunk.name"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="">Select trunk</option>
+                                        <template x-for="option in trunkOptions" :key="option.name">
+                                            <option :value="option.name" x-text="option.display_name || option.name">
+                                            </option>
+                                        </template>
+                                    </select>
+                                    <input type="number" min="0" step="1" x-model.number="trunk.weight"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="Weight">
+                                    <button type="button" @click="removeTrunkAssignment(index)"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                        Remove
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
+                            <div class="flex flex-wrap items-center gap-3">
+                                <span>Total weight:</span>
+                                <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
+                                    x-text="totalWeight"></span>
+                                <span>Normalized distribution preview:</span>
+                                <div class="flex flex-wrap gap-2 text-[11px]">
+                                    <template x-for="item in normalizedWeights" :key="item.name">
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
+                                            <span x-text="item.label"></span>
+                                            <span class="text-slate-400" x-text="item.percent + '%' "></span>
+                                        </span>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
+                                trunk</label>
+                            <select name="source_trunk" x-model="route.source_trunk"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">Select source trunk</option>
+                                <template x-for="option in trunkOptions" :key="'source-' + option.name">
+                                    <option :value="option.name" x-text="option.display_name || option.name"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
+                                trunks</label>
+                            <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+                                <template x-for="option in trunkOptions" :key="'target-' + option.name">
+                                    <label class="mb-2 flex items-center gap-2">
+                                        <input type="checkbox" :value="option.name" @change="toggleTarget(option.name)"
+                                            :checked="route.target_trunks.includes(option.name)"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                        <span x-text="option.display_name || option.name"></span>
+                                    </label>
+                                </template>
+                                <template x-if="!trunkOptions.length">
+                                    <p class="text-slate-400">No trunks available. Add trunks first.</p>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
+                x-transition.opacity x-cloak>
+                <div class="flex flex-col gap-2">
+                    <h2 class="text-base font-semibold text-slate-900">Operational notes</h2>
+                    <p class="text-xs text-slate-500">Document change log, rollout guardrails, or diagnostics.</p>
+                </div>
+
+                <div class="mt-4 space-y-3">
+                    <button type="button" @click="addNote()"
+                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                        Add note
+                    </button>
+                    <template x-if="!notes.length">
+                        <p class="text-xs text-slate-400">No notes recorded yet.</p>
+                    </template>
+                    <div class="space-y-3">
+                        <template x-for="(note, index) in notes" :key="index">
+                            <div class="flex gap-2">
+                                <textarea x-model="notes[index]"
+                                    class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    rows="2"></textarea>
+                                <button type="button" @click="removeNote(index)"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                    Remove
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-slate-900/95 p-6 text-slate-200 shadow-sm ring-1 ring-black/40"
+                x-show="activeTab === 'notes'" x-transition.opacity x-cloak>
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-white">Generated route payload</h2>
+                        <p class="text-xs text-slate-400">Review the JSON that will be submitted with this change.</p>
+                    </div>
+                    <button type="button" @click="copyJson"
+                        class="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10">
+                        Copy JSON
+                    </button>
+                </div>
+                <pre class="mt-4 max-h-80 overflow-auto rounded-lg bg-black/30 p-4 text-xs text-emerald-100">
+<span x-text="jsonPreview"></span>
+                </pre>
+            </section>
+        </form>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('routingForm', (routePayload, trunkPayload, algorithms) => ({
+            mode: '{{ mode }}',
+            activeTab: 'overview',
+            directionOptions: [],
+            statusOptions: [],
+            route: {
+                id: null,
+                name: '',
+                description: '',
+                owner: '',
+                direction: 'outbound',
+                priority: 10,
+                disabled: false,
+                match: {},
+                rewrite: {},
+                action: { select: 'rr', hash_key: null, trunks: [] },
+                source_trunk: '',
+                target_trunks: [],
+            },
+            matchHeaders: [],
+            rewriteHeaders: [],
+            notes: [],
+            trunkOptions: [],
+            algorithmOptions: [],
+            init() {
+                this.algorithmOptions = Array.isArray(algorithms) ? algorithms : [];
+                this.directionOptions = this.parseJson(this.$el.dataset.directionOptions, []);
+                this.statusOptions = this.parseJson(this.$el.dataset.statusOptions, []);
+                const routeData = this.parseJson(routePayload, {});
+                const trunksData = this.parseJson(trunkPayload, {});
+                this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData.trunks || []);
+                const normalised = this.normaliseRoute(routeData || {});
+                this.route = normalised.route;
+                this.matchHeaders = normalised.matchHeaders;
+                this.rewriteHeaders = normalised.rewriteHeaders;
+                this.notes = normalised.notes;
+            },
+            parseJson(input, fallback) {
+                if (!input) return fallback;
+                if (typeof input === 'object') return input;
+                try {
+                    return JSON.parse(input);
+                } catch (error) {
+                    console.warn('Failed to parse JSON payload for routing form', error);
+                    return fallback;
+                }
+            },
+            normaliseRoute(raw) {
+                const route = {
+                    id: raw.id ?? null,
+                    name: raw.name ?? '',
+                    description: raw.description ?? '',
+                    owner: raw.owner ?? '',
+                    direction: raw.direction ?? 'outbound',
+                    priority: typeof raw.priority === 'number' ? raw.priority : Number(raw.priority) || 10,
+                    disabled: Boolean(raw.disabled),
+                    match: Object.assign({
+                        from_user: '',
+                        from_host: '',
+                        to_user: '',
+                        to_host: '',
+                        request_uri_user: '',
+                        request_uri_host: '',
+                        request_uri_port: '',
+                    }, raw.match || {}),
+                    rewrite: Object.assign({
+                        from_user: '',
+                        from_host: '',
+                        to_user: '',
+                        to_host: '',
+                        request_uri_user: '',
+                        request_uri_host: '',
+                    }, raw.rewrite || {}),
+                    action: {
+                        select: (raw.action && raw.action.select) || 'rr',
+                        hash_key: raw.action ? raw.action.hash_key : null,
+                        trunks: Array.isArray(raw.action?.trunks)
+                            ? raw.action.trunks.map((item) => ({
+                                name: item.name || '',
+                                weight: typeof item.weight === 'number' ? item.weight : Number(item.weight) || 0,
+                            }))
+                            : [],
+                    },
+                    source_trunk: raw.source_trunk || '',
+                    target_trunks: Array.isArray(raw.target_trunks) ? raw.target_trunks.slice() : [],
+                };
+
+                const matchHeaders = [];
+                Object.keys(route.match).forEach((key) => {
+                    if (key.startsWith('header.')) {
+                        matchHeaders.push({
+                            name: key.replace(/^header\./, ''),
+                            value: route.match[key] || '',
+                        });
+                        delete route.match[key];
+                    }
+                });
+
+                const rewriteHeaders = [];
+                Object.keys(route.rewrite).forEach((key) => {
+                    if (key.startsWith('header.')) {
+                        rewriteHeaders.push({
+                            name: key.replace(/^header\./, ''),
+                            value: route.rewrite[key] || '',
+                        });
+                        delete route.rewrite[key];
+                    }
+                });
+
+                const notes = Array.isArray(raw.notes) ? raw.notes.slice() : [];
+
+                return { route, matchHeaders, rewriteHeaders, notes };
+            },
+            get matchFields() {
+                return [
+                    { key: 'from_user', label: 'From user regex', placeholder: '^20(0[1-9]|[1-9][0-9])$' },
+                    { key: 'from_host', label: 'From host regex', placeholder: '^sip\\.example\\.com$' },
+                    { key: 'to_user', label: 'To user regex', placeholder: '^(852|853)\\d{7,8}$' },
+                    { key: 'to_host', label: 'To host regex', placeholder: '^carrier\\.provider\\.net$' },
+                    { key: 'request_uri_user', label: 'R-URI user regex', placeholder: '^(400|800)\\d{6}$' },
+                    { key: 'request_uri_host', label: 'R-URI host regex', placeholder: '.*' },
+                    { key: 'request_uri_port', label: 'R-URI port', placeholder: '5061' },
+                ];
+            },
+            get rewriteFields() {
+                return [
+                    { key: 'from_user', label: 'Rewrite From user', placeholder: '{1}' },
+                    { key: 'from_host', label: 'Rewrite From host', placeholder: 'sip.internal' },
+                    { key: 'to_user', label: 'Rewrite To user', placeholder: '00{1}' },
+                    { key: 'to_host', label: 'Rewrite To host', placeholder: 'carrier.provider.net' },
+                    { key: 'request_uri_user', label: 'Rewrite R-URI user', placeholder: 'ivr-{1}' },
+                    { key: 'request_uri_host', label: 'Rewrite R-URI host', placeholder: 'rtp.provider.net' },
+                ];
+            },
+            addMatchHeader() {
+                this.matchHeaders.push({ name: '', value: '' });
+            },
+            removeMatchHeader(index) {
+                this.matchHeaders.splice(index, 1);
+            },
+            addRewriteHeader() {
+                this.rewriteHeaders.push({ name: '', value: '' });
+            },
+            removeRewriteHeader(index) {
+                this.rewriteHeaders.splice(index, 1);
+            },
+            addTrunkAssignment() {
+                this.route.action.trunks.push({ name: '', weight: 0 });
+            },
+            removeTrunkAssignment(index) {
+                this.route.action.trunks.splice(index, 1);
+            },
+            setAlgorithm(value) {
+                this.route.action.select = value;
+                if (value !== 'hash') {
+                    this.route.action.hash_key = null;
+                }
+            },
+            toggleTarget(name) {
+                const current = new Set(this.route.target_trunks);
+                if (current.has(name)) {
+                    current.delete(name);
+                } else {
+                    current.add(name);
+                }
+                this.route.target_trunks = Array.from(current);
+            },
+            addNote() {
+                this.notes.push('');
+            },
+            removeNote(index) {
+                this.notes.splice(index, 1);
+            },
+            get totalWeight() {
+                return this.route.action.trunks.reduce((sum, trunk) => sum + (Number(trunk.weight) || 0), 0);
+            },
+            get normalizedWeights() {
+                const total = this.totalWeight || 1;
+                return this.route.action.trunks
+                    .filter((trunk) => trunk.name)
+                    .map((trunk) => ({
+                        name: trunk.name,
+                        label: trunk.name,
+                        percent: Math.round(((Number(trunk.weight) || 0) / total) * 100),
+                    }));
+            },
+            get routeSummary() {
+                return `${this.route.direction} · priority ${this.route.priority}`;
+            },
+            buildPayload() {
+                const match = { ...this.route.match };
+                this.matchHeaders.forEach((header) => {
+                    if (!header.name) return;
+                    match[`header.${header.name}`] = header.value || '';
+                });
+
+                const rewrite = { ...this.route.rewrite };
+                this.rewriteHeaders.forEach((header) => {
+                    if (!header.name) return;
+                    rewrite[`header.${header.name}`] = header.value || '';
+                });
+
+                return {
+                    id: this.route.id,
+                    name: this.route.name,
+                    description: this.route.description,
+                    owner: this.route.owner,
+                    direction: this.route.direction,
+                    priority: Number(this.route.priority) || 0,
+                    disabled: Boolean(this.route.disabled),
+                    match,
+                    rewrite,
+                    action: {
+                        select: this.route.action.select,
+                        hash_key: this.route.action.select === 'hash' ? this.route.action.hash_key : null,
+                        trunks: this.route.action.trunks
+                            .filter((trunk) => trunk.name)
+                            .map((trunk) => ({
+                                name: trunk.name,
+                                weight: Number(trunk.weight) || 0,
+                            })),
+                    },
+                    source_trunk: this.route.source_trunk || null,
+                    target_trunks: this.route.target_trunks,
+                    notes: this.notes.filter((note) => note.trim().length > 0),
+                };
+            },
+            get jsonPreview() {
+                return JSON.stringify(this.buildPayload(), null, 2);
+            },
+            copyJson() {
+                const json = this.jsonPreview;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(json).then(() => {
+                        this.showToast('JSON copied to clipboard');
+                    }).catch(() => this.showToast('Copy failed, press ⌘+C'));
+                } else {
+                    this.showToast('Copy failed, press ⌘+C');
+                }
+            },
+            showToast(message) {
+                const event = new CustomEvent('notify', { detail: { message } });
+                window.dispatchEvent(event);
+            },
+        }));
+    });
+</script>
+{% endblock %}

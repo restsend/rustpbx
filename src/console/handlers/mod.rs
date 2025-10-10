@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 pub mod call_record;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod extension;
 pub mod forms;
 pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
-pub mod testing;
 pub mod user;
 
 pub fn router(state: Arc<ConsoleState>) -> Router {
@@ -43,9 +43,19 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             get(self::extension::page_extension_detail),
         )
         .route("/routing", get(self::routing::page_routing))
-        .route("/sip", get(self::sip_trunk::page_sip))
+        .route("/routing/new", get(self::routing::page_routing_create))
+        .route("/routing/{id}", get(self::routing::page_routing_edit))
+        .route("/sip-trunk", get(self::sip_trunk::page_sip_trunk))
+        .route(
+            "/sip-trunk/{id}",
+            get(self::sip_trunk::page_sip_trunk_detail),
+        )
         .route("/call-records", get(self::call_record::page_call_records))
-        .route("/test", get(self::testing::page_testing))
+        .route(
+            "/call-records/{id}",
+            get(self::call_record::page_call_record_detail),
+        )
+        .route("/diagnostics", get(self::diagnostics::page_diagnostics))
         .route("/settings", get(self::setting::page_settings));
 
     Router::new()

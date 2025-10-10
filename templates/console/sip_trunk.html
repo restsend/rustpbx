@@ -1,13 +1,523 @@
 {% extends "console/layout.html" %}
-{% block title %}SIP Trunk / DID · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}SIP Trunks · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl">
-        <h1 class="text-xl font-semibold text-slate-900">SIP Trunk / DID</h1>
-        <p class="mt-2 text-sm text-slate-500">Manage carriers, trunks, and DID numbers.</p>
-        <div class="mt-6 rounded-xl bg-white p-6 ring-1 ring-black/5">
-            <div class="text-sm text-slate-500">Placeholder content.</div>
-        </div>
+    <div class="mx-auto max-w-7xl space-y-6" x-data="sipTrunkIndex({{ trunk_data | escape }})">
+        <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div class="space-y-1">
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Carrier connectivity</p>
+                <h1 class="text-2xl font-semibold text-slate-900">SIP trunk catalogue</h1>
+                <p class="text-sm text-slate-500">Audit access control, DID inventory, limits, and billing utilisation
+                    for each trunk.</p>
+            </div>
+            <div class="flex flex-wrap gap-3">
+                <a href="{{ create_url }}"
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                    </svg>
+                    New routing rule
+                </a>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 4h14M3 10h14M3 16h14" />
+                    </svg>
+                    Export trunks
+                </button>
+            </div>
+        </header>
+
+        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total trunks</div>
+                <div class="mt-2 flex items-baseline gap-2">
+                    <span class="text-2xl font-semibold text-slate-900" x-text="summary.total"></span>
+                    <span class="text-xs text-slate-500">configured</span>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction mix</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>Inbound</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.inbound"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Outbound</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.outbound"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Bi-directional</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.bidirectional"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Access surface</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>IP addresses</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.total_allowed_ips"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>DID numbers</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.total_dids"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Capacity snapshot</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>Avg CPS</span>
+                        <span class="font-semibold text-slate-900" x-text="formatNumber(summary.avg_cps)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Avg concurrency</span>
+                        <span class="font-semibold text-slate-900"
+                            x-text="formatNumber(summary.avg_concurrency)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Avg utilisation</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.avg_utilisation + '%' "></span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Inventory</h2>
+                    <p class="text-xs text-slate-500">Filter by status, direction, or billing template to locate a
+                        specific carrier trunk.</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3 text-xs">
+                    <button type="button"
+                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                        @click="clearFilters">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
+                        </svg>
+                        Reset filters
+                    </button>
+                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
+                        x-text="filteredTrunks.length + ' results'"></span>
+                </div>
+            </div>
+
+            <div class="mt-4 grid gap-4 lg:grid-cols-4">
+                <label class="lg:col-span-2 flex flex-col gap-2">
+                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Search</span>
+                    <div class="relative">
+                        <input type="search" x-model.debounce.300ms="search"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Search by name, carrier, DID, IP…">
+                        <svg class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                            viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12.5 12.5l4 4m-2.5-6a5.5 5.5 0 11-11 0 5.5 5.5 0 0111 0z" />
+                        </svg>
+                    </div>
+                </label>
+                <label class="flex flex-col gap-2">
+                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Status</span>
+                    <select x-model="statusFilter"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        <template x-for="option in statusOptions" :key="option.value">
+                            <option :value="option.value" x-text="option.label"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="flex flex-col gap-2">
+                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Direction</span>
+                    <select x-model="directionFilter"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        <template x-for="option in directionOptions" :key="option.value">
+                            <option :value="option.value" x-text="option.label"></option>
+                        </template>
+                    </select>
+                </label>
+                <label class="flex flex-col gap-2">
+                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Billing
+                        template</span>
+                    <select x-model="billingFilter"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        <option value="all">All templates</option>
+                        <template x-for="template in templateOptions" :key="template">
+                            <option :value="template" x-text="template"></option>
+                        </template>
+                    </select>
+                </label>
+            </div>
+
+            <div class="mt-4 flex flex-wrap gap-2" x-show="appliedFilters.length">
+                <template x-for="chip in appliedFilters" :key="chip.id">
+                    <span
+                        class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600">
+                        <span x-text="chip.label + ': ' + chip.value"></span>
+                        <button type="button"
+                            class="rounded-full p-1 text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                            @click="clearFilter(chip.id)">
+                            <span class="sr-only">Remove filter</span>
+                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                            </svg>
+                        </button>
+                    </span>
+                </template>
+            </div>
+            <p class="mt-4 text-xs text-slate-400" x-show="!appliedFilters.length">No filters applied.</p>
+
+            <template x-if="!filteredTrunks.length">
+                <div
+                    class="mt-6 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-200 py-16 text-center text-sm text-slate-400">
+                    <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8 6h13M3 12h18M8 18h13" />
+                    </svg>
+                    <div>No trunks match the current filters.</div>
+                </div>
+            </template>
+
+            <div class="mt-6 grid gap-4 lg:grid-cols-2">
+                <template x-for="trunk in filteredTrunks" :key="trunk.name">
+                    <article
+                        class="flex flex-col gap-4 rounded-xl border border-slate-200 p-5 shadow-sm transition hover:border-sky-200 hover:shadow-lg">
+                        <header class="flex flex-wrap items-start justify-between gap-3">
+                            <div class="space-y-1">
+                                <div class="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900">
+                                    <span x-text="trunk.display_name || trunk.name"></span>
+                                    <span
+                                        class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
+                                        x-text="trunk.name"></span>
+                                </div>
+                                <div class="text-xs text-slate-500" x-text="trunk.carrier"></div>
+                                <div class="text-xs text-slate-500" x-text="trunk.dest"></div>
+                            </div>
+                            <div class="flex flex-col items-end gap-2 text-xs font-semibold">
+                                <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5"
+                                    :class="statusClasses(trunk.status)">
+                                    <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(trunk.status)"></span>
+                                    <span x-text="statusLabel(trunk.status)"></span>
+                                </span>
+                                <div class="flex flex-wrap items-center gap-1">
+                                    <template x-for="dir in trunk.direction || []" :key="dir">
+                                        <span
+                                            class="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700"
+                                            x-text="directionLabel(dir)"></span>
+                                    </template>
+                                </div>
+                            </div>
+                        </header>
+
+                        <dl class="grid gap-3 text-xs text-slate-600 md:grid-cols-3">
+                            <div class="rounded-lg bg-slate-50 px-3 py-2">
+                                <dt class="font-semibold text-slate-700">Access & DIDs</dt>
+                                <dd class="mt-1 space-y-1">
+                                    <div class="flex items-center justify-between">
+                                        <span>IPs</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="(trunk.ip_whitelist || []).length"></span>
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <span>DIDs</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="(trunk.did_numbers || []).length"></span>
+                                    </div>
+                                </dd>
+                            </div>
+                            <div class="rounded-lg bg-slate-50 px-3 py-2">
+                                <dt class="font-semibold text-slate-700">Limits</dt>
+                                <dd class="mt-1 space-y-1">
+                                    <div class="flex items-center justify-between">
+                                        <span>CPS</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="trunk.limits?.max_cps ?? trunk.max_cps ?? '—'"></span>
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <span>Concurrent</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="trunk.limits?.max_concurrent ?? trunk.max_calls ?? '—'"></span>
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <span>Duration</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="formatDuration(trunk.limits?.max_call_duration)"></span>
+                                    </div>
+                                </dd>
+                            </div>
+                            <div class="rounded-lg bg-slate-50 px-3 py-2">
+                                <dt class="font-semibold text-slate-700">Billing</dt>
+                                <dd class="mt-1 space-y-1">
+                                    <div class="flex items-center justify-between">
+                                        <span>Template</span>
+                                        <span class="font-semibold text-slate-900 truncate"
+                                            x-text="trunk.billing?.template_name || '—'"></span>
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <span>Usage</span>
+                                        <span class="font-semibold text-slate-900"
+                                            x-text="formatUsage(trunk.billing)"></span>
+                                    </div>
+                                </dd>
+                            </div>
+                        </dl>
+
+                        <footer class="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+                            <div class="flex items-center gap-2">
+                                <span class="font-semibold text-slate-700">Default route:</span>
+                                <a class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 font-semibold text-slate-700 hover:text-sky-700"
+                                    :href="trunk.default_route?.url || '#'">
+                                    <span x-text="trunk.default_route?.name || 'Not assigned'"></span>
+                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                    </svg>
+                                </a>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <a class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                    :href="trunk.detail_url">
+                                    View detail
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                    </svg>
+                                </a>
+                            </div>
+                        </footer>
+                    </article>
+                </template>
+            </div>
+        </section>
     </div>
 </div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('sipTrunkIndex', (payload) => ({
+            init() {
+                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
+                this.summary = Object.assign({
+                    total: 0,
+                    inbound: 0,
+                    outbound: 0,
+                    bidirectional: 0,
+                    warning: 0,
+                    total_allowed_ips: 0,
+                    total_dids: 0,
+                    avg_cps: 0,
+                    avg_concurrency: 0,
+                    avg_utilisation: 0,
+                    unique_templates: 0,
+                }, data.summary || {});
+                this.templateOptions = this.collectTemplates();
+            },
+            trunks: [],
+            summary: {},
+            search: '',
+            statusFilter: 'all',
+            directionFilter: 'any',
+            billingFilter: 'all',
+            templateOptions: [],
+            directionOptions: [
+                { value: 'any', label: 'Any direction' },
+                { value: 'inbound', label: 'Inbound' },
+                { value: 'outbound', label: 'Outbound' },
+                { value: 'bidirectional', label: 'Bi-directional' },
+            ],
+            statusOptions: [
+                { value: 'all', label: 'Any status' },
+                { value: 'healthy', label: 'Healthy' },
+                { value: 'warning', label: 'Warning' },
+                { value: 'standby', label: 'Standby' },
+            ],
+            collectTemplates() {
+                const set = new Set();
+                this.trunks.forEach((trunk) => {
+                    const template = trunk?.billing?.template_name;
+                    if (template) {
+                        set.add(String(template));
+                    }
+                });
+                return Array.from(set).sort();
+            },
+            formatNumber(value) {
+                if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                    return '—';
+                }
+                if (value >= 1000) {
+                    return Number(value).toLocaleString();
+                }
+                return Number(value).toFixed(Number(value) % 1 === 0 ? 0 : 1);
+            },
+            formatDuration(value) {
+                const duration = Number(value || 0);
+                if (!duration) {
+                    return '—';
+                }
+                if (duration >= 3600) {
+                    return `${Math.round(duration / 60)} min`;
+                }
+                if (duration >= 60) {
+                    return `${Math.round(duration / 60)} min`;
+                }
+                return `${duration} sec`;
+            },
+            formatUsage(billing) {
+                if (!billing || !billing.usage || !billing.usage.current) {
+                    return '—';
+                }
+                const current = billing.usage.current;
+                const minutes = Number(current.minutes || 0).toLocaleString();
+                const cost = (Number(current.cost || 0)).toFixed(2);
+                const currency = billing.currency || '';
+                return `${minutes} min · ${currency}${cost}`.trim();
+            },
+            directionLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'inbound':
+                        return 'Inbound';
+                    case 'outbound':
+                        return 'Outbound';
+                    case 'bidirectional':
+                        return 'Bi-directional';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
+            statusLabel(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'healthy':
+                        return 'Healthy';
+                    case 'warning':
+                        return 'Warning';
+                    case 'standby':
+                        return 'Standby';
+                    default:
+                        return status || 'Unknown';
+                }
+            },
+            statusClasses(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'healthy':
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    case 'warning':
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    case 'standby':
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+            },
+            statusDot(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'healthy':
+                        return 'bg-emerald-500';
+                    case 'warning':
+                        return 'bg-amber-500';
+                    case 'standby':
+                        return 'bg-slate-400';
+                    default:
+                        return 'bg-slate-400';
+                }
+            },
+            matchesDirection(trunk) {
+                if (this.directionFilter === 'any') {
+                    return true;
+                }
+                const directions = (trunk.direction || []).map((dir) => String(dir).toLowerCase());
+                if (this.directionFilter === 'bidirectional') {
+                    return directions.includes('inbound') && directions.includes('outbound');
+                }
+                return directions.includes(this.directionFilter);
+            },
+            matchesBilling(trunk) {
+                if (this.billingFilter === 'all') {
+                    return true;
+                }
+                return (trunk?.billing?.template_name || '').toLowerCase() === this.billingFilter.toLowerCase();
+            },
+            matchesSearch(trunk) {
+                if (!this.search) {
+                    return true;
+                }
+                const needle = this.search.toLowerCase();
+                const haystack = [
+                    trunk.name,
+                    trunk.display_name,
+                    trunk.carrier,
+                    trunk.dest,
+                    ...(trunk.did_numbers || []).map((item) => `${item.number} ${item.label}`),
+                    ...(trunk.ip_whitelist || []).map((item) => `${item.cidr} ${item.label}`),
+                    ...(trunk.tags || []),
+                ]
+                    .filter(Boolean)
+                    .join(' ')
+                    .toLowerCase();
+                return haystack.includes(needle);
+            },
+            clearFilters() {
+                this.search = '';
+                this.statusFilter = 'all';
+                this.directionFilter = 'any';
+                this.billingFilter = 'all';
+            },
+            clearFilter(id) {
+                switch (id) {
+                    case 'status':
+                        this.statusFilter = 'all';
+                        break;
+                    case 'direction':
+                        this.directionFilter = 'any';
+                        break;
+                    case 'billing':
+                        this.billingFilter = 'all';
+                        break;
+                    default:
+                        break;
+                }
+            },
+            get appliedFilters() {
+                const filters = [];
+                if (this.statusFilter !== 'all') {
+                    filters.push({ id: 'status', label: 'Status', value: this.statusFilter });
+                }
+                if (this.directionFilter !== 'any') {
+                    filters.push({ id: 'direction', label: 'Direction', value: this.directionFilter });
+                }
+                if (this.billingFilter !== 'all') {
+                    filters.push({ id: 'billing', label: 'Billing template', value: this.billingFilter });
+                }
+                return filters;
+            },
+            get filteredTrunks() {
+                return this.trunks
+                    .filter((trunk) => {
+                        if (this.statusFilter !== 'all') {
+                            const status = (trunk.status || '').toLowerCase();
+                            if (status !== this.statusFilter) {
+                                return false;
+                            }
+                        }
+                        if (!this.matchesDirection(trunk)) {
+                            return false;
+                        }
+                        if (!this.matchesBilling(trunk)) {
+                            return false;
+                        }
+                        if (!this.matchesSearch(trunk)) {
+                            return false;
+                        }
+                        return true;
+                    })
+                    .sort((a, b) => String(a.display_name || a.name).localeCompare(String(b.display_name || b.name)));
+            },
+        }));
+    });
+</script>
 {% endblock %}

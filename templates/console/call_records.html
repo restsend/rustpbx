@@ -2,12 +2,687 @@
 {% block title %}Call Records · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl">
-        <h1 class="text-xl font-semibold text-slate-900">Call Records</h1>
-        <p class="mt-2 text-sm text-slate-500">Search and replay call recordings.</p>
-        <div class="mt-6 rounded-xl bg-white p-6 ring-1 ring-black/5">
-            <div class="text-sm text-slate-500">Placeholder content.</div>
-        </div>
+    <div class="mx-auto max-w-7xl space-y-6" x-data="callRecordsConsole({{ call_data | escape }})">
+        <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div class="space-y-1">
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Voice analytics</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Call records</h1>
+                <p class="text-sm text-slate-500">Filter, export, and drill into SIP & media diagnostics for every
+                    session.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                    @click="clearFilters">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
+                    </svg>
+                    Reset filters
+                </button>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                    @click="exportCsv">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 12l6 6 6-6" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 18V4" />
+                    </svg>
+                    Export CSV
+                </button>
+            </div>
+        </header>
+
+        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total calls</div>
+                <div class="mt-2 flex items-baseline gap-2">
+                    <span class="text-2xl font-semibold text-slate-900" x-text="summary.total"></span>
+                    <span class="text-xs text-slate-500">records</span>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Completion</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>Answered</span>
+                        <span class="font-semibold text-emerald-600" x-text="summary.answered"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Missed</span>
+                        <span class="font-semibold text-amber-600" x-text="summary.missed"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Failed</span>
+                        <span class="font-semibold text-rose-600" x-text="summary.failed"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Utilisation</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>Avg duration</span>
+                        <span class="font-semibold text-slate-900"
+                            x-text="formatAvgDuration(summary.avg_duration)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Total minutes</span>
+                        <span class="font-semibold text-slate-900" x-text="formatNumber(summary.total_minutes)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Unique DIDs</span>
+                        <span class="font-semibold text-slate-900" x-text="summary.unique_dids"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">ASR coverage</div>
+                <div class="mt-2 flex items-baseline gap-2">
+                    <span class="text-2xl font-semibold text-sky-600" x-text="summary.transcribed"></span>
+                    <span class="text-xs text-slate-500">transcribed</span>
+                </div>
+                <p class="mt-2 text-[11px] text-slate-400" x-show="summary.transcribed">Ready for semantic search</p>
+            </div>
+        </section>
+
+        <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Filters</h2>
+                    <p class="text-xs text-slate-500">Combine time range, direction, and transcript readiness to focus
+                        investigations.</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3 text-xs">
+                    <div class="relative text-sm">
+                        <input type="search" x-model.debounce.300ms="search"
+                            class="w-72 rounded-lg border border-slate-200 px-3 py-2 text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Search number, agent, tag...">
+                        <svg class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                            viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12.5 12.5l4 4m-2.5-6a5.5 5.5 0 11-11 0 5.5 5.5 0 0111 0z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <label class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Status</label>
+                        <select x-model="statusFilter"
+                            class="mt-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in filterOptions.status" :key="option">
+                                <option :value="option" x-text="statusLabel(option)"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div>
+                        <label
+                            class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Direction</label>
+                        <select x-model="directionFilter"
+                            class="mt-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in filterOptions.direction" :key="option">
+                                <option :value="option" x-text="directionLabel(option)"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">From</label>
+                        <input type="date" x-model="dateFrom"
+                            class="mt-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <div>
+                        <label class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">To</label>
+                        <input type="date" x-model="dateTo"
+                            class="mt-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <label
+                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50">
+                        <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                            x-model="onlyTranscribed">
+                        Transcribed only
+                    </label>
+                </div>
+            </div>
+
+            <template x-if="exportedAt">
+                <div class="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+                    CSV exported <span class="font-semibold" x-text="exportedAt"></span>
+                </div>
+            </template>
+
+            <template x-if="!filteredRecords.length">
+                <div
+                    class="mt-8 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-200 py-16 text-center text-sm text-slate-400">
+                    <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8 6h13M3 12h18M8 18h13" />
+                    </svg>
+                    <div>No records match the current filters.</div>
+                </div>
+            </template>
+
+            <div class="mt-6 overflow-x-auto" x-show="filteredRecords.length">
+                <table class="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Call</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Started</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Direction</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Caller</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Callee</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Duration / MOS</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Status</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Tags</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Transcript</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <template x-for="record in paginatedRecords" :key="record.id">
+                            <tr class="align-middle transition hover:bg-slate-50">
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <div class="font-semibold text-slate-900" x-text="record.display_id || record.id">
+                                    </div>
+                                    <div class="mt-0.5 text-[11px] text-slate-500" x-text="record.id"></div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="text-sm text-slate-700" x-text="formatDateTime(record.started_at)">
+                                    </div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="directionClasses(record.direction)">
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M5 10h10M10 5l5 5-5 5" />
+                                        </svg>
+                                        <span x-text="directionLabel(record.direction)"></span>
+                                    </div>
+                                    <div class="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 4v12M12 8h4" />
+                                        </svg>
+                                        <span x-text="record.sip_gateway || '—'"></span>
+                                    </div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="text-sm font-semibold text-slate-800"
+                                        x-text="record.cnam || record.from || '—'"></div>
+                                    <div class="text-xs text-slate-500">
+                                        <span class="font-mono" x-text="record.from || '—'"></span>
+                                    </div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="text-sm font-semibold text-slate-800"
+                                        x-text="record.agent || record.to || '—'"></div>
+                                    <div class="text-xs text-slate-500 flex flex-wrap gap-1">
+                                        <span class="font-mono" x-text="record.to || '—'"></span>
+                                        <span class="text-[11px] text-slate-400" x-show="record.queue"
+                                            x-text="record.queue"></span>
+                                    </div>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <div class="text-sm font-semibold text-slate-800"
+                                        x-text="formatDuration(record.duration_secs)"></div>
+                                    <div class="text-xs font-semibold" :class="qualityTone(record.quality?.mos)"
+                                        x-text="record.quality && record.quality.mos !== undefined && record.quality.mos !== null ? formatNumber(record.quality.mos) : '—'">
+                                    </div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="statusClasses(record.status)">
+                                        <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
+                                        <span x-text="statusLabel(record.status)"></span>
+                                    </span>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="flex flex-wrap gap-1 text-[11px]">
+                                        <template x-for="tag in (record.tags || [])" :key="record.id + tag">
+                                            <span
+                                                class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+                                                <span x-text="tag"></span>
+                                            </span>
+                                        </template>
+                                        <template x-if="!(record.tags || []).length">
+                                            <span class="rounded-full bg-slate-50 px-2 py-0.5 text-slate-400">No
+                                                tags</span>
+                                        </template>
+                                    </div>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="record.has_transcript ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M5 10h10M10 5l5 5-5 5" />
+                                        </svg>
+                                        <span x-text="record.has_transcript ? 'Ready' : 'Pending'"></span>
+                                    </div>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2 text-right text-xs font-semibold">
+                                    <div class="flex items-center justify-end gap-2">
+                                        <a :href="record.detail_url" title="View detail"
+                                            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                            </svg>
+                                        </a>
+                                        <template x-if="record.recording && record.recording.url">
+                                            <a :href="record.recording.url" target="_blank" rel="noopener"
+                                                title="Download audio"
+                                                class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
+                                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                    stroke="currentColor" stroke-width="1.6">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M4 12l6 6 6-6" />
+                                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 18V4" />
+                                                </svg>
+                                            </a>
+                                        </template>
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+                <div
+                    class="flex flex-col gap-3 border-t border-slate-100 px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <span x-text="filteredRecords.length ? pageRangeStart : 0"></span>
+                        –
+                        <span x-text="pageRangeEnd"></span>
+                        of
+                        <span x-text="filteredRecords.length"></span>
+                        records
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3">
+                        <label class="flex items-center gap-2">
+                            <span class="text-[11px] uppercase tracking-wide text-slate-400">Per page</span>
+                            <select x-model.number="pageSize"
+                                class="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in pageSizeOptions" :key="option">
+                                    <option :value="option" x-text="option"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <div
+                            class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs font-semibold text-slate-600">
+                            <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
+                                :disabled="currentPage === 1" @click="prevPage">
+                                Prev
+                            </button>
+                            <span class="px-2" x-text="`Page ${currentPage} / ${totalPages}`"></span>
+                            <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
+                                :disabled="currentPage === totalPages" @click="nextPage">
+                                Next
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
     </div>
 </div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('callRecordsConsole', (payload) => ({
+            init() {
+                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                this.records = Array.isArray(data.records) ? data.records : [];
+                this.summary = Object.assign({
+                    total: 0,
+                    answered: 0,
+                    missed: 0,
+                    failed: 0,
+                    transcribed: 0,
+                    avg_duration: 0,
+                    total_minutes: 0,
+                    unique_dids: 0,
+                }, data.summary || {});
+                this.filterOptions = Object.assign({ status: ['any'], direction: ['any'] }, data.filter_options || {});
+                const resetPagination = () => this.resetPage();
+                this.$watch('search', resetPagination);
+                this.$watch('statusFilter', resetPagination);
+                this.$watch('directionFilter', resetPagination);
+                this.$watch('dateFrom', resetPagination);
+                this.$watch('dateTo', resetPagination);
+                this.$watch('onlyTranscribed', resetPagination);
+                this.$watch('pageSize', () => this.setPage(1));
+            },
+            records: [],
+            summary: {},
+            filterOptions: { status: ['any'], direction: ['any'] },
+            search: '',
+            statusFilter: 'any',
+            directionFilter: 'any',
+            dateFrom: '',
+            dateTo: '',
+            onlyTranscribed: false,
+            exportedAt: null,
+            pageSizeOptions: [10, 25, 50],
+            pageSize: 10,
+            currentPage: 1,
+            clearFilters() {
+                this.search = '';
+                this.statusFilter = 'any';
+                this.directionFilter = 'any';
+                this.dateFrom = '';
+                this.dateTo = '';
+                this.onlyTranscribed = false;
+                this.resetPage();
+            },
+            statusLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'completed':
+                        return 'Completed';
+                    case 'missed':
+                        return 'Missed';
+                    case 'failed':
+                        return 'Failed';
+                    case 'any':
+                        return 'Any status';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
+            directionLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'inbound':
+                        return 'Inbound';
+                    case 'outbound':
+                        return 'Outbound';
+                    case 'internal':
+                        return 'Internal';
+                    case 'any':
+                        return 'Any direction';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
+            statusClasses(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'completed':
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    case 'missed':
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    case 'failed':
+                        return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+            },
+            statusDot(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'completed':
+                        return 'bg-emerald-500';
+                    case 'missed':
+                        return 'bg-amber-500';
+                    case 'failed':
+                        return 'bg-rose-500';
+                    default:
+                        return 'bg-slate-400';
+                }
+            },
+            directionClasses(direction) {
+                switch ((direction || '').toLowerCase()) {
+                    case 'inbound':
+                        return 'border border-sky-100 bg-sky-50 text-sky-700';
+                    case 'outbound':
+                        return 'border border-emerald-100 bg-emerald-50 text-emerald-700';
+                    case 'internal':
+                        return 'border border-slate-200 bg-slate-50 text-slate-700';
+                    default:
+                        return 'border border-slate-200 bg-slate-50 text-slate-700';
+                }
+            },
+            qualityTone(value) {
+                const mos = Number(value || 0);
+                if (mos >= 4.3) {
+                    return 'text-emerald-600';
+                }
+                if (mos >= 3.8) {
+                    return 'text-amber-600';
+                }
+                if (mos > 0) {
+                    return 'text-rose-600';
+                }
+                return 'text-slate-500';
+            },
+            formatNumber(value) {
+                if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                    return '—';
+                }
+                return Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 });
+            },
+            formatAvgDuration(value) {
+                if (!value) {
+                    return '0s';
+                }
+                const seconds = Number(value);
+                if (Number.isNaN(seconds)) {
+                    return '—';
+                }
+                if (seconds >= 3600) {
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.round((seconds % 3600) / 60);
+                    return `${hours}h ${minutes}m`;
+                }
+                if (seconds >= 60) {
+                    const minutes = Math.floor(seconds / 60);
+                    const secs = Math.round(seconds % 60);
+                    return `${minutes}m ${secs}s`;
+                }
+                return `${Math.round(seconds)}s`;
+            },
+            formatDuration(value) {
+                const seconds = Number(value || 0);
+                if (!seconds) {
+                    return '00:00';
+                }
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = Math.floor(seconds % 60);
+                const pad = (num) => String(num).padStart(2, '0');
+                if (hours > 0) {
+                    return `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
+                }
+                return `${pad(minutes)}:${pad(secs)}`;
+            },
+            formatDateTime(value) {
+                if (!value) {
+                    return '—';
+                }
+                try {
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) {
+                        return value;
+                    }
+                    return date.toLocaleString();
+                } catch (err) {
+                    return value;
+                }
+            },
+            matchesSearch(record) {
+                if (!this.search) {
+                    return true;
+                }
+                const needle = this.search.toLowerCase();
+                const haystack = [
+                    record.id,
+                    record.display_id,
+                    record.from,
+                    record.to,
+                    record.agent,
+                    record.queue,
+                    ...(record.tags || []),
+                ]
+                    .filter(Boolean)
+                    .join(' ')
+                    .toLowerCase();
+                return haystack.includes(needle);
+            },
+            matchesDate(record) {
+                if (!this.dateFrom && !this.dateTo) {
+                    return true;
+                }
+                const start = new Date(record.started_at || 0);
+                if (Number.isNaN(start.getTime())) {
+                    return false;
+                }
+                if (this.dateFrom) {
+                    const from = new Date(`${this.dateFrom}T00:00:00Z`);
+                    if (start < from) {
+                        return false;
+                    }
+                }
+                if (this.dateTo) {
+                    const to = new Date(`${this.dateTo}T23:59:59Z`);
+                    if (start > to) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            get filteredRecords() {
+                return this.records
+                    .filter((record) => {
+                        if (this.statusFilter !== 'any') {
+                            const status = (record.status || '').toLowerCase();
+                            if (status !== this.statusFilter) {
+                                return false;
+                            }
+                        }
+                        if (this.directionFilter !== 'any') {
+                            const direction = (record.direction || '').toLowerCase();
+                            if (direction !== this.directionFilter) {
+                                return false;
+                            }
+                        }
+                        if (this.onlyTranscribed && !record.has_transcript) {
+                            return false;
+                        }
+                        if (!this.matchesSearch(record)) {
+                            return false;
+                        }
+                        if (!this.matchesDate(record)) {
+                            return false;
+                        }
+                        return true;
+                    })
+                    .sort((a, b) => {
+                        const aTime = new Date(a.started_at || 0).getTime();
+                        const bTime = new Date(b.started_at || 0).getTime();
+                        return bTime - aTime;
+                    });
+            },
+            get totalPages() {
+                const total = this.filteredRecords.length;
+                if (!total) {
+                    return 1;
+                }
+                return Math.max(1, Math.ceil(total / this.pageSize));
+            },
+            get paginatedRecords() {
+                const total = this.filteredRecords.length;
+                if (!total) {
+                    this.currentPage = 1;
+                    return [];
+                }
+                const totalPages = this.totalPages;
+                if (this.currentPage > totalPages) {
+                    this.currentPage = totalPages;
+                }
+                if (this.currentPage < 1) {
+                    this.currentPage = 1;
+                }
+                const start = (this.currentPage - 1) * this.pageSize;
+                return this.filteredRecords.slice(start, start + this.pageSize);
+            },
+            get pageRangeStart() {
+                if (!this.filteredRecords.length) {
+                    return 0;
+                }
+                return (this.currentPage - 1) * this.pageSize + 1;
+            },
+            get pageRangeEnd() {
+                if (!this.filteredRecords.length) {
+                    return 0;
+                }
+                return this.pageRangeStart + this.paginatedRecords.length - 1;
+            },
+            exportCsv() {
+                const rows = this.filteredRecords;
+                if (!rows.length) {
+                    this.exportedAt = 'No data to export';
+                    return;
+                }
+                const header = [
+                    'Call ID',
+                    'Display ID',
+                    'Started At',
+                    'Direction',
+                    'Status',
+                    'From',
+                    'To',
+                    'Duration (s)',
+                    'Agent',
+                    'Queue',
+                    'Tags',
+                    'Transcript',
+                ];
+                const csv = [header]
+                    .concat(
+                        rows.map((record) => [
+                            record.id,
+                            record.display_id || '',
+                            this.formatDateTime(record.started_at),
+                            this.directionLabel(record.direction),
+                            this.statusLabel(record.status),
+                            record.from || '',
+                            record.to || '',
+                            record.duration_secs || 0,
+                            record.agent || '',
+                            record.queue || '',
+                            (record.tags || []).join('|'),
+                            record.has_transcript ? 'Yes' : 'No',
+                        ])
+                    )
+                    .map((line) => line
+                        .map((cell) => {
+                            const value = cell === null || cell === undefined ? '' : String(cell);
+                            const escaped = value.replace(/"/g, '""');
+                            return `"${escaped}"`;
+                        })
+                        .join(','))
+                    .join('\n');
+
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `call-records-${new Date().toISOString().slice(0, 10)}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                this.exportedAt = new Date().toLocaleString();
+            },
+            resetPage() {
+                this.currentPage = 1;
+            },
+            setPage(page) {
+                const target = Math.min(Math.max(page, 1), this.totalPages);
+                this.currentPage = target;
+            },
+            prevPage() {
+                this.setPage(this.currentPage - 1);
+            },
+            nextPage() {
+                this.setPage(this.currentPage + 1);
+            },
+        }));
+    });
+</script>
 {% endblock %}
