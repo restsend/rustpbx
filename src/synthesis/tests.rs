@@ -1,3 +1,4 @@
+use crate::synthesis::deepgram::DeepegramTtsClient;
 use crate::synthesis::{
     AliyunTtsClient, SynthesisOption, SynthesisType, tencent_cloud::TencentCloudTtsClient,
 };
@@ -146,6 +147,11 @@ fn get_aliyun_credentials() -> Option<String> {
     env::var("DASHSCOPE_API_KEY").ok()
 }
 
+fn get_deepgram_credentials() -> Option<String> {
+    dotenv().ok();
+    env::var("DEEPGRAM_API_KEY").ok()
+}
+
 #[tokio::test]
 async fn test_tencent_cloud_tts() {
     // Initialize crypto provider
@@ -217,6 +223,33 @@ async fn test_aliyun_tts() {
     test_multiple_tts_commands_non_streaming(non_streaming_client.as_mut()).await;
 
     let mut streaming_client = AliyunTtsClient::create(true, &config).unwrap();
+    test_tts_basic(streaming_client.as_mut()).await;
+    test_multiple_tts_commands_streaming(streaming_client.as_mut()).await;
+}
+
+#[tokio::test]
+async fn test_deepgram_tts() {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider()).ok();
+
+    let api_key = match get_deepgram_credentials() {
+        Some(key) => key,
+        None => {
+            return;
+        }
+    };
+
+    let config = SynthesisOption {
+        provider: Some(SynthesisType::Deepgram),
+        secret_key: Some(api_key),
+        max_concurrent_tasks: Some(3),
+        ..Default::default()
+    };
+
+    let mut non_streaming_client = DeepegramTtsClient::create(false, &config).unwrap();
+    test_tts_basic(non_streaming_client.as_mut()).await;
+    test_multiple_tts_commands_non_streaming(non_streaming_client.as_mut()).await;
+
+    let mut streaming_client = DeepegramTtsClient::create(true, &config).unwrap();
     test_tts_basic(streaming_client.as_mut()).await;
     test_multiple_tts_commands_streaming(streaming_client.as_mut()).await;
 }
