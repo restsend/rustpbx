@@ -722,7 +722,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   - `secretId` (string, optional): Secret ID for VAD service authentication
 - `tts` (SynthesisOption, optional): Text-to-Speech configuration
   - `samplerate` (number, optional): TTS output sample rate in Hz
-  - `provider` (string, optional): TTS provider ("tencent", "aliyun", "voiceapi")
+  - `provider` (string, optional): TTS provider ("tencent", "aliyun", "deepgram", "voiceapi")
   - `speed` (number, optional): Speech speed multiplier (default: 1.0)
   - `appId` (string, optional): Application ID for TTS service
   - `secretId` (string, optional): Secret ID for authentication

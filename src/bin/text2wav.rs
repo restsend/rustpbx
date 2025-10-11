@@ -9,9 +9,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, info};
 
 use rustpbx::media::codecs::bytes_to_samples;
-use rustpbx::synthesis::{
-    SynthesisClient, SynthesisEvent, SynthesisOption, SynthesisType, TencentCloudTtsClient,
-};
+use rustpbx::synthesis::{SynthesisEvent, SynthesisOption, SynthesisType, TencentCloudTtsClient};
 
 const SAMPLE_RATE: u32 = 16000;
 
@@ -176,7 +174,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
     info!("Created TTS configuration {:?}", synthesis_config);
-    let mut tts_client = TencentCloudTtsClient::new(synthesis_config);
+    let mut tts_client = TencentCloudTtsClient::create(false, &synthesis_config).unwrap();
 
     // Parse the input text into segments
     let segments = parse_input(&args.input_text);

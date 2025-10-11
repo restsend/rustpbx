@@ -452,8 +452,4 @@ impl TencentCloudTtsClient {
             Ok(Box::new(RealTimeClient::new(option.clone())))
         }
     }
-
-    pub fn new(option: SynthesisOption) -> RealTimeClient {
-        RealTimeClient::new(option)
-    }
 }
