@@ -22,13 +22,21 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::extension::Entity")]
-    Extension,
+    #[sea_orm(has_many = "super::extension_department::Entity")]
+    ExtensionDepartment,
 }
 
 impl Related<super::extension::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Extension.def()
+        super::extension_department::Relation::Extension.def()
+    }
+
+    fn via() -> Option<RelationDef> {
+        Some(
+            super::extension_department::Relation::Department
+                .def()
+                .rev(),
+        )
     }
 }
 
@@ -55,19 +63,31 @@ impl MigrationTrait for Migration {
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(json_null(Column::Metadata))
-                    .index(
-                        Index::create()
-                            .name("idx_rustpbx_departments_slug")
-                            .col(Column::Slug),
-                    )
                     .to_owned(),
             )
             .await?;
 
+        manager
+            .create_index(
+                Index::create()
+                    .table(Entity)
+                    .name("idx_rustpbx_departments_slug")
+                    .col(Column::Slug)
+                    .to_owned(),
+            )
+            .await?;
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_rustpbx_departments_slug")
+                    .table(Entity)
+                    .to_owned(),
+            )
+            .await?;
         manager
             .drop_table(Table::drop().table(Entity).to_owned())
             .await

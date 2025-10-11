@@ -3,7 +3,6 @@ use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     boolean, integer, json_null, pk_auto, string, string_null, text_null, timestamp, timestamp_null,
 };
-use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -14,7 +13,6 @@ pub struct Model {
     #[sea_orm(unique)]
     pub extension: String,
     pub display_name: Option<String>,
-    pub department_id: Option<i64>,
     pub email: Option<String>,
     pub status: Option<String>,
     pub login_allowed: bool,
@@ -38,19 +36,17 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::department::Entity",
-        from = "Column::DepartmentId",
-        to = "super::department::Column::Id",
-        on_update = "Cascade",
-        on_delete = "SetNull"
-    )]
-    Department,
+    #[sea_orm(has_many = "super::extension_department::Entity")]
+    ExtensionDepartment,
 }
 
 impl Related<super::department::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Department.def()
+        super::extension_department::Relation::Department.def()
+    }
+
+    fn via() -> Option<RelationDef> {
+        Some(super::extension_department::Relation::Extension.def().rev())
     }
 }
 
@@ -70,7 +66,6 @@ impl MigrationTrait for Migration {
                     .col(pk_auto(Column::Id))
                     .col(string(Column::Extension).char_len(32))
                     .col(string_null(Column::DisplayName).char_len(160))
-                    .col(integer(Column::DepartmentId).null())
                     .col(string_null(Column::Email).char_len(160))
                     .col(string_null(Column::Status).char_len(32))
                     .col(boolean(Column::LoginAllowed).default(true))
@@ -94,14 +89,6 @@ impl MigrationTrait for Migration {
                     .col(text_null(Column::Notes))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_extension_department")
-                            .from(Entity, Column::DepartmentId)
-                            .to(super::department::Entity, super::department::Column::Id)
-                            .on_delete(MigrationForeignKeyAction::SetNull)
-                            .on_update(MigrationForeignKeyAction::Cascade),
-                    )
                     .to_owned(),
             )
             .await?;
@@ -116,16 +103,7 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_rustpbx_extensions_department")
-                    .table(Entity)
-                    .col(Column::DepartmentId)
-                    .to_owned(),
-            )
-            .await
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

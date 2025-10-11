@@ -6,6 +6,7 @@ pub mod bill_template;
 pub mod call_record;
 pub mod department;
 pub mod extension;
+pub mod extension_department;
 pub mod migration;
 pub mod routing;
 pub mod sip_trunk;
