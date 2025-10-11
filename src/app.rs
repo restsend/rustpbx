@@ -23,6 +23,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use std::{path::Path, sync::atomic::AtomicU64};
@@ -36,6 +37,7 @@ use tower_http::{
 use tracing::{debug, info, warn};
 
 pub struct AppStateInner {
+    pub db: DatabaseConnection,
     pub config: Arc<Config>,
     pub useragent: Option<Arc<UserAgent>>,
     pub sip_server: Option<SipServer>,
@@ -162,6 +164,17 @@ impl AppStateBuilder {
             .unwrap_or_else(|| CancellationToken::new());
         let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
 
+        let db = match crate::models::create_db(&config.database_url).await {
+            Ok(db) => db,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to initialize database {}: {}",
+                    config.database_url,
+                    e
+                ));
+            }
+        };
+
         let useragent = if let Some(ua) = self.useragent {
             Some(ua)
         } else {
@@ -198,7 +211,7 @@ impl AppStateBuilder {
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => {
-                Some(crate::console::ConsoleState::initialize(console_config).await?)
+                Some(crate::console::ConsoleState::initialize(db.clone(), console_config).await?)
             }
             None => None,
         };
@@ -224,6 +237,7 @@ impl AppStateBuilder {
         };
 
         let app_state = Arc::new(AppStateInner {
+            db,
             config,
             useragent,
             sip_server,

@@ -9,7 +9,7 @@ use minijinja::Environment;
 use std::sync::Arc;
 use tracing::warn;
 
-pub struct AuthRequired(pub super::models::user::Model);
+pub struct AuthRequired(pub crate::models::user::Model);
 
 impl<S> FromRequestParts<S> for AuthRequired
 where

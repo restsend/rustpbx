@@ -80,8 +80,12 @@ async fn main() -> Result<()> {
             .map(|email| email.to_string())
             .unwrap_or_else(|| format!("{}@localhost", super_username));
 
+        let db = rustpbx::models::create_db(&config.database_url)
+            .await
+            .expect("Failed to create or connect to database");
+
         let console_config = config.console.clone().unwrap_or_default();
-        let console_state = ConsoleState::initialize(console_config)
+        let console_state = ConsoleState::initialize(db, console_config)
             .await
             .expect("Failed to initialize console state");
         console_state

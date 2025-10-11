@@ -1,7 +1,7 @@
-use super::models::user::{
+use crate::console::ConsoleState;
+use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
-use crate::console::ConsoleState;
 use anyhow::{Context, Result, ensure};
 use argon2::{
     Argon2,
@@ -17,7 +17,7 @@ use sha2::Sha256;
 use std::time::Duration;
 use tracing::warn;
 
-pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_console_session";
+pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_session";
 const SESSION_TTL_HOURS: u64 = 12;
 const RESET_TOKEN_VALID_MINUTES: u64 = 30;
 
