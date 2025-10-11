@@ -432,8 +432,4 @@ impl AliyunTtsClient {
             Ok(Box::new(NonStreamingClient::new(option.clone())))
         }
     }
-
-    pub fn new(option: SynthesisOption) -> NonStreamingClient {
-        NonStreamingClient::new(option)
-    }
 }

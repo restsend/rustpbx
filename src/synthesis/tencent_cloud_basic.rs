@@ -152,7 +152,7 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
                     let audio = BASE64_STANDARD.decode(resp.response.audio)?;
                     Ok((audio, resp.response.subtitles))
                 });
-                
+
                 // convert result to events
                 stream::once(fut)
                     .flat_map(|res| match res {
@@ -208,10 +208,9 @@ pub struct TencentCloudTtsBasicClient {
 
 impl TencentCloudTtsBasicClient {
     pub fn create(_streaming: bool, option: &SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-        Ok(Box::new(Self::new(option.clone())))
-    }
-
-    pub fn new(option: SynthesisOption) -> Self {
-        Self { option, tx: None }
+        Ok(Box::new(Self {
+            option: option.clone(),
+            tx: None,
+        }))
     }
 }
