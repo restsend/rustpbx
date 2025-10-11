@@ -75,12 +75,11 @@
             <input type="hidden" name="voicemail_enabled" :value="voicemailEnabled ? 'true' : 'false'">
             <input type="hidden" name="call_forwarding_mode" :value="callForwardingMode">
             <input type="hidden" name="call_forwarding_destination" :value="callForwardingDestination">
-
-            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
-                <nav class="flex flex-wrap gap-2">
-                    <button type="button"
-                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
-                        :class="activeTab === 'profile' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+            <div class="space-y-6">
+                <nav
+                    class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
+                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
+                        :class="activeTab === 'profile' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         @click="activeTab = 'profile'">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -88,9 +87,8 @@
                         </svg>
                         Profile
                     </button>
-                    <button type="button"
-                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
-                        :class="activeTab === 'access' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
+                        :class="activeTab === 'access' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         @click="activeTab = 'access'">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -99,9 +97,8 @@
                         </svg>
                         Access & Forwarding
                     </button>
-                    <button type="button"
-                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
-                        :class="activeTab === 'telephony' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
+                        :class="activeTab === 'telephony' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         @click="activeTab = 'telephony'">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -109,9 +106,8 @@
                         </svg>
                         Telephony
                     </button>
-                    <button type="button"
-                        class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition"
-                        :class="activeTab === 'notes' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
+                        :class="activeTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         @click="activeTab = 'notes'">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9" />
@@ -122,255 +118,268 @@
                         Notes
                     </button>
                 </nav>
-            </div>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'profile'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">Profile</h2>
-                    <p class="text-sm text-slate-500">Key identity details that appear in call control and logs.</p>
-                </header>
-                <div class="mt-6 grid gap-5 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Extension number
-                        <input type="text" name="extension" required value="{{ extension.extension | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 1007">
-                        <span class="text-xs font-normal text-slate-400">Numbers only. This becomes the SIP user
-                            ID.</span>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Display name
-                        <input type="text" name="display_name" value="{{ extension.display_name | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Visible to internal contacts">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Department
-                        <select name="department"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <option value="" {% if not extension.department %}selected{% endif %}>Select a department
-                            </option>
-                            {% for dept in department_options %}
-                            <option value="{{ dept }}" {% if extension.department==dept %}selected{% endif %}>{{ dept }}
-                            </option>
-                            {% endfor %}
-                        </select>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Email (optional)
-                        <input type="email" name="email" value="{{ extension.email | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="name@example.com">
-                    </label>
-                </div>
-            </section>
+                <section x-show="activeTab === 'profile'" x-transition.opacity x-cloak class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">Profile</h2>
+                            <p class="text-sm text-slate-500">Key identity details that appear in call control and logs.
+                            </p>
+                        </header>
+                        <div class="mt-6 grid gap-5 md:grid-cols-2">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Extension number
+                                <input type="text" name="extension" required
+                                    value="{{ extension.extension | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="e.g. 1007">
+                                <span class="text-xs font-normal text-slate-400">Numbers only. This becomes the SIP user
+                                    ID.</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Display name
+                                <input type="text" name="display_name"
+                                    value="{{ extension.display_name | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Visible to internal contacts">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Department
+                                <select name="department"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="" {% if not extension.department %}selected{% endif %}>Select a
+                                        department
+                                    </option>
+                                    {% for dept in department_options %}
+                                    <option value="{{ dept }}" {% if extension.department==dept %}selected{% endif %}>{{
+                                        dept }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Email (optional)
+                                <input type="email" name="email" value="{{ extension.email | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="name@example.com">
+                            </label>
+                        </div>
+                    </div>
+                </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'access'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">Access control</h2>
-                    <p class="text-sm text-slate-500">Toggle who can authenticate and whether voicemail is available.
-                    </p>
-                </header>
-                <div class="mt-6 grid gap-5 md:grid-cols-2">
-                    <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
-                        <div>
-                            <div class="text-sm font-semibold text-slate-900">Allow portal login</div>
-                            <div class="text-xs text-slate-500">Controls app/web authentication for this extension.
+                <section x-show="activeTab === 'access'" x-transition.opacity x-cloak class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">Access control</h2>
+                            <p class="text-sm text-slate-500">Toggle who can authenticate and whether voicemail is
+                                available.
+                            </p>
+                        </header>
+                        <div class="mt-6 grid gap-5 md:grid-cols-2">
+                            <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
+                                <div>
+                                    <div class="text-sm font-semibold text-slate-900">Allow portal login</div>
+                                    <div class="text-xs text-slate-500">Controls app/web authentication for this
+                                        extension.
+                                    </div>
+                                </div>
+                                <button type="button" @click="loginAllowed = !loginAllowed"
+                                    :class="loginAllowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
+                                    class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l3 4-3 4" />
+                                    </svg>
+                                    <span x-text="loginAllowed ? 'Enabled' : 'Disabled'"></span>
+                                </button>
+                            </div>
+                            <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
+                                <div>
+                                    <div class="text-sm font-semibold text-slate-900">Voicemail inbox</div>
+                                    <div class="text-xs text-slate-500">Enable voicemail drops when calls go unanswered.
+                                    </div>
+                                </div>
+                                <button type="button" @click="voicemailEnabled = !voicemailEnabled"
+                                    :class="voicemailEnabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
+                                    class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M5 7a5 5 0 0010 0M4 7h12" />
+                                    </svg>
+                                    <span x-text="voicemailEnabled ? 'Enabled' : 'Disabled'"></span>
+                                </button>
                             </div>
                         </div>
-                        <button type="button" @click="loginAllowed = !loginAllowed"
-                            :class="loginAllowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
-                            class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
-                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l3 4-3 4" />
-                            </svg>
-                            <span x-text="loginAllowed ? 'Enabled' : 'Disabled'"></span>
-                        </button>
                     </div>
-                    <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
-                        <div>
-                            <div class="text-sm font-semibold text-slate-900">Voicemail inbox</div>
-                            <div class="text-xs text-slate-500">Enable voicemail drops when calls go unanswered.</div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">Call forwarding</h2>
+                            <p class="text-sm text-slate-500">Choose how incoming calls are diverted for this extension.
+                            </p>
+                        </header>
+                        <div class="mt-6 space-y-5">
+                            <div class="grid gap-3 md:grid-cols-2">
+                                <label
+                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="callForwardingMode === 'none' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                    <input type="radio" name="call_forwarding_mode_choice" value="none"
+                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                        x-model="callForwardingMode">
+                                    <span>
+                                        <span class="font-semibold text-slate-900">None</span>
+                                        <span class="block text-xs text-slate-500">All calls ring this extension without
+                            </div>
+                </section>
+
+                <section x-show="activeTab === 'telephony'" x-transition.opacity x-cloak class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">SIP credentials</h2>
+                            <p class="text-sm text-slate-500">Keep these private—use regenerate after onboarding
+                                devices.</p>
+                        </header>
+                        <div class="mt-6 grid gap-5 md:grid-cols-2">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                SIP password
+                                <input type="password" name="sip_password"
+                                    value="{{ extension.sip_password | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Auto-generated secure secret">
+                                <span class="text-xs font-normal text-slate-400">Provide a strong password or leave
+                                    blank to
+                                    auto-generate later.</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Security PIN
+                                <input type="text" name="pin" value="{{ extension.pin | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Optional keypad PIN">
+                            </label>
                         </div>
-                        <button type="button" @click="voicemailEnabled = !voicemailEnabled"
-                            :class="voicemailEnabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
-                            class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
-                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 7a5 5 0 0010 0M4 7h12" />
-                            </svg>
-                            <span x-text="voicemailEnabled ? 'Enabled' : 'Disabled'"></span>
-                        </button>
                     </div>
-                </div>
-            </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'access'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">Call forwarding</h2>
-                    <p class="text-sm text-slate-500">Choose how incoming calls are diverted for this extension.</p>
-                </header>
-                <div class="mt-6 space-y-5">
-                    <div class="grid gap-3 md:grid-cols-2">
-                        <label
-                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                            :class="callForwardingMode === 'none' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                            <input type="radio" name="call_forwarding_mode_choice" value="none"
-                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                x-model="callForwardingMode">
-                            <span>
-                                <span class="font-semibold text-slate-900">None</span>
-                                <span class="block text-xs text-slate-500">All calls ring this extension without
-                                    forwarding.</span>
-                            </span>
-                        </label>
-                        <label
-                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                            :class="callForwardingMode === 'when_busy' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                            <input type="radio" name="call_forwarding_mode_choice" value="when_busy"
-                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                x-model="callForwardingMode">
-                            <span>
-                                <span class="font-semibold text-slate-900">When busy</span>
-                                <span class="block text-xs text-slate-500">Forward calls when the extension is already
-                                    on a call.</span>
-                            </span>
-                        </label>
-                        <label
-                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                            :class="callForwardingMode === 'always' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                            <input type="radio" name="call_forwarding_mode_choice" value="always"
-                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                x-model="callForwardingMode">
-                            <span>
-                                <span class="font-semibold text-slate-900">Always</span>
-                                <span class="block text-xs text-slate-500">Forward every inbound call to the specified
-                                    destination immediately.</span>
-                            </span>
-                        </label>
-                        <label
-                            class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                            :class="callForwardingMode === 'when_not_answered' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                            <input type="radio" name="call_forwarding_mode_choice" value="when_not_answered"
-                                class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                x-model="callForwardingMode">
-                            <span>
-                                <span class="font-semibold text-slate-900">When not answered</span>
-                                <span class="block text-xs text-slate-500">Ring this extension first, then forward if
-                                    unanswered.</span>
-                            </span>
-                        </label>
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
+                            <p class="text-sm text-slate-500">Customize how recipients perceive this extension on
+                                outbound
+                                calls.</p>
+                        </header>
+                        <div class="mt-6 grid gap-5 md:grid-cols-2">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Caller ID name
+                                <input type="text" name="caller_id_name"
+                                    value="{{ extension.caller_id_name | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Name shown to recipients">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Caller ID number
+                                <input type="text" name="caller_id_number"
+                                    value="{{ extension.caller_id_number | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="E.164 format recommended">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Outbound caller ID override
+                                <input type="text" name="outbound_caller_id"
+                                    value="{{ extension.outbound_caller_id | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Optional">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Emergency caller ID
+                                <input type="text" name="emergency_caller_id"
+                                    value="{{ extension.emergency_caller_id | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Emergency services callback">
+                            </label>
+                        </div>
                     </div>
-                    <div class="rounded-lg border px-4 py-4 transition"
-                        :class="callForwardingMode !== 'none' ? 'border-sky-200 bg-sky-50/60' : 'border-slate-200 bg-white'">
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Forward destination
-                            <input type="text" x-model="callForwardingDestination"
-                                placeholder="e.g. sip:1002@example.com or +1 555 010 2000"
-                                class="rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 transition"
-                                :class="callForwardingMode !== 'none' ? 'border-sky-300 text-slate-700 focus:border-sky-300 focus:ring-sky-200' : 'border-slate-200 bg-slate-100 text-slate-400 focus:ring-0'"
-                                :readonly="callForwardingMode === 'none'">
-                            <span class="text-xs font-normal text-slate-400">Supports SIP URIs, external PSTN
-                                numbers, or internal extensions.</span>
-                        </label>
+                </section>
+
+                <section x-show="activeTab === 'notes'" x-transition.opacity x-cloak class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <header class="flex flex-col gap-1">
+                            <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
+                            <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or
+                                escalation
+                                details in one place.</p>
+                        </header>
+                        <textarea name="notes" rows="4"
+                            class="mt-6 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Optional internal notes">{{ extension.notes | default('') }}</textarea>
                     </div>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">SIP credentials</h2>
-                    <p class="text-sm text-slate-500">Keep these private—use regenerate after onboarding devices.</p>
-                </header>
-                <div class="mt-6 grid gap-5 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        SIP password
-                        <input type="password" name="sip_password" value="{{ extension.sip_password | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Auto-generated secure secret">
-                        <span class="text-xs font-normal text-slate-400">Provide a strong password or leave blank to
-                            auto-generate later.</span>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Security PIN
-                        <input type="text" name="pin" value="{{ extension.pin | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Optional keypad PIN">
-                    </label>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
-                    <p class="text-sm text-slate-500">Customize how recipients perceive this extension on outbound
-                        calls.</p>
-                </header>
-                <div class="mt-6 grid gap-5 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Caller ID name
-                        <input type="text" name="caller_id_name" value="{{ extension.caller_id_name | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Name shown to recipients">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Caller ID number
-                        <input type="text" name="caller_id_number"
-                            value="{{ extension.caller_id_number | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="E.164 format recommended">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Outbound caller ID override
-                        <input type="text" name="outbound_caller_id"
-                            value="{{ extension.outbound_caller_id | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Optional">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Emergency caller ID
-                        <input type="text" name="emergency_caller_id"
-                            value="{{ extension.emergency_caller_id | default('') }}"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Emergency services callback">
-                    </label>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
-                x-transition.opacity x-cloak>
-                <header class="flex flex-col gap-1">
-                    <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
-                    <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or escalation
-                        details in one place.</p>
-                </header>
-                <textarea name="notes" rows="4"
-                    class="mt-6 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="Optional internal notes">{{ extension.notes | default('') }}</textarea>
-            </section>
-
-            <div class="flex flex-col gap-3 sm:flex-row sm:justify-between">
-                <div class="text-xs text-slate-400">
-                    Changes are saved to draft immediately after submission. No services are disrupted until applied.
-                </div>
-                <div class="flex items-center gap-3">
-                    <a href="{{ back_url }}"
-                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-                        Cancel
-                    </a>
-                    <button type="submit"
-                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                        {{ submit_label }}
-                    </button>
-                </div>
+                </section>
             </div>
-        </form>
     </div>
+    </section>
+
+    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
+        x-transition.opacity x-cloak>
+        <header class="flex flex-col gap-1">
+            <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
+            <p class="text-sm text-slate-500">Customize how recipients perceive this extension on outbound
+                calls.</p>
+        </header>
+        <div class="mt-6 grid gap-5 md:grid-cols-2">
+            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                Caller ID name
+                <input type="text" name="caller_id_name" value="{{ extension.caller_id_name | default('') }}"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="Name shown to recipients">
+            </label>
+            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                Caller ID number
+                <input type="text" name="caller_id_number" value="{{ extension.caller_id_number | default('') }}"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="E.164 format recommended">
+            </label>
+            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                Outbound caller ID override
+                <input type="text" name="outbound_caller_id" value="{{ extension.outbound_caller_id | default('') }}"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="Optional">
+            </label>
+            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                Emergency caller ID
+                <input type="text" name="emergency_caller_id" value="{{ extension.emergency_caller_id | default('') }}"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="Emergency services callback">
+            </label>
+        </div>
+    </section>
+
+    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
+        x-transition.opacity x-cloak>
+        <header class="flex flex-col gap-1">
+            <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
+            <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or escalation
+                details in one place.</p>
+        </header>
+        <textarea name="notes" rows="4"
+            class="mt-6 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+            placeholder="Optional internal notes">{{ extension.notes | default('') }}</textarea>
+    </section>
+
+    <div class="flex flex-col gap-3 sm:flex-row sm:justify-between">
+        <div class="text-xs text-slate-400">
+            Changes are saved to draft immediately after submission. No services are disrupted until applied.
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="{{ back_url }}"
+                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                Cancel
+            </a>
+            <button type="submit"
+                class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                {{ submit_label }}
+            </button>
+        </div>
+    </div>
+    </form>
+</div>
 </div>
 {% endblock %}
