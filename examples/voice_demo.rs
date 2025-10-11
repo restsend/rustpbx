@@ -7,7 +7,7 @@ use futures::StreamExt;
 use rustpbx::llm::LlmContent;
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
-use rustpbx::synthesis::{SynthesisClient, SynthesisEvent};
+use rustpbx::synthesis::SynthesisEvent;
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
 use rustpbx::{PcmBuf, Sample};
 use std::collections::VecDeque;
@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut tts_client = TencentCloudTtsClient::new(synthesis_config);
+    let mut tts_client = TencentCloudTtsClient::create(false, &synthesis_config).unwrap();
 
     // Set up microphone input if requested
     let mut input_stream = None;

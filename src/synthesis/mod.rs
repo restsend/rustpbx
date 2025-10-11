@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 mod aliyun;
+mod deepgram;
 mod tencent_cloud;
 mod tencent_cloud_basic;
 mod voiceapi;
 pub use aliyun::AliyunTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
-// pub use tencent_cloud_streaming::TencentCloudStreamingTtsClient;
 pub use tencent_cloud_basic::TencentCloudTtsBasicClient;
+pub use deepgram::DeepegramTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Clone, Default)]
@@ -37,6 +38,8 @@ pub enum SynthesisType {
     VoiceApi,
     #[serde(rename = "aliyun")]
     Aliyun,
+    #[serde(rename = "deepgram")]
+    Deepgram,
     #[serde(rename = "other")]
     Other(String),
 }
@@ -47,6 +50,7 @@ impl std::fmt::Display for SynthesisType {
             SynthesisType::TencentCloud => write!(f, "tencent"),
             SynthesisType::VoiceApi => write!(f, "voiceapi"),
             SynthesisType::Aliyun => write!(f, "aliyun"),
+            SynthesisType::Deepgram => write!(f, "deepgram"),
             SynthesisType::Other(provider) => write!(f, "{}", provider),
         }
     }
@@ -62,6 +66,7 @@ impl<'de> Deserialize<'de> for SynthesisType {
             "tencent" => Ok(SynthesisType::TencentCloud),
             "voiceapi" => Ok(SynthesisType::VoiceApi),
             "aliyun" => Ok(SynthesisType::Aliyun),
+            "deepgram" => Ok(SynthesisType::Deepgram),
             _ => Ok(SynthesisType::Other(value)),
         }
     }
@@ -236,34 +241,13 @@ impl SynthesisOption {
                         self.secret_key = std::env::var("DASHSCOPE_API_KEY").ok();
                     }
                 }
+                "deepgram" => {
+                    if self.secret_key.is_none() {
+                        self.secret_key = std::env::var("DEEPGRAM_API_KEY").ok();
+                    }
+                }
                 _ => {}
             }
-        }
-    }
-}
-
-/// Create a synthesis client based on the provider type
-pub fn create_synthesis_client(option: SynthesisOption) -> Result<Box<dyn SynthesisClient>> {
-    let provider = option
-        .provider
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No provider specified"))?;
-
-    match provider {
-        SynthesisType::TencentCloud => {
-            let client = TencentCloudTtsClient::new(option);
-            Ok(Box::new(client))
-        }
-        SynthesisType::VoiceApi => {
-            let client = VoiceApiTtsClient::new(option);
-            Ok(Box::new(client))
-        }
-        SynthesisType::Aliyun => {
-            let client = AliyunTtsClient::new(option);
-            Ok(Box::new(client))
-        }
-        SynthesisType::Other(provider) => {
-            Err(anyhow::anyhow!("Unsupported provider: {}", provider))
         }
     }
 }
