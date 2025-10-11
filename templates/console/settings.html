@@ -189,7 +189,7 @@
                                 x-text="(billing.templates?.length || 0) + ' templates'"></span>
                             <button type="button"
                                 class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                                @click="startTemplateDraft()">
+                                @click="openBillingTemplateCreate()">
                                 <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                     stroke-width="1.8">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
@@ -224,122 +224,301 @@
                                 x-show="!(billing.templates || []).length">No billing templates defined yet.</p>
                         </div>
 
-                        <div class="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600"
-                            x-show="selectedBillingTemplate">
-                            <template x-if="selectedBillingTemplate">
-                                <div class="space-y-4">
-                                    <header class="flex flex-wrap items-start justify-between gap-3">
-                                        <div>
-                                            <div class="text-xs uppercase tracking-wide text-slate-400">Template</div>
-                                            <h3 class="text-lg font-semibold text-slate-900"
-                                                x-text="selectedBillingTemplate.name"></h3>
-                                            <p class="mt-1 text-xs text-slate-500"
-                                                x-text="selectedBillingTemplate.description || 'No additional details'">
-                                            </p>
-                                        </div>
-                                        <div class="text-right text-xs text-slate-500">
-                                            <div class="font-semibold text-slate-700"
-                                                x-text="selectedBillingTemplate.currency || billing.default_currency || 'USD'">
+                        <div class="space-y-4">
+                            <div class="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600"
+                                x-show="selectedBillingTemplate">
+                                <template x-if="selectedBillingTemplate">
+                                    <div class="space-y-4">
+                                        <header class="flex flex-wrap items-start justify-between gap-3">
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400">Template
+                                                </div>
+                                                <h3 class="text-lg font-semibold text-slate-900"
+                                                    x-text="selectedBillingTemplate.name"></h3>
+                                                <p class="mt-1 text-xs text-slate-500"
+                                                    x-text="selectedBillingTemplate.description || 'No additional details'">
+                                                </p>
                                             </div>
-                                            <div
-                                                x-text="'Billing increment · ' + (selectedBillingTemplate.increment || '60/60')">
-                                            </div>
-                                            <div
-                                                x-text="'Included minutes · ' + (selectedBillingTemplate.included_minutes ?? 0)">
-                                            </div>
-                                        </div>
-                                    </header>
-
-                                    <div class="rounded-lg border border-slate-200 p-4 text-xs text-slate-500">
-                                        <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Usage
-                                            rates
-                                        </div>
-                                        <div class="mt-3 overflow-hidden rounded-lg border border-slate-200">
-                                            <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
-                                                <thead
-                                                    class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                                    <tr>
-                                                        <th class="px-3 py-2">Prefix</th>
-                                                        <th class="px-3 py-2">Destination</th>
-                                                        <th class="px-3 py-2 text-right">Connect fee</th>
-                                                        <th class="px-3 py-2 text-right">Per minute</th>
-                                                        <th class="px-3 py-2 text-right">Increment</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody class="divide-y divide-slate-100">
-                                                    <template x-for="rate in selectedBillingTemplate.rates || []"
-                                                        :key="rate.id || rate.prefix">
-                                                        <tr>
-                                                            <td class="px-3 py-2 font-mono text-xs"
-                                                                x-text="rate.prefix || '*'">
-                                                            </td>
-                                                            <td class="px-3 py-2" x-text="rate.label || 'Global'"></td>
-                                                            <td class="px-3 py-2 text-right font-mono"
-                                                                x-text="formatCurrency(rate.connect_fee || 0, selectedBillingTemplate.currency)">
-                                                            </td>
-                                                            <td class="px-3 py-2 text-right font-mono"
-                                                                x-text="formatCurrency(rate.rate_per_minute || rate.rate || 0, selectedBillingTemplate.currency)">
-                                                            </td>
-                                                            <td class="px-3 py-2 text-right"
-                                                                x-text="rate.increment || selectedBillingTemplate.increment || '60/60'">
-                                                            </td>
-                                                        </tr>
-                                                    </template>
-                                                    <tr x-show="!(selectedBillingTemplate.rates || []).length">
-                                                        <td colspan="5"
-                                                            class="px-3 py-6 text-center text-xs text-slate-400">No
-                                                            rates configured.</td>
-                                                    </tr>
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-
-                                    <div class="rounded-lg border border-dashed border-slate-200 p-4">
-                                        <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                                            <div class="space-y-2">
-                                                <div
-                                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                                                    Cost
-                                                    simulator</div>
-                                                <div class="grid gap-2 sm:grid-cols-2">
-                                                    <label class="flex flex-col gap-1">
-                                                        <span
-                                                            class="text-[11px] uppercase tracking-wide text-slate-400">Destination</span>
-                                                        <input type="text" x-model="billingSimulation.destination"
-                                                            placeholder="E.g. +1206555"
-                                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                    </label>
-                                                    <label class="flex flex-col gap-1">
-                                                        <span
-                                                            class="text-[11px] uppercase tracking-wide text-slate-400">Minutes</span>
-                                                        <input type="number" min="0" step="1"
-                                                            x-model.number="billingSimulation.minutes"
-                                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                    </label>
+                                            <div class="flex flex-col items-end gap-2 text-xs text-slate-500">
+                                                <div class="text-right">
+                                                    <div class="font-semibold text-slate-700"
+                                                        x-text="selectedBillingTemplate.currency || billing.default_currency || 'USD'">
+                                                    </div>
+                                                    <div
+                                                        x-text="'Billing increment · ' + (selectedBillingTemplate.increment || '60/60')">
+                                                    </div>
+                                                    <div
+                                                        x-text="'Included minutes · ' + (selectedBillingTemplate.included_minutes ?? 0)">
+                                                    </div>
+                                                </div>
+                                                <div class="flex items-center gap-2">
+                                                    <button type="button"
+                                                        class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
+                                                        @click="openBillingTemplateEdit(selectedBillingTemplate.id)">
+                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M4 13v3h3l9-9-3-3-9 9z" />
+                                                        </svg>
+                                                        Edit
+                                                    </button>
+                                                    <button type="button"
+                                                        class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+                                                        @click="deleteBillingTemplate(selectedBillingTemplate.id)">
+                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M6 6l8 8M6 14l8-8" />
+                                                        </svg>
+                                                        Remove
+                                                    </button>
                                                 </div>
                                             </div>
-                                            <button type="button" @click="simulateTemplateCost()"
-                                                class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                                        </header>
+
+                                        <div class="rounded-lg border border-slate-200 p-4 text-xs text-slate-500">
+                                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                                Usage
+                                                rates
+                                            </div>
+                                            <div class="mt-3 overflow-hidden rounded-lg border border-slate-200">
+                                                <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                                                    <thead
+                                                        class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                                        <tr>
+                                                            <th class="px-3 py-2">Prefix</th>
+                                                            <th class="px-3 py-2">Destination</th>
+                                                            <th class="px-3 py-2 text-right">Connect fee</th>
+                                                            <th class="px-3 py-2 text-right">Per minute</th>
+                                                            <th class="px-3 py-2 text-right">Increment</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody class="divide-y divide-slate-100">
+                                                        <template x-for="rate in selectedBillingTemplate.rates || []"
+                                                            :key="rate.id || rate.prefix">
+                                                            <tr>
+                                                                <td class="px-3 py-2 font-mono text-xs"
+                                                                    x-text="rate.prefix || '*'">
+                                                                </td>
+                                                                <td class="px-3 py-2" x-text="rate.label || 'Global'">
+                                                                </td>
+                                                                <td class="px-3 py-2 text-right font-mono"
+                                                                    x-text="formatCurrency(rate.connect_fee || 0, selectedBillingTemplate.currency)">
+                                                                </td>
+                                                                <td class="px-3 py-2 text-right font-mono"
+                                                                    x-text="formatCurrency(rate.rate_per_minute || rate.rate || 0, selectedBillingTemplate.currency)">
+                                                                </td>
+                                                                <td class="px-3 py-2 text-right"
+                                                                    x-text="rate.increment || selectedBillingTemplate.increment || '60/60'">
+                                                                </td>
+                                                            </tr>
+                                                        </template>
+                                                        <tr x-show="!(selectedBillingTemplate.rates || []).length">
+                                                            <td colspan="5"
+                                                                class="px-3 py-6 text-center text-xs text-slate-400">No
+                                                                rates configured.</td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+
+                                        <div class="rounded-lg border border-dashed border-slate-200 p-4">
+                                            <div
+                                                class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                                <div class="space-y-2">
+                                                    <div
+                                                        class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                                        Cost
+                                                        simulator</div>
+                                                    <div class="grid gap-2 sm:grid-cols-2">
+                                                        <label class="flex flex-col gap-1">
+                                                            <span
+                                                                class="text-[11px] uppercase tracking-wide text-slate-400">Destination</span>
+                                                            <input type="text" x-model="billingSimulation.destination"
+                                                                placeholder="E.g. +1206555"
+                                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                        </label>
+                                                        <label class="flex flex-col gap-1">
+                                                            <span
+                                                                class="text-[11px] uppercase tracking-wide text-slate-400">Minutes</span>
+                                                            <input type="number" min="0" step="1"
+                                                                x-model.number="billingSimulation.minutes"
+                                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                                <button type="button" @click="simulateTemplateCost()"
+                                                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10h10M10 5l5 5-5 5" />
+                                                    </svg>
+                                                    Calculate cost
+                                                </button>
+                                            </div>
+                                            <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500"
+                                                x-show="billingSimulation.result">
+                                                <div
+                                                    class="flex items-center justify-between text-sm font-semibold text-slate-700">
+                                                    <span>Total cost</span>
+                                                    <span x-text="billingSimulation.result?.formatted"></span>
+                                                </div>
+                                                <p class="mt-1 text-[11px] text-slate-400"
+                                                    x-text="billingSimulation.result?.explanation"></p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+
+                            <template x-if="billingTemplateFormVisible">
+                                <div
+                                    class="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-6 text-sm text-slate-600">
+                                    <form class="space-y-4" @submit.prevent="saveBillingTemplate">
+                                        <header class="flex flex-wrap items-center justify-between gap-3">
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400"
+                                                    x-text="billingTemplateFormMode === 'edit' ? 'Update template' : 'Create template'">
+                                                </div>
+                                                <h3 class="text-base font-semibold text-slate-900"
+                                                    x-text="billingTemplateFormMode === 'edit' ? 'Edit billing template' : 'New billing template'">
+                                                </h3>
+                                            </div>
+                                            <button type="button"
+                                                class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
+                                                @click="cancelBillingTemplateForm()">Cancel</button>
+                                        </header>
+                                        <div class="grid gap-4 md:grid-cols-2">
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Template name
+                                                <input type="text" x-model="billingTemplateDraft.name" required
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="e.g. Global outbound">
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Currency
+                                                <input type="text" x-model="billingTemplateDraft.currency"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="USD">
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Billing increment
+                                                <input type="text" x-model="billingTemplateDraft.increment"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="60/60">
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Included minutes
+                                                <input type="number" min="0"
+                                                    x-model.number="billingTemplateDraft.included_minutes"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="0">
+                                            </label>
+                                            <label
+                                                class="md:col-span-2 flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Description
+                                                <textarea rows="2" x-model="billingTemplateDraft.description"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Where this template applies"></textarea>
+                                            </label>
+                                        </div>
+                                        <div class="space-y-3">
+                                            <div class="flex items-center justify-between">
+                                                <div
+                                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                                    Rate table
+                                                </div>
+                                                <button type="button"
+                                                    class="inline-flex items-center gap-2 rounded-md border border-dashed border-slate-300 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                                    @click="addBillingRateRow()">
+                                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M10 4v12m6-6H4" />
+                                                    </svg>
+                                                    Add rate
+                                                </button>
+                                            </div>
+                                            <div class="space-y-3">
+                                                <template x-for="(rate, index) in billingTemplateDraft.rates"
+                                                    :key="rate.__key">
+                                                    <div class="rounded-lg border border-slate-200 bg-white p-4">
+                                                        <div class="flex flex-wrap items-start gap-3">
+                                                            <label
+                                                                class="flex-grow basis-32 flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                                                Prefix
+                                                                <input type="text" x-model="rate.prefix"
+                                                                    class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                                    placeholder="*">
+                                                            </label>
+                                                            <label
+                                                                class="flex-grow basis-40 flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                                                Destination label
+                                                                <input type="text" x-model="rate.label"
+                                                                    class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                                    placeholder="Global">
+                                                            </label>
+                                                            <label
+                                                                class="flex-grow basis-32 flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                                                Connect fee
+                                                                <input type="number" step="0.0001" min="0"
+                                                                    x-model.number="rate.connect_fee"
+                                                                    class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                                    placeholder="0">
+                                                            </label>
+                                                            <label
+                                                                class="flex-grow basis-32 flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                                                Rate / minute
+                                                                <input type="number" step="0.0001" min="0"
+                                                                    x-model.number="rate.rate_per_minute"
+                                                                    class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                                    placeholder="0.015">
+                                                            </label>
+                                                            <label
+                                                                class="flex-grow basis-28 flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                                                Increment
+                                                                <input type="text" x-model="rate.increment"
+                                                                    class="rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                                    placeholder="60/60">
+                                                            </label>
+                                                        </div>
+                                                        <div class="mt-3 flex justify-end">
+                                                            <button type="button"
+                                                                class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+                                                                @click="removeBillingRateRow(index)">
+                                                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                    stroke="currentColor" stroke-width="1.6">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                                        d="M6 6l8 8M6 14l8-8" />
+                                                                </svg>
+                                                                Remove rate
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                                <p class="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400"
+                                                    x-show="!(billingTemplateDraft.rates || []).length">
+                                                    No rates yet. Add at least one prefix or use * as a catch-all.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center justify-end gap-3">
+                                            <button type="button"
+                                                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                                                @click="cancelBillingTemplateForm()">Cancel</button>
+                                            <button type="submit"
+                                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                                                 <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
                                                     stroke="currentColor" stroke-width="1.8">
                                                     <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M5 10h10M10 5l5 5-5 5" />
+                                                        d="M5 10l3 3 7-7" />
                                                 </svg>
-                                                Calculate cost
+                                                Save template
                                             </button>
                                         </div>
-                                        <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500"
-                                            x-show="billingSimulation.result">
-                                            <div
-                                                class="flex items-center justify-between text-sm font-semibold text-slate-700">
-                                                <span>Total cost</span>
-                                                <span x-text="billingSimulation.result?.formatted"></span>
-                                            </div>
-                                            <p class="mt-1 text-[11px] text-slate-400"
-                                                x-text="billingSimulation.result?.explanation"></p>
-                                        </div>
-                                    </div>
+                                    </form>
                                 </div>
                             </template>
                         </div>
@@ -496,15 +675,26 @@
             <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
                                 <h2 class="text-base font-semibold text-slate-900">Departments</h2>
                                 <p class="text-xs text-slate-500">Review ownership, service-level expectations, and
                                     extension
                                     blocks.</p>
                             </div>
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400"
-                                x-text="(directory.departments?.length || 0) + ' total'"></span>
+                            <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+                                <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600"
+                                    x-text="(directory.departments?.length || 0) + ' total'"></span>
+                                <button type="button"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                    @click="openDepartmentCreate()">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                    </svg>
+                                    New department
+                                </button>
+                            </div>
                         </div>
                         <div class="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)]">
                             <div class="space-y-2">
@@ -522,36 +712,157 @@
                                             x-text="dept.members + ' members'"></span>
                                     </button>
                                 </template>
+                                <p class="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400"
+                                    x-show="!(directory.departments || []).length">
+                                    No departments defined yet.
+                                </p>
                             </div>
-                            <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
-                                x-show="selectedDepartment">
-                                <template x-if="selectedDepartment">
-                                    <div class="space-y-3">
-                                        <div class="flex items-center justify-between">
-                                            <div>
-                                                <div class="text-xs uppercase tracking-wide text-slate-400">Department
+                            <div class="space-y-4">
+                                <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
+                                    x-show="selectedDepartment">
+                                    <template x-if="selectedDepartment">
+                                        <div class="space-y-4">
+                                            <div class="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400">
+                                                        Department
+                                                    </div>
+                                                    <div class="mt-1 text-base font-semibold text-slate-900"
+                                                        x-text="selectedDepartment.name"></div>
+                                                    <div class="text-xs text-slate-500">Lead · <span
+                                                            x-text="selectedDepartment.lead || 'Unassigned'"></span>
+                                                    </div>
                                                 </div>
-                                                <div class="mt-1 text-base font-semibold text-slate-900"
-                                                    x-text="selectedDepartment.name"></div>
+                                                <div class="flex flex-col items-end gap-2 text-xs">
+                                                    <span
+                                                        class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                        x-text="selectedDepartment.extension_range || '—'"></span>
+                                                    <div class="flex items-center gap-2">
+                                                        <button type="button"
+                                                            class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
+                                                            @click="openDepartmentEdit(selectedDepartment.id)">
+                                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                stroke="currentColor" stroke-width="1.6">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                    d="M4 13v3h3l9-9-3-3-9 9z" />
+                                                            </svg>
+                                                            Edit
+                                                        </button>
+                                                        <button type="button"
+                                                            class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+                                                            @click="deleteDepartment(selectedDepartment.id)">
+                                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                stroke="currentColor" stroke-width="1.6">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                    d="M6 6l8 8M6 14l8-8" />
+                                                            </svg>
+                                                            Remove
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <span
-                                                class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
-                                                x-text="selectedDepartment.extension_range"></span>
+                                            <div class="text-xs text-slate-500"
+                                                x-text="selectedDepartment.description || 'No additional description provided.'">
+                                            </div>
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400">Tags</div>
+                                                <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                                    <template x-for="tag in selectedDepartment.tags || []" :key="tag">
+                                                        <span
+                                                            class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                            x-text="tag"></span>
+                                                    </template>
+                                                    <span class="text-[11px] text-slate-400"
+                                                        x-show="!(selectedDepartment.tags || []).length">No tags
+                                                        assigned</span>
+                                                </div>
+                                            </div>
+                                            <div class="flex items-center justify-between text-xs text-slate-500">
+                                                <span>SLA target</span>
+                                                <span class="font-semibold text-slate-700"
+                                                    x-text="selectedDepartment.sla || '—'"></span>
+                                            </div>
+                                            <div class="flex items-center justify-between text-xs text-slate-500">
+                                                <span>Members</span>
+                                                <span class="font-semibold text-slate-700"
+                                                    x-text="selectedDepartment.members + ' teammates'"></span>
+                                            </div>
                                         </div>
-                                        <div class="text-xs text-slate-500" x-text="selectedDepartment.description">
-                                        </div>
-                                        <div class="flex flex-wrap gap-2 text-[11px]">
-                                            <template x-for="tag in selectedDepartment.tags || []" :key="tag">
-                                                <span
-                                                    class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                                    x-text="tag"></span>
-                                            </template>
-                                        </div>
-                                        <div class="flex items-center justify-between text-xs text-slate-500">
-                                            <span>SLA</span>
-                                            <span class="font-semibold text-slate-700"
-                                                x-text="selectedDepartment.sla"></span>
-                                        </div>
+                                    </template>
+                                </div>
+
+                                <template x-if="departmentFormVisible">
+                                    <div
+                                        class="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-5 text-sm text-slate-600">
+                                        <form class="space-y-4" @submit.prevent="saveDepartment">
+                                            <header class="flex items-center justify-between">
+                                                <div>
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400"
+                                                        x-text="departmentFormMode === 'edit' ? 'Update department' : 'Create department'">
+                                                    </div>
+                                                    <h3 class="text-base font-semibold text-slate-900"
+                                                        x-text="departmentFormMode === 'edit' ? 'Edit department' : 'New department'">
+                                                    </h3>
+                                                </div>
+                                                <button type="button"
+                                                    class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
+                                                    @click="cancelDepartmentForm()">Cancel</button>
+                                            </header>
+                                            <div class="grid gap-4 md:grid-cols-2">
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Name
+                                                    <input type="text" x-model="departmentDraft.name" required
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="e.g. Customer Success">
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Department lead
+                                                    <input type="text" x-model="departmentDraft.lead"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="Manager name">
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Extension range
+                                                    <input type="text" x-model="departmentDraft.extension_range"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="e.g. 2000-2099">
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    SLA target
+                                                    <input type="text" x-model="departmentDraft.sla"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="e.g. < 30s response">
+                                                </label>
+                                            </div>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Tags
+                                                <input type="text" x-model="departmentDraft.tagsInput"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Comma separated (e.g. voice,priority)">
+                                                <span class="text-xs font-normal text-slate-400">We'll split tags by
+                                                    comma and remove duplicates.</span>
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Description
+                                                <textarea rows="3" x-model="departmentDraft.description"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Team remit, on-call details, or escalation notes."></textarea>
+                                            </label>
+                                            <div class="flex items-center justify-end gap-3">
+                                                <button type="button"
+                                                    class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                                                    @click="cancelDepartmentForm()">Cancel</button>
+                                                <button type="submit"
+                                                    class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10l3 3 7-7" />
+                                                    </svg>
+                                                    Save department
+                                                </button>
+                                            </div>
+                                        </form>
                                     </div>
                                 </template>
                             </div>
@@ -566,14 +877,25 @@
             <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
                                 <h2 class="text-base font-semibold text-slate-900">Users</h2>
                                 <p class="text-xs text-slate-500">Assign roles, enforce MFA, and map staff to
                                     extensions.</p>
                             </div>
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400"
-                                x-text="(directory.users?.length || 0) + ' users'"></span>
+                            <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+                                <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600"
+                                    x-text="(directory.users?.length || 0) + ' users'"></span>
+                                <button type="button"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                    @click="openUserCreate()">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                    </svg>
+                                    Add team member
+                                </button>
+                            </div>
                         </div>
                         <div class="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                             <div class="space-y-2">
@@ -593,51 +915,204 @@
                                         </div>
                                     </button>
                                 </template>
+                                <p class="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400"
+                                    x-show="!(directory.users || []).length">
+                                    No staff accounts yet.
+                                </p>
                             </div>
-                            <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
-                                x-show="selectedUser">
-                                <template x-if="selectedUser">
-                                    <div class="space-y-3">
-                                        <div class="flex items-center justify-between">
-                                            <div>
-                                                <div class="text-xs uppercase tracking-wide text-slate-400">User</div>
-                                                <div class="mt-1 text-base font-semibold text-slate-900"
-                                                    x-text="selectedUser.name"></div>
-                                                <div class="text-xs text-slate-500" x-text="selectedUser.email"></div>
-                                            </div>
-                                            <div class="flex flex-col items-end gap-1">
-                                                <span
-                                                    class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
-                                                    x-text="selectedUser.role"></span>
-                                                <span class="text-[11px] text-slate-400">Dept · <span
-                                                        x-text="selectedUser.department"></span></span>
-                                            </div>
-                                        </div>
-                                        <div class="flex items-center gap-2 text-xs text-slate-500">
-                                            <span class="font-semibold text-slate-700">MFA:</span>
-                                            <span x-text="selectedUser.mfa ? 'Enabled' : 'Disabled'"></span>
-                                        </div>
-                                        <div>
-                                            <div class="text-xs uppercase tracking-wide text-slate-400">Extensions</div>
-                                            <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
-                                                <template x-for="ext in selectedUser.extensions || []" :key="ext">
+                            <div class="space-y-4">
+                                <div class="rounded-lg border border-slate-200 p-4 text-sm text-slate-600"
+                                    x-show="selectedUser">
+                                    <template x-if="selectedUser">
+                                        <div class="space-y-4">
+                                            <div class="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400">User
+                                                    </div>
+                                                    <div class="mt-1 text-base font-semibold text-slate-900"
+                                                        x-text="selectedUser.name"></div>
+                                                    <div class="text-xs text-slate-500" x-text="selectedUser.email">
+                                                    </div>
+                                                </div>
+                                                <div class="flex flex-col items-end gap-2 text-xs">
                                                     <span
                                                         class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                                        x-text="ext"></span>
-                                                </template>
+                                                        x-text="selectedUser.role || 'Contributor'"></span>
+                                                    <span class="text-[11px] text-slate-400">Dept · <span
+                                                            x-text="selectedUser.department || 'Unassigned'"></span></span>
+                                                    <div class="flex items-center gap-2">
+                                                        <button type="button"
+                                                            class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
+                                                            @click="openUserEdit(selectedUser.id)">
+                                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                stroke="currentColor" stroke-width="1.6">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                    d="M4 13v3h3l9-9-3-3-9 9z" />
+                                                            </svg>
+                                                            Edit
+                                                        </button>
+                                                        <button type="button"
+                                                            class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
+                                                            @click="deleteUser(selectedUser.id)">
+                                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                                stroke="currentColor" stroke-width="1.6">
+                                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                                    d="M6 6l8 8M6 14l8-8" />
+                                                            </svg>
+                                                            Remove
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="flex items-center justify-between text-xs text-slate-500">
+                                                <span>Status</span>
+                                                <span class="font-semibold text-slate-700"
+                                                    x-text="selectedUser.status"></span>
+                                            </div>
+                                            <div class="flex items-center justify-between text-xs text-slate-500">
+                                                <span>MFA</span>
+                                                <span class="font-semibold text-slate-700"
+                                                    x-text="selectedUser.mfa ? 'Enabled' : 'Disabled'"></span>
+                                            </div>
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400">Extensions
+                                                </div>
+                                                <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                                    <template x-for="ext in selectedUser.extensions || []" :key="ext">
+                                                        <span
+                                                            class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                            x-text="ext"></span>
+                                                    </template>
+                                                    <span class="text-[11px] text-slate-400"
+                                                        x-show="!(selectedUser.extensions || []).length">No extension
+                                                        bindings</span>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400">Permissions
+                                                </div>
+                                                <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
+                                                    <template x-for="perm in selectedUser.permissions || []"
+                                                        :key="perm">
+                                                        <span
+                                                            class="rounded-full bg-sky-50 px-2 py-0.5 font-semibold text-sky-700"
+                                                            x-text="perm"></span>
+                                                    </template>
+                                                    <span class="text-[11px] text-slate-400"
+                                                        x-show="!(selectedUser.permissions || []).length">No permissions
+                                                        assigned</span>
+                                                </div>
                                             </div>
                                         </div>
-                                        <div>
-                                            <div class="text-xs uppercase tracking-wide text-slate-400">Permissions
+                                    </template>
+                                </div>
+
+                                <template x-if="userFormVisible">
+                                    <div
+                                        class="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-5 text-sm text-slate-600">
+                                        <form class="space-y-4" @submit.prevent="saveUser">
+                                            <header class="flex items-center justify-between">
+                                                <div>
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400"
+                                                        x-text="userFormMode === 'edit' ? 'Update teammate' : 'Invite teammate'">
+                                                    </div>
+                                                    <h3 class="text-base font-semibold text-slate-900"
+                                                        x-text="userFormMode === 'edit' ? 'Edit user' : 'New user'">
+                                                    </h3>
+                                                </div>
+                                                <button type="button"
+                                                    class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
+                                                    @click="cancelUserForm()">Cancel</button>
+                                            </header>
+                                            <div class="grid gap-4 md:grid-cols-2">
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Full name
+                                                    <input type="text" x-model="userDraft.name" required
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="e.g. Taylor Reed">
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Email
+                                                    <input type="email" x-model="userDraft.email" required
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                        placeholder="name@example.com">
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Role
+                                                    <select x-model="userDraft.role"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                        <option value="Admin">Admin</option>
+                                                        <option value="Supervisor">Supervisor</option>
+                                                        <option value="Agent">Agent</option>
+                                                        <option value="Observer">Observer</option>
+                                                    </select>
+                                                </label>
+                                                <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                    Status
+                                                    <select x-model="userDraft.status"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                        <option value="active">Active</option>
+                                                        <option value="invited">Invited</option>
+                                                        <option value="suspended">Suspended</option>
+                                                    </select>
+                                                </label>
+                                                <label
+                                                    class="flex flex-col gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+                                                    Department
+                                                    <select x-model="userDraft.department"
+                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                        <option value="">Unassigned</option>
+                                                        <template x-for="dept in directory.departments || []"
+                                                            :key="dept.id">
+                                                            <option :value="dept.name" x-text="dept.name"></option>
+                                                        </template>
+                                                    </select>
+                                                </label>
                                             </div>
-                                            <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
-                                                <template x-for="perm in selectedUser.permissions || []" :key="perm">
-                                                    <span
-                                                        class="rounded-full bg-sky-50 px-2 py-0.5 font-semibold text-sky-700"
-                                                        x-text="perm"></span>
-                                                </template>
+                                            <div
+                                                class="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">
+                                                <div>
+                                                    <div class="font-semibold text-slate-800">Require MFA</div>
+                                                    <p class="text-xs text-slate-500">Enforce app-based MFA at next
+                                                        login.</p>
+                                                </div>
+                                                <label
+                                                    class="inline-flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-600">
+                                                    <input type="checkbox"
+                                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                                        x-model="userDraft.mfa">
+                                                    <span x-text="userDraft.mfa ? 'Enabled' : 'Disabled'"></span>
+                                                </label>
                                             </div>
-                                        </div>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Extensions
+                                                <input type="text" x-model="userDraft.extensionsInput"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Comma separated numbers">
+                                                <span class="text-xs font-normal text-slate-400">Example: 1007,
+                                                    2001</span>
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                                Permissions
+                                                <input type="text" x-model="userDraft.permissionsInput"
+                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Comma separated (e.g. recordings,analytics)">
+                                            </label>
+                                            <div class="flex items-center justify-end gap-3">
+                                                <button type="button"
+                                                    class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                                                    @click="cancelUserForm()">Cancel</button>
+                                                <button type="submit"
+                                                    class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10l3 3 7-7" />
+                                                    </svg>
+                                                    Save user
+                                                </button>
+                                            </div>
+                                        </form>
                                     </div>
                                 </template>
                             </div>
@@ -657,6 +1132,18 @@
                 this.server = data.server || {};
                 this.retention = data.retention || {};
                 this.directory = data.directory || { departments: [], users: [], pending_invites: [] };
+                if (!this.directory || typeof this.directory !== 'object') {
+                    this.directory = { departments: [], users: [], pending_invites: [] };
+                }
+                if (!Array.isArray(this.directory.departments)) {
+                    this.directory.departments = [];
+                }
+                if (!Array.isArray(this.directory.users)) {
+                    this.directory.users = [];
+                }
+                if (!Array.isArray(this.directory.pending_invites)) {
+                    this.directory.pending_invites = [];
+                }
                 this.security = data.security || { trusted_ips: [], blocked_user_agents: [], rate_limits: {}, threat_feed: [], audit: {} };
                 if (!this.security || typeof this.security !== 'object') {
                     this.security = {};
@@ -686,16 +1173,10 @@
                 if (!Array.isArray(this.billing.templates)) {
                     this.billing.templates = [];
                 }
-                this.billing.templates = this.billing.templates.map((tpl) => {
-                    if (!tpl || typeof tpl !== 'object') {
-                        return tpl;
-                    }
-                    const normalized = { ...tpl };
-                    if (normalized.id !== undefined && normalized.id !== null) {
-                        normalized.id = String(normalized.id);
-                    }
-                    return normalized;
-                });
+                this.billing.templates = this.normalizeBillingTemplates(this.billing.templates);
+                if (!(this.billing.templates || []).length) {
+                    this.billing.templates = this.seedBillingTemplates();
+                }
                 this.asr = data.asr || { providers: [], languages: [], callback: {} };
                 this.selectedProvider = this.asr.active_provider || (this.asr.providers?.[0]?.id || '');
                 this.selectedStorageProfile = this.server.storage?.mode || (this.server.storage_profiles?.[0]?.id || '');
@@ -710,12 +1191,16 @@
                 const initialTemplateId = data.billing && data.billing.selected_template_id !== undefined && data.billing.selected_template_id !== null
                     ? String(data.billing.selected_template_id)
                     : '';
-                if (initialTemplateId) {
+                if (initialTemplateId && this.billing.templates.some((tpl) => tpl.id === initialTemplateId)) {
                     this.selectedBillingTemplateId = initialTemplateId;
                 } else {
                     const firstTemplate = this.billing.templates?.[0];
                     this.selectedBillingTemplateId = firstTemplate ? String(firstTemplate.id) : '';
                 }
+                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
+                this.departmentDraft = this.defaultDepartmentDraft();
+                this.userDraft = this.defaultUserDraft();
+                this.recalculateDepartmentMembers();
             },
             tabs: [
                 { id: 'platform', label: 'Platform overview' },
@@ -741,6 +1226,25 @@
             billingSimulation: { destination: '', minutes: 1, result: null },
             lastOperation: null,
             asrProbe: null,
+            billingTemplateFormVisible: false,
+            billingTemplateFormMode: 'create',
+            billingTemplateEditingId: '',
+            billingTemplateDraft: {
+                name: '',
+                description: '',
+                currency: 'USD',
+                increment: '60/60',
+                included_minutes: 0,
+                rates: [],
+            },
+            departmentFormVisible: false,
+            departmentFormMode: 'create',
+            departmentEditingId: '',
+            departmentDraft: { name: '', lead: '', extension_range: '', description: '', tagsInput: '', sla: '' },
+            userFormVisible: false,
+            userFormMode: 'create',
+            userEditingId: '',
+            userDraft: { name: '', email: '', role: 'Agent', status: 'invited', department: '', mfa: false, extensionsInput: '', permissionsInput: '' },
             get storageProfiles() {
                 return Array.isArray(this.server.storage_profiles) ? this.server.storage_profiles : [];
             },
@@ -750,12 +1254,9 @@
             selectBillingTemplate(id) {
                 this.selectedBillingTemplateId = String(id);
                 this.billingSimulation.result = null;
-            },
-            startTemplateDraft() {
-                this.$dispatch('toast', {
-                    title: 'Preview mode',
-                    message: 'Template creation is simulated in the console preview.',
-                });
+                if (this.billingTemplateFormVisible) {
+                    this.cancelBillingTemplateForm();
+                }
             },
             get selectedStorageProfileData() {
                 return this.storageProfiles.find((item) => item.id === this.selectedStorageProfile) || null;
@@ -876,6 +1377,521 @@
                     formatted: this.formatCurrency(total, currency),
                     explanation: `${billedMinutes.toFixed(2)} billed minutes at ${this.formatCurrency(perMinute, currency)}/min plus ${this.formatCurrency(connectFee, currency)} connect fee`,
                 };
+            },
+            normalizeBillingTemplates(input) {
+                if (!Array.isArray(input)) {
+                    return [];
+                }
+                return input
+                    .filter((tpl) => tpl && typeof tpl === 'object')
+                    .map((tpl) => {
+                        const normalized = { ...tpl };
+                        normalized.id = normalized.id !== undefined && normalized.id !== null ? String(normalized.id) : this.generateId('tpl');
+                        normalized.name = normalized.name || 'Untitled template';
+                        normalized.description = normalized.description || '';
+                        normalized.currency = normalized.currency || this.billing.default_currency || 'USD';
+                        normalized.increment = normalized.increment || '60/60';
+                        normalized.included_minutes = normalized.included_minutes !== undefined && normalized.included_minutes !== null
+                            ? Number(normalized.included_minutes) || 0
+                            : 0;
+                        const rates = Array.isArray(normalized.rates) ? normalized.rates : [];
+                        normalized.rates = rates
+                            .filter((rate) => rate && typeof rate === 'object')
+                            .map((rate) => ({
+                                prefix: (rate.prefix ?? '*') === '' ? '*' : String(rate.prefix ?? '*'),
+                                label: rate.label || 'Global',
+                                connect_fee: Number(rate.connect_fee ?? 0) || 0,
+                                rate_per_minute: Number(rate.rate_per_minute ?? rate.rate ?? 0) || 0,
+                                increment: rate.increment || normalized.increment || '60/60',
+                            }));
+                        if (!normalized.rates.length) {
+                            normalized.rates = [{
+                                prefix: '*',
+                                label: 'Global',
+                                connect_fee: 0,
+                                rate_per_minute: 0,
+                                increment: normalized.increment || '60/60',
+                            }];
+                        }
+                        return normalized;
+                    });
+            },
+            seedBillingTemplates() {
+                const samples = [
+                    {
+                        id: 'tpl-sample-global',
+                        name: 'Global default',
+                        description: 'Baseline rates for worldwide outbound calling with a catch-all prefix.',
+                        currency: this.billing.default_currency || 'USD',
+                        increment: '60/60',
+                        included_minutes: 0,
+                        rates: [
+                            { prefix: '*', label: 'All destinations', connect_fee: 0.0200, rate_per_minute: 0.0185, increment: '60/60' },
+                        ],
+                    },
+                    {
+                        id: 'tpl-sample-na',
+                        name: 'North America bundle',
+                        description: 'Preferential pricing for +1 destinations with bundled minutes.',
+                        currency: this.billing.default_currency || 'USD',
+                        increment: '6/6',
+                        included_minutes: 500,
+                        rates: [
+                            { prefix: '1', label: 'US & Canada', connect_fee: 0.0000, rate_per_minute: 0.0120, increment: '6/6' },
+                            { prefix: '44', label: 'UK Mainland', connect_fee: 0.0150, rate_per_minute: 0.0225, increment: '30/6' },
+                            { prefix: '*', label: 'Rest of world', connect_fee: 0.0350, rate_per_minute: 0.0450, increment: '60/60' },
+                        ],
+                    },
+                    {
+                        id: 'tpl-sample-apac',
+                        name: 'APAC premium',
+                        description: 'Premium routing for Asia Pacific call centers with low-latency trunks.',
+                        currency: this.billing.default_currency || 'USD',
+                        increment: '30/6',
+                        included_minutes: 120,
+                        rates: [
+                            { prefix: '81', label: 'Japan', connect_fee: 0.0250, rate_per_minute: 0.0480, increment: '30/6' },
+                            { prefix: '61', label: 'Australia', connect_fee: 0.0200, rate_per_minute: 0.0400, increment: '30/6' },
+                            { prefix: '*', label: 'Fallback global', connect_fee: 0.0450, rate_per_minute: 0.0550, increment: '60/60' },
+                        ],
+                    },
+                ];
+                return this.normalizeBillingTemplates(samples);
+            },
+            openBillingTemplateCreate() {
+                this.billingTemplateFormMode = 'create';
+                this.billingTemplateEditingId = '';
+                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
+                this.billingTemplateFormVisible = true;
+            },
+            openBillingTemplateEdit(id) {
+                const tpl = (this.billing.templates || []).find((item) => item.id === String(id));
+                if (!tpl) {
+                    this.$dispatch('toast', {
+                        title: 'Not found',
+                        message: 'Unable to locate that billing template in the preview data.',
+                    });
+                    return;
+                }
+                this.billingTemplateFormMode = 'edit';
+                this.billingTemplateEditingId = tpl.id;
+                this.billingTemplateDraft = this.templateToDraft(tpl);
+                this.billingTemplateFormVisible = true;
+            },
+            cancelBillingTemplateForm() {
+                this.billingTemplateFormVisible = false;
+                this.billingTemplateEditingId = '';
+                this.billingTemplateFormMode = 'create';
+                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
+            },
+            addBillingRateRow() {
+                if (!this.billingTemplateDraft || !Array.isArray(this.billingTemplateDraft.rates)) {
+                    this.billingTemplateDraft.rates = [];
+                }
+                const increment = this.billingTemplateDraft?.increment || '60/60';
+                this.billingTemplateDraft.rates.push(this.defaultBillingRateRow('', '', 0, 0, increment));
+            },
+            removeBillingRateRow(index) {
+                if (!this.billingTemplateDraft || !Array.isArray(this.billingTemplateDraft.rates)) {
+                    return;
+                }
+                this.billingTemplateDraft.rates.splice(index, 1);
+            },
+            saveBillingTemplate() {
+                const draft = this.billingTemplateDraft || this.defaultBillingTemplateDraft();
+                const name = (draft.name || '').trim();
+                if (!name) {
+                    this.$dispatch('toast', {
+                        title: 'Missing information',
+                        message: 'Template name is required.',
+                    });
+                    return;
+                }
+                let rates = Array.isArray(draft.rates) ? draft.rates : [];
+                rates = rates
+                    .map((rate) => ({
+                        prefix: (rate.prefix || '*').trim() || '*',
+                        label: (rate.label || 'Global').trim() || 'Global',
+                        connect_fee: Number(rate.connect_fee ?? 0) || 0,
+                        rate_per_minute: Number(rate.rate_per_minute ?? rate.rate ?? 0) || 0,
+                        increment: (rate.increment || draft.increment || '60/60').trim() || draft.increment || '60/60',
+                    }))
+                    .filter((rate, index, arr) => rate && arr.findIndex((item) => item.prefix === rate.prefix && item.label === rate.label) === index);
+                if (!rates.length) {
+                    rates = [
+                        {
+                            prefix: '*',
+                            label: 'Global',
+                            connect_fee: 0,
+                            rate_per_minute: 0,
+                            increment: (draft.increment || '60/60') || '60/60',
+                        },
+                    ];
+                }
+                const payload = {
+                    id: this.billingTemplateFormMode === 'edit' ? (this.billingTemplateEditingId || this.generateId('tpl')) : this.generateId('tpl'),
+                    name,
+                    description: (draft.description || '').trim(),
+                    currency: (draft.currency || this.billing.default_currency || 'USD').trim() || (this.billing.default_currency || 'USD'),
+                    increment: (draft.increment || '60/60').trim() || '60/60',
+                    included_minutes: Number(draft.included_minutes ?? 0) || 0,
+                    rates,
+                };
+                const normalized = this.normalizeBillingTemplates([payload])[0];
+                if (this.billingTemplateFormMode === 'edit') {
+                    this.billing.templates = (this.billing.templates || []).map((tpl) => (tpl.id === normalized.id ? normalized : tpl));
+                    this.$dispatch('toast', {
+                        title: 'Template updated',
+                        message: `${normalized.name} saved in preview mode.`,
+                    });
+                } else {
+                    this.billing.templates = [...(this.billing.templates || []), normalized];
+                    this.$dispatch('toast', {
+                        title: 'Template created',
+                        message: `${normalized.name} added in preview mode.`,
+                    });
+                }
+                this.selectedBillingTemplateId = normalized.id;
+                this.billingTemplateFormVisible = false;
+                this.billingTemplateEditingId = '';
+                this.billingTemplateFormMode = 'create';
+                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
+            },
+            deleteBillingTemplate(id) {
+                const tpl = (this.billing.templates || []).find((item) => item.id === String(id));
+                if (!tpl) {
+                    return;
+                }
+                if (typeof window !== 'undefined' && window.confirm && !window.confirm(`Remove ${tpl.name}? This only affects the preview data.`)) {
+                    return;
+                }
+                this.billing.templates = (this.billing.templates || []).filter((item) => item.id !== tpl.id);
+                if (this.selectedBillingTemplateId === tpl.id) {
+                    this.selectedBillingTemplateId = this.billing.templates?.[0]?.id || '';
+                    this.billingSimulation.result = null;
+                }
+                if (this.billingTemplateEditingId === tpl.id) {
+                    this.cancelBillingTemplateForm();
+                }
+                this.$dispatch('toast', {
+                    title: 'Template removed',
+                    message: `${tpl.name} deleted in preview mode.`,
+                });
+            },
+            templateToDraft(template) {
+                const base = template || {};
+                const draft = {
+                    name: base.name || '',
+                    description: base.description || '',
+                    currency: base.currency || this.billing.default_currency || 'USD',
+                    increment: base.increment || '60/60',
+                    included_minutes: Number(base.included_minutes ?? 0) || 0,
+                    rates: (base.rates || []).map((rate) => this.decorateRateForForm(rate)),
+                };
+                if (!draft.rates.length) {
+                    draft.rates = [this.defaultBillingRateRow('*', 'Global', 0, 0, draft.increment)];
+                }
+                return draft;
+            },
+            decorateRateForForm(rate) {
+                return {
+                    __key: this.generateId('rate'),
+                    prefix: (rate?.prefix || '*').toString(),
+                    label: rate?.label || 'Global',
+                    connect_fee: Number(rate?.connect_fee ?? 0) || 0,
+                    rate_per_minute: Number(rate?.rate_per_minute ?? rate?.rate ?? 0) || 0,
+                    increment: rate?.increment || '',
+                };
+            },
+            defaultBillingRateRow(prefix = '*', label = 'Global', connectFee = 0, rate = 0.02, increment = '60/60') {
+                return {
+                    __key: this.generateId('rate'),
+                    prefix,
+                    label,
+                    connect_fee: Number(connectFee) || 0,
+                    rate_per_minute: Number(rate) || 0,
+                    increment,
+                };
+            },
+            defaultBillingTemplateDraft() {
+                return {
+                    name: '',
+                    description: '',
+                    currency: this.billing.default_currency || 'USD',
+                    increment: '60/60',
+                    included_minutes: 0,
+                    rates: [this.defaultBillingRateRow('*', 'Global', 0, 0.0185, '60/60')],
+                };
+            },
+            openDepartmentCreate() {
+                this.departmentFormMode = 'create';
+                this.departmentEditingId = '';
+                this.departmentDraft = this.defaultDepartmentDraft();
+                this.departmentFormVisible = true;
+            },
+            openDepartmentEdit(id) {
+                const dept = (this.directory.departments || []).find((item) => item.id === id);
+                if (!dept) {
+                    this.$dispatch('toast', {
+                        title: 'Not found',
+                        message: 'Unable to locate that department in the preview data.',
+                    });
+                    return;
+                }
+                this.departmentFormMode = 'edit';
+                this.departmentEditingId = id;
+                this.departmentDraft = {
+                    name: dept.name || '',
+                    lead: dept.lead || '',
+                    extension_range: dept.extension_range || '',
+                    description: dept.description || '',
+                    tagsInput: this.formatListInput(dept.tags),
+                    sla: dept.sla || '',
+                };
+                this.departmentFormVisible = true;
+            },
+            cancelDepartmentForm() {
+                this.departmentFormVisible = false;
+                this.departmentEditingId = '';
+                this.departmentDraft = this.defaultDepartmentDraft();
+            },
+            saveDepartment() {
+                const draft = this.departmentDraft || this.defaultDepartmentDraft();
+                const name = (draft.name || '').trim();
+                if (!name) {
+                    this.$dispatch('toast', {
+                        title: 'Missing information',
+                        message: 'Department name is required.',
+                    });
+                    return;
+                }
+                const previous = this.departmentFormMode === 'edit'
+                    ? (this.directory.departments || []).find((item) => item.id === this.departmentEditingId)
+                    : null;
+                const payload = {
+                    id: this.departmentFormMode === 'edit' ? (previous?.id || this.departmentEditingId) : this.generateId('dept'),
+                    name,
+                    lead: (draft.lead || '').trim(),
+                    extension_range: (draft.extension_range || '').trim(),
+                    description: (draft.description || '').trim(),
+                    tags: this.parseList(draft.tagsInput),
+                    sla: (draft.sla || '').trim(),
+                };
+                if (previous && previous.name && previous.name !== payload.name) {
+                    this.directory.users = (this.directory.users || []).map((user) => {
+                        if ((user.department || '').trim() === previous.name.trim()) {
+                            return { ...user, department: payload.name };
+                        }
+                        return user;
+                    });
+                }
+                payload.members = this.countMembersForDepartment(payload.name);
+                if (this.departmentFormMode === 'edit') {
+                    this.directory.departments = (this.directory.departments || []).map((dept) => (dept.id === payload.id ? { ...dept, ...payload } : dept));
+                    this.$dispatch('toast', {
+                        title: 'Department updated',
+                        message: `${payload.name} saved in preview mode.`,
+                    });
+                } else {
+                    this.directory.departments = [...(this.directory.departments || []), payload];
+                    this.$dispatch('toast', {
+                        title: 'Department created',
+                        message: `${payload.name} added in preview mode.`,
+                    });
+                }
+                this.selectedDepartmentId = payload.id;
+                this.departmentFormVisible = false;
+                this.departmentEditingId = '';
+                this.departmentDraft = this.defaultDepartmentDraft();
+                this.recalculateDepartmentMembers();
+            },
+            deleteDepartment(id) {
+                const dept = (this.directory.departments || []).find((item) => item.id === id);
+                if (!dept) {
+                    return;
+                }
+                if (typeof window !== 'undefined' && window.confirm && !window.confirm(`Remove ${dept.name}? This only affects the preview data.`)) {
+                    return;
+                }
+                const removedName = dept.name || '';
+                this.directory.users = (this.directory.users || []).map((user) => {
+                    if ((user.department || '').trim() === removedName.trim()) {
+                        return { ...user, department: '' };
+                    }
+                    return user;
+                });
+                this.directory.departments = (this.directory.departments || []).filter((item) => item.id !== id);
+                if (this.selectedDepartmentId === id) {
+                    this.selectedDepartmentId = this.directory.departments?.[0]?.id || '';
+                }
+                if (this.departmentEditingId === id) {
+                    this.departmentEditingId = '';
+                    this.departmentFormVisible = false;
+                    this.departmentDraft = this.defaultDepartmentDraft();
+                }
+                this.recalculateDepartmentMembers();
+                this.$dispatch('toast', {
+                    title: 'Department removed',
+                    message: `${removedName || 'Department'} deleted in preview mode.`,
+                });
+            },
+            openUserCreate() {
+                this.userFormMode = 'create';
+                this.userEditingId = '';
+                this.userDraft = this.defaultUserDraft();
+                this.userFormVisible = true;
+            },
+            openUserEdit(id) {
+                const user = (this.directory.users || []).find((item) => item.id === id);
+                if (!user) {
+                    this.$dispatch('toast', {
+                        title: 'Not found',
+                        message: 'Unable to locate that user in the preview data.',
+                    });
+                    return;
+                }
+                this.userFormMode = 'edit';
+                this.userEditingId = id;
+                this.userDraft = {
+                    name: user.name || '',
+                    email: user.email || '',
+                    role: user.role || 'Agent',
+                    status: user.status || 'active',
+                    department: user.department || '',
+                    mfa: !!user.mfa,
+                    extensionsInput: this.formatListInput(user.extensions),
+                    permissionsInput: this.formatListInput(user.permissions),
+                };
+                this.userFormVisible = true;
+            },
+            cancelUserForm() {
+                this.userFormVisible = false;
+                this.userEditingId = '';
+                this.userDraft = this.defaultUserDraft();
+            },
+            saveUser() {
+                const draft = this.userDraft || this.defaultUserDraft();
+                const name = (draft.name || '').trim();
+                const email = (draft.email || '').trim();
+                if (!name || !email) {
+                    this.$dispatch('toast', {
+                        title: 'Missing information',
+                        message: 'Name and email are required for users.',
+                    });
+                    return;
+                }
+                const extensions = this.parseList(draft.extensionsInput);
+                const permissions = this.parseList(draft.permissionsInput);
+                const existingUser = (this.directory.users || []).find((item) => item.id === this.userEditingId);
+                const payload = this.userFormMode === 'edit'
+                    ? { ...(existingUser || { id: this.userEditingId || this.generateId('user'), last_login: null }) }
+                    : { id: this.generateId('user'), last_login: null };
+                payload.name = name;
+                payload.email = email;
+                payload.role = draft.role || 'Agent';
+                payload.status = draft.status || 'invited';
+                payload.department = (draft.department || '').trim();
+                payload.mfa = !!draft.mfa;
+                payload.extensions = extensions;
+                payload.permissions = permissions;
+                if (this.userFormMode === 'edit') {
+                    this.directory.users = (this.directory.users || []).map((item) => (item.id === payload.id ? { ...item, ...payload } : item));
+                    this.$dispatch('toast', {
+                        title: 'User updated',
+                        message: `${payload.name} saved in preview mode.`,
+                    });
+                } else {
+                    this.directory.users = [...(this.directory.users || []), payload];
+                    this.$dispatch('toast', {
+                        title: 'User created',
+                        message: `${payload.name} added in preview mode.`,
+                    });
+                }
+                this.selectedUserId = payload.id;
+                this.userFormVisible = false;
+                this.userEditingId = '';
+                this.userDraft = this.defaultUserDraft();
+                this.recalculateDepartmentMembers();
+            },
+            deleteUser(id) {
+                const user = (this.directory.users || []).find((item) => item.id === id);
+                if (!user) {
+                    return;
+                }
+                if (typeof window !== 'undefined' && window.confirm && !window.confirm(`Remove ${user.name}? This only affects the preview data.`)) {
+                    return;
+                }
+                this.directory.users = (this.directory.users || []).filter((item) => item.id !== id);
+                if (this.selectedUserId === id) {
+                    this.selectedUserId = this.directory.users?.[0]?.id || '';
+                }
+                if (this.userEditingId === id) {
+                    this.userEditingId = '';
+                    this.userFormVisible = false;
+                    this.userDraft = this.defaultUserDraft();
+                }
+                this.recalculateDepartmentMembers();
+                this.$dispatch('toast', {
+                    title: 'User removed',
+                    message: `${user.name} deleted in preview mode.`,
+                });
+            },
+            parseList(value) {
+                if (!value) {
+                    return [];
+                }
+                return String(value)
+                    .split(/[,;\n]/)
+                    .map((item) => item.trim())
+                    .filter((item) => !!item)
+                    .filter((item, index, arr) => arr.indexOf(item) === index);
+            },
+            formatListInput(list) {
+                if (!Array.isArray(list)) {
+                    return '';
+                }
+                return list.join(', ');
+            },
+            defaultDepartmentDraft() {
+                return {
+                    name: '',
+                    lead: '',
+                    extension_range: '',
+                    description: '',
+                    tagsInput: '',
+                    sla: '',
+                };
+            },
+            defaultUserDraft() {
+                return {
+                    name: '',
+                    email: '',
+                    role: 'Agent',
+                    status: 'invited',
+                    department: '',
+                    mfa: false,
+                    extensionsInput: '',
+                    permissionsInput: '',
+                };
+            },
+            countMembersForDepartment(name) {
+                const label = (name || '').trim();
+                if (!label) {
+                    return 0;
+                }
+                return (this.directory.users || []).filter((user) => (user.department || '').trim() === label).length;
+            },
+            recalculateDepartmentMembers() {
+                this.directory.departments = (this.directory.departments || []).map((dept) => ({
+                    ...dept,
+                    members: this.countMembersForDepartment(dept.name),
+                }));
+            },
+            generateId(prefix = 'id') {
+                if (typeof window !== 'undefined' && window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return `${prefix}-${window.crypto.randomUUID()}`;
+                }
+                return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
             },
             findMatchingRate(tpl, destination) {
                 const rates = Array.isArray(tpl?.rates) ? tpl.rates : [];

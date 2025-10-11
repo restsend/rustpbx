@@ -9,12 +9,17 @@ use super::{
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
-    call::{CallOption, EouOption}, event::EventSender, synthesis::{
-        AliyunTtsClient, DeepegramTtsClient, SynthesisClient, SynthesisOption, SynthesisType, TencentCloudTtsBasicClient, TencentCloudTtsClient, VoiceApiTtsClient
-    }, transcription::{
+    TrackId,
+    call::{CallOption, EouOption},
+    event::EventSender,
+    synthesis::{
+        AliyunTtsClient, DeepegramTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
+        TencentCloudTtsBasicClient, TencentCloudTtsClient, VoiceApiTtsClient,
+    },
+    transcription::{
         AliyunAsrClientBuilder, TencentCloudAsrClientBuilder, TranscriptionClient,
         TranscriptionOption, TranscriptionType, VoiceApiAsrClientBuilder,
-    }, TrackId
+    },
 };
 use anyhow::Result;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};

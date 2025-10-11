@@ -11,9 +11,9 @@ mod tencent_cloud;
 mod tencent_cloud_basic;
 mod voiceapi;
 pub use aliyun::AliyunTtsClient;
+pub use deepgram::DeepegramTtsClient;
 pub use tencent_cloud::TencentCloudTtsClient;
 pub use tencent_cloud_basic::TencentCloudTtsBasicClient;
-pub use deepgram::DeepegramTtsClient;
 pub use voiceapi::VoiceApiTtsClient;
 
 #[derive(Clone, Default)]

@@ -8,12 +8,14 @@ pub mod event;
 pub mod handler;
 pub mod llm;
 pub mod media;
+pub mod models;
 pub mod net_tool;
 pub mod proxy;
 pub mod synthesis;
 pub mod transcription;
 pub mod useragent;
 pub mod version;
+
 pub type TrackId = String;
 pub type Sample = i16;
 pub type PcmBuf = Vec<Sample>;

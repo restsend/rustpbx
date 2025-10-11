@@ -1,60 +1,17 @@
 use crate::config::ConsoleConfig;
 use crate::console::middleware::RenderTemplate;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::response::{IntoResponse, Response};
 use minijinja::{Environment, path_loader};
-use sea_orm::{Database, DatabaseConnection};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
-use std::fs::OpenOptions;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::debug;
 
 pub mod auth;
 mod handlers;
 pub mod middleware;
-pub mod migration;
-pub mod models;
 pub use handlers::router;
-
-fn prepare_sqlite_database(database_url: &str) -> Result<()> {
-    let Some(path_part) = database_url.strip_prefix("sqlite://") else {
-        return Ok(());
-    };
-
-    let (path_str, _) = path_part.split_once('?').unwrap_or((path_part, ""));
-    if path_str.is_empty() || path_str.starts_with(':') {
-        return Ok(());
-    }
-
-    let path = Path::new(path_str);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create directory for console database at {}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
-
-    if !path.exists() {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(path)
-            .with_context(|| {
-                format!(
-                    "failed to create console database file at {}",
-                    path.display()
-                )
-            })?;
-    }
-
-    Ok(())
-}
 
 #[derive(Clone)]
 pub struct ConsoleState {
@@ -64,22 +21,11 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
-    pub async fn initialize(config: ConsoleConfig) -> Result<Arc<Self>> {
+    pub async fn initialize(db: DatabaseConnection, config: ConsoleConfig) -> Result<Arc<Self>> {
         let ConsoleConfig {
-            database_url,
             session_secret,
             base_path,
         } = config;
-
-        prepare_sqlite_database(&database_url)?;
-
-        let db = Database::connect(&database_url)
-            .await
-            .with_context(|| format!("failed to connect admin database: {}", database_url))?;
-
-        migration::Migrator::up(&db, None)
-            .await
-            .context("failed to run console migrations")?;
 
         let key_material: [u8; 32] = Sha256::digest(session_secret.as_bytes()).into();
         let session_key = Arc::new(key_material.to_vec());
