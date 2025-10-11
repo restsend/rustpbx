@@ -21,153 +21,158 @@
         </div>
 
         <div x-data='extensionFilters({{ filters | tojson }})'
-            class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-            <div class="flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div class="flex flex-wrap items-center gap-2">
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                        x-text="activeFilters.length ? activeFilters.length + ' filters' : 'No filters'"></span>
-                    <span class="text-slate-400" x-show="activeFilters.length" x-text="activeFiltersSummary()"></span>
+            class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Filters</h2>
+                    <p class="text-xs text-slate-500">Add or remove filters to narrow down the list.</p>
                 </div>
                 <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
                     @click="reset()">
                     <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
                     </svg>
-                    Reset filters
+                    Clear all
                 </button>
             </div>
 
-            <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <template x-for="option in availableFilters" :key="option.id">
-                    <div class="flex flex-col gap-1">
-                        <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400"
-                            x-text="option.label"></span>
-                        <div class="relative" x-data="{ open: false }" @keydown.escape.window="open = false"
-                            @click.outside="open = false">
-                            <button type="button"
-                                class="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium transition hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
-                                :class="isActive(option.id) ? 'bg-sky-50 border-sky-200 text-sky-700' : 'bg-white text-slate-600'"
-                                @click="open = !open">
-                                <span class="truncate" x-text="summaryFor(option)"></span>
-                                <svg class="h-4 w-4 text-slate-400 transition-transform duration-150"
-                                    :class="open ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="none"
-                                    stroke="currentColor" stroke-width="1.8">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                                </svg>
-                            </button>
-                            <div x-cloak x-show="open" x-transition.origin.top.left
-                                class="absolute z-20 mt-2 w-64 rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-xl">
-                                <template x-if="option.type === 'select'">
-                                    <div class="space-y-2">
-                                        <template x-for="choice in option.options" :key="choice.value">
-                                            <label
-                                                class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 hover:bg-slate-100">
-                                                <input type="checkbox"
-                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
-                                                    :checked="isSelected(option.id, choice.value)"
-                                                    @change="toggleSelectOption(option, choice.value, $event.target.checked)">
-                                                <span x-text="choice.label"></span>
+            <div class="mt-6 space-y-6">
+                <div>
+                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Available filters</h3>
+                    <div class="mt-3 flex flex-wrap gap-3">
+                        <template x-for="option in availableFilters" :key="option.id">
+                            <div class="relative" x-data="{ open: false }" @keydown.escape.window="open = false"
+                                @click.outside="open = false">
+                                <button type="button"
+                                    class="group inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 hover:border-slate-300"
+                                    :class="isActive(option.id) ? 'bg-sky-50 border-sky-200 text-sky-700' : 'bg-white text-slate-600'"
+                                    @click="open = !open">
+                                    <span x-text="option.label"></span>
+                                    <span class="text-xs font-normal text-slate-400 group-hover:text-slate-500"
+                                        x-text="summaryFor(option)"></span>
+                                    <svg class="h-4 w-4 text-slate-400 transition-transform duration-150"
+                                        :class="open ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="none"
+                                        stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
+                                    </svg>
+                                </button>
+                                <div x-cloak x-show="open" x-transition.origin.top.left
+                                    class="absolute z-20 mt-2 w-64 rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-xl">
+                                    <template x-if="option.type === 'select'">
+                                        <div class="space-y-2">
+                                            <template x-for="choice in option.options" :key="choice.value">
+                                                <label
+                                                    class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 hover:bg-slate-100">
+                                                    <input type="checkbox"
+                                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                                        :checked="isSelected(option.id, choice.value)"
+                                                        @change="toggleSelectOption(option, choice.value, $event.target.checked)">
+                                                    <span x-text="choice.label"></span>
+                                                </label>
+                                            </template>
+                                            <div class="flex justify-between gap-2 pt-2">
+                                                <button type="button"
+                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
+                                                    @click="clearFilter(option); open = false">
+                                                    Clear
+                                                </button>
+                                                <button type="button"
+                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
+                                                    @click="open = false">
+                                                    Done
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    <template x-if="option.type === 'single'">
+                                        <div class="space-y-1">
+                                            <template x-for="choice in option.options" :key="choice.value">
+                                                <button type="button"
+                                                    class="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left hover:bg-slate-100"
+                                                    @click="selectSingleOption(option, choice.value); open = false">
+                                                    <span x-text="choice.label"></span>
+                                                    <svg x-show="isSingleSelected(option, choice.value)"
+                                                        class="h-4 w-4 text-sky-500" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M5 10l3 3 7-7" />
+                                                    </svg>
+                                                </button>
+                                            </template>
+                                            <div class="flex justify-between gap-2 pt-2">
+                                                <button type="button"
+                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
+                                                    @click="clearFilter(option); open = false">
+                                                    Clear
+                                                </button>
+                                                <button type="button"
+                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
+                                                    @click="open = false">
+                                                    Done
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    <template x-if="option.type === 'daterange'">
+                                        <div class="space-y-3">
+                                            <label class="block text-xs font-medium text-slate-500">
+                                                Start date
+                                                <input type="date"
+                                                    class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    :value="getActive(option.id)?.value?.start || ''"
+                                                    @input="updateRange(option, 'start', $event.target.value)">
                                             </label>
-                                        </template>
-                                        <div class="flex justify-between gap-2 pt-2">
-                                            <button type="button"
-                                                class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                @click="clearFilter(option); open = false">
-                                                Clear
-                                            </button>
-                                            <button type="button"
-                                                class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                @click="open = false">
-                                                Done
-                                            </button>
+                                            <label class="block text-xs font-medium text-slate-500">
+                                                End date
+                                                <input type="date"
+                                                    class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    :value="getActive(option.id)?.value?.end || ''"
+                                                    @input="updateRange(option, 'end', $event.target.value)">
+                                            </label>
+                                            <div class="flex justify-between gap-2 pt-2">
+                                                <button type="button"
+                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
+                                                    @click="clearFilter(option); open = false">
+                                                    Clear
+                                                </button>
+                                                <button type="button"
+                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
+                                                    @click="open = false">
+                                                    Done
+                                                </button>
+                                            </div>
                                         </div>
-                                    </div>
-                                </template>
-                                <template x-if="option.type === 'single'">
-                                    <div class="space-y-1">
-                                        <template x-for="choice in option.options" :key="choice.value">
-                                            <button type="button"
-                                                class="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left hover:bg-slate-100"
-                                                @click="selectSingleOption(option, choice.value); open = false">
-                                                <span x-text="choice.label"></span>
-                                                <svg x-show="isSingleSelected(option, choice.value)"
-                                                    class="h-4 w-4 text-sky-500" viewBox="0 0 20 20" fill="none"
-                                                    stroke="currentColor" stroke-width="1.8">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M5 10l3 3 7-7" />
-                                                </svg>
-                                            </button>
-                                        </template>
-                                        <div class="flex justify-between gap-2 pt-2">
-                                            <button type="button"
-                                                class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                @click="clearFilter(option); open = false">
-                                                Clear
-                                            </button>
-                                            <button type="button"
-                                                class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                @click="open = false">
-                                                Done
-                                            </button>
-                                        </div>
-                                    </div>
-                                </template>
-                                <template x-if="option.type === 'daterange'">
-                                    <div class="space-y-3">
-                                        <label class="block text-xs font-medium text-slate-500">
-                                            Start date
-                                            <input type="date"
-                                                class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                :value="getActive(option.id)?.value?.start || ''"
-                                                @input="updateRange(option, 'start', $event.target.value)">
-                                        </label>
-                                        <label class="block text-xs font-medium text-slate-500">
-                                            End date
-                                            <input type="date"
-                                                class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                :value="getActive(option.id)?.value?.end || ''"
-                                                @input="updateRange(option, 'end', $event.target.value)">
-                                        </label>
-                                        <div class="flex justify-between gap-2 pt-2">
-                                            <button type="button"
-                                                class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                @click="clearFilter(option); open = false">
-                                                Clear
-                                            </button>
-                                            <button type="button"
-                                                class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                @click="open = false">
-                                                Done
-                                            </button>
-                                        </div>
-                                    </div>
-                                </template>
+                                    </template>
+                                </div>
                             </div>
-                        </div>
+                        </template>
                     </div>
-                </template>
-            </div>
+                </div>
 
-            <div class="mt-3 flex flex-wrap gap-2" x-show="activeFilters.length">
-                <template x-for="filter in activeFilters" :key="filter.id">
-                    <span
-                        class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-                        <span x-text="filter.label"></span>
-                        <span class="text-slate-400" x-text="filterSummary(filter)"></span>
-                        <button type="button"
-                            class="rounded-full p-1 text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                            @click="removeFilter(filter.id)">
-                            <span class="sr-only">Remove filter</span>
-                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
-                            </svg>
-                        </button>
-                    </span>
-                </template>
+                <div>
+                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Selected filters</h3>
+                    <div class="mt-3 flex flex-wrap gap-2" x-show="activeFilters.length">
+                        <template x-for="filter in activeFilters" :key="filter.id">
+                            <span
+                                class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+                                <span x-text="filter.label"></span>
+                                <span class="text-slate-400" x-text="filterSummary(filter)"></span>
+                                <button type="button"
+                                    class="rounded-full p-1 text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                                    @click="removeFilter(filter.id)">
+                                    <span class="sr-only">Remove filter</span>
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                                    </svg>
+                                </button>
+                            </span>
+                        </template>
+                    </div>
+                    <p class="mt-3 text-xs text-slate-400" x-show="!activeFilters.length">No filters applied.</p>
+                </div>
             </div>
-            <p class="mt-3 text-xs text-slate-400" x-show="!activeFilters.length">No filters applied.</p>
         </div>
         <div class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
             <div class="overflow-x-auto">
@@ -547,21 +552,6 @@
                         return `${start || 'Start'} → ${end || 'End'}`;
                     }
                     return '';
-                },
-                activeFiltersSummary() {
-                    if (!this.activeFilters.length) {
-                        return '';
-                    }
-                    const parts = this.activeFilters
-                        .map((filter) => this.filterSummary(filter))
-                        .filter(Boolean);
-                    if (!parts.length) {
-                        return '';
-                    }
-                    if (parts.length <= 2) {
-                        return parts.join(' · ');
-                    }
-                    return `${parts.slice(0, 2).join(' · ')} +${parts.length - 2} more`;
                 },
                 clearFilter(option) {
                     this.removeFilter(option.id);

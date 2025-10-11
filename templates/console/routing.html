@@ -27,30 +27,42 @@
             </div>
         </div>
 
-        <section class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-            <div class="flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div class="flex flex-wrap items-center gap-2">
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                        x-text="filteredRoutes.length + ' routes'"></span>
-                    <span class="text-slate-400" x-show="activeFilterCount()"
-                        x-text="activeFilterCount() + ' filters'"></span>
+        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total routes</div>
+                <div class="mt-2 flex items-baseline gap-2">
+                    <span class="text-2xl font-semibold text-slate-900" x-text="summary.total_routes"></span>
+                    <span class="text-xs text-slate-500">rules</span>
                 </div>
-                <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                    @click="clearFilters()">
-                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
-                    </svg>
-                    Reset filters
-                </button>
             </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Active routes</div>
+                <div class="mt-2 text-2xl font-semibold text-emerald-600" x-text="summary.active_routes"></div>
+                <div class="text-xs text-slate-500">Enabled for real-time traffic</div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Paused routes</div>
+                <div class="mt-2 text-2xl font-semibold text-amber-600" x-text="pausedRoutes"></div>
+                <div class="text-xs text-slate-500">Temporarily disabled for maintenance</div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Last deploy</div>
+                <div class="mt-2 text-base font-semibold text-slate-900" x-text="formatDate(summary.last_deploy)"></div>
+                <div class="text-xs text-slate-500">Across the cluster</div>
+            </div>
+        </section>
 
-            <div class="mt-3 grid gap-3 xl:grid-cols-5">
-                <label class="xl:col-span-2 flex flex-col gap-1">
-                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Search</span>
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Routes</h2>
+                    <p class="text-xs text-slate-500">Filter by direction, status, selection method, or search by
+                        regex, trunk, or owner.</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
                     <div class="relative">
                         <input type="search" x-model.debounce.300ms="search"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            class="w-72 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="Search routes, regex, trunks...">
                         <svg class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                             viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -58,33 +70,33 @@
                                 d="M12.5 12.5l4 4m-2.5-6a5.5 5.5 0 11-11 0 5.5 5.5 0 0111 0z" />
                         </svg>
                     </div>
-                </label>
-                <label class="flex flex-col gap-1">
-                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Direction</span>
-                    <select x-model="directionFilter"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <option value="all">Any direction</option>
-                        <option value="inbound">Inbound</option>
-                        <option value="outbound">Outbound</option>
-                    </select>
-                </label>
-                <label class="flex flex-col gap-1">
-                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Status</span>
-                    <select x-model="statusFilter"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <option value="all">Any status</option>
-                        <option value="active">Active</option>
-                        <option value="disabled">Paused</option>
-                    </select>
-                </label>
-                <div class="flex flex-col gap-1">
-                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Selection
-                        method</span>
-                    <div class="flex flex-wrap items-center gap-1">
+                    <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="directionFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="directionFilter = 'all'">All</button>
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="directionFilter === 'inbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="directionFilter = 'inbound'">Inbound</button>
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="directionFilter === 'outbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="directionFilter = 'outbound'">Outbound</button>
+                    </div>
+                    <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="statusFilter === 'all' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
+                            @click="statusFilter = 'all'">Any status</button>
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
+                            @click="statusFilter = 'active'">Active</button>
+                        <button type="button" class="rounded-md px-3 py-1 transition"
+                            :class="statusFilter === 'disabled' ? 'bg-rose-100 text-rose-700' : 'hover:bg-slate-100'"
+                            @click="statusFilter = 'disabled'">Paused</button>
+                    </div>
+                    <div class="flex gap-1 text-xs">
                         <template x-for="option in algorithmOptions" :key="option.value">
                             <button type="button"
-                                class="rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold transition"
-                                :class="algorithmFilter.includes(option.value) ? 'border-sky-300 bg-sky-50 text-sky-700' : 'hover:bg-slate-100 text-slate-600'"
+                                class="rounded-lg border border-slate-200 px-3 py-1 font-medium transition"
+                                :class="algorithmFilter.includes(option.value) ? 'border-sky-300 bg-sky-50 text-sky-700' : 'hover:bg-slate-100'"
                                 @click="toggleAlgorithm(option.value)">
                                 <span x-text="option.label"></span>
                             </button>
@@ -93,134 +105,257 @@
                 </div>
             </div>
 
-            <template x-if="!filteredRoutes.length">
-                <div
-                    class="mt-6 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-200 py-14 text-center text-sm text-slate-400">
-                    <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h4l2-5 4 10 2-5h4" />
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 19h16" />
-                    </svg>
-                    <div>No routes found for the current filters.</div>
-                </div>
-            </template>
+            <div class="mt-5 divide-y divide-slate-100">
+                <template x-if="!filteredRoutes.length">
+                    <div
+                        class="flex flex-col items-center justify-center gap-3 py-14 text-center text-sm text-slate-400">
+                        <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h4l2-5 4 10 2-5h4" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 19h16" />
+                        </svg>
+                        <div>No routes found for the current filters.</div>
+                    </div>
+                </template>
 
-            <div class="mt-6 overflow-x-auto" x-show="filteredRoutes.length">
-                <table class="min-w-full divide-y divide-slate-200 text-sm">
-                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        <tr>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2 w-64">Route</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Direction</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Status</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Selection</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Source</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Targets</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Owner</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Updated</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2 text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 bg-white text-sm text-slate-600">
-                        <template x-for="route in paginatedRoutes" :key="route.id">
-                            <tr class="transition hover:bg-slate-50" :class="route.disabled ? 'opacity-70' : ''">
-                                <td class="px-4 py-2 align-top w-64">
-                                    <div class="font-semibold text-slate-900 truncate" x-text="route.name"></div>
-                                    <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                        <span class="rounded-full bg-slate-100 px-2 py-0.5"
-                                            x-text="'Priority ' + (route.priority ?? '—')"></span>
-                                        <span class="truncate max-w-[12rem]"
-                                            x-text="route.description || 'No description'"
-                                            :title="route.description || 'No description'"></span>
-                                    </div>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2 align-top">
+                <template x-for="route in filteredRoutes" :key="route.id">
+                    <article class="py-4" :class="route.disabled ? 'opacity-60' : ''" x-data="{ open: false }">
+                        <header
+                            class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition hover:border-sky-200 hover:shadow md:flex-row md:items-center md:justify-between">
+                            <div class="flex flex-1 flex-col gap-2">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h3 class="text-base font-semibold text-slate-900" x-text="route.name"></h3>
                                     <span
-                                        class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600' : 'bg-sky-50 text-sky-600'">
+                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                                        :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="2">
+                                            <path x-show="route.direction === 'inbound'" stroke-linecap="round"
+                                                stroke-linejoin="round" d="M5 8l5 5 5-5" />
+                                            <path x-show="route.direction === 'outbound'" stroke-linecap="round"
+                                                stroke-linejoin="round" d="M5 12l5-5 5 5" />
+                                        </svg>
                                         <span class="uppercase" x-text="route.direction"></span>
                                     </span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2 align-top">
                                     <span
-                                        class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="routeStatusClasses(route)">
-                                        <span class="h-1.5 w-1.5 rounded-full"
-                                            :class="route.disabled ? 'bg-rose-500' : 'bg-emerald-500'"></span>
-                                        <span x-text="routeStatusLabel(route)"></span>
+                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                                        Priority
+                                        <span class="font-semibold" x-text="route.priority"></span>
                                     </span>
-                                </td>
-                                <td class="px-4 py-2 align-top">
-                                    <div class="font-semibold text-slate-700" x-text="selectionLabel(route)"></div>
-                                    <div class="text-xs text-slate-400" x-show="route.action.hash_key">
-                                        Hash: <span class="font-mono" x-text="route.action.hash_key"></span>
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 6h8M6 10h5M6 14h8" />
+                                        </svg>
+                                        <span x-text="route.action.select.toUpperCase()"></span>
+                                    </span>
+                                    <template x-if="route.disabled">
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-600 ring-1 ring-rose-200">
+                                            Paused
+                                        </span>
+                                    </template>
+                                </div>
+                                <p class="text-sm text-slate-500"
+                                    x-text="route.description || 'No description provided.'"></p>
+                                <div class="flex flex-wrap gap-3 text-xs text-slate-500">
+                                    <div class="inline-flex items-center gap-1">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                        <span>Owner: </span>
+                                        <span class="font-medium text-slate-600" x-text="route.owner || '—'"></span>
                                     </div>
-                                </td>
-                                <td class="px-4 py-2 align-top text-sm font-medium text-slate-700"
-                                    x-text="route.source_trunk || '—'"></td>
-                                <td class="px-4 py-2 align-top text-sm text-slate-700" x-text="targetSummary(route)">
-                                </td>
-                                <td class="px-4 py-2 align-top text-sm text-slate-700" x-text="route.owner || '—'"></td>
-                                <td class="px-4 py-2 align-top text-xs text-slate-500"
-                                    x-text="formatDate(route.last_modified)"></td>
-                                <td class="whitespace-nowrap px-4 py-2 text-right text-xs font-semibold">
-                                    <div class="flex items-center justify-end gap-2">
-                                        <button type="button"
-                                            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-slate-300"
-                                            :title="trunkSummary(route)" aria-label="Trunks summary">
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                                stroke-width="1.6">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M6 6h8M6 10h5M6 14h8" />
-                                            </svg>
-                                        </button>
-                                        <a :href="route.edit_url || '{{ create_url }}'"
-                                            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700"
-                                            title="Edit route">
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                                stroke-width="1.6">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
-                                            </svg>
-                                        </a>
+                                    <div class="inline-flex items-center gap-1">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M6 2l.344 1.376A2 2 0 008.29 5h3.42a2 2 0 001.947-1.624L14 2" />
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M4 7h12v9a2 2 0 01-2 2H6a2 2 0 01-2-2V7z" />
+                                        </svg>
+                                        <span x-text="formatDate(route.last_modified)"></span>
                                     </div>
-                                </td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
-                <div
-                    class="flex flex-col gap-3 border-t border-slate-100 px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <span x-text="filteredRoutes.length ? pageRangeStart : 0"></span>
-                        –
-                        <span x-text="pageRangeEnd"></span>
-                        of
-                        <span x-text="filteredRoutes.length"></span>
-                        routes
-                    </div>
-                    <div class="flex flex-wrap items-center gap-3">
-                        <label class="flex items-center gap-2">
-                            <span class="text-[11px] uppercase tracking-wide text-slate-400">Per page</span>
-                            <select x-model.number="pageSize"
-                                class="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <template x-for="option in pageSizeOptions" :key="option">
-                                    <option :value="option" x-text="option"></option>
-                                </template>
-                            </select>
-                        </label>
-                        <div
-                            class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs font-semibold text-slate-600">
-                            <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
-                                :disabled="currentPage === 1" @click="prevPage()">
-                                Prev
-                            </button>
-                            <span class="px-2" x-text="`Page ${currentPage} / ${totalPages}`"></span>
-                            <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
-                                :disabled="currentPage === totalPages" @click="nextPage()">
-                                Next
-                            </button>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button type="button"
+                                    class="hidden rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 md:inline-flex">
+                                    History
+                                </button>
+                                <a :href="route.edit_url || '{{ create_url }}'"
+                                    class="hidden rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 md:inline-flex">
+                                    Edit
+                                </a>
+                                <button type="button"
+                                    class="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600"
+                                    @click="open = !open">
+                                    <svg class="h-4 w-4 transition" :class="open ? 'rotate-180' : ''"
+                                        viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </header>
+
+                        <div x-show="open" x-collapse
+                            class="mt-3 space-y-4 rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="rounded-lg border border-slate-200 p-4">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Match
+                                        conditions</div>
+                                    <ul class="mt-3 space-y-2">
+                                        <template x-for="item in matchEntries(route)" :key="item.key">
+                                            <li class="flex items-start gap-2">
+                                                <span
+                                                    class="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-600 ring-1 ring-sky-100">
+                                                    Rx
+                                                </span>
+                                                <div>
+                                                    <div class="text-xs font-semibold text-slate-500"
+                                                        x-text="item.label"></div>
+                                                    <code class="text-xs text-slate-600" x-text="item.value"></code>
+                                                </div>
+                                            </li>
+                                        </template>
+                                        <template x-if="!matchEntries(route).length">
+                                            <li class="text-xs text-slate-400">Matches all traffic</li>
+                                        </template>
+                                    </ul>
+                                </div>
+                                <div class="rounded-lg border border-slate-200 p-4">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Rewrite &
+                                        headers</div>
+                                    <ul class="mt-3 space-y-2">
+                                        <template x-for="item in rewriteEntries(route)" :key="item.key">
+                                            <li class="flex items-start gap-2">
+                                                <span
+                                                    class="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-600 ring-1 ring-amber-100">
+                                                    ↺
+                                                </span>
+                                                <div>
+                                                    <div class="text-xs font-semibold text-slate-500"
+                                                        x-text="item.label"></div>
+                                                    <code class="text-xs text-slate-600" x-text="item.value"></code>
+                                                </div>
+                                            </li>
+                                        </template>
+                                        <template x-if="!rewriteEntries(route).length">
+                                            <li class="text-xs text-slate-400">No rewrite applied</li>
+                                        </template>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="rounded-lg border border-slate-200 p-4">
+                                    <div class="mb-3 flex items-center justify-between">
+                                        <div>
+                                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                                Trunk selection</div>
+                                            <div class="text-sm font-semibold text-slate-700"
+                                                x-text="selectionLabel(route)"></div>
+                                            <template x-if="route.action.hash_key">
+                                                <div class="text-xs text-slate-500">Hash key: <span class="font-mono"
+                                                        x-text="route.action.hash_key"></span></div>
+                                            </template>
+                                        </div>
+                                        <div
+                                            class="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
+                                            <span x-text="totalWeight(route)"></span>
+                                            total weight
+                                        </div>
+                                    </div>
+                                    <div class="space-y-2">
+                                        <template x-for="trunk in (route.action.trunks || [])" :key="trunk.name">
+                                            <div class="rounded-lg border border-slate-200 px-3 py-2">
+                                                <div
+                                                    class="flex items-center justify-between text-xs font-medium text-slate-600">
+                                                    <div class="flex items-center gap-2">
+                                                        <span
+                                                            class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">
+                                                            <span x-text="trunkInitial(trunk.name)"></span>
+                                                        </span>
+                                                        <span x-text="trunk.name"></span>
+                                                    </div>
+                                                    <div class="flex items-center gap-2">
+                                                        <span class="font-semibold text-slate-900"
+                                                            x-text="trunk.weight ?? '—'"></span>
+                                                        <span class="text-slate-400">wt</span>
+                                                        <span
+                                                            class="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-600"
+                                                            x-text="weightPercent(route, trunk) + '%' "></span>
+                                                    </div>
+                                                </div>
+                                                <div class="mt-2 h-1.5 w-full rounded-full bg-slate-100">
+                                                    <div class="h-full rounded-full bg-sky-500"
+                                                        :style="{ width: weightPercent(route, trunk) + '%' }"></div>
+                                                </div>
+                                            </div>
+                                        </template>
+                                        <template x-if="!(route.action.trunks || []).length">
+                                            <div
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-400">
+                                                Uses default
+                                                destination</div>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div class="rounded-lg border border-slate-200 p-4">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source &
+                                        target trunks</div>
+                                    <div class="mt-3 grid gap-3 text-sm">
+                                        <div>
+                                            <div class="text-xs font-semibold text-slate-500">Source trunk</div>
+                                            <div
+                                                class="mt-1 inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
+                                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                    stroke="currentColor" stroke-width="1.6">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M4 4h12v2H4zM4 9h12v2H4zM4 14h12v2H4z" />
+                                                </svg>
+                                                <span x-text="route.source_trunk || '—'"></span>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div class="text-xs font-semibold text-slate-500">Target trunks</div>
+                                            <div class="mt-1 flex flex-wrap gap-2">
+                                                <template x-for="target in (route.target_trunks || [])" :key="target">
+                                                    <span
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M5 10h10M12 5l5 5-5 5" />
+                                                        </svg>
+                                                        <span x-text="target"></span>
+                                                    </span>
+                                                </template>
+                                                <template x-if="!(route.target_trunks || []).length">
+                                                    <span class="text-xs text-slate-400">Default destination</span>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="rounded-lg border border-dashed border-slate-200 p-4">
+                                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Notes</div>
+                                <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-slate-500">
+                                    <template x-for="note in (route.notes || [])" :key="note">
+                                        <li x-text="note"></li>
+                                    </template>
+                                    <template x-if="!(route.notes || []).length">
+                                        <li>No operator notes recorded.</li>
+                                    </template>
+                                </ul>
+                            </div>
                         </div>
-                    </div>
-                </div>
+                    </article>
+                </template>
             </div>
         </section>
 
@@ -233,14 +368,10 @@
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
                 this.routes = Array.isArray(data.routes) ? data.routes : [];
-                const resetPage = () => this.setPage(1);
-                this.$watch('search', resetPage);
-                this.$watch('directionFilter', resetPage);
-                this.$watch('statusFilter', resetPage);
-                this.$watch('algorithmFilter', resetPage);
-                this.$watch('pageSize', () => this.setPage(1));
+                this.summary = Object.assign({ total_routes: 0, active_routes: 0, last_deploy: null }, data.summary || {});
             },
             routes: [],
+            summary: { total_routes: 0, active_routes: 0, last_deploy: null },
             search: '',
             directionFilter: 'all',
             statusFilter: 'all',
@@ -250,22 +381,10 @@
                 { value: 'weight', label: 'Weighted' },
                 { value: 'hash', label: 'Hash' },
             ],
-            pageSizeOptions: [20, 50, 100],
-            pageSize: 20,
-            currentPage: 1,
-            clearFilters() {
-                this.search = '';
-                this.directionFilter = 'all';
-                this.statusFilter = 'all';
-                this.algorithmFilter = [];
-                this.setPage(1);
-            },
-            activeFilterCount() {
-                let count = 0;
-                if (this.directionFilter !== 'all') count += 1;
-                if (this.statusFilter !== 'all') count += 1;
-                count += this.algorithmFilter.length;
-                return count;
+            get pausedRoutes() {
+                const total = Number(this.summary.total_routes) || 0;
+                const active = Number(this.summary.active_routes) || 0;
+                return Math.max(total - active, 0);
             },
             toggleAlgorithm(value) {
                 if (this.algorithmFilter.includes(value)) {
@@ -273,17 +392,6 @@
                 } else {
                     this.algorithmFilter = [...this.algorithmFilter, value];
                 }
-            },
-            setPage(page) {
-                const total = this.totalPages;
-                const next = Math.min(Math.max(page, 1), total);
-                this.currentPage = next;
-            },
-            nextPage() {
-                this.setPage(this.currentPage + 1);
-            },
-            prevPage() {
-                this.setPage(this.currentPage - 1);
             },
             get filteredRoutes() {
                 return this.routes
@@ -313,22 +421,6 @@
                     })
                     .sort((a, b) => a.priority - b.priority);
             },
-            get totalPages() {
-                const total = this.filteredRoutes.length;
-                return Math.max(Math.ceil(total / this.pageSize) || 1, 1);
-            },
-            get paginatedRoutes() {
-                const start = (this.currentPage - 1) * this.pageSize;
-                return this.filteredRoutes.slice(start, start + this.pageSize);
-            },
-            get pageRangeStart() {
-                if (!this.filteredRoutes.length) return 0;
-                return (this.currentPage - 1) * this.pageSize + 1;
-            },
-            get pageRangeEnd() {
-                if (!this.filteredRoutes.length) return 0;
-                return Math.min(this.currentPage * this.pageSize, this.filteredRoutes.length);
-            },
             matchesSearch(route, term) {
                 if (!term) return true;
                 const needle = term.toLowerCase();
@@ -354,6 +446,96 @@
                 }
                 return date.toLocaleString();
             },
+            matchEntries(route) {
+                const labels = {
+                    'from_user': 'From user regex',
+                    'from_host': 'From host regex',
+                    'to_user': 'To user regex',
+                    'to_host': 'To host regex',
+                    'to_port': 'To port',
+                    'request_uri_user': 'R-URI user regex',
+                    'request_uri_host': 'R-URI host regex',
+                    'request_uri_port': 'R-URI port',
+                    'from': 'From',
+                    'to': 'To',
+                    'caller': 'Caller',
+                    'callee': 'Callee',
+                };
+                const match = route.match || {};
+                const entries = [];
+                Object.entries(match).forEach(([key, value]) => {
+                    if (value === null || value === undefined || value === '') {
+                        return;
+                    }
+                    if (key === 'headers' && typeof value === 'object') {
+                        Object.entries(value).forEach(([headerKey, headerValue]) => {
+                            entries.push({
+                                key: headerKey,
+                                label: `Header ${headerKey.replace(/^header\./, '')}`,
+                                value: headerValue,
+                            });
+                        });
+                    } else {
+                        entries.push({
+                            key,
+                            label: labels[key] || key,
+                            value,
+                        });
+                    }
+                });
+                return entries;
+            },
+            rewriteEntries(route) {
+                const labels = {
+                    'from_user': 'Rewrite From user',
+                    'from_host': 'Rewrite From host',
+                    'to_user': 'Rewrite To user',
+                    'to_host': 'Rewrite To host',
+                    'to_port': 'Rewrite To port',
+                    'request_uri_user': 'Rewrite R-URI user',
+                    'request_uri_host': 'Rewrite R-URI host',
+                    'request_uri_port': 'Rewrite R-URI port',
+                    'from': 'Rewrite From',
+                    'to': 'Rewrite To',
+                    'caller': 'Rewrite Caller',
+                    'callee': 'Rewrite Callee',
+                };
+                const rewrite = route.rewrite || {};
+                const entries = [];
+                Object.entries(rewrite).forEach(([key, value]) => {
+                    if (value === null || value === undefined || value === '') {
+                        return;
+                    }
+                    if (key === 'headers' && typeof value === 'object') {
+                        Object.entries(value).forEach(([headerKey, headerValue]) => {
+                            entries.push({
+                                key: headerKey,
+                                label: `Set header ${headerKey.replace(/^header\./, '')}`,
+                                value: headerValue,
+                            });
+                        });
+                    } else {
+                        entries.push({
+                            key,
+                            label: labels[key] || key,
+                            value,
+                        });
+                    }
+                });
+                return entries;
+            },
+            weightPercent(route, trunk) {
+                const trunks = route.action?.trunks || [];
+                const total = trunks.reduce((sum, item) => sum + (item.weight || 0), 0) || 1;
+                const current = trunk.weight || 0;
+                return Math.round((current / total) * 100);
+            },
+            totalWeight(route) {
+                const trunks = route.action?.trunks || [];
+                if (!trunks.length) return '—';
+                const total = trunks.reduce((sum, item) => sum + (item.weight || 0), 0);
+                return total || '—';
+            },
             selectionLabel(route) {
                 const select = (route.action?.select || 'rr').toLowerCase();
                 const map = {
@@ -363,32 +545,14 @@
                 };
                 return map[select] || select;
             },
-            routeStatusLabel(route) {
-                return route.disabled ? 'Paused' : 'Active';
-            },
-            routeStatusClasses(route) {
-                return route.disabled ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600';
-            },
-            trunkSummary(route) {
-                const trunks = route.action?.trunks || [];
-                if (!trunks.length) {
-                    return 'Uses default destination';
-                }
-                const names = trunks.map((item) => item.name || item.trunk || 'Unnamed');
-                if (names.length <= 2) {
-                    return names.join(', ');
-                }
-                return `${names.slice(0, 2).join(', ')} +${names.length - 2} more`;
-            },
-            targetSummary(route) {
-                const targets = route.target_trunks || [];
-                if (!targets.length) {
-                    return 'Default destination';
-                }
-                if (targets.length <= 2) {
-                    return targets.join(', ');
-                }
-                return `${targets.slice(0, 2).join(', ')} +${targets.length - 2} more`;
+            trunkInitial(name) {
+                if (!name) return '?';
+                return name
+                    .split(/[^a-zA-Z0-9]/)
+                    .filter(Boolean)
+                    .map((part) => part[0]?.toUpperCase())
+                    .join('')
+                    .slice(0, 2);
             },
         }));
     });
