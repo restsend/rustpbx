@@ -762,6 +762,7 @@ impl ProxyCall {
                     .unwrap_or_else(|| caller.clone()),
                 credential: target.credential.clone(),
                 headers: target.headers.clone(),
+                ..Default::default()
             };
 
             // Forward dialog state events to aggregator
@@ -931,6 +932,7 @@ impl ProxyCall {
             StatusCode::ServerInternalError,
             Some("No caller specified in dialplan".to_string()),
         ))?;
+        let caller_display_name = self.dialplan.caller_display_name.as_ref();
 
         let offer = match session.callee_offer.as_ref() {
             Some(sdp) if !sdp.trim().is_empty() => Some(sdp.clone().into_bytes()),
@@ -944,6 +946,7 @@ impl ProxyCall {
         };
 
         let invite_option = InviteOption {
+            caller_display_name: caller_display_name.cloned(),
             callee: target.aor.clone(),
             caller: caller.clone(),
             content_type,
@@ -957,6 +960,7 @@ impl ProxyCall {
                 .unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
             headers: target.headers.clone(),
+            ..Default::default()
         };
 
         let mut invite_option = if let Some(ref route_invite) = self.dialplan.route_invite {

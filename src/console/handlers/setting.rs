@@ -53,9 +53,8 @@ pub async fn page_settings(
                         }
                     ],
                     "operations": [
-                        {"label": "Reload dialplan", "id": "reload-dialplan"},
-                        {"label": "Reload trunk ACL", "id": "reload-acl"},
-                        {"label": "Restart media engine", "id": "restart-media"}
+                        {"label": "Reload routing", "id": "reload-routing"},
+                        {"label": "Reload ACL", "id": "reload-acl"},
                     ],
                     "database": {
                         "provider": "PostgreSQL",

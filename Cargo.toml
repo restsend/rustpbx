@@ -39,7 +39,7 @@ minijinja = { version = "2.0.1", features = [
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.143"
 tokio = { version = "1.47.1", features = ["full", "tracing"] }
-tokio-stream = { version = "0.1.17", features = ["net","sync"] }
+tokio-stream = { version = "0.1.17", features = ["net", "sync"] }
 tokio-tungstenite = { version = "0.28.0", features = [
     "rustls-tls-native-roots",
 ] }
@@ -59,7 +59,7 @@ hound = "3.5.1"
 ort = { version = "2.0.0-rc.10", features = ["ndarray"], optional = true }
 ort-sys = { version = "2.0.0-rc.10", optional = true }
 chrono = "0.4.41"
-rsipstack = "0.2.67"
+rsipstack = "0.2.68"
 #rsipstack = { path = "../rsipstack" }
 g729-sys = { version = "0.1.0", optional = true }
 rsip = "0.4.0"

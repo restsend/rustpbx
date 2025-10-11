@@ -14,11 +14,11 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **User Management**: Flexible user authentication and registration system
 
 ### AI Voice Agent Services
-- **Speech-to-Text (ASR)**: Real-time speech recognition with multiple providers (Tencent Cloud, VoiceAPI)
+- **Speech-to-Text (ASR)**: Real-time speech recognition with multiple providers (Tencent Cloud, Aliyun, Deepgram)
 - **Text-to-Speech (TTS)**: High-quality speech synthesis with emotion and speaker control
 - **LLM Integration**: OpenAI-compatible LLM proxy for intelligent conversation handling
-- **Voice Activity Detection**: WebRTC and Silero VAD support for optimal speech processing
-- **Noise Suppression**: Real-time audio denoising for crystal-clear conversations
+- **Voice Activity Detection**: WebRTC and Silero VAD and Ten VAD support for optimal speech processing
+- **Noise Suppression**: Real-time audio denoising(rnnoise) for crystal-clear conversations
 
 ### WebRTC Integration
 - **Direct WebRTC Calls**: Native WebRTC support for web-based communications
@@ -30,7 +30,6 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **RESTful Endpoints**: Complete REST API for call management and control
 - **WebSocket Commands**: Real-time call control via WebSocket connections
 - **Call Management**: List, monitor, and control active calls
-- **LLM Proxy**: Built-in proxy for AI language model services
 
 ## 🛠 Quick Start
 
