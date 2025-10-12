@@ -2,7 +2,7 @@ use crate::console::ConsoleState;
 use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -236,77 +236,6 @@ impl ConsoleState {
             .update(&self.db)
             .await
             .context("failed to update password")
-    }
-
-    pub async fn upsert_super_user(
-        &self,
-        username: &str,
-        email: &str,
-        password: &str,
-    ) -> Result<UserModel> {
-        let username = username.trim();
-        let email = email.trim().to_lowercase();
-        ensure!(!username.is_empty(), "username is required");
-        ensure!(!email.is_empty(), "email is required");
-        ensure!(!password.is_empty(), "password is required");
-
-        let salt = SaltString::generate(&mut OsRng);
-        let hashed = Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
-            .to_string();
-
-        let now = Utc::now().naive_utc();
-
-        let mut user = UserEntity::find()
-            .filter(UserColumn::Username.eq(username))
-            .one(&self.db)
-            .await
-            .with_context(|| format!("failed to lookup user by username: {}", username))?;
-
-        if user.is_none() {
-            if let Some(existing) = UserEntity::find()
-                .filter(UserColumn::Email.eq(email.clone()))
-                .one(&self.db)
-                .await
-                .with_context(|| format!("failed to lookup user by email: {}", email))?
-            {
-                user = Some(existing);
-            }
-        }
-
-        if let Some(user) = user {
-            let mut model: UserActiveModel = user.into();
-            model.username = Set(username.to_string());
-            model.email = Set(email.clone());
-            model.password_hash = Set(hashed);
-            model.is_active = Set(true);
-            model.is_staff = Set(true);
-            model.is_superuser = Set(true);
-            model.reset_token = Set(None);
-            model.reset_token_expires = Set(None);
-            model.updated_at = Set(now);
-            model
-                .update(&self.db)
-                .await
-                .context("failed to update super user")
-        } else {
-            let mut model: UserActiveModel = Default::default();
-            model.username = Set(username.to_string());
-            model.email = Set(email.clone());
-            model.password_hash = Set(hashed);
-            model.created_at = Set(now);
-            model.updated_at = Set(now);
-            model.is_active = Set(true);
-            model.is_staff = Set(true);
-            model.is_superuser = Set(true);
-            model.reset_token = Set(None);
-            model.reset_token_expires = Set(None);
-            model
-                .insert(&self.db)
-                .await
-                .context("failed to create super user")
-        }
     }
 
     pub async fn mark_login(&self, user: &UserModel, last_login_ip: String) -> Result<()> {

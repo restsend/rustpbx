@@ -1,5 +1,11 @@
-use anyhow::Result;
+use anyhow::Context;
+use anyhow::{Result, ensure};
+use argon2::Argon2;
+use argon2::PasswordHasher;
+use argon2::password_hash::SaltString;
+use argon2::password_hash::rand_core::OsRng;
 use chrono::Utc;
+use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
@@ -37,6 +43,77 @@ impl Model {
         match (self.reset_token.as_ref(), self.reset_token_expires) {
             (Some(_), Some(expiry)) => expiry < Utc::now().naive_utc(),
             _ => true,
+        }
+    }
+
+    pub async fn upsert_super_user(
+        db: &DatabaseConnection,
+        username: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<Model> {
+        let username = username.trim();
+        let email = email.trim().to_lowercase();
+        ensure!(!username.is_empty(), "username is required");
+        ensure!(!email.is_empty(), "email is required");
+        ensure!(!password.is_empty(), "password is required");
+
+        let salt = SaltString::generate(&mut OsRng);
+        let hashed = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
+            .to_string();
+
+        let now = Utc::now().naive_utc();
+
+        let mut user = Entity::find()
+            .filter(Column::Username.eq(username))
+            .one(db)
+            .await
+            .with_context(|| format!("failed to lookup user by username: {}", username))?;
+
+        if user.is_none() {
+            if let Some(existing) = Entity::find()
+                .filter(Column::Email.eq(email.clone()))
+                .one(db)
+                .await
+                .with_context(|| format!("failed to lookup user by email: {}", email))?
+            {
+                user = Some(existing);
+            }
+        }
+
+        if let Some(user) = user {
+            let mut model: ActiveModel = user.into();
+            model.username = Set(username.to_string());
+            model.email = Set(email.clone());
+            model.password_hash = Set(hashed);
+            model.is_active = Set(true);
+            model.is_staff = Set(true);
+            model.is_superuser = Set(true);
+            model.reset_token = Set(None);
+            model.reset_token_expires = Set(None);
+            model.updated_at = Set(now);
+            model
+                .update(db)
+                .await
+                .context("failed to update super user")
+        } else {
+            let mut model: ActiveModel = Default::default();
+            model.username = Set(username.to_string());
+            model.email = Set(email.clone());
+            model.password_hash = Set(hashed);
+            model.created_at = Set(now);
+            model.updated_at = Set(now);
+            model.is_active = Set(true);
+            model.is_staff = Set(true);
+            model.is_superuser = Set(true);
+            model.reset_token = Set(None);
+            model.reset_token_expires = Set(None);
+            model
+                .insert(db)
+                .await
+                .context("failed to create super user")
         }
     }
 }
