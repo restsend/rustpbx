@@ -97,6 +97,10 @@ impl ConsoleState {
         r
     }
 
+    pub fn db(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
     pub fn url_for(&self, suffix: &str) -> String {
         let trimmed = suffix.trim();
         if trimmed.is_empty() || trimmed == "/" {
