@@ -1,5 +1,8 @@
 use crate::console::ConsoleState;
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use std::sync::Arc;
 
 pub mod call_record;
@@ -33,14 +36,25 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             get(self::user::reset_page).post(self::user::reset_post),
         )
         // PBX pages
-        .route("/extensions", get(self::extension::page_extensions))
+        .route(
+            "/extensions",
+            get(self::extension::page_extensions).post(self::extension::create_extension),
+        )
         .route(
             "/extensions/new",
             get(self::extension::page_extension_create),
         )
         .route(
             "/extensions/{id}",
-            get(self::extension::page_extension_detail),
+            get(self::extension::page_extension_detail).post(self::extension::update_extension),
+        )
+        .route(
+            "/extensions/{id}/delete",
+            post(self::extension::delete_extension),
+        )
+        .route(
+            "/extensions/{id}/toggle",
+            post(self::extension::toggle_extension_login),
         )
         .route("/routing", get(self::routing::page_routing))
         .route("/routing/new", get(self::routing::page_routing_create))

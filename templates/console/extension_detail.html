@@ -60,21 +60,29 @@
             {% endif %}
         </div>
 
+        {% if error_message %}
+        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {{ error_message }}
+        </div>
+        {% endif %}
+
         <form action="{{ form_action }}" method="post" class="space-y-6" x-data="{
-                loginAllowed: {{ 'true' if extension.login_allowed else 'false' }},
-                voicemailEnabled: {{ 'true' if extension.voicemail_enabled else 'false' }},
-                callForwardingMode: 'none',
-                callForwardingDestination: '',
+        loginAllowed: {{ 'true' if extension.login_allowed else 'false' }},
+        voicemailEnabled: {{ 'true' if extension.voicemail_enabled else 'false' }},
+        callForwardingMode: 'none',
+        callForwardingDestination: '',
+        callForwardingTimeout: {{ extension.call_forwarding_timeout | default(30) }},
         activeTab: 'profile',
-            }"
-            x-init="callForwardingMode = ($el.dataset.forwardingMode || 'none'); callForwardingDestination = $el.dataset.forwardingDestination || ''"
-            x-effect="if (callForwardingMode === 'none') { callForwardingDestination = ''; }"
+        }" x-init="callForwardingMode = ($el.dataset.forwardingMode || 'none'); callForwardingDestination = $el.dataset.forwardingDestination || ''; const parsedTimeout = parseInt($el.dataset.forwardingTimeout || '', 10); callForwardingTimeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 30;"
+            x-effect="if (callForwardingMode === 'none') { callForwardingDestination = ''; } if (callForwardingTimeout < 5) { callForwardingTimeout = 5; } if (callForwardingTimeout > 120) { callForwardingTimeout = 120; }"
             data-forwarding-mode="{{ extension.call_forwarding_mode | default('none') }}"
-            data-forwarding-destination="{{ extension.call_forwarding_destination | default('') }}">
+            data-forwarding-destination="{{ extension.call_forwarding_destination | default('') }}"
+            data-forwarding-timeout="{{ extension.call_forwarding_timeout | default(30) }}">
             <input type="hidden" name="login_allowed" :value="loginAllowed ? 'true' : 'false'">
             <input type="hidden" name="voicemail_enabled" :value="voicemailEnabled ? 'true' : 'false'">
             <input type="hidden" name="call_forwarding_mode" :value="callForwardingMode">
             <input type="hidden" name="call_forwarding_destination" :value="callForwardingDestination">
+            <input type="hidden" name="call_forwarding_timeout" :value="callForwardingTimeout">
             <div class="space-y-6">
                 <nav
                     class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
@@ -98,22 +106,11 @@
                         Access & Forwarding
                     </button>
                     <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
-                        :class="activeTab === 'telephony' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        @click="activeTab = 'telephony'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M22 16.92V21a1 1 0 01-1.09 1 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 11.72 19.79 19.79 0 010 3.09 1 1 0 011 2h4.09a1 1 0 011 .75 12.4 12.4 0 00.7 2.27 1 1 0 01-.23 1L5.21 7.79a16 16 0 006 6l1.74-1.57a1 1 0 011-.24 12.4 12.4 0 002.27.7 1 1 0 01.75 1V22a1 1 0 01-1 1z" />
-                        </svg>
-                        Telephony
-                    </button>
-                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
                         :class="activeTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         @click="activeTab = 'notes'">
                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 14h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h3v12H3z" />
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
                         </svg>
                         Notes
                     </button>
@@ -142,6 +139,16 @@
                                     value="{{ extension.display_name | default('') }}"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="Visible to internal contacts">
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                SIP password
+                                <input type="password" name="sip_password"
+                                    value="{{ extension.sip_password | default('') }}"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Auto-generated secure secret">
+                                <span class="text-xs font-normal text-slate-400">Provide a strong password or leave
+                                    blank to
+                                    auto-generate later.</span>
                             </label>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                                 Department
@@ -186,9 +193,10 @@
                                 <button type="button" @click="loginAllowed = !loginAllowed"
                                     :class="loginAllowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
                                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 22 22" fill="none" stroke="currentColor"
                                         stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l3 4-3 4" />
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
                                     </svg>
                                     <span x-text="loginAllowed ? 'Enabled' : 'Disabled'"></span>
                                 </button>
@@ -202,10 +210,10 @@
                                 <button type="button" @click="voicemailEnabled = !voicemailEnabled"
                                     :class="voicemailEnabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
                                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 22 22" fill="none" stroke="currentColor"
                                         stroke-width="1.8">
                                         <path stroke-linecap="round" stroke-linejoin="round"
-                                            d="M5 7a5 5 0 0010 0M4 7h12" />
+                                            d="M2.25 13.5h3.86a2.25 2.25 0 0 1 2.012 1.244l.256.512a2.25 2.25 0 0 0 2.013 1.244h3.218a2.25 2.25 0 0 0 2.013-1.244l.256-.512a2.25 2.25 0 0 1 2.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 0 0-2.15-1.588H6.911a2.25 2.25 0 0 0-2.15 1.588L2.35 13.177a2.25 2.25 0 0 0-.1.661Z" />
                                     </svg>
                                     <span x-text="voicemailEnabled ? 'Enabled' : 'Disabled'"></span>
                                 </button>
@@ -219,7 +227,7 @@
                             <p class="text-sm text-slate-500">Choose how incoming calls are diverted for this extension.
                             </p>
                         </header>
-                        <div class="mt-6 space-y-5">
+                        <div class="mt-6 space-y-6">
                             <div class="grid gap-3 md:grid-cols-2">
                                 <label
                                     class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
@@ -228,74 +236,71 @@
                                         class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
                                         x-model="callForwardingMode">
                                     <span>
-                                        <span class="font-semibold text-slate-900">None</span>
+                                        <span class="font-semibold text-slate-900">No forwarding</span>
                                         <span class="block text-xs text-slate-500">All calls ring this extension without
+                                            diversion.</span>
+                                    </span>
+                                </label>
+                                <label
+                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="callForwardingMode === 'always' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                    <input type="radio" name="call_forwarding_mode_choice" value="always"
+                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                        x-model="callForwardingMode">
+                                    <span>
+                                        <span class="font-semibold text-slate-900">Always forward</span>
+                                        <span class="block text-xs text-slate-500">Send every call to another
+                                            destination immediately.</span>
+                                    </span>
+                                </label>
+                                <label
+                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="callForwardingMode === 'when_busy' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                    <input type="radio" name="call_forwarding_mode_choice" value="when_busy"
+                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                        x-model="callForwardingMode">
+                                    <span>
+                                        <span class="font-semibold text-slate-900">When busy</span>
+                                        <span class="block text-xs text-slate-500">Forward calls only when the endpoint
+                                            is already handling another call.</span>
+                                    </span>
+                                </label>
+                                <label
+                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
+                                    :class="callForwardingMode === 'when_not_answered' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                    <input type="radio" name="call_forwarding_mode_choice" value="when_not_answered"
+                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
+                                        x-model="callForwardingMode">
+                                    <span>
+                                        <span class="font-semibold text-slate-900">When not answered</span>
+                                        <span class="block text-xs text-slate-500">Try this extension first, then
+                                            forward after the timeout below.</span>
+                                    </span>
+                                </label>
                             </div>
-                </section>
 
-                <section x-show="activeTab === 'telephony'" x-transition.opacity x-cloak class="space-y-6">
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">SIP credentials</h2>
-                            <p class="text-sm text-slate-500">Keep these private—use regenerate after onboarding
-                                devices.</p>
-                        </header>
-                        <div class="mt-6 grid gap-5 md:grid-cols-2">
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                SIP password
-                                <input type="password" name="sip_password"
-                                    value="{{ extension.sip_password | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Auto-generated secure secret">
-                                <span class="text-xs font-normal text-slate-400">Provide a strong password or leave
-                                    blank to
-                                    auto-generate later.</span>
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Security PIN
-                                <input type="text" name="pin" value="{{ extension.pin | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Optional keypad PIN">
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
-                            <p class="text-sm text-slate-500">Customize how recipients perceive this extension on
-                                outbound
-                                calls.</p>
-                        </header>
-                        <div class="mt-6 grid gap-5 md:grid-cols-2">
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Caller ID name
-                                <input type="text" name="caller_id_name"
-                                    value="{{ extension.caller_id_name | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Name shown to recipients">
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Caller ID number
-                                <input type="text" name="caller_id_number"
-                                    value="{{ extension.caller_id_number | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="E.164 format recommended">
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Outbound caller ID override
-                                <input type="text" name="outbound_caller_id"
-                                    value="{{ extension.outbound_caller_id | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Optional">
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Emergency caller ID
-                                <input type="text" name="emergency_caller_id"
-                                    value="{{ extension.emergency_caller_id | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Emergency services callback">
-                            </label>
+                            <div class="grid gap-5 md:grid-cols-2">
+                                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                    Forward destination
+                                    <input type="tel" x-model="callForwardingDestination"
+                                        :disabled="callForwardingMode === 'none'"
+                                        :class="callForwardingMode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                        class="rounded-lg border px-3 py-2 text-sm text-slate-700 transition"
+                                        placeholder="SIP URI, extension, or phone number">
+                                    <span class="text-xs font-normal text-slate-400">Required for forwarding modes other
+                                        than "No forwarding".</span>
+                                </label>
+                                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                    Ring timeout (seconds)
+                                    <input type="number" min="5" max="120" step="1"
+                                        x-model.number="callForwardingTimeout" :disabled="callForwardingMode === 'none'"
+                                        :class="callForwardingMode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                        class="rounded-lg border px-3 py-2 text-sm text-slate-700 transition"
+                                        placeholder="30">
+                                    <span class="text-xs font-normal text-slate-400">How long to ring before forwarding.
+                                        Clamped between 5 and 120 seconds.</span>
+                                </label>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -314,72 +319,23 @@
                     </div>
                 </section>
             </div>
+
+            <div class="flex flex-col gap-3 sm:flex-row sm:justify-between">
+                <div class="text-xs text-slate-400">
+                    Changes are saved to draft immediately after submission. No services are disrupted until applied.
+                </div>
+                <div class="flex items-center gap-3">
+                    <a href="{{ back_url }}"
+                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                        Cancel
+                    </a>
+                    <button type="submit"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                        {{ submit_label }}
+                    </button>
+                </div>
+            </div>
+        </form>
     </div>
-    </section>
-
-    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'telephony'"
-        x-transition.opacity x-cloak>
-        <header class="flex flex-col gap-1">
-            <h2 class="text-lg font-semibold text-slate-900">Caller ID</h2>
-            <p class="text-sm text-slate-500">Customize how recipients perceive this extension on outbound
-                calls.</p>
-        </header>
-        <div class="mt-6 grid gap-5 md:grid-cols-2">
-            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                Caller ID name
-                <input type="text" name="caller_id_name" value="{{ extension.caller_id_name | default('') }}"
-                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="Name shown to recipients">
-            </label>
-            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                Caller ID number
-                <input type="text" name="caller_id_number" value="{{ extension.caller_id_number | default('') }}"
-                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="E.164 format recommended">
-            </label>
-            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                Outbound caller ID override
-                <input type="text" name="outbound_caller_id" value="{{ extension.outbound_caller_id | default('') }}"
-                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="Optional">
-            </label>
-            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                Emergency caller ID
-                <input type="text" name="emergency_caller_id" value="{{ extension.emergency_caller_id | default('') }}"
-                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="Emergency services callback">
-            </label>
-        </div>
-    </section>
-
-    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
-        x-transition.opacity x-cloak>
-        <header class="flex flex-col gap-1">
-            <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
-            <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or escalation
-                details in one place.</p>
-        </header>
-        <textarea name="notes" rows="4"
-            class="mt-6 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-            placeholder="Optional internal notes">{{ extension.notes | default('') }}</textarea>
-    </section>
-
-    <div class="flex flex-col gap-3 sm:flex-row sm:justify-between">
-        <div class="text-xs text-slate-400">
-            Changes are saved to draft immediately after submission. No services are disrupted until applied.
-        </div>
-        <div class="flex items-center gap-3">
-            <a href="{{ back_url }}"
-                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-                Cancel
-            </a>
-            <button type="submit"
-                class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                {{ submit_label }}
-            </button>
-        </div>
-    </div>
-    </form>
-</div>
 </div>
 {% endblock %}
