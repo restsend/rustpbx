@@ -1,11 +1,8 @@
-use std::path::Path;
-
 use anyhow::Result;
 use clap::Parser;
 use dotenv::dotenv;
-#[cfg(feature = "console")]
-use rustpbx::console::ConsoleState;
 use rustpbx::{app::AppStateBuilder, config::Config, version};
+use std::path::Path;
 use tokio::select;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{
@@ -84,14 +81,14 @@ async fn main() -> Result<()> {
             .await
             .expect("Failed to create or connect to database");
 
-        let console_config = config.console.clone().unwrap_or_default();
-        let console_state = ConsoleState::initialize(db, console_config)
-            .await
-            .expect("Failed to initialize console state");
-        console_state
-            .upsert_super_user(super_username, &super_email, super_password)
-            .await
-            .expect("Failed to create or update super user");
+        rustpbx::models::user::Model::upsert_super_user(
+            &db,
+            super_username,
+            &super_email,
+            super_password,
+        )
+        .await
+        .expect("Failed to create or update super user");
         println!(
             "Console super user '{}' ensured with email '{}'",
             super_username, super_email
