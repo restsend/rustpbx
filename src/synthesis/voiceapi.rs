@@ -172,7 +172,7 @@ impl SynthesisClient for VoiceApiTtsClient {
                             ws_to_event_stream(ws_stream, cmd_seq)
                         }
                         Err(e) => {
-                            tracing::error!("VoiceAPI TTS websocket error: {}", e);
+                            tracing::warn!("VoiceAPI TTS websocket error: {}", e);
                             stream::empty().boxed()
                         }
                     })

@@ -1,4 +1,3 @@
-use super::routing::sample_trunks;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use axum::{
     extract::{Path as AxumPath, State},
@@ -6,6 +5,82 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
+
+fn sample_trunks() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "sip-hk-primary",
+            "display_name": "HK Primary SIP",
+            "carrier": "Pacific Voice HK",
+            "dest": "sip:hk-primary.provider.com",
+            "transport": "tls",
+            "status": "Healthy",
+            "direction": ["outbound"],
+            "ip_whitelist": [
+                {"label": "HK POP", "cidr": "203.0.113.10/32"},
+                {"label": "HK DR", "cidr": "203.0.113.12/32"}
+            ],
+            "did_numbers": [
+                {"number": "+85258001234", "label": "Sales hotline"}
+            ],
+            "max_cps": 45,
+            "max_calls": 160,
+            "limits": {
+                "max_concurrent": 160,
+                "max_cps": 45,
+                "max_call_duration": 3600
+            },
+            "billing": {
+                "template_id": "tpl-premium-hk",
+                "usage": {
+                    "current": {
+                        "minutes": 12450.0,
+                        "included_minutes": 15000.0
+                    }
+                }
+            },
+            "default_route": {
+                "id": "sales-outbound-hk",
+                "name": "Sales outbound (HK)"
+            }
+        }),
+        json!({
+            "name": "pstn-local",
+            "display_name": "Local PSTN",
+            "carrier": "MetroTel",
+            "dest": "sip:pstn-local.provider.com",
+            "transport": "udp",
+            "status": "Warning",
+            "direction": ["inbound", "outbound"],
+            "ip_whitelist": [
+                {"label": "Metro POP", "cidr": "198.51.100.20/29"},
+                {"label": "Firewall VIP", "cidr": "198.51.100.48/32"}
+            ],
+            "did_numbers": [
+                {"number": "+861059001234", "label": "Support hotline"},
+                {"number": "+861059001235", "label": "Billing hotline"}
+            ],
+            "limits": {
+                "max_concurrent": 90,
+                "max_cps": 15,
+                "max_call_duration": 5400
+            },
+            "billing": {
+                "template_id": "tpl-domestic-cn",
+                "usage": {
+                    "current": {
+                        "minutes": 8420.0,
+                        "included_minutes": 10000.0
+                    }
+                }
+            },
+            "default_route": {
+                "id": "support-inbound",
+                "name": "Support inbound"
+            }
+        }),
+    ]
+}
 
 fn direction_flags(value: &Value) -> (bool, bool) {
     let Some(arr) = value.as_array() else {

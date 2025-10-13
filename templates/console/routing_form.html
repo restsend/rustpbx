@@ -29,6 +29,12 @@
             </div>
         </div>
 
+        {% if error_message %}
+        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {{ error_message }}
+        </div>
+        {% endif %}
+
         <form id="routing-form" action="{{ form_action }}" method="post" class="space-y-6">
             <input type="hidden" name="disabled" :value="route.disabled">
             <input type="hidden" name="payload" :value="jsonPreview">

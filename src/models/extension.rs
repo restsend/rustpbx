@@ -1,11 +1,17 @@
 use sea_orm::entity::prelude::*;
+use sea_orm::{ActiveValue::Set, ConnectionTrait, DbErr, QueryFilter};
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer, json_null, pk_auto, string, string_null, text_null, timestamp, timestamp_null,
+    boolean, integer_null, pk_auto, string, string_null, text_null, timestamp, timestamp_null,
 };
 use sea_query::Expr;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+pub const DEFAULT_FORWARDING_TIMEOUT: i32 = 30;
+pub const MIN_FORWARDING_TIMEOUT: i32 = 5;
+pub const MAX_FORWARDING_TIMEOUT: i32 = 120;
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Default)]
 #[sea_orm(table_name = "rustpbx_extensions")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -15,29 +21,28 @@ pub struct Model {
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub status: Option<String>,
-    pub login_allowed: bool,
-    pub voicemail_enabled: bool,
+    pub login_disabled: bool,
+    pub voicemail_disabled: bool,
     pub sip_password: Option<String>,
-    pub pin: Option<String>,
-    pub caller_id_name: Option<String>,
-    pub caller_id_number: Option<String>,
-    pub outbound_caller_id: Option<String>,
-    pub emergency_caller_id: Option<String>,
-    pub call_forwarding_mode: String,
+    pub call_forwarding_mode: Option<String>,
     pub call_forwarding_destination: Option<String>,
     pub call_forwarding_timeout: Option<i32>,
-    pub registrar: Option<String>,
-    pub registered_at: Option<DateTime>,
-    pub metadata: Option<Json>,
+    #[sea_orm(column_type = "DateTime")]
+    pub registered_at: Option<DateTimeUtc>,
     pub notes: Option<String>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    #[sea_orm(column_type = "DateTime", default_value = "CURRENT_TIMESTAMP")]
+    pub created_at: DateTimeUtc,
+    #[sea_orm(column_type = "DateTime", default_value = "CURRENT_TIMESTAMP")]
+    pub updated_at: DateTimeUtc,
 }
 
-#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::extension_department::Entity")]
-    ExtensionDepartment,
+#[derive(Copy, Clone, Debug, EnumIter)]
+pub enum Relation {}
+
+impl RelationTrait for Relation {
+    fn def(&self) -> RelationDef {
+        panic!("no direct relations defined for extension");
+    }
 }
 
 impl Related<super::department::Entity> for Entity {
@@ -51,6 +56,125 @@ impl Related<super::department::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Entity {
+    pub async fn find_by_id_with_departments<C>(
+        conn: &C,
+        id: i64,
+    ) -> Result<Option<(Model, Vec<super::department::Model>)>, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        let mut results = Self::find()
+            .filter(Column::Id.eq(id))
+            .find_with_related(super::department::Entity)
+            .all(conn)
+            .await?;
+
+        Ok(results.pop())
+    }
+
+    pub async fn replace_departments<C>(
+        conn: &C,
+        extension_id: i64,
+        department_ids: &[i64],
+    ) -> Result<(), DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        super::extension_department::Entity::delete_many()
+            .filter(super::extension_department::Column::ExtensionId.eq(extension_id))
+            .exec(conn)
+            .await?;
+
+        if department_ids.is_empty() {
+            return Ok(());
+        }
+
+        let models =
+            department_ids
+                .iter()
+                .map(|department_id| super::extension_department::ActiveModel {
+                    extension_id: Set(extension_id),
+                    department_id: Set(*department_id),
+                    ..Default::default()
+                });
+
+        super::extension_department::Entity::insert_many(models)
+            .exec(conn)
+            .await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{department, migration::Migrator};
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn extension_can_map_to_multiple_departments() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        Migrator::up(&db, None)
+            .await
+            .expect("migrations should succeed");
+
+        let extension = ActiveModel {
+            extension: Set("1001".to_string()),
+            login_disabled: Set(false),
+            voicemail_disabled: Set(false),
+            call_forwarding_mode: Set(Some("none".to_string())),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert extension");
+
+        let sales = department::ActiveModel {
+            name: Set("Sales".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert sales");
+
+        let support = department::ActiveModel {
+            name: Set("Support".to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert support");
+
+        Entity::replace_departments(&db, extension.id, &[sales.id, support.id])
+            .await
+            .expect("assign departments");
+
+        let result = Entity::find_by_id_with_departments(&db, extension.id)
+            .await
+            .expect("query extension")
+            .expect("extension exists");
+
+        assert_eq!(result.1.len(), 2, "extension should have two departments");
+
+        Entity::replace_departments(&db, extension.id, &[sales.id])
+            .await
+            .expect("reassign departments");
+
+        let result = Entity::find_by_id_with_departments(&db, extension.id)
+            .await
+            .expect("query extension")
+            .expect("extension exists");
+
+        assert_eq!(result.1.len(), 1, "extension should have one department");
+        assert_eq!(result.1[0].id, sales.id);
+    }
+}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -68,24 +192,13 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::DisplayName).char_len(160))
                     .col(string_null(Column::Email).char_len(160))
                     .col(string_null(Column::Status).char_len(32))
-                    .col(boolean(Column::LoginAllowed).default(true))
-                    .col(boolean(Column::VoicemailEnabled).default(false))
+                    .col(boolean(Column::LoginDisabled))
+                    .col(boolean(Column::VoicemailDisabled))
                     .col(string_null(Column::SipPassword).char_len(160))
-                    .col(string_null(Column::Pin).char_len(32))
-                    .col(string_null(Column::CallerIdName).char_len(160))
-                    .col(string_null(Column::CallerIdNumber).char_len(64))
-                    .col(string_null(Column::OutboundCallerId).char_len(64))
-                    .col(string_null(Column::EmergencyCallerId).char_len(64))
-                    .col(
-                        string(Column::CallForwardingMode)
-                            .char_len(32)
-                            .default("none"),
-                    )
+                    .col(string_null(Column::CallForwardingMode).char_len(32))
                     .col(string_null(Column::CallForwardingDestination).char_len(160))
-                    .col(integer(Column::CallForwardingTimeout).null())
-                    .col(string_null(Column::Registrar).char_len(160))
+                    .col(integer_null(Column::CallForwardingTimeout))
                     .col(timestamp_null(Column::RegisteredAt))
-                    .col(json_null(Column::Metadata))
                     .col(text_null(Column::Notes))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))

@@ -2,8 +2,9 @@ use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{json_null, pk_auto, string, string_null, text_null, timestamp};
 use sea_query::Expr;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "rustpbx_departments")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -15,30 +16,15 @@ pub struct Model {
     pub description: Option<String>,
     pub color: Option<String>,
     pub manager_contact: Option<String>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    #[sea_orm(column_type = "DateTime", default_value = "CURRENT_TIMESTAMP")]
+    pub created_at: DateTimeUtc,
+    #[sea_orm(column_type = "DateTime", default_value = "CURRENT_TIMESTAMP")]
+    pub updated_at: DateTimeUtc,
     pub metadata: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::extension_department::Entity")]
-    ExtensionDepartment,
-}
-
-impl Related<super::extension::Entity> for Entity {
-    fn to() -> RelationDef {
-        super::extension_department::Relation::Extension.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(
-            super::extension_department::Relation::Department
-                .def()
-                .rev(),
-        )
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 

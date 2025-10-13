@@ -12,6 +12,82 @@
     {% endfor %}
     <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
     <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
+    <script>
+        document.addEventListener('alpine:init', () => {
+            const STORAGE_KEYS = {
+                sidebarCollapsed: 'console.sidebar.collapsed',
+            };
+
+            Alpine.data('consoleLayoutShell', () => ({
+                sidebarOpen: false,
+                sidebarCollapsed: false,
+                init() {
+                    this.sidebarCollapsed = this.readCollapsedState();
+                },
+                readCollapsedState() {
+                    try {
+                        const raw = window.localStorage.getItem(STORAGE_KEYS.sidebarCollapsed);
+                        return raw === 'true';
+                    } catch (_) {
+                        return false;
+                    }
+                },
+                toggleSidebarCollapse() {
+                    this.sidebarCollapsed = !this.sidebarCollapsed;
+                    this.persistCollapsedState();
+                },
+                persistCollapsedState() {
+                    try {
+                        window.localStorage.setItem(
+                            STORAGE_KEYS.sidebarCollapsed,
+                            this.sidebarCollapsed ? 'true' : 'false',
+                        );
+                    } catch (_) {
+                        /* ignore storage errors */
+                    }
+                },
+            }));
+
+            Alpine.data('consoleConfirmDialog', () => ({
+                open: false,
+                title: 'Are you sure?',
+                message: '',
+                confirmLabel: 'Confirm',
+                cancelLabel: 'Cancel',
+                destructive: false,
+                onConfirm: null,
+                init() {
+                    window.addEventListener('console:confirm', (event) => {
+                        const detail = event.detail || {};
+                        this.title = detail.title || 'Are you sure?';
+                        this.message = detail.message || detail.description || '';
+                        this.confirmLabel = detail.confirmLabel || 'Confirm';
+                        this.cancelLabel = detail.cancelLabel || 'Cancel';
+                        this.destructive = Boolean(detail.destructive);
+                        this.onConfirm = typeof detail.onConfirm === 'function' ? detail.onConfirm : null;
+                        this.open = true;
+                        this.$nextTick(() => {
+                            this.$refs.confirmButton?.focus();
+                        });
+                    });
+                },
+                close() {
+                    this.open = false;
+                    this.onConfirm = null;
+                },
+                confirm() {
+                    if (typeof this.onConfirm === 'function') {
+                        const result = this.onConfirm();
+                        if (result && typeof result.then === 'function') {
+                            result.finally(() => this.close());
+                            return;
+                        }
+                    }
+                    this.close();
+                },
+            }));
+        });
+    </script>
     {% endblock %}
     <style>
         [x-cloak] {
@@ -21,7 +97,7 @@
 </head>
 
 <body class="min-h-screen bg-slate-100 text-slate-900">
-    <div x-data="{ sidebarOpen: false, sidebarCollapsed: false }" class="min-h-screen">
+    <div x-data="consoleLayoutShell()" x-init="init()" class="min-h-screen">
         <!-- Off-canvas overlay -->
         <div x-show="sidebarOpen" x-transition.opacity class="fixed inset-0 z-30 bg-black/40 lg:hidden"
             @click="sidebarOpen=false"></div>
@@ -39,7 +115,7 @@
                         <div class="font-semibold" x-show="!sidebarCollapsed" x-transition.opacity x-cloak>RustPBX</div>
                     </div>
                     <button class="hidden rounded-lg p-2 hover:bg-slate-100 lg:inline-flex"
-                        @click="sidebarCollapsed = !sidebarCollapsed" aria-label="Toggle sidebar">
+                        @click="toggleSidebarCollapse()" aria-label="Toggle sidebar">
                         <svg x-show="!sidebarCollapsed" x-transition.opacity class="h-5 w-5 text-slate-600"
                             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7" />
@@ -173,6 +249,37 @@
             </footer>
         </div>
     </div>
+
+    <div x-data="consoleConfirmDialog()" x-show="open" x-cloak x-transition.opacity.duration.150ms
+        class="fixed inset-0 z-[100] flex items-center justify-center">
+        <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" @click="close" aria-hidden="true"></div>
+        <div class="relative z-10 w-full max-w-sm origin-center scale-95 transform rounded-xl bg-white p-6 shadow-2xl ring-1 ring-black/10"
+            x-transition.scale.duration.150ms @keydown.escape.window="close">
+            <div class="flex items-start gap-3">
+                <div class="mt-1 flex h-10 w-10 items-center justify-center rounded-full"
+                    :class="destructive ? 'bg-rose-100 text-rose-600 ring-1 ring-rose-200' : 'bg-sky-100 text-sky-600 ring-1 ring-sky-200'">
+                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M12 9v4m0 4h.01M5.25 7.5h13.5L18 19.5H6l-.75-12z" />
+                    </svg>
+                </div>
+                <div class="flex-1 space-y-2">
+                    <h2 class="text-base font-semibold text-slate-900" x-text="title"></h2>
+                    <p class="text-sm text-slate-600" x-show="message" x-text="message"></p>
+                </div>
+            </div>
+            <div class="mt-6 flex items-center justify-end gap-2">
+                <button type="button"
+                    class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:ring-offset-2"
+                    @click="close" x-text="cancelLabel"></button>
+                <button type="button" x-ref="confirmButton"
+                    class="inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm transition focus:outline-none focus:ring-2 focus:ring-offset-2"
+                    :class="destructive ? 'bg-rose-600 hover:bg-rose-500 focus:ring-rose-500' : 'bg-sky-600 hover:bg-sky-500 focus:ring-sky-500'"
+                    @click="confirm" x-text="confirmLabel"></button>
+            </div>
+        </div>
+    </div>
+
 </body>
 
 </html>

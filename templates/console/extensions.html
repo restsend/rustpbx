@@ -1,17 +1,21 @@
 {% extends "console/layout.html" %}
-{% block title %}Extensions · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}Extensions · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
-<div class="p-4 sm:p-6">
-    <div class="mx-auto max-w-7xl space-y-5">
+<div class="p-4 sm:p-6" x-data='extensionsPage({
+    basePath: {{ (base_path | default("/console")) | tojson }},
+    filters: {{ filters | default({}) | tojson }},
+    createUrl: {{ create_url | tojson }}
+})' x-init="init()">
+    <div class="mx-auto max-w-7xl space-y-6">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-0.5">
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Directory management</p>
                 <h1 class="text-2xl font-semibold text-slate-900">Extensions</h1>
-                <p class="text-sm text-slate-500 sm:max-w-xl">Search, review, and manage every extension in your PBX.
-                </p>
+                <p class="text-sm text-slate-500 sm:max-w-xl">Review, search, and manage extension endpoints without
+                    refreshing the page.</p>
             </div>
             <div class="flex gap-3">
-                <a href="{{ create_url }}"
+                <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
@@ -21,331 +25,235 @@
             </div>
         </div>
 
-        <div x-data='extensionFilters({{ filters | tojson }})' x-init="init()"
-            class="rounded-xl bg-white p-4 sm:p-5 lg:p-6 shadow-sm ring-1 ring-black/5">
+        <template x-if="flash">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="flash"></div>
+        </template>
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
+            </div>
+        </template>
+
+        <section class="rounded-xl bg-white p-4 sm:p-5 lg:p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-wrap items-center justify-between gap-2">
                 <div class="space-y-0.5">
                     <h2 class="text-sm font-semibold text-slate-900">Filters</h2>
-                    <p class="text-xs text-slate-500 hidden md:block">Add or remove filters to narrow down the list.</p>
+                    <p class="text-xs text-slate-500 hidden md:block">Search by keyword or narrow down by department
+                        without triggering a full page reload.</p>
                 </div>
-                <div class="flex items-center gap-2">
-                    <button type="button"
-                        class="inline-flex md:hidden items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                        @click="expanded = !expanded" :aria-expanded="expanded">
-                        <svg class="h-3.5 w-3.5 transition-transform duration-150" viewBox="0 0 20 20" fill="none"
-                            stroke="currentColor" stroke-width="1.6" :class="{ 'rotate-180': expanded }">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                        </svg>
-                        <span x-text="expanded ? 'Hide filters' : 'Show filters'"></span>
-                    </button>
-                    <button type="button"
-                        class="hidden md:inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                        @click="reset()">
-                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                            stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
-                        </svg>
-                        Clear all
-                    </button>
-                </div>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                    @click="resetFilters()">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
+                    </svg>
+                    Clear all
+                </button>
             </div>
 
-            <div class="mt-4 space-y-4" x-cloak x-show="expanded" x-transition>
+            <div class="mt-4 grid gap-5 md:grid-cols-2">
+                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                    Search
+                    <div class="relative">
+                        <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                            viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="m17.5 17.5-3.65-3.65m0 0a5.5 5.5 0 1 0-7.778-7.778 5.5 5.5 0 0 0 7.778 7.778Z" />
+                        </svg>
+                        <input type="search"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Extension, display name, or email" x-model="keyword"
+                            @input.debounce.400ms="applyFilters()">
+                    </div>
+                    <span class="text-xs font-normal text-slate-400">Keyword filtering happens client-side and updates
+                        the results asynchronously.</span>
+                </label>
+
                 <div>
-                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Available filters</h3>
-                    <div class="mt-2 flex flex-wrap gap-2">
-                        <template x-for="option in availableFilters" :key="option.id">
-                            <div class="relative" x-data="{ open: false }" @keydown.escape.window="open = false"
-                                @click.outside="open = false">
-                                <button type="button"
-                                    class="group inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 hover:border-slate-300"
-                                    :class="isActive(option.id) ? 'bg-sky-50 border-sky-200 text-sky-700' : 'bg-white text-slate-600'"
-                                    @click="open = !open">
-                                    <span x-text="option.label"></span>
-                                    <span class="text-xs font-normal text-slate-400 group-hover:text-slate-500"
-                                        x-text="summaryFor(option)"></span>
-                                    <svg class="h-4 w-4 text-slate-400 transition-transform duration-150"
-                                        :class="open ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="none"
-                                        stroke="currentColor" stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                                    </svg>
-                                </button>
-                                <div x-cloak x-show="open" x-transition.origin.top.left
-                                    class="absolute z-20 mt-2 w-64 rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-xl">
-                                    <template x-if="option.type === 'select'">
-                                        <div class="space-y-2">
-                                            <template x-for="choice in option.options" :key="choice.value">
-                                                <label
-                                                    class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 hover:bg-slate-100">
-                                                    <input type="checkbox"
-                                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
-                                                        :checked="isSelected(option.id, choice.value)"
-                                                        @change="toggleSelectOption(option, choice.value, $event.target.checked)">
-                                                    <span x-text="choice.label"></span>
-                                                </label>
-                                            </template>
-                                            <div class="flex justify-between gap-2 pt-2">
-                                                <button type="button"
-                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                    @click="clearFilter(option); open = false">
-                                                    Clear
-                                                </button>
-                                                <button type="button"
-                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                    @click="open = false">
-                                                    Done
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </template>
-                                    <template x-if="option.type === 'single'">
-                                        <div class="space-y-1">
-                                            <template x-for="choice in option.options" :key="choice.value">
-                                                <button type="button"
-                                                    class="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left hover:bg-slate-100"
-                                                    @click="selectSingleOption(option, choice.value); open = false">
-                                                    <span x-text="choice.label"></span>
-                                                    <svg x-show="isSingleSelected(option, choice.value)"
-                                                        class="h-4 w-4 text-sky-500" viewBox="0 0 20 20" fill="none"
-                                                        stroke="currentColor" stroke-width="1.8">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                            d="M5 10l3 3 7-7" />
-                                                    </svg>
-                                                </button>
-                                            </template>
-                                            <div class="flex justify-between gap-2 pt-2">
-                                                <button type="button"
-                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                    @click="clearFilter(option); open = false">
-                                                    Clear
-                                                </button>
-                                                <button type="button"
-                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                    @click="open = false">
-                                                    Done
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </template>
-                                    <template x-if="option.type === 'daterange'">
-                                        <div class="space-y-3">
-                                            <label class="block text-xs font-medium text-slate-500">
-                                                Start date
-                                                <input type="date"
-                                                    class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    :value="getActive(option.id)?.value?.start || ''"
-                                                    @input="updateRange(option, 'start', $event.target.value)">
-                                            </label>
-                                            <label class="block text-xs font-medium text-slate-500">
-                                                End date
-                                                <input type="date"
-                                                    class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    :value="getActive(option.id)?.value?.end || ''"
-                                                    @input="updateRange(option, 'end', $event.target.value)">
-                                            </label>
-                                            <div class="flex justify-between gap-2 pt-2">
-                                                <button type="button"
-                                                    class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-50"
-                                                    @click="clearFilter(option); open = false">
-                                                    Clear
-                                                </button>
-                                                <button type="button"
-                                                    class="w-full rounded-md bg-sky-600 px-2 py-1 text-xs font-semibold text-white hover:bg-sky-500"
-                                                    @click="open = false">
-                                                    Done
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </template>
-                                </div>
-                            </div>
+                    <div class="text-sm font-medium text-slate-700">Departments</div>
+                    <p class="mt-1 text-xs text-slate-400">Selections are cached in the page state to avoid repeated
+                        lookups.</p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <template x-if="!departments.length">
+                            <span class="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-400">No
+                                departments configured.</span>
+                        </template>
+                        <template x-for="dept in departments" :key="dept.id">
+                            <label
+                                class="inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                <input type="checkbox"
+                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                    :value="String(dept.id)" x-model="selectedDepartments" @change="applyFilters()">
+                                <span x-text="dept.name"></span>
+                            </label>
                         </template>
                     </div>
                 </div>
-
-                <div>
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400">Selected filters</h3>
-                        <button type="button"
-                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 md:hidden"
-                            @click="reset()" x-show="activeFilters.length">
-                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.6">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
-                            </svg>
-                            Clear all
-                        </button>
-                    </div>
-                    <div class="mt-2 flex flex-wrap gap-2" x-show="activeFilters.length">
-                        <template x-for="filter in activeFilters" :key="filter.id">
-                            <span
-                                class="group inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-                                <span x-text="filter.label"></span>
-                                <span class="text-slate-400" x-text="filterSummary(filter)"></span>
-                                <button type="button"
-                                    class="rounded-full p-1 text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                                    @click="removeFilter(filter.id)">
-                                    <span class="sr-only">Remove filter</span>
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="2">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
-                                    </svg>
-                                </button>
-                            </span>
-                        </template>
-                    </div>
-                    <p class="mt-2 text-xs text-slate-400" x-show="!activeFilters.length">No filters applied.</p>
-                </div>
             </div>
-        </div>
-        <div class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
+        </section>
+
+        <section class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
                     <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                         <tr>
                             <th scope="col" class="px-4 py-2">Extension</th>
-                            <th scope="col" class="px-4 py-2">Department</th>
+                            <th scope="col" class="px-4 py-2">Departments</th>
                             <th scope="col" class="px-4 py-2">Status</th>
-                            <th scope="col" class="px-4 py-2">Enabled</th>
+                            <th scope="col" class="px-4 py-2">Login</th>
                             <th scope="col" class="px-4 py-2">Forwarding</th>
                             <th scope="col" class="px-4 py-2">Created</th>
                             <th scope="col" class="px-4 py-2">Registered</th>
-                            <th scope="col" class="px-4 py-2">Action</th>
+                            <th scope="col" class="px-4 py-2">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100 bg-white text-sm text-slate-600">
-                        {% for extension in extensions %}
-                        <tr class="hover:bg-slate-50">
-                            <td class="whitespace-nowrap px-4 py-2">
-                                <div class="font-medium text-slate-900">{{ extension.display_name | default('—') }}
-                                </div>
-                                <div class="text-xs text-slate-400">Ext {{ extension.extension }}</div>
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-2">
-                                {% if extension.department is string %}
-                                <span
-                                    class="mr-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200">{{
-                                    extension.department }}</span>
-                                {% elif extension.department %}
-                                {% for dept in extension.department %}
-                                <span
-                                    class="mr-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200">{{
-                                    dept }}</span>
-                                {% endfor %}
-                                {% else %}
-                                <span class="text-slate-400">—</span>
-                                {% endif %}
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-2">
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold {{ 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' if extension.status == 'Online' else ('bg-amber-50 text-amber-600 ring-1 ring-amber-100' if extension.status == 'Ringing' or extension.status == 'Idle' else 'bg-slate-100 text-slate-600 ring-1 ring-slate-200') }}">
-                                    <span
-                                        class="h-1.5 w-1.5 rounded-full {{ 'bg-emerald-400' if extension.status == 'Online' else ('bg-amber-400' if extension.status == 'Ringing' or extension.status == 'Idle' else 'bg-slate-400') }}"></span>
-                                    {{ extension.status }}
-                                </span>
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-2">
-                                {% if extension.login_allowed %}
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-600 ring-1 ring-emerald-100">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8" />
-                                    </svg>
-                                    Enabled
-                                </span>
-                                {% else %}
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-medium text-rose-600 ring-1 ring-rose-100">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
-                                    </svg>
-                                    Disabled
-                                </span>
-                                {% endif %}
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-2">
-                                {% set mode = extension.call_forwarding_mode | default('none') %}
-                                {% if mode != 'none' %}
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-600 ring-1 ring-sky-100">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
-                                    </svg>
-                                    {% if mode == 'always' %}
-                                    Always
-                                    {% elif mode == 'when_busy' %}
-                                    When busy
-                                    {% elif mode == 'when_not_answered' %}
-                                    When not answered
-                                    {% else %}
-                                    {{ mode }}
-                                    {% endif %}
-                                </span>
-                                {% if extension.call_forwarding_destination %}
-                                <div class="mt-1 max-w-[12rem] truncate text-xs text-slate-400"
-                                    title="{{ extension.call_forwarding_destination }}">
-                                    {{ extension.call_forwarding_destination }}
-                                </div>
-                                {% endif %}
-                                {% else %}
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200">
-                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
-                                    </svg>
-                                    None
-                                </span>
-                                {% endif %}
-                            </td>
-                            <td class="whitespace-nowrap px-4 py-2 text-slate-500">{{ extension.created_at }}</td>
-                            <td class="whitespace-nowrap px-4 py-2 text-slate-600">
-                                {% if extension.registered_at %}
-                                <div class="flex items-start gap-2">
-                                    <span
-                                        class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-200">
-                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="2">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l3 3 7-7" />
+                        <template x-if="loading">
+                            <tr>
+                                <td colspan="8" class="px-4 py-6 text-center text-sm text-slate-500">
+                                    <div class="inline-flex items-center gap-2">
+                                        <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                                         </svg>
-                                    </span>
-                                    <div class="leading-tight">
-                                        <div class="text-sm text-slate-700">{{ extension.registrar | default('Unknown
-                                            device') }}</div>
-                                        <div class="text-xs text-slate-400">{{ extension.registered_at }}</div>
+                                        Loading extensions…
                                     </div>
-                                </div>
-                                {% else %}
-                                <div class="flex items-center gap-2 text-slate-400">
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-if="!loading && !extensions.length">
+                            <tr>
+                                <td colspan="8" class="px-4 py-6 text-center text-sm text-slate-500">
+                                    No extensions found for the current filters.
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-for="extension in extensions" :key="extension.id">
+                            <tr class="hover:bg-slate-50">
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <div class="font-medium text-slate-900"
+                                        x-text="formatDefault(extension.display_name, '—')"></div>
+                                    <div class="text-xs text-slate-400">Ext <span x-text="extension.extension"></span>
+                                    </div>
+                                    <template x-if="extension.email">
+                                        <div class="text-xs text-slate-400" x-text="extension.email"></div>
+                                    </template>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <template x-if="resolveDepartments(extension).length">
+                                        <div class="flex flex-wrap gap-1">
+                                            <template x-for="dept in resolveDepartments(extension)" :key="dept">
+                                                <span
+                                                    class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200"
+                                                    x-text="dept"></span>
+                                            </template>
+                                        </div>
+                                    </template>
+                                    <template x-if="!resolveDepartments(extension).length">
+                                        <span class="text-slate-400">—</span>
+                                    </template>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
                                     <span
-                                        class="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500 ring-1 ring-slate-200">
-                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="2">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M6 6l8 8M6 14l8-8" />
-                                        </svg>
+                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
+                                        :class="statusMeta(extension.status).badge">
+                                        <span class="h-1.5 w-1.5 rounded-full"
+                                            :class="statusMeta(extension.status).dot"></span>
+                                        <span x-text="statusMeta(extension.status).label"></span>
                                     </span>
-                                    <span class="text-xs">Not registered</span>
-                                </div>
-                                {% endif %}
-                            </td>
-                            <td class="px-4 py-2">
-                                <div class="flex items-center gap-2">
-                                    <a href="{{ extension.edit_url }}" title="Edit extension"
-                                        class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600">
-                                        <span class="sr-only">Edit</span>
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1"
+                                        :class="loginAllowed(extension) ? 'bg-emerald-50 text-emerald-600 ring-emerald-100' : 'bg-rose-50 text-rose-600 ring-rose-100'">
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8"
+                                                x-show="loginAllowed(extension)"></path>
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
+                                                x-show="!loginAllowed(extension)"></path>
                                         </svg>
-                                    </a>
-                                    <form method="post" action="{{ extension.delete_url }}" style="display:inline">
-                                        <button type="submit" title="Delete extension"
-                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-rose-300 hover:text-rose-600">
+                                        <span x-text="loginAllowed(extension) ? 'Enabled' : 'Disabled'"></span>
+                                    </span>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1"
+                                        :class="forwardingLabel(extension) === 'None' ? 'bg-slate-100 text-slate-600 ring-slate-200' : 'bg-sky-50 text-sky-600 ring-sky-100'">
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                        </svg>
+                                        <span x-text="forwardingLabel(extension)"></span>
+                                    </span>
+                                    <template x-if="forwardingDestination(extension)">
+                                        <div class="mt-1 max-w-[12rem] truncate text-xs text-slate-400"
+                                            :title="forwardingDestination(extension)"
+                                            x-text="forwardingDestination(extension)"></div>
+                                    </template>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2 text-slate-500"
+                                    x-text="formatDate(extension.created_at)"></td>
+                                <td class="whitespace-nowrap px-4 py-2 text-slate-500">
+                                    <template x-if="extension.registered_at">
+                                        <div class="flex items-start gap-2">
+                                            <span
+                                                class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-200">
+                                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                    stroke="currentColor" stroke-width="2">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M5 10l3 3 7-7" />
+                                                </svg>
+                                            </span>
+                                            <div class="leading-tight">
+                                                <div class="text-xs font-semibold text-slate-700"
+                                                    x-text="formatDefault(extension.registrar, 'Unknown device')"></div>
+                                                <div class="text-xs text-slate-400"
+                                                    x-text="formatDate(extension.registered_at)"></div>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    <template x-if="!extension.registered_at">
+                                        <div class="flex items-center gap-2 text-slate-400">
+                                            <span
+                                                class="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500 ring-1 ring-slate-200">
+                                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                    stroke="currentColor" stroke-width="2">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M6 6l8 8M6 14l8-8" />
+                                                </svg>
+                                            </span>
+                                            <span class="text-xs">Not registered</span>
+                                        </div>
+                                    </template>
+                                </td>
+                                <td class="px-4 py-2">
+                                    <div class="flex items-center gap-2">
+                                        <a :href="detailUrl(extension.id)" title="Edit extension"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600">
+                                            <span class="sr-only">Edit</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
+                                            </svg>
+                                        </a>
+                                        <button type="button" title="Toggle login"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-amber-300 hover:text-amber-600"
+                                            :disabled="processing.toggle === extension.id"
+                                            @click="toggleLogin(extension)">
+                                            <span class="sr-only">Toggle login</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+                                            </svg>
+                                        </button>
+                                        <button type="button" title="Delete extension"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-rose-300 hover:text-rose-600"
+                                            :disabled="processing.delete === extension.id"
+                                            @click="confirmDelete(extension)">
                                             <span class="sr-only">Delete</span>
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
@@ -353,265 +261,310 @@
                                                     d="M6 7h8m-7 0v8m3-8v8m3-8v8M4 7h12M8 4h4a1 1 0 011 1v2H7V5a1 1 0 011-1z" />
                                             </svg>
                                         </button>
-                                    </form>
-                                    {% set toggle_label = 'Disable login' if extension.login_allowed else 'Enable login'
-                                    %}
-                                    <form method="post" action="{{ extension.toggle_url }}" style="display:inline">
-                                        <button type="submit" title="{{ toggle_label }}"
-                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-amber-300 hover:text-amber-600">
-                                            <span class="sr-only">{{ toggle_label }}</span>
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                                stroke-width="1.6">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-
-                                            </svg>
-                                        </button>
-                                    </form>
-                                </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
                     </tbody>
                 </table>
             </div>
-            <div
-                class="flex flex-col gap-3 border-t border-slate-100 px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                    Showing
-                    <span class="font-semibold text-slate-700">{{ pagination.showing_from }}</span>
-                    –
-                    <span class="font-semibold text-slate-700">{{ pagination.showing_to }}</span>
-                    of
-                    <span class="font-semibold text-slate-700">{{ pagination.total_records }}</span>
-                    extensions
-                </div>
-                <div class="flex items-center gap-2">
-                    <a href="?page={{ pagination.prev_page }}"
-                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold {{ 'pointer-events-none opacity-40' if not pagination.has_prev else 'hover:border-sky-300 hover:text-sky-700' }}"
-                        aria-disabled="{{ 'true' if not pagination.has_prev else 'false' }}">
-                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
-                        </svg>
-                        Prev
-                    </a>
-                    <span class="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600">
-                        Page {{ pagination.current_page }} / {{ pagination.total_pages }}
-                    </span>
-                    <a href="?page={{ pagination.next_page }}"
-                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold {{ 'pointer-events-none opacity-40' if not pagination.has_next else 'hover:border-sky-300 hover:text-sky-700' }}"
-                        aria-disabled="{{ 'true' if not pagination.has_next else 'false' }}">
-                        Next
-                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 5l4 5-4 5" />
-                        </svg>
-                    </a>
-                </div>
+        </section>
+
+        <section
+            class="flex flex-col gap-3 rounded-xl border border-slate-100 bg-white px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between"
+            x-show="pagination">
+            <div>
+                Showing
+                <span class="font-semibold text-slate-700" x-text="pagination?.showing_from ?? 0"></span>
+                –
+                <span class="font-semibold text-slate-700" x-text="pagination?.showing_to ?? 0"></span>
+                of
+                <span class="font-semibold text-slate-700" x-text="pagination?.total_items ?? 0"></span>
+                extensions
             </div>
-        </div>
+            <div class="flex items-center gap-2">
+                <label class="hidden md:inline-flex items-center gap-1 text-slate-400">
+                    Per page
+                    <select
+                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        @change="perPage = parseInt($event.target.value, 10) || 20; applyFilters();" :value="perPage">
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="50">50</option>
+                    </select>
+                </label>
+                <button type="button"
+                    class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold hover:border-sky-300 hover:text-sky-700"
+                    :class="{ 'pointer-events-none opacity-40': !(pagination?.has_prev) }" @click="prevPage()">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
+                    </svg>
+                    Prev
+                </button>
+                <span class="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600">
+                    Page <span x-text="pagination?.current_page ?? page"></span> /
+                    <span x-text="pagination?.total_pages ?? 1"></span>
+                </span>
+                <button type="button"
+                    class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold hover:border-sky-300 hover:text-sky-700"
+                    :class="{ 'pointer-events-none opacity-40': !(pagination?.has_next) }" @click="nextPage()">
+                    Next
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8 5l4 5-4 5" />
+                    </svg>
+                </button>
+            </div>
+        </section>
     </div>
 </div>
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('extensionFilters', (rawFilters) => {
-            let parsed = rawFilters;
-            if (typeof rawFilters === 'string') {
+        Alpine.data('extensionsPage', (options) => ({
+            basePath: options.basePath || '/console',
+            listEndpoint: `${options.basePath || '/console'}/extensions`,
+            createUrl: options.createUrl || `${options.basePath || '/console'}/extensions/new`,
+            filtersRaw: options.filters || {},
+            departments: [],
+            extensions: [],
+            pagination: null,
+            loading: false,
+            error: null,
+            flash: null,
+            keyword: '',
+            selectedDepartments: [],
+            page: 1,
+            perPage: 20,
+            processing: {
+                toggle: null,
+                delete: null,
+            },
+            init() {
+                this.departments = (this.filtersRaw.departments || []).map((item) => ({
+                    id: item.id,
+                    name: item.name || item.display_name || item.label || `Department #${item.id}`,
+                }));
+                this.fetchExtensions();
+            },
+            resetFilters() {
+                this.keyword = '';
+                this.selectedDepartments = [];
+                this.applyFilters();
+            },
+            buildParams() {
+                const params = new URLSearchParams();
+                params.set('page', this.page);
+                params.set('per_page', this.perPage);
+                if (this.keyword.trim().length) {
+                    params.set('filters[q]', this.keyword.trim());
+                }
+                this.selectedDepartments.forEach((id) => {
+                    params.append('filters[department_ids][]', id);
+                });
+                return params;
+            },
+            async fetchExtensions() {
+                this.loading = true;
+                this.error = null;
                 try {
-                    parsed = JSON.parse(rawFilters);
-                } catch (error) {
-                    parsed = {};
-                    console.warn('Failed to parse filters JSON:', error);
+                    const params = this.buildParams();
+                    const response = await fetch(`${this.listEndpoint}?${params.toString()}`, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to load extensions');
+                    }
+                    this.extensions = Array.isArray(data?.pagination?.items) ? data.pagination.items : [];
+                    this.pagination = data?.pagination || null;
+                    if (this.pagination?.per_page) {
+                        this.perPage = this.pagination.per_page;
+                    }
+                    this.flash = null;
+                } catch (err) {
+                    console.error(err);
+                    this.error = err.message || 'Unable to load extensions';
+                } finally {
+                    this.loading = false;
                 }
-            }
-            parsed = parsed || {};
-
-            const normalizeChoice = (choice) => {
-                if (choice && typeof choice === 'object') {
-                    const value = choice.value ?? '';
-                    const label = choice.label ?? value;
-                    return { value, label };
+            },
+            applyFilters() {
+                this.page = 1;
+                this.fetchExtensions();
+            },
+            goToPage(target) {
+                if (!this.pagination) {
+                    return;
                 }
-                const value = String(choice ?? '');
-                return { value, label: value };
-            };
-
-            const normalizeOptions = (options = []) => options.map(normalizeChoice);
-
-            const normalize = (item = {}) => ({
-                ...item,
-                type: item.type || 'select',
-                options: normalizeOptions(item.options || []),
-            });
-
-            const availableFilters = (parsed.available || []).map(normalize);
-            const activeFilters = (parsed.active || []).map((item) => {
-                const source = availableFilters.find((opt) => opt.id === item.id) || {};
-                const base = normalize({ ...source, ...item });
-                let value = item.value;
-                if (base.type === 'select') {
-                    value = Array.isArray(value) ? value : [];
-                } else if (base.type === 'single') {
-                    value = typeof value === 'string' ? value : (base.default ?? '');
-                } else if (base.type === 'daterange') {
-                    value = value && typeof value === 'object' ? value : { start: '', end: '' };
+                const totalPages = this.pagination.total_pages || 1;
+                const page = Math.min(Math.max(target, 1), totalPages);
+                if (page === this.page) {
+                    return;
                 }
-                return {
-                    ...base,
-                    value,
-                };
-            });
-
-            return {
-                availableFilters,
-                activeFilters,
-                expanded: false,
-                wasDesktop: false,
-                init() {
-                    const syncState = (forceCollapse = false) => {
-                        const isDesktop = window.innerWidth >= 768;
-                        if (isDesktop) {
-                            this.expanded = true;
-                        } else if (forceCollapse || this.wasDesktop) {
-                            this.expanded = false;
+                this.page = page;
+                this.fetchExtensions();
+            },
+            prevPage() {
+                if (this.pagination?.has_prev) {
+                    this.goToPage((this.pagination?.prev_page) || (this.page - 1));
+                }
+            },
+            nextPage() {
+                if (this.pagination?.has_next) {
+                    this.goToPage((this.pagination?.next_page) || (this.page + 1));
+                }
+            },
+            formatDefault(value, fallback = '—') {
+                if (value === undefined || value === null || value === '') {
+                    return fallback;
+                }
+                return value;
+            },
+            formatDate(value) {
+                if (!value) {
+                    return '—';
+                }
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) {
+                    return value;
+                }
+                return date.toLocaleString();
+            },
+            loginAllowed(extension) {
+                return !(extension?.login_disabled);
+            },
+            forwardingLabel(extension) {
+                const mode = (extension?.call_forwarding_mode || 'none').toLowerCase();
+                switch (mode) {
+                    case 'always':
+                        return 'Always';
+                    case 'when_busy':
+                        return 'When busy';
+                    case 'when_not_answered':
+                        return 'When not answered';
+                    default:
+                        return 'None';
+                }
+            },
+            forwardingDestination(extension) {
+                return extension?.call_forwarding_destination || '';
+            },
+            resolveDepartments(extension) {
+                const raw = extension?.departments || extension?.metadata?.departments || [];
+                if (!Array.isArray(raw)) {
+                    return [];
+                }
+                return raw
+                    .map((entry) => {
+                        if (typeof entry === 'string') {
+                            return entry;
                         }
-                        this.wasDesktop = isDesktop;
-                    };
-
-                    syncState(true);
-                    const handler = () => syncState();
-                    window.addEventListener('resize', handler);
-                    this._cleanup = () => window.removeEventListener('resize', handler);
-                },
-                getActive(id) {
-                    return this.activeFilters.find((filter) => filter.id === id);
-                },
-                isActive(id) {
-                    return Boolean(this.getActive(id));
-                },
-                ensureFilter(option) {
-                    let current = this.getActive(option.id);
-                    if (!current) {
-                        const value = option.type === 'select'
-                            ? []
-                            : option.type === 'single'
-                                ? (option.default ?? '')
-                                : { start: '', end: '' };
-                        current = {
-                            ...option,
-                            options: normalizeOptions(option.options || []),
-                            value,
-                        };
-                        this.activeFilters.push(current);
-                    } else if (!current.options?.length) {
-                        current.options = normalizeOptions(option.options || []);
-                    }
-                    return current;
-                },
-                removeFilter(id) {
-                    this.activeFilters = this.activeFilters.filter((filter) => filter.id !== id);
-                },
-                toggleSelectOption(option, choice, checked) {
-                    const filter = this.ensureFilter(option);
-                    const values = new Set(Array.isArray(filter.value) ? filter.value : []);
-                    if (checked) {
-                        values.add(choice);
-                    } else {
-                        values.delete(choice);
-                    }
-                    filter.value = Array.from(values);
-                    if (!filter.value.length) {
-                        this.removeFilter(option.id);
-                    }
-                },
-                isSelected(id, choice) {
-                    const filter = this.getActive(id);
-                    if (!filter || !Array.isArray(filter.value)) {
-                        return false;
-                    }
-                    return filter.value.includes(choice);
-                },
-                isSingleSelected(option, choice) {
-                    const filter = this.getActive(option.id);
-                    if (!filter) {
-                        return false;
-                    }
-                    return filter.value === choice;
-                },
-                selectSingleOption(option, choice) {
-                    if (!choice || choice === option.default) {
-                        this.removeFilter(option.id);
-                        return;
-                    }
-                    const filter = this.ensureFilter(option);
-                    filter.value = choice;
-                },
-                updateRange(option, key, value) {
-                    const filter = this.ensureFilter(option);
-                    filter.value = { ...(filter.value || { start: '', end: '' }), [key]: value };
-                    if (!filter.value.start && !filter.value.end) {
-                        this.removeFilter(option.id);
-                    }
-                },
-                labelFor(option, value) {
-                    const candidates = option.options || [];
-                    const match = candidates.find((opt) => opt.value === value);
-                    return match ? match.label : value;
-                },
-                summaryFor(option) {
-                    const filter = this.getActive(option.id);
-                    if (!filter) {
-                        if (option.type === 'select') {
-                            return 'All';
-                        }
-                        if (option.type === 'single') {
-                            return option.default || 'All';
-                        }
-                        if (option.type === 'daterange') {
-                            return 'Any time';
+                        if (entry && typeof entry === 'object') {
+                            return entry.name || entry.display_name || entry.label || entry.title || '';
                         }
                         return '';
+                    })
+                    .filter(Boolean);
+            },
+            statusMeta(status) {
+                const normalized = (status || '').toLowerCase();
+                if (normalized === 'online') {
+                    return {
+                        label: 'Online',
+                        badge: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100',
+                        dot: 'bg-emerald-400',
+                    };
+                }
+                if (normalized === 'ringing' || normalized === 'idle') {
+                    return {
+                        label: status || 'Idle',
+                        badge: 'bg-amber-50 text-amber-600 ring-1 ring-amber-100',
+                        dot: 'bg-amber-400',
+                    };
+                }
+                return {
+                    label: status || 'Unknown',
+                    badge: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200',
+                    dot: 'bg-slate-400',
+                };
+            },
+            detailUrl(id) {
+                return `${this.basePath}/extensions/${id}`;
+            },
+            async toggleLogin(extension) {
+                if (!extension) {
+                    return;
+                }
+                this.processing.toggle = extension.id;
+                this.error = null;
+                try {
+                    const nextDisabled = this.loginAllowed(extension);
+                    const body = new URLSearchParams();
+                    body.set('login_disabled', nextDisabled ? 'true' : 'false');
+                    const response = await fetch(this.detailUrl(extension.id), {
+                        method: 'PATCH',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                        },
+                        body: body.toString(),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update extension');
                     }
-                    return this.filterSummary(filter);
-                },
-                filterSummary(filter) {
-                    if (filter.type === 'select') {
-                        if (!filter.value?.length) {
-                            return 'All';
-                        }
-                        if (filter.value.length <= 2) {
-                            return filter.value
-                                .map((val) => this.labelFor(filter, val))
-                                .join(', ');
-                        }
-                        return `${filter.value.length} selected`;
+                    extension.login_disabled = nextDisabled;
+                    this.flash = nextDisabled ? 'Login disabled for this extension.' : 'Login enabled for this extension.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err.message || 'Failed to toggle login state';
+                    this.fetchExtensions();
+                } finally {
+                    this.processing.toggle = null;
+                }
+            },
+            confirmDelete(extension) {
+                if (!extension) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete extension',
+                        message: `Delete extension ${extension.extension}? This action cannot be undone.`,
+                        confirmLabel: 'Delete',
+                        cancelLabel: 'Cancel',
+                        destructive: true,
+                        onConfirm: () => this.deleteExtension(extension),
+                    },
+                }));
+            },
+            async deleteExtension(extension) {
+                this.processing.delete = extension.id;
+                this.error = null;
+                try {
+                    const response = await fetch(this.detailUrl(extension.id), {
+                        method: 'DELETE',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to delete extension');
                     }
-                    if (filter.type === 'single') {
-                        return this.labelFor(filter, filter.value) || filter.default || 'All';
-                    }
-                    if (filter.type === 'daterange') {
-                        const start = filter.value?.start || '';
-                        const end = filter.value?.end || '';
-                        if (!start && !end) {
-                            return 'Any time';
-                        }
-                        return `${start || 'Start'} → ${end || 'End'}`;
-                    }
-                    return '';
-                },
-                clearFilter(option) {
-                    this.removeFilter(option.id);
-                },
-                reset() {
-                    this.activeFilters = [];
-                },
-                destroy() {
-                    if (this._cleanup) {
-                        this._cleanup();
-                    }
-                },
-            };
-        });
+                    this.flash = 'Extension deleted successfully.';
+                    await this.fetchExtensions();
+                } catch (err) {
+                    console.error(err);
+                    this.error = err.message || 'Failed to delete extension';
+                } finally {
+                    this.processing.delete = null;
+                }
+            },
+        }));
     });
 </script>
 

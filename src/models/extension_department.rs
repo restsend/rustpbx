@@ -92,27 +92,6 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_rustpbx_extension_departments_extension")
-                    .table(Entity)
-                    .col(Column::ExtensionId)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_rustpbx_extension_departments_department")
-                    .table(Entity)
-                    .col(Column::DepartmentId)
-                    .to_owned(),
-            )
-            .await?;
-
         manager
             .create_index(
                 Index::create()
