@@ -124,15 +124,15 @@ impl Track for MediaPassTrack {
         event_sender: EventSender,
         packet_sender: TrackPacketSender,
     ) -> Result<()> {
-        let target = format!(
-            "{}?sample_rate={}&packet_size={}",
-            self.url.clone(),
-            self.sample_rate,
-            self.packet_size
-        );
-        debug!("Media pass connecting url: {target}");
+        let mut url = url::Url::parse(&self.url)?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("sample_rate", self.sample_rate.to_string().as_str());
+            query.append_pair("packet_size", self.packet_size.to_string().as_str());
+        }
+        debug!("Media pass connecting url: {url}");
         let sample_rate = self.config.samplerate;
-        let (ws_stream, _) = tokio_tungstenite::connect_async(target).await?;
+        let (ws_stream, _) = tokio_tungstenite::connect_async(url.as_str()).await?;
         let (ws_sink, mut ws_source) = ws_stream.split();
         *self.ws_sink.lock().await = Some(ws_sink);
 
