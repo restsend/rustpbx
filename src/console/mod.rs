@@ -89,7 +89,7 @@ impl ConsoleState {
         let r = RenderTemplate {
             tmpl_env: &tmpl_env,
             template_name: template,
-            context: &serde_json::to_value(ctx).unwrap_or(serde_json::Value::Null),
+            context: &ctx,
         }
         .into_response();
         let elapsed = start_time.elapsed();

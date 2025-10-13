@@ -1,11 +1,20 @@
 {% extends "console/layout.html" %}
-{% block title %}{{ page_title }} · RustPBX{% endblock %}
+{% set has_model = model is defined and model is not none %}
+{% set mode_text = '"edit"' if has_model else '"create"' %}
+{% set model_data = model if has_model else {} %}
+{% block title %}{{ model_data.extension | default("New extension") }} · {{ site_name | default('RustPBX') }}{% endblock
+%}
 {% block content %}
-<div class="p-6">
+{% set base_url = base_path | default('/console') %}
+<div class="p-6" x-data='extensionDetailPage({
+        basePath: {{ base_url | tojson }},
+        mode: {{ mode_text }}, model: {{ model_data | tojson }}, departments: {{
+    filters.departments | default([]) | tojson }}, assignedDepartments: {{ departments | default([]) | tojson }} })'
+    x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div class="space-y-3">
-                <a href="{{ back_url }}"
+                <a :href="listUrl"
                     class="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-700">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
@@ -13,329 +22,413 @@
                     Back to list
                 </a>
                 <div>
-                    <h1 class="text-2xl font-semibold text-slate-900">{{ page_title }}</h1>
-                    <p class="mt-2 text-sm text-slate-500">
-                        {% if mode == 'create' %}
-                        Define how new endpoints authenticate, register, and present themselves.
-                        {% else %}
-                        Update the profile, credentials, and access controls for this extension.
-                        {% endif %}
+                    <h1 class="text-2xl font-semibold text-slate-900" x-text="pageTitle"></h1>
+                    <p class="mt-2 text-sm text-slate-500"
+                        x-text="mode === 'create' ? 'Define credentials, departments, and availability for the new extension.' : 'Update profile, credentials, routing, and access controls for this extension.'">
                     </p>
                 </div>
             </div>
-            {% if mode == 'edit' %}
             <div class="rounded-xl bg-white p-5 text-sm text-slate-600 shadow-sm ring-1 ring-black/5">
                 <div class="flex items-center justify-between">
-                    <div class="font-semibold text-slate-900">Extension insights</div>
-                    <span
-                        class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 ring-1 ring-emerald-200">
-                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                        Active
-                    </span>
+                    <div class="font-semibold text-slate-900">Extension summary</div>
+                    <template x-if="mode === 'edit'">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-semibold text-sky-600 ring-1 ring-sky-200">
+                            <span class="h-1.5 w-1.5 rounded-full"
+                                :class="model?.registered_at ? 'bg-emerald-400' : 'bg-slate-300'"></span>
+                            <span x-text="model?.registered_at ? 'Active' : 'Pending'"></span>
+                        </span>
+                    </template>
                 </div>
-                <dl class="mt-4 space-y-3">
+                <dl class="mt-4 space-y-3 text-xs text-slate-500">
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="text-xs uppercase tracking-wide text-slate-400">Created</dt>
-                        <dd class="text-sm text-slate-700">{{ extension.created_at | default('—') }}</dd>
+                        <dt class="uppercase tracking-wide">Extension</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.extension || '—'"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="text-xs uppercase tracking-wide text-slate-400">Last registered</dt>
-                        <dd class="text-sm text-slate-700">
-                            {% if extension.registered_at %}
-                            {{ extension.registered_at }}
-                            {% else %}
-                            <span class="text-xs text-slate-400">Not registered</span>
-                            {% endif %}
-                        </dd>
+                        <dt class="uppercase tracking-wide">Created</dt>
+                        <dd class="text-sm text-slate-700" x-text="formatDate(model?.created_at)"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="text-xs uppercase tracking-wide text-slate-400">Login</dt>
-                        <dd
-                            class="text-sm font-medium {{ 'text-emerald-600' if extension.login_allowed else 'text-rose-600' }}">
-                            {{ 'Allowed' if extension.login_allowed else 'Blocked' }}
-                        </dd>
+                        <dt class="uppercase tracking-wide">Last registered</dt>
+                        <dd class="text-sm text-slate-700"
+                            x-text="model?.registered_at ? formatDate(model.registered_at) : 'Not registered'"></dd>
                     </div>
                 </dl>
             </div>
-            {% endif %}
         </div>
 
-        {% if error_message %}
-        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-            {{ error_message }}
-        </div>
-        {% endif %}
+        <template x-if="success">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="success"></div>
+        </template>
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
+            </div>
+        </template>
 
-        <form action="{{ form_action }}" method="post" class="space-y-6" x-data="{
-        loginAllowed: {{ 'true' if extension.login_allowed else 'false' }},
-        voicemailEnabled: {{ 'true' if extension.voicemail_enabled else 'false' }},
-        callForwardingMode: 'none',
-        callForwardingDestination: '',
-        callForwardingTimeout: {{ extension.call_forwarding_timeout | default(30) }},
-        activeTab: 'profile',
-        }" x-init="callForwardingMode = ($el.dataset.forwardingMode || 'none'); callForwardingDestination = $el.dataset.forwardingDestination || ''; const parsedTimeout = parseInt($el.dataset.forwardingTimeout || '', 10); callForwardingTimeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 30;"
-            x-effect="if (callForwardingMode === 'none') { callForwardingDestination = ''; } if (callForwardingTimeout < 5) { callForwardingTimeout = 5; } if (callForwardingTimeout > 120) { callForwardingTimeout = 120; }"
-            data-forwarding-mode="{{ extension.call_forwarding_mode | default('none') }}"
-            data-forwarding-destination="{{ extension.call_forwarding_destination | default('') }}"
-            data-forwarding-timeout="{{ extension.call_forwarding_timeout | default(30) }}">
-            <input type="hidden" name="login_allowed" :value="loginAllowed ? 'true' : 'false'">
-            <input type="hidden" name="voicemail_enabled" :value="voicemailEnabled ? 'true' : 'false'">
-            <input type="hidden" name="call_forwarding_mode" :value="callForwardingMode">
-            <input type="hidden" name="call_forwarding_destination" :value="callForwardingDestination">
-            <input type="hidden" name="call_forwarding_timeout" :value="callForwardingTimeout">
+        <form class="space-y-6" @submit.prevent="submit">
             <div class="space-y-6">
-                <nav
-                    class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
-                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
-                        :class="activeTab === 'profile' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        @click="activeTab = 'profile'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M3 12l9-9 9 9M4.5 10.5V21h15V10.5" />
-                        </svg>
-                        Profile
-                    </button>
-                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
-                        :class="activeTab === 'access' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        @click="activeTab = 'access'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                        </svg>
-                        Access & Forwarding
-                    </button>
-                    <button type="button" class="flex items-center gap-2 rounded-md px-4 py-2 transition"
-                        :class="activeTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        @click="activeTab = 'notes'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
-                        </svg>
-                        Notes
-                    </button>
-                </nav>
+                <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+                    <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                        role="tablist" aria-label="Extension configuration sections">
+                        <template x-for="tab in tabs" :key="tab.id">
+                            <button type="button" @click="setActiveTab(tab.id)"
+                                class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                                :class="isActiveTab(tab.id) ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                :aria-selected="isActiveTab(tab.id)" :aria-controls="`tab-panel-${tab.id}`">
+                                <div class="flex flex-col">
+                                    <span class="text-sm" x-text="tab.label"></span>
+                                    <span class="text-[11px] font-normal text-slate-400"
+                                        x-text="tab.description"></span>
+                                </div>
+                            </button>
+                        </template>
+                    </nav>
+                </div>
 
-                <section x-show="activeTab === 'profile'" x-transition.opacity x-cloak class="space-y-6">
+                <div x-cloak x-show="activeTab === 'profile'" x-transition.opacity.duration.200ms
+                    :id="`tab-panel-profile`" role="tabpanel" tabindex="0" class="space-y-6">
+                    <div class="grid gap-6 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Extension number
+                            <input type="text" x-model.trim="form.extension" required maxlength="32"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="e.g. 1007">
+                            <span class="text-xs font-normal text-slate-400">Numbers only. This becomes the SIP user ID
+                                for
+                                clients.</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Display name
+                            <input type="text" x-model.trim="form.display_name" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Visible to teammates and call logs">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Email (optional)
+                            <input type="email" x-model.trim="form.email" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="name@example.com">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            SIP password
+                            <input type="text" x-model.trim="form.sip_password" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Leave blank to keep current or auto-generate">
+                            <span class="text-xs font-normal text-slate-400">Provide a strong password. Leave blank to
+                                keep
+                                the existing secret.</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div x-cloak x-show="activeTab === 'access'" x-transition.opacity.duration.200ms
+                    :id="`tab-panel-access`" role="tabpanel" tabindex="0" class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">Profile</h2>
-                            <p class="text-sm text-slate-500">Key identity details that appear in call control and logs.
-                            </p>
-                        </header>
-                        <div class="mt-6 grid gap-5 md:grid-cols-2">
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Extension number
-                                <input type="text" name="extension" required
-                                    value="{{ extension.extension | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="e.g. 1007">
-                                <span class="text-xs font-normal text-slate-400">Numbers only. This becomes the SIP user
-                                    ID.</span>
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Display name
-                                <input type="text" name="display_name"
-                                    value="{{ extension.display_name | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Visible to internal contacts">
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                SIP password
-                                <input type="password" name="sip_password"
-                                    value="{{ extension.sip_password | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Auto-generated secure secret">
-                                <span class="text-xs font-normal text-slate-400">Provide a strong password or leave
-                                    blank to
-                                    auto-generate later.</span>
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Department
-                                <select name="department"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="" {% if not extension.department %}selected{% endif %}>Select a
-                                        department
-                                    </option>
-                                    {% for dept in department_options %}
-                                    <option value="{{ dept }}" {% if extension.department==dept %}selected{% endif %}>{{
-                                        dept }}
-                                    </option>
-                                    {% endfor %}
-                                </select>
-                            </label>
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Email (optional)
-                                <input type="email" name="email" value="{{ extension.email | default('') }}"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="name@example.com">
-                            </label>
+                        <h2 class="text-sm font-semibold text-slate-900">Departments</h2>
+                        <p class="mt-1 text-xs text-slate-500">Assignments load once and remain available while editing.
+                        </p>
+                        <div class="mt-4 flex flex-wrap gap-2">
+                            <template x-if="!availableDepartments.length">
+                                <span class="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-400">No
+                                    departments configured.</span>
+                            </template>
+                            <template x-for="dept in availableDepartments" :key="dept.id">
+                                <label
+                                    class="inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                    <input type="checkbox"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                        :value="String(dept.id)" x-model="selectedDepartments">
+                                    <span x-text="dept.name"></span>
+                                </label>
+                            </template>
                         </div>
                     </div>
-                </section>
 
-                <section x-show="activeTab === 'access'" x-transition.opacity x-cloak class="space-y-6">
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">Access control</h2>
-                            <p class="text-sm text-slate-500">Toggle who can authenticate and whether voicemail is
-                                available.
-                            </p>
-                        </header>
-                        <div class="mt-6 grid gap-5 md:grid-cols-2">
-                            <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
+                    <div class="grid gap-6 md:grid-cols-2">
+                        <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                            <div class="flex items-start justify-between">
                                 <div>
-                                    <div class="text-sm font-semibold text-slate-900">Allow portal login</div>
-                                    <div class="text-xs text-slate-500">Controls app/web authentication for this
-                                        extension.
-                                    </div>
+                                    <h2 class="text-sm font-semibold text-slate-900">Portal login</h2>
+                                    <p class="text-xs text-slate-500">Controls whether softphone or web clients can sign
+                                        in.
+                                    </p>
                                 </div>
-                                <button type="button" @click="loginAllowed = !loginAllowed"
-                                    :class="loginAllowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
+                                <button type="button" @click="form.login_allowed = !form.login_allowed"
+                                    :class="form.login_allowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
                                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
                                     <svg class="h-3.5 w-3.5" viewBox="0 0 22 22" fill="none" stroke="currentColor"
                                         stroke-width="1.8">
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
                                     </svg>
-                                    <span x-text="loginAllowed ? 'Enabled' : 'Disabled'"></span>
+                                    <span x-text="form.login_allowed ? 'Enabled' : 'Disabled'"></span>
                                 </button>
                             </div>
-                            <div class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3">
+                        </div>
+                        <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                            <div class="flex items-start justify-between">
                                 <div>
-                                    <div class="text-sm font-semibold text-slate-900">Voicemail inbox</div>
-                                    <div class="text-xs text-slate-500">Enable voicemail drops when calls go unanswered.
-                                    </div>
+                                    <h2 class="text-sm font-semibold text-slate-900">Voicemail inbox</h2>
+                                    <p class="text-xs text-slate-500">Allow unanswered calls to drop voicemail messages.
+                                    </p>
                                 </div>
-                                <button type="button" @click="voicemailEnabled = !voicemailEnabled"
-                                    :class="voicemailEnabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
+                                <button type="button" @click="form.voicemail_enabled = !form.voicemail_enabled"
+                                    :class="form.voicemail_enabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
                                     class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
                                     <svg class="h-3.5 w-3.5" viewBox="0 0 22 22" fill="none" stroke="currentColor"
                                         stroke-width="1.8">
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M2.25 13.5h3.86a2.25 2.25 0 0 1 2.012 1.244l.256.512a2.25 2.25 0 0 0 2.013 1.244h3.218a2.25 2.25 0 0 0 2.013-1.244l.256-.512a2.25 2.25 0 0 1 2.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 0 0-2.15-1.588H6.911a2.25 2.25 0 0 0-2.15 1.588L2.35 13.177a2.25 2.25 0 0 0-.1.661Z" />
                                     </svg>
-                                    <span x-text="voicemailEnabled ? 'Enabled' : 'Disabled'"></span>
+                                    <span x-text="form.voicemail_enabled ? 'Enabled' : 'Disabled'"></span>
                                 </button>
                             </div>
                         </div>
                     </div>
+                </div>
 
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div x-cloak x-show="activeTab === 'routing'" x-transition.opacity.duration.200ms
+                    :id="`tab-panel-routing`" role="tabpanel" tabindex="0" class="space-y-6">
+                    <div class="space-y-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">Call forwarding</h2>
-                            <p class="text-sm text-slate-500">Choose how incoming calls are diverted for this extension.
-                            </p>
+                            <h2 class="text-sm font-semibold text-slate-900">Call forwarding</h2>
+                            <p class="text-xs text-slate-500">Configure destination and timeout. Disabled fields are
+                                ignored
+                                when forwarding is off.</p>
                         </header>
-                        <div class="mt-6 space-y-6">
-                            <div class="grid gap-3 md:grid-cols-2">
+                        <div class="grid gap-3 md:grid-cols-2">
+                            <template x-for="option in forwardingModes" :key="option.value">
                                 <label
                                     class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                                    :class="callForwardingMode === 'none' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                    <input type="radio" name="call_forwarding_mode_choice" value="none"
+                                    :class="form.call_forwarding_mode === option.value ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                    <input type="radio"
                                         class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                        x-model="callForwardingMode">
+                                        x-model="form.call_forwarding_mode" :value="option.value">
                                     <span>
-                                        <span class="font-semibold text-slate-900">No forwarding</span>
-                                        <span class="block text-xs text-slate-500">All calls ring this extension without
-                                            diversion.</span>
+                                        <span class="font-semibold text-slate-900" x-text="option.label"></span>
+                                        <span class="block text-xs text-slate-500" x-text="option.description"></span>
                                     </span>
                                 </label>
-                                <label
-                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                                    :class="callForwardingMode === 'always' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                    <input type="radio" name="call_forwarding_mode_choice" value="always"
-                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                        x-model="callForwardingMode">
-                                    <span>
-                                        <span class="font-semibold text-slate-900">Always forward</span>
-                                        <span class="block text-xs text-slate-500">Send every call to another
-                                            destination immediately.</span>
-                                    </span>
-                                </label>
-                                <label
-                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                                    :class="callForwardingMode === 'when_busy' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                    <input type="radio" name="call_forwarding_mode_choice" value="when_busy"
-                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                        x-model="callForwardingMode">
-                                    <span>
-                                        <span class="font-semibold text-slate-900">When busy</span>
-                                        <span class="block text-xs text-slate-500">Forward calls only when the endpoint
-                                            is already handling another call.</span>
-                                    </span>
-                                </label>
-                                <label
-                                    class="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm transition"
-                                    :class="callForwardingMode === 'when_not_answered' ? 'border-sky-200 bg-sky-50/60 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                    <input type="radio" name="call_forwarding_mode_choice" value="when_not_answered"
-                                        class="mt-1 h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-400"
-                                        x-model="callForwardingMode">
-                                    <span>
-                                        <span class="font-semibold text-slate-900">When not answered</span>
-                                        <span class="block text-xs text-slate-500">Try this extension first, then
-                                            forward after the timeout below.</span>
-                                    </span>
-                                </label>
-                            </div>
-
-                            <div class="grid gap-5 md:grid-cols-2">
-                                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                    Forward destination
-                                    <input type="tel" x-model="callForwardingDestination"
-                                        :disabled="callForwardingMode === 'none'"
-                                        :class="callForwardingMode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                        class="rounded-lg border px-3 py-2 text-sm text-slate-700 transition"
-                                        placeholder="SIP URI, extension, or phone number">
-                                    <span class="text-xs font-normal text-slate-400">Required for forwarding modes other
-                                        than "No forwarding".</span>
-                                </label>
-                                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                    Ring timeout (seconds)
-                                    <input type="number" min="5" max="120" step="1"
-                                        x-model.number="callForwardingTimeout" :disabled="callForwardingMode === 'none'"
-                                        :class="callForwardingMode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                        class="rounded-lg border px-3 py-2 text-sm text-slate-700 transition"
-                                        placeholder="30">
-                                    <span class="text-xs font-normal text-slate-400">How long to ring before forwarding.
-                                        Clamped between 5 and 120 seconds.</span>
-                                </label>
-                            </div>
+                            </template>
+                        </div>
+                        <div class="grid gap-5 md:grid-cols-2">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Forward destination
+                                <input type="text" x-model.trim="form.call_forwarding_destination" maxlength="160"
+                                    :disabled="form.call_forwarding_mode === 'none'"
+                                    :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                    class="rounded-lg border px-3 py-2 text-sm text-slate-700"
+                                    placeholder="SIP URI, PSTN number, or internal extension">
+                                <span class="text-xs font-normal text-slate-400">Required whenever forwarding is
+                                    enabled.</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                Ring timeout (seconds)
+                                <input type="number" min="5" max="120" step="1"
+                                    x-model.number="form.call_forwarding_timeout"
+                                    :disabled="form.call_forwarding_mode === 'none'"
+                                    :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                    class="rounded-lg border px-3 py-2 text-sm text-slate-700">
+                                <span class="text-xs font-normal text-slate-400">Accepted range: 5–120 seconds.</span>
+                            </label>
                         </div>
                     </div>
-                </section>
 
-                <section x-show="activeTab === 'notes'" x-transition.opacity x-cloak class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <header class="flex flex-col gap-1">
-                            <h2 class="text-lg font-semibold text-slate-900">Notes</h2>
-                            <p class="text-sm text-slate-500">Keep onboarding context, troubleshooting hints, or
-                                escalation
-                                details in one place.</p>
-                        </header>
-                        <textarea name="notes" rows="4"
-                            class="mt-6 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Optional internal notes">{{ extension.notes | default('') }}</textarea>
+                        <h2 class="text-sm font-semibold text-slate-900">Internal notes</h2>
+                        <textarea rows="4" x-model="form.notes"
+                            class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Optional notes for provisioning or troubleshooting."></textarea>
                     </div>
-                </section>
+                </div>
             </div>
 
-            <div class="flex flex-col gap-3 sm:flex-row sm:justify-between">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="text-xs text-slate-400">
-                    Changes are saved to draft immediately after submission. No services are disrupted until applied.
+                    Submissions update immediately through the API. All actions run via AJAX—no full page reloads
+                    required.
                 </div>
                 <div class="flex items-center gap-3">
-                    <a href="{{ back_url }}"
+                    <a :href="listUrl"
                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
                         Cancel
                     </a>
                     <button type="submit"
-                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                        {{ submit_label }}
+                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                        :disabled="saving">
+                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6" x-show="saving">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
+                        </svg>
+                        <span x-text="mode === 'create' ? 'Create extension' : 'Save changes'"></span>
                     </button>
                 </div>
             </div>
         </form>
     </div>
 </div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('extensionDetailPage', (options) => ({
+            basePath: options.basePath || '/console',
+            mode: options.mode || 'create',
+            model: options.model || {},
+            availableDepartmentsRaw: options.departments || [],
+            assignedDepartmentsRaw: options.assignedDepartments || [],
+            listUrl: `${options.basePath || '/console'}/extensions`,
+            success: null,
+            error: null,
+            saving: false,
+            activeTab: 'profile',
+            tabs: [
+                { id: 'profile', label: 'Profile', description: 'Extension details' },
+                { id: 'access', label: 'Access & Departments', description: 'Departments and access permissions' },
+                { id: 'routing', label: 'Call forwarding', description: 'Call forwarding and internal notes' },
+            ],
+            form: {
+                extension: options.model?.extension || '',
+                display_name: options.model?.display_name || '',
+                email: options.model?.email || '',
+                sip_password: '',
+                login_allowed: !(options.model?.login_disabled ?? false),
+                voicemail_enabled: !(options.model?.voicemail_disabled ?? false),
+                call_forwarding_mode: options.model?.call_forwarding_mode || 'none',
+                call_forwarding_destination: options.model?.call_forwarding_destination || '',
+                call_forwarding_timeout: options.model?.call_forwarding_timeout || 30,
+                notes: options.model?.notes || '',
+            },
+            selectedDepartments: [],
+            forwardingModes: [
+                { value: 'none', label: 'No forwarding', description: 'Ring this extension only.' },
+                { value: 'always', label: 'Always forward', description: 'Forward every call immediately.' },
+                { value: 'when_busy', label: 'When busy', description: 'Forward only when already on a call.' },
+                { value: 'when_not_answered', label: 'When not answered', description: 'Forward if unanswered within the timeout.' },
+            ],
+            setActiveTab(tabId) {
+                const fallback = this.tabs[0]?.id || 'profile';
+                this.activeTab = this.tabs.some((tab) => tab.id === tabId) ? tabId : fallback;
+            },
+            isActiveTab(tabId) {
+                return this.activeTab === tabId;
+            },
+            get availableDepartments() {
+                return this.availableDepartmentsRaw.map((item) => ({
+                    id: item.id,
+                    name: item.name || item.display_name || item.label || `Department #${item.id}`,
+                }));
+            },
+            get pageTitle() {
+                return this.mode === 'edit'
+                    ? `Edit ${this.form.display_name || this.form.extension || 'extension'}`
+                    : 'Create extension';
+            },
+            submitUrl() {
+                if (this.mode === 'edit' && this.model?.id) {
+                    return `${this.basePath}/extensions/${this.model.id}`;
+                }
+                return `${this.basePath}/extensions`;
+            },
+            submitMethod() {
+                return this.mode === 'edit' ? 'PATCH' : 'PUT';
+            },
+            init() {
+                this.selectedDepartments = (this.assignedDepartmentsRaw || [])
+                    .map((dept) => String(dept.id))
+                    .filter(Boolean);
+                this.form.call_forwarding_timeout = this.clampTimeout(this.form.call_forwarding_timeout);
+            },
+            clampTimeout(value) {
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) {
+                    return 30;
+                }
+                return Math.min(120, Math.max(5, Math.round(numeric)));
+            },
+            formatDate(value) {
+                if (!value) {
+                    return '—';
+                }
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) {
+                    return value;
+                }
+                return date.toLocaleString();
+            },
+            buildPayload() {
+                const params = new URLSearchParams();
+                params.set('extension', this.form.extension.trim());
+
+                params.set('display_name', this.form.display_name.trim());
+                params.set('email', this.form.email.trim());
+                if (this.form.sip_password.trim()) {
+                    params.set('sip_password', this.form.sip_password.trim());
+                }
+
+                params.set('login_disabled', this.form.login_allowed ? 'false' : 'true');
+                params.set('voicemail_disabled', this.form.voicemail_enabled ? 'false' : 'true');
+
+                const mode = this.form.call_forwarding_mode || 'none';
+                params.set('call_forwarding_mode', mode);
+                if (mode !== 'none') {
+                    if (this.form.call_forwarding_destination.trim()) {
+                        params.set('call_forwarding_destination', this.form.call_forwarding_destination.trim());
+                    }
+                    params.set('call_forwarding_timeout', String(this.clampTimeout(this.form.call_forwarding_timeout)));
+                }
+
+                params.set('notes', this.form.notes ? this.form.notes.trim() : '');
+
+                this.selectedDepartments.forEach((id) => params.append('department_ids', id));
+
+                return params;
+            },
+            async submit() {
+                if (!this.form.extension.trim()) {
+                    this.error = 'Extension number is required.';
+                    return;
+                }
+                if (this.form.call_forwarding_mode !== 'none' && !this.form.call_forwarding_destination.trim()) {
+                    this.error = 'Forwarding destination is required when call forwarding is enabled.';
+                    return;
+                }
+
+                this.saving = true;
+                this.error = null;
+                this.success = null;
+                try {
+                    const body = this.buildPayload();
+                    const response = await fetch(this.submitUrl(), {
+                        method: this.submitMethod(),
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                        },
+                        body: body.toString(),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to save extension');
+                    }
+
+                    this.success = this.mode === 'create'
+                        ? 'Extension created successfully. Returning to the list...'
+                        : 'Changes saved. Returning to the list...';
+                    setTimeout(() => {
+                        window.location.href = this.listUrl;
+                    }, 600);
+                } catch (err) {
+                    console.error(err);
+                    this.error = err.message || 'Failed to submit form';
+                } finally {
+                    this.saving = false;
+                }
+            },
+        }));
+    });
+</script>
+
 {% endblock %}

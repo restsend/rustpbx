@@ -6,13 +6,24 @@ use crate::{
     handler::middleware::clientaddr::ClientAddr,
 };
 use axum::{
+    Router,
     extract::{Form, Path as AxumPath, Query, State},
     http::{StatusCode, header::SET_COOKIE},
     response::{IntoResponse, Redirect, Response},
+    routing::get,
 };
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/login", get(login_page).post(login_post))
+        .route("/logout", get(logout))
+        .route("/register", get(register_page).post(register_post))
+        .route("/forgot", get(forgot_page).post(forgot_post))
+        .route("/reset/{token}", get(reset_page).post(reset_post))
+}
 
 pub async fn login_page(
     State(state): State<Arc<ConsoleState>>,
