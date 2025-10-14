@@ -20,27 +20,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     let routes = Router::new()
         .merge(user::urls())
         .merge(extension::urls())
-        // PBX pages
-        // .route(
-        //     "/extensions",
-        //     get(self::extension::page_extensions).post(self::extension::create_extension),
-        // )
-        // .route(
-        //     "/extensions/new",
-        //     get(self::extension::page_extension_create),
-        // )
-        // .route(
-        //     "/extensions/{id}",
-        //     get(self::extension::page_extension_detail).post(self::extension::update_extension),
-        // )
-        // .route(
-        //     "/extensions/{id}/delete",
-        //     post(self::extension::delete_extension),
-        // )
-        // .route(
-        //     "/extensions/{id}/toggle",
-        //     post(self::extension::toggle_extension_login),
-        // )
+        .merge(setting::urls())
         .route(
             "/routing",
             get(self::routing::page_routing).post(self::routing::create_routing),
@@ -61,8 +41,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             "/call-records/{id}",
             get(self::call_record::page_call_record_detail),
         )
-        .route("/diagnostics", get(self::diagnostics::page_diagnostics))
-        .route("/settings", get(self::setting::page_settings));
+        .route("/diagnostics", get(self::diagnostics::page_diagnostics));
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))
