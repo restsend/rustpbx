@@ -359,32 +359,23 @@
                 return date.toLocaleString();
             },
             buildPayload() {
-                const params = new URLSearchParams();
-                params.set('extension', this.form.extension.trim());
-
-                params.set('display_name', this.form.display_name.trim());
-                params.set('email', this.form.email.trim());
-                if (this.form.sip_password.trim()) {
-                    params.set('sip_password', this.form.sip_password.trim());
+                return {
+                    'extension': this.form.extension.trim(),
+                    'display_name': this.form.display_name.trim(),
+                    'email': this.form.email.trim(),
+                    'sip_password': this.form.sip_password.trim() || undefined,
+                    'login_disabled': this.form.login_allowed ? false : true,
+                    'voicemail_disabled': this.form.voicemail_enabled ? false : true,
+                    'call_forwarding_mode': this.form.call_forwarding_mode || 'none',
+                    'call_forwarding_destination': this.form.call_forwarding_mode !== 'none' && this.form.call_forwarding_destination.trim()
+                        ? this.form.call_forwarding_destination.trim()
+                        : undefined,
+                    'call_forwarding_timeout': this.form.call_forwarding_mode !== 'none'
+                        ? this.clampTimeout(this.form.call_forwarding_timeout)
+                        : undefined,
+                    'notes': this.form.notes ? this.form.notes.trim() : '',
+                    'department_ids': this.selectedDepartments.map((id) => id.trim()).filter(Boolean),
                 }
-
-                params.set('login_disabled', this.form.login_allowed ? 'false' : 'true');
-                params.set('voicemail_disabled', this.form.voicemail_enabled ? 'false' : 'true');
-
-                const mode = this.form.call_forwarding_mode || 'none';
-                params.set('call_forwarding_mode', mode);
-                if (mode !== 'none') {
-                    if (this.form.call_forwarding_destination.trim()) {
-                        params.set('call_forwarding_destination', this.form.call_forwarding_destination.trim());
-                    }
-                    params.set('call_forwarding_timeout', String(this.clampTimeout(this.form.call_forwarding_timeout)));
-                }
-
-                params.set('notes', this.form.notes ? this.form.notes.trim() : '');
-
-                this.selectedDepartments.forEach((id) => params.append('department_ids', id));
-
-                return params;
             },
             async submit() {
                 if (!this.form.extension.trim()) {
@@ -405,9 +396,9 @@
                         method: this.submitMethod(),
                         headers: {
                             'Accept': 'application/json',
-                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                            'Content-Type': 'application/json',
                         },
-                        body: body.toString(),
+                        body: JSON.stringify(body),
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {

@@ -1,8 +1,8 @@
 {% extends "console/layout.html" %}
-{% block title %}SIP Trunks · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}Billing templates · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
-<div class="p-6" x-data='sipTrunkPage({
+<div class="p-6" x-data='billTemplatesPage({
         basePath: {{ base_url | tojson }},
         filters: {{ filters | default({}) | tojson }},
         createUrl: {{ create_url | tojson }}
@@ -10,17 +10,17 @@
     <div class="mx-auto max-w-7xl space-y-6">
         <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Carrier connectivity</p>
-                <h1 class="text-2xl font-semibold text-slate-900">SIP trunks</h1>
-                <p class="text-sm text-slate-500">Review carrier endpoints, capacity limits, and billing policy in one
-                    place.</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Billing catalog</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Billing templates</h1>
+                <p class="text-sm text-slate-500">Standardise charging models, allowances, and taxes for trunks and
+                    customers.</p>
             </div>
             <a :href="createUrl"
                 class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                 <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                 </svg>
-                New SIP trunk
+                New template
             </a>
         </header>
 
@@ -37,8 +37,8 @@
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                     <h2 class="text-sm font-semibold text-slate-900">Filters</h2>
-                    <p class="text-xs text-slate-500">Search trunks by name, carrier, status, direction, or billing
-                        template.</p>
+                    <p class="text-xs text-slate-500">Search templates or narrow down by currency and billing interval.
+                    </p>
                 </div>
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
@@ -50,7 +50,7 @@
                 </button>
             </div>
 
-            <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                     Search
                     <div class="relative">
@@ -61,47 +61,28 @@
                         </svg>
                         <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
                             class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Name, carrier, DID…">
+                            placeholder="Name or display label">
                     </div>
                 </label>
-
                 <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Status
-                    <select x-model="statusFilter" @change="applyFilters()"
+                    Currency
+                    <select x-model="currencyFilter" @change="applyFilters()"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <template x-for="option in statusOptions" :key="option.value">
+                        <template x-for="option in currencyOptions" :key="option.value">
                             <option :value="option.value" x-text="option.label"></option>
                         </template>
                     </select>
                 </label>
-
                 <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Direction
-                    <select x-model="directionFilter" @change="applyFilters()"
+                    Billing interval
+                    <select x-model="intervalFilter" @change="applyFilters()"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <template x-for="option in directionOptions" :key="option.value">
-                            <option :value="option.value" x-text="option.label"></option>
-                        </template>
-                    </select>
-                </label>
-
-                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Billing template
-                    <select x-model="templateFilter" @change="applyFilters()"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <template x-for="option in templateOptions" :key="option.value">
+                        <template x-for="option in intervalOptions" :key="option.value">
                             <option :value="option.value" x-text="option.label"></option>
                         </template>
                     </select>
                 </label>
             </div>
-
-            <label
-                class="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
-                    x-model="activeOnly" @change="applyFilters()">
-                Show active trunks only
-            </label>
         </section>
 
         <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
@@ -109,12 +90,11 @@
                 <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
                     <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                         <tr>
-                            <th scope="col" class="px-4 py-2">Trunk</th>
-                            <th scope="col" class="px-4 py-2">Carrier</th>
-                            <th scope="col" class="px-4 py-2">Status</th>
-                            <th scope="col" class="px-4 py-2">Direction</th>
                             <th scope="col" class="px-4 py-2">Template</th>
-                            <th scope="col" class="px-4 py-2">Capacity</th>
+                            <th scope="col" class="px-4 py-2">Currency</th>
+                            <th scope="col" class="px-4 py-2">Interval</th>
+                            <th scope="col" class="px-4 py-2">Allowances</th>
+                            <th scope="col" class="px-4 py-2">Rates</th>
                             <th scope="col" class="px-4 py-2">Updated</th>
                             <th scope="col" class="px-4 py-2">Actions</th>
                         </tr>
@@ -122,72 +102,69 @@
                     <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
                         <template x-if="loading">
                             <tr>
-                                <td colspan="8" class="px-4 py-6 text-center text-sm text-slate-500">
+                                <td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500">
                                     <div class="inline-flex items-center gap-2">
                                         <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                                         </svg>
-                                        Loading trunks…
+                                        Loading templates…
                                     </div>
                                 </td>
                             </tr>
                         </template>
-                        <template x-if="!loading && !trunks.length">
+                        <template x-if="!loading && !templates.length">
                             <tr>
-                                <td colspan="8" class="px-4 py-6 text-center text-sm text-slate-500">
-                                    No trunks found. Create one to get started.
+                                <td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500">
+                                    No templates found. Create one to get started.
                                 </td>
                             </tr>
                         </template>
-                        <template x-for="trunk in trunks" :key="trunk.id">
+                        <template x-for="template in templates" :key="template.id">
                             <tr class="hover:bg-slate-50">
                                 <td class="whitespace-nowrap px-4 py-2">
-                                    <div class="font-semibold text-slate-900" x-text="trunk.display_name || trunk.name">
+                                    <div class="font-semibold text-slate-900"
+                                        x-text="template.display_name || template.name"></div>
+                                    <div class="text-xs text-slate-400">#<span x-text="template.name"></span></div>
+                                    <template x-if="template.description">
+                                        <div class="mt-1 max-w-xs truncate text-xs text-slate-400"
+                                            x-text="template.description"></div>
+                                    </template>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2" x-text="template.currency"></td>
+                                <td class="whitespace-nowrap px-4 py-2"
+                                    x-text="intervalLabel(template.billing_interval)"></td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <div class="flex flex-col text-xs">
+                                        <span><span class="font-semibold"
+                                                x-text="formatNumber(template.included_minutes)"></span> minutes</span>
+                                        <span><span class="font-semibold"
+                                                x-text="formatNumber(template.included_messages)"></span>
+                                            messages</span>
                                     </div>
-                                    <div class="text-xs text-slate-400">#<span x-text="trunk.name"></span></div>
-                                    <template x-if="trunk.is_active === false">
-                                        <span
-                                            class="mt-1 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">Disabled</span>
-                                    </template>
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-2">
-                                    <div x-text="trunk.carrier || '—'"></div>
-                                    <template x-if="trunk.sip_server">
-                                        <div class="text-xs text-slate-400" x-text="trunk.sip_server"></div>
-                                    </template>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2">
-                                    <span
-                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
-                                        :class="statusBadgeClasses(trunk.status)">
-                                        <span class="h-1.5 w-1.5 rounded-full"
-                                            :class="statusDotClasses(trunk.status)"></span>
-                                        <span x-text="statusBadgeLabel(trunk.status)"></span>
-                                    </span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2">
-                                    <span x-text="directionLabel(trunk.direction)"></span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2">
-                                    <span x-text="templateLabel(trunk)"></span>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2">
-                                    <span x-text="capacitySummary(trunk)"></span>
+                                    <div class="flex flex-col text-xs">
+                                        <span>Overage <span class="font-semibold"
+                                                x-text="formatCurrency(template.overage_rate_per_minute, template.currency)"></span>/min</span>
+                                        <span>Setup <span class="font-semibold"
+                                                x-text="formatCurrency(template.setup_fee, template.currency)"></span></span>
+                                        <span>Tax <span class="font-semibold"
+                                                x-text="formatPercent(template.tax_percent)"></span></span>
+                                    </div>
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-2 text-slate-500"
-                                    x-text="formatDate(trunk.updated_at)"></td>
+                                    x-text="formatDate(template.updated_at)"></td>
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="flex items-center gap-2">
-                                        <a :href="detailUrl(trunk.id)"
+                                        <a :href="detailUrl(template.id)"
                                             class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
                                             View
                                         </a>
                                         <button type="button"
-                                            class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1 text-xs font-semibold transition"
-                                            :class="processingDelete === trunk.id ? 'text-rose-300 cursor-not-allowed' : 'text-rose-600 hover:bg-rose-50'"
-                                            :disabled="processingDelete === trunk.id" @click="confirmDelete(trunk)">
+                                            class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-50"
+                                            @click="deleteTemplate(template)">
                                             Delete
                                         </button>
                                     </div>
@@ -232,56 +209,40 @@
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('sipTrunkPage', (options) => ({
+        Alpine.data('billTemplatesPage', (options) => ({
             basePath: options.basePath || '/console',
-            listEndpoint: `${options.basePath || '/console'}/sip-trunk`,
-            createUrl: options.createUrl || `${options.basePath || '/console'}/sip-trunk/new`,
+            listEndpoint: `${options.basePath || '/console'}/bill-templates`,
+            createUrl: options.createUrl || `${options.basePath || '/console'}/bill-templates/new`,
             filtersRaw: options.filters || {},
             keyword: '',
-            statusFilter: 'all',
-            directionFilter: 'all',
-            templateFilter: 'all',
-            activeOnly: false,
-            statusOptions: [],
-            directionOptions: [],
-            templateOptions: [],
-            templateMap: {},
-            trunks: [],
+            currencyFilter: 'all',
+            intervalFilter: 'all',
+            currencyOptions: [],
+            intervalOptions: [],
+            templates: [],
             pagination: null,
             loading: false,
             error: null,
             flash: null,
-            processingDelete: null,
             page: 1,
             perPage: 20,
             init() {
                 this.loadFilterOptions();
-                this.fetchTrunks();
+                this.fetchTemplates();
             },
             loadFilterOptions() {
-                const statuses = Array.isArray(this.filtersRaw.statuses) ? this.filtersRaw.statuses : [];
-                const directions = Array.isArray(this.filtersRaw.directions) ? this.filtersRaw.directions : [];
-                const templates = Array.isArray(this.filtersRaw.bill_templates) ? this.filtersRaw.bill_templates : [];
-
-                this.statusOptions = [{ value: 'all', label: 'Any status' }]
-                    .concat(statuses.map((value) => ({
-                        value: String(value).toLowerCase(),
-                        label: this.statusBadgeLabel(value),
+                const currencies = Array.isArray(this.filtersRaw.currencies) ? this.filtersRaw.currencies : [];
+                const intervals = Array.isArray(this.filtersRaw.billing_intervals) ? this.filtersRaw.billing_intervals : [];
+                this.currencyOptions = [{ value: 'all', label: 'Any currency' }]
+                    .concat(currencies.map((value) => ({
+                        value: String(value).toUpperCase(),
+                        label: String(value).toUpperCase(),
                     })));
-
-                this.directionOptions = [{ value: 'all', label: 'Any direction' }]
-                    .concat(directions.map((value) => ({
+                this.intervalOptions = [{ value: 'all', label: 'Any interval' }]
+                    .concat(intervals.map((value) => ({
                         value: String(value).toLowerCase(),
-                        label: this.directionLabel(value),
+                        label: this.intervalLabel(value),
                     })));
-
-                this.templateOptions = [{ value: 'all', label: 'Any template' }]
-                    .concat(templates.map((tpl) => {
-                        const value = String(tpl.id ?? tpl.name ?? '');
-                        const label = tpl.display_name || tpl.name || value || 'Template';
-                        this.templateMap[value] = label;
-                        return { value, label };
-                    }));
             },
             buildParams() {
                 const params = new URLSearchParams();
@@ -290,21 +251,15 @@
                 if (this.keyword.trim()) {
                     params.set('filters[q]', this.keyword.trim());
                 }
-                if (this.statusFilter !== 'all') {
-                    params.set('filters[status]', this.statusFilter);
+                if (this.currencyFilter !== 'all') {
+                    params.set('filters[currency]', this.currencyFilter);
                 }
-                if (this.directionFilter !== 'all') {
-                    params.set('filters[direction]', this.directionFilter);
-                }
-                if (this.templateFilter !== 'all') {
-                    params.append('filters[billing_template_ids][]', this.templateFilter);
-                }
-                if (this.activeOnly) {
-                    params.set('filters[only_active]', 'true');
+                if (this.intervalFilter !== 'all') {
+                    params.set('filters[billing_interval]', this.intervalFilter);
                 }
                 return params;
             },
-            async fetchTrunks() {
+            async fetchTemplates() {
                 this.loading = true;
                 this.error = null;
                 try {
@@ -316,9 +271,9 @@
                     });
                     const data = await response.json();
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to load SIP trunks');
+                        throw new Error(data?.message || 'Failed to load billing templates');
                     }
-                    this.trunks = Array.isArray(data?.pagination?.items) ? data.pagination.items : [];
+                    this.templates = Array.isArray(data?.pagination?.items) ? data.pagination.items : [];
                     this.pagination = data?.pagination || null;
                     if (this.pagination?.per_page) {
                         this.perPage = this.pagination.per_page;
@@ -326,21 +281,19 @@
                     this.flash = null;
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Unable to load SIP trunks';
+                    this.error = err?.message || 'Unable to load billing templates';
                 } finally {
                     this.loading = false;
                 }
             },
             applyFilters() {
                 this.page = 1;
-                this.fetchTrunks();
+                this.fetchTemplates();
             },
             resetFilters() {
                 this.keyword = '';
-                this.statusFilter = 'all';
-                this.directionFilter = 'all';
-                this.templateFilter = 'all';
-                this.activeOnly = false;
+                this.currencyFilter = 'all';
+                this.intervalFilter = 'all';
                 this.applyFilters();
             },
             goToPage(target) {
@@ -353,7 +306,7 @@
                     return;
                 }
                 this.page = page;
-                this.fetchTrunks();
+                this.fetchTemplates();
             },
             prevPage() {
                 if (this.pagination?.has_prev) {
@@ -365,6 +318,9 @@
                     this.goToPage(this.pagination.next_page || (this.page + 1));
                 }
             },
+            detailUrl(id) {
+                return `${this.basePath}/bill-templates/${id}`;
+            },
             formatDate(value) {
                 if (!value) {
                     return '—';
@@ -375,79 +331,46 @@
                 }
                 return date.toLocaleString();
             },
-            directionLabel(value) {
+            intervalLabel(value) {
                 const normalized = String(value || '').toLowerCase();
-                if (normalized === 'inbound') return 'Inbound';
-                if (normalized === 'outbound') return 'Outbound';
-                if (normalized === 'bidirectional') return 'Bi-directional';
-                return value || 'Unknown';
+                if (normalized === 'hourly') return 'Hourly';
+                if (normalized === 'daily') return 'Daily';
+                if (normalized === 'weekly') return 'Weekly';
+                if (normalized === 'monthly') return 'Monthly';
+                if (normalized === 'quarterly') return 'Quarterly';
+                if (normalized === 'yearly') return 'Yearly';
+                return value || 'Custom';
             },
-            statusBadgeLabel(status) {
-                const normalized = String(status || '').toLowerCase();
-                if (!normalized) {
-                    return 'Unknown';
+            formatNumber(value) {
+                if (value === null || value === undefined) {
+                    return '0';
                 }
-                return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+                return Number(value).toLocaleString();
             },
-            statusBadgeClasses(status) {
-                const normalized = String(status || '').toLowerCase();
-                if (normalized === 'healthy') return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100';
-                if (normalized === 'warning') return 'bg-amber-50 text-amber-600 ring-1 ring-amber-100';
-                if (normalized === 'standby') return 'bg-sky-50 text-sky-600 ring-1 ring-sky-100';
-                if (normalized === 'offline') return 'bg-rose-50 text-rose-600 ring-1 ring-rose-100';
-                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+            formatCurrency(value, currency) {
+                const amount = Number(value || 0);
+                const currencyCode = currency || 'USD';
+                const formatter = new Intl.NumberFormat(undefined, {
+                    style: 'currency',
+                    currency: currencyCode,
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 4,
+                });
+                return formatter.format(amount);
             },
-            statusDotClasses(status) {
-                const normalized = String(status || '').toLowerCase();
-                if (normalized === 'healthy') return 'bg-emerald-400';
-                if (normalized === 'warning') return 'bg-amber-400';
-                if (normalized === 'standby') return 'bg-sky-400';
-                if (normalized === 'offline') return 'bg-rose-400';
-                return 'bg-slate-400';
+            formatPercent(value) {
+                const amount = Number(value || 0);
+                return `${amount.toFixed(2)}%`;
             },
-            templateLabel(trunk) {
-                if (trunk?.billing_template?.display_name) {
-                    return trunk.billing_template.display_name;
-                }
-                if (trunk?.billing_template?.name) {
-                    return trunk.billing_template.name;
-                }
-                if (trunk?.billing_template_id != null) {
-                    const key = String(trunk.billing_template_id);
-                    return this.templateMap[key] || key;
-                }
-                return '—';
-            },
-            capacitySummary(trunk) {
-                const cps = trunk?.max_cps ?? '—';
-                const channels = trunk?.max_concurrent ?? '—';
-                return `${cps} cps · ${channels} ch`;
-            },
-            detailUrl(id) {
-                return `${this.basePath}/sip-trunk/${id}`;
-            },
-            confirmDelete(trunk) {
-                if (!trunk || !trunk.id) {
+            async deleteTemplate(template) {
+                if (!template || !template.id) {
                     return;
                 }
-                window.dispatchEvent(new CustomEvent('console:confirm', {
-                    detail: {
-                        title: 'Delete SIP trunk',
-                        message: `Delete trunk ${trunk.display_name || trunk.name}? This action cannot be undone.`,
-                        confirmLabel: 'Delete',
-                        cancelLabel: 'Cancel',
-                        destructive: true,
-                        onConfirm: () => this.deleteTrunk(trunk),
-                    },
-                }));
-            },
-            async deleteTrunk(trunk) {
-                if (!trunk || !trunk.id) {
+                if (!window.confirm(`Delete billing template ${template.display_name || template.name}? This cannot be undone.`)) {
                     return;
                 }
-                this.processingDelete = trunk.id;
                 try {
-                    const response = await fetch(this.detailUrl(trunk.id), {
+                    const response = await fetch(this.detailUrl(template.id), {
                         method: 'DELETE',
                         headers: {
                             'Accept': 'application/json',
@@ -455,15 +378,14 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to delete trunk');
+                        throw new Error(data?.message || 'Failed to delete billing template');
                     }
-                    this.flash = 'SIP trunk deleted.';
-                    await this.fetchTrunks();
+                    this.flash = 'Billing template deleted.';
+                    await this.fetchTemplates();
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to delete trunk';
+                    this.error = err?.message || 'Failed to delete billing template';
                 }
-                this.processingDelete = null;
             },
         }));
     });
