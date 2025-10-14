@@ -125,6 +125,7 @@ impl CallModule {
         let session_id: String = format!("{}-{}", rand::random::<u32>(), dialog_id);
 
         let media_config = MediaConfig::new()
+            .with_proxy_mode(self.inner.config.media_proxy)
             .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
             .with_rtp_start_port(self.inner.server.rtp_config.start_port.clone())
             .with_rtp_end_port(self.inner.server.rtp_config.end_port.clone());

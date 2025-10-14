@@ -1,439 +1,558 @@
 {% extends "console/layout.html" %}
-{% block title %}SIP Trunk Detail · {{site_name|default('RustPBX')}}{% endblock %}
+{% set has_model = model is defined and model is not none %}
+{% set mode_text = '"edit"' if has_model else '"create"' %}
+{% set model_data = model if has_model else {} %}
+{% set bill_template_data = bill_template if bill_template is defined and bill_template is not none else {} %}
+{% block title %}{{ model_data.display_name | default(model_data.name | default('New SIP trunk')) }} · {{ site_name |
+default('RustPBX') }}{% endblock %}
 {% block content %}
-<div class="p-6">
-    <div class="mx-auto max-w-6xl space-y-6" x-data="sipTrunkDetail({{ trunk_data | escape }})">
-        <header class="flex flex-col gap-4 border-b border-slate-200 pb-4 md:flex-row md:items-end md:justify-between">
-            <div class="space-y-2">
-                <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-sky-600">
-                    <span>SIP trunk</span>
-                    <span class="text-slate-400">/</span>
-                    <span x-text="trunk.name"></span>
-                </div>
-                <h1 class="text-3xl font-semibold text-slate-900" x-text="trunk.display_name || trunk.name"></h1>
-                <p class="text-sm text-slate-500" x-text="trunk.dest"></p>
-                <div class="flex flex-wrap items-center gap-2 text-xs font-semibold">
-                    <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
-                        :class="statusClasses(trunk.status)">
-                        <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(trunk.status)"></span>
-                        <span x-text="statusLabel(trunk.status)"></span>
-                    </span>
-                    <template x-for="dir in trunk.direction || []" :key="dir">
-                        <span
-                            class="inline-flex items-center rounded-full bg-sky-50 px-3 py-1 text-[11px] font-semibold text-sky-700"
-                            x-text="directionLabel(dir)"></span>
-                    </template>
-                    <span
-                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600"
-                        x-text="trunk.carrier"></span>
+{% set base_url = base_path | default('/console') %}
+<div class="p-6" x-data='sipTrunkDetailPage({
+        basePath: {{ base_url | tojson }},
+        mode: {{ mode_text }},
+        model: {{ model_data | tojson }},
+        billTemplate: {{ bill_template_data | tojson }},
+        filters: {{ filters | default({}) | tojson }},
+        templates: {{ templates | default([]) | tojson }},
+        createUrl: {{ create_url | default(null) | tojson }},
+        updateUrl: {{ update_url | default(null) | tojson }}
+    })' x-init="init()">
+    <div class="mx-auto max-w-5xl space-y-6">
+        <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div class="space-y-3">
+                <a :href="listUrl"
+                    class="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-700">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
+                    </svg>
+                    Back to SIP trunks
+                </a>
+                <div>
+                    <h1 class="text-2xl font-semibold text-slate-900" x-text="pageTitle"></h1>
+                    <p class="mt-2 text-sm text-slate-500"
+                        x-text="mode === 'create' ? 'Register a carrier trunk, configure authentication, limits, and optional billing template.' : 'Update carrier credentials, routing, limits, and billing linkage for this trunk.'">
+                    </p>
                 </div>
             </div>
-            <div class="flex flex-wrap items-center gap-3 text-sm">
-                <a :href="backUrl"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-5 5 5 5" />
-                    </svg>
-                    Back to list
-                </a>
-                <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                    </svg>
-                    Clone trunk
-                </button>
+            <div class="rounded-xl bg-white p-5 text-sm text-slate-600 shadow-sm ring-1 ring-black/5"
+                x-show="mode === 'edit'" x-cloak>
+                <div class="flex items-center justify-between">
+                    <div class="font-semibold text-slate-900">Trunk summary</div>
+                    <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
+                        :class="statusBadgeClasses(form.status)">
+                        <span class="h-1.5 w-1.5 rounded-full" :class="statusDotClasses(form.status)"></span>
+                        <span x-text="statusBadgeLabel(form.status)"></span>
+                    </span>
+                </div>
+                <dl class="mt-4 space-y-3 text-xs text-slate-500">
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Trunk</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.display_name || form.name || '—'"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Carrier</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.carrier || '—'"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Linked template</dt>
+                        <dd class="text-sm text-slate-700" x-text="selectedTemplateLabel"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Updated</dt>
+                        <dd class="text-sm text-slate-700" x-text="formatDate(model?.updated_at)"></dd>
+                    </div>
+                </dl>
             </div>
         </header>
 
-        <section class="grid gap-4 md:grid-cols-3">
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Utilisation</div>
-                <div class="mt-3 flex items-baseline gap-2">
-                    <span class="text-3xl font-semibold text-slate-900"
-                        x-text="summary.utilisation_percent + '%'"></span>
-                </div>
-                <p class="mt-2 text-xs text-slate-500">Consumed minutes vs included allowance this billing period.</p>
-                <div class="mt-4 h-2 rounded-full bg-slate-200">
-                    <div class="h-2 rounded-full bg-sky-500"
-                        :style="{ width: Math.min(summary.utilisation_percent, 100) + '%' }"></div>
-                </div>
+        <template x-if="success">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="success"></div>
+        </template>
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
             </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Current cost</div>
-                <div class="mt-3 text-3xl font-semibold text-slate-900"
-                    x-text="formatCurrency(summary.current_cost, trunk.billing?.currency)"></div>
-                <p class="mt-2 text-xs text-slate-500">Charges accrued during <span
-                        x-text="trunk.billing?.usage?.current?.period || 'this period'"></span>.</p>
-            </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Minutes used</div>
-                <div class="mt-3 text-3xl font-semibold text-slate-900" x-text="formatNumber(summary.current_minutes)">
-                </div>
-                <p class="mt-2 text-xs text-slate-500">Minutes consumed across all routes for this trunk.</p>
-            </div>
-        </section>
+        </template>
 
-        <section class="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-            <div class="space-y-4">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-base font-semibold text-slate-900">Access control</h2>
-                        <span class="text-xs text-slate-500"
-                            x-text="(trunk.ip_whitelist || []).length + ' allowed IPs'"></span>
-                    </div>
-                    <p class="mt-1 text-xs text-slate-500">Review the edge IPs permitted to originate calls on this
-                        carrier.</p>
-                    <table class="mt-4 w-full table-auto text-left text-sm text-slate-600">
-                        <thead class="text-xs uppercase tracking-wide text-slate-400">
-                            <tr>
-                                <th class="pb-2">Label</th>
-                                <th class="pb-2">CIDR</th>
-                                <th class="pb-2">Notes</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-100">
-                            <template x-for="item in trunk.ip_whitelist || []" :key="item.cidr">
-                                <tr>
-                                    <td class="py-2 font-medium text-slate-700" x-text="item.label || '—'"></td>
-                                    <td class="py-2 font-mono text-xs" x-text="item.cidr"></td>
-                                    <td class="py-2 text-xs text-slate-500" x-text="item.note || 'Carrier POP'"></td>
-                                </tr>
+        <form class="space-y-6" @submit.prevent="submit">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">General</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Trunk name
+                        <input type="text" x-model.trim="form.name" maxlength="120" required
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sip-hk-primary">
+                        <span class="text-xs font-normal text-slate-400">Unique identifier used in routing rules.</span>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Display name
+                        <input type="text" x-model.trim="form.display_name" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Hong Kong primary trunk">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Carrier
+                        <input type="text" x-model.trim="form.carrier" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Carrier name">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Status
+                        <select x-model="form.status"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in statusOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
                             </template>
-                            <template x-if="!(trunk.ip_whitelist || []).length">
-                                <tr>
-                                    <td colspan="3" class="py-6 text-center text-xs text-slate-400">No IP whitelist
-                                        defined.</td>
-                                </tr>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Direction
+                        <select x-model="form.direction"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in directionOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
                             </template>
-                        </tbody>
-                    </table>
-                </div>
-
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-base font-semibold text-slate-900">DID inventory</h2>
-                        <span class="text-xs text-slate-500"
-                            x-text="(trunk.did_numbers || []).length + ' numbers'"></span>
-                    </div>
-                    <p class="mt-1 text-xs text-slate-500">Assigned numbers and routing labels for inbound distribution.
-                    </p>
-                    <div class="mt-4 grid gap-3 sm:grid-cols-2">
-                        <template x-for="did in trunk.did_numbers || []" :key="did.number">
-                            <div class="rounded-lg border border-slate-200 p-3">
-                                <div class="text-sm font-semibold text-slate-800" x-text="did.number"></div>
-                                <div class="text-xs text-slate-500" x-text="did.label || 'Uncategorised'"></div>
-                            </div>
-                        </template>
-                        <template x-if="!(trunk.did_numbers || []).length">
-                            <div
-                                class="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">
-                                No DIDs assigned.
-                            </div>
-                        </template>
-                    </div>
-                </div>
-
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-base font-semibold text-slate-900">Capacity limits</h2>
-                        <div class="flex gap-2 text-xs text-slate-500">
-                            <span>Max CPS: <span class="font-semibold text-slate-800"
-                                    x-text="trunk.limits?.max_cps ?? trunk.max_cps ?? '—'"></span></span>
-                            <span>Concurrent: <span class="font-semibold text-slate-800"
-                                    x-text="trunk.limits?.max_concurrent ?? trunk.max_calls ?? '—'"></span></span>
-                            <span>Duration: <span class="font-semibold text-slate-800"
-                                    x-text="formatDuration(trunk.limits?.max_call_duration)"></span></span>
-                        </div>
-                    </div>
-                    <p class="mt-1 text-xs text-slate-500">Combined hard limits from carrier contract and PBX throttling
-                        policy.</p>
-                    <div class="mt-4 grid gap-4 sm:grid-cols-3">
-                        <div class="rounded-lg border border-slate-200 p-4 text-xs text-slate-500">
-                            <div class="text-sm font-semibold text-slate-800">Burst CPS</div>
-                            <p class="mt-2">Peak calls per second allowed before queuing. Useful for outbound campaigns.
-                            </p>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 p-4 text-xs text-slate-500">
-                            <div class="text-sm font-semibold text-slate-800">Concurrent calls</div>
-                            <p class="mt-2">Carrier enforced channel capacity across all media streams.</p>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 p-4 text-xs text-slate-500">
-                            <div class="text-sm font-semibold text-slate-800">Max duration</div>
-                            <p class="mt-2">Longest call duration in seconds before enforced release.</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <aside class="space-y-4">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-base font-semibold text-slate-900">Default routing</h2>
-                        <a class="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 hover:text-sky-500"
-                            :href="trunk.default_route?.url || '#'">
-                            View rule
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        SIP transport
+                        <select x-model="form.sip_transport"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in transportOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
+                            </template>
+                        </select>
+                    </label>
+                    <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        SIP server / realm
+                        <input type="text" x-model.trim="form.sip_server" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sip:provider.example.com">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Outbound proxy
+                        <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="proxy.example.com">
+                    </label>
+                    <div class="flex flex-col gap-2">
+                        <span class="text-sm font-medium text-slate-700">Active</span>
+                        <button type="button" @click="toggleActive()"
+                            class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
+                            :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
                             <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                 stroke-width="1.6">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8"
+                                    x-show="form.is_active"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
+                                    x-show="!form.is_active"></path>
                             </svg>
-                        </a>
-                    </div>
-                    <p class="mt-1 text-xs text-slate-500">Primary routing rule applied to calls sourced from this
-                        carrier.</p>
-                    <div class="mt-4 space-y-3 text-sm text-slate-600">
-                        <div class="rounded-lg border border-slate-200 p-3">
-                            <div class="font-semibold text-slate-800"
-                                x-text="trunk.default_route?.name || 'Not assigned'"></div>
-                            <div class="text-xs text-slate-500"
-                                x-text="'Priority ' + (trunk.default_route?.priority ?? '—')"></div>
-                            <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                <span class="rounded-full bg-slate-100 px-2 py-0.5 font-medium"
-                                    x-text="trunk.default_route?.strategy || 'Unknown strategy'"></span>
-                                <template x-for="fallback in trunk.default_route?.fallbacks || []" :key="fallback.name">
-                                    <span
-                                        class="inline-flex items-center gap-1 rounded-full bg-slate-50 px-2 py-0.5 font-medium text-slate-700">
-                                        <span x-text="fallback.name"></span>
-                                        <span class="text-[11px] text-slate-400" x-text="'w' + fallback.weight"></span>
-                                    </span>
-                                </template>
-                            </div>
-                        </div>
+                            <span x-text="form.is_active ? 'Enabled' : 'Disabled'"></span>
+                        </button>
                     </div>
                 </div>
+                <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                    Description
+                    <textarea rows="3" x-model.trim="form.description"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="Internal notes about provisioning or escalation."></textarea>
+                </label>
+            </section>
 
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Billing template</h2>
-                    <p class="mt-1 text-xs text-slate-500">Understand allowance usage and recent spend.</p>
-                    <div class="mt-4 space-y-3 text-sm text-slate-600">
-                        <div class="rounded-lg border border-slate-200 p-3">
-                            <div class="font-semibold text-slate-800"
-                                x-text="trunk.billing?.template_name || 'Not linked'"></div>
-                            <div class="text-xs text-slate-500"
-                                x-text="trunk.billing?.template_id ? ('Template ID · ' + trunk.billing.template_id) : 'No template ID'">
-                            </div>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 p-3">
-                            <div class="flex items-center justify-between text-xs text-slate-500">
-                                <span>Current period</span>
-                                <span x-text="trunk.billing?.usage?.current?.period || '—'"></span>
-                            </div>
-                            <div class="mt-2 flex items-center justify-between text-sm font-semibold text-slate-800">
-                                <span x-text="formatNumber(trunk.billing?.usage?.current?.minutes) + ' minutes'"></span>
-                                <span
-                                    x-text="formatCurrency(trunk.billing?.usage?.current?.cost, trunk.billing?.currency)"></span>
-                            </div>
-                            <div class="mt-2 h-2 rounded-full bg-slate-200">
-                                <div class="h-2 rounded-full bg-emerald-500"
-                                    :style="{ width: currentUtilisationWidth }"></div>
-                            </div>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-500">
-                            <div class="flex items-center justify-between">
-                                <span>Last 30 days</span>
-                                <span
-                                    x-text="formatNumber(trunk.billing?.usage?.last_30_days?.minutes) + ' min'"></span>
-                            </div>
-                            <div class="mt-2 flex items-center justify-between text-sm font-semibold text-slate-800">
-                                <span x-text="(trunk.billing?.usage?.last_30_days?.calls || 0) + ' calls'"></span>
-                                <span
-                                    x-text="formatCurrency(trunk.billing?.usage?.last_30_days?.cost, trunk.billing?.currency)"></span>
-                            </div>
-                        </div>
-                    </div>
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Authentication & routing</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Auth username
+                        <input type="text" x-model.trim="form.auth_username" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Provided by carrier">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Auth password
+                        <input type="text" x-model.trim="form.auth_password" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Encrypted storage recommended">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Default route label
+                        <input type="text" x-model.trim="form.default_route_label" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Internal label for default routing">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Billing template
+                        <select x-model="form.billing_template_id"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in templateOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
+                            </template>
+                        </select>
+                    </label>
                 </div>
+            </section>
 
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Operational insights</h2>
-                    <div class="mt-3 space-y-4 text-sm text-slate-600">
-                        <div>
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Call distribution
-                            </h3>
-                            <div class="mt-2 space-y-2">
-                                <template x-for="slice in trunk.analytics?.call_distribution || []" :key="slice.label">
-                                    <div class="space-y-1">
-                                        <div class="flex items-center justify-between text-xs text-slate-500">
-                                            <span x-text="slice.label"></span>
-                                            <span class="font-semibold text-slate-800"
-                                                x-text="slice.value + '%' "></span>
-                                        </div>
-                                        <div class="h-2 rounded-full bg-slate-200">
-                                            <div class="h-2 rounded-full bg-sky-500"
-                                                :style="{ width: slice.value + '%' }"></div>
-                                        </div>
-                                    </div>
-                                </template>
-                                <template x-if="!(trunk.analytics?.call_distribution || []).length">
-                                    <div
-                                        class="rounded-lg border border-dashed border-slate-200 p-4 text-xs text-slate-400">
-                                        No distribution data available.
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                        <div>
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Recent events</h3>
-                            <ul class="mt-2 space-y-2">
-                                <template x-for="event in trunk.analytics?.recent_events || []" :key="event.timestamp">
-                                    <li class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-500">
-                                        <div class="flex items-center justify-between">
-                                            <span class="font-semibold text-slate-700" x-text="event.type"></span>
-                                            <span x-text="formatTimestamp(event.timestamp)"></span>
-                                        </div>
-                                        <p class="mt-1" x-text="event.message"></p>
-                                    </li>
-                                </template>
-                                <template x-if="!(trunk.analytics?.recent_events || []).length">
-                                    <li
-                                        class="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">
-                                        No recent events logged.
-                                    </li>
-                                </template>
-                            </ul>
-                        </div>
-                        <div>
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Quality history
-                            </h3>
-                            <div class="mt-2 space-y-2 text-xs text-slate-500">
-                                <template x-for="row in trunk.analytics?.quality_history || []" :key="row.period">
-                                    <div class="rounded-lg border border-slate-200 p-3">
-                                        <div class="flex items-center justify-between text-slate-600">
-                                            <span class="font-semibold text-slate-700" x-text="row.period"></span>
-                                            <span>Latency <span class="font-semibold text-slate-800"
-                                                    x-text="row.latency + ' ms'"></span></span>
-                                        </div>
-                                        <div class="mt-1 flex items-center justify-between">
-                                            <span>Availability <span class="font-semibold text-slate-800"
-                                                    x-text="row.availability + '%'"></span></span>
-                                            <span>Loss <span class="font-semibold text-slate-800"
-                                                    x-text="row.loss + '%'"></span></span>
-                                        </div>
-                                    </div>
-                                </template>
-                                <template x-if="!(trunk.analytics?.quality_history || []).length">
-                                    <div
-                                        class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
-                                        No historical telemetry provided.
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </div>
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Capacity limits</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-3">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Max CPS
+                        <input type="number" min="0" step="1" x-model="form.max_cps"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 30">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Max concurrent calls
+                        <input type="number" min="0" step="1" x-model="form.max_concurrent"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 120">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Max call duration (sec)
+                        <input type="number" min="0" step="1" x-model="form.max_call_duration"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 3600">
+                    </label>
                 </div>
-            </aside>
-        </section>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Allowed IPs (JSON array)
+                        <textarea rows="6" x-model="form.allowed_ips"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='[{"label": "POP", "cidr": "203.0.113.10/32"}]'></textarea>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        DID numbers (JSON array)
+                        <textarea rows="6" x-model="form.did_numbers"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='[{"number": "+85258001234", "label": "Sales"}]'></textarea>
+                    </label>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Metadata (optional)</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Billing snapshot (JSON)
+                        <textarea rows="5" x-model="form.billing_snapshot"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Leave blank to keep unchanged"></textarea>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Analytics payload (JSON)
+                        <textarea rows="5" x-model="form.analytics"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Tags (JSON)
+                        <textarea rows="4" x-model="form.tags"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Metadata (JSON)
+                        <textarea rows="4" x-model="form.metadata"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                    </label>
+                </div>
+            </section>
+
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p class="text-xs text-slate-400">Changes are saved via the API without page reloads.</p>
+                <div class="flex items-center gap-3">
+                    <a :href="listUrl"
+                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                        Cancel
+                    </a>
+                    <button type="submit"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                        :disabled="saving">
+                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6" x-show="saving">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
+                        </svg>
+                        <span x-text="mode === 'edit' ? 'Save changes' : 'Create trunk'"></span>
+                    </button>
+                </div>
+            </div>
+        </form>
     </div>
 </div>
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('sipTrunkDetail', (payload) => ({
+        Alpine.data('sipTrunkDetailPage', (options) => ({
+            basePath: options.basePath || '/console',
+            mode: options.mode || 'create',
+            model: options.model || null,
+            billTemplate: options.billTemplate || null,
+            templatesRaw: Array.isArray(options.templates) ? options.templates : [],
+            filters: options.filters || {},
+            listUrl: `${options.basePath || '/console'}/sip-trunk`,
+            createUrl: options.createUrl || null,
+            updateUrl: options.updateUrl || null,
+            statusOptions: [],
+            directionOptions: [],
+            transportOptions: [
+                { value: 'udp', label: 'UDP' },
+                { value: 'tcp', label: 'TCP' },
+                { value: 'tls', label: 'TLS' },
+            ],
+            templateOptions: [],
+            form: {
+                name: '',
+                display_name: '',
+                carrier: '',
+                description: '',
+                status: 'healthy',
+                direction: 'bidirectional',
+                sip_server: '',
+                sip_transport: 'udp',
+                outbound_proxy: '',
+                auth_username: '',
+                auth_password: '',
+                default_route_label: '',
+                billing_template_id: 'none',
+                max_cps: '',
+                max_concurrent: '',
+                max_call_duration: '',
+                allowed_ips: '',
+                did_numbers: '',
+                billing_snapshot: '',
+                analytics: '',
+                tags: '',
+                metadata: '',
+                is_active: true,
+            },
+            success: null,
+            error: null,
+            saving: false,
             init() {
-                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
-                this.trunk = data.trunk || {};
-                this.summary = data.summary || {};
-                this.backUrl = data.back_url || '#';
-                const utilisation = this.trunk?.billing?.usage?.current?.minutes || 0;
-                const included = this.trunk?.billing?.usage?.current?.included_minutes || 0;
-                const ratio = included ? Math.min(100, Math.round((utilisation / included) * 100)) : 0;
-                this.currentUtilisationWidth = ratio + '%';
-            },
-            trunk: {},
-            summary: {},
-            backUrl: '#',
-            currentUtilisationWidth: '0%',
-            statusLabel(status) {
-                switch ((status || '').toLowerCase()) {
-                    case 'healthy':
-                        return 'Healthy';
-                    case 'warning':
-                        return 'Warning';
-                    case 'standby':
-                        return 'Standby';
-                    default:
-                        return status || 'Unknown';
+                this.loadOptions();
+                if (this.model) {
+                    this.populateFromModel();
                 }
             },
-            statusClasses(status) {
-                switch ((status || '').toLowerCase()) {
-                    case 'healthy':
-                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                    case 'warning':
-                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                    case 'standby':
-                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                    default:
-                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+            loadOptions() {
+                const statuses = Array.isArray(this.filters.statuses) ? this.filters.statuses : ['healthy', 'warning', 'standby'];
+                const directions = Array.isArray(this.filters.directions) ? this.filters.directions : ['inbound', 'outbound', 'bidirectional'];
+
+                this.statusOptions = statuses.map((value) => ({
+                    value: String(value).toLowerCase(),
+                    label: this.statusBadgeLabel(value),
+                }));
+
+                this.directionOptions = directions.map((value) => ({
+                    value: String(value).toLowerCase(),
+                    label: this.directionLabel(value),
+                }));
+
+                const mappedTemplates = this.templatesRaw.map((tpl) => ({
+                    value: String(tpl.id),
+                    label: tpl.display_name || tpl.name || `Template #${tpl.id}`,
+                }));
+
+                this.templateOptions = [{ value: 'none', label: 'No template' }].concat(mappedTemplates);
+
+                if (!this.model && this.mode === 'create') {
+                    this.form.billing_template_id = 'none';
                 }
             },
-            statusDot(status) {
-                switch ((status || '').toLowerCase()) {
-                    case 'healthy':
-                        return 'bg-emerald-500';
-                    case 'warning':
-                        return 'bg-amber-500';
-                    case 'standby':
-                        return 'bg-slate-400';
-                    default:
-                        return 'bg-slate-400';
+            populateFromModel() {
+                const model = this.model || {};
+                this.form.name = model.name || '';
+                this.form.display_name = model.display_name || '';
+                this.form.carrier = model.carrier || '';
+                this.form.description = model.description || '';
+                this.form.status = (model.status || 'healthy').toLowerCase();
+                this.form.direction = (model.direction || 'bidirectional').toLowerCase();
+                this.form.sip_transport = (model.sip_transport || 'udp').toLowerCase();
+                this.form.sip_server = model.sip_server || '';
+                this.form.outbound_proxy = model.outbound_proxy || '';
+                this.form.auth_username = model.auth_username || '';
+                this.form.auth_password = model.auth_password || '';
+                this.form.default_route_label = model.default_route_label || '';
+                this.form.billing_template_id = model.billing_template_id != null ? String(model.billing_template_id) : 'none';
+                this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
+                this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
+                this.form.max_call_duration = model.max_call_duration != null ? String(model.max_call_duration) : '';
+                this.form.allowed_ips = this.formatJson(model.allowed_ips);
+                this.form.did_numbers = this.formatJson(model.did_numbers);
+                this.form.billing_snapshot = this.formatJson(model.billing_snapshot);
+                this.form.analytics = this.formatJson(model.analytics);
+                this.form.tags = this.formatJson(model.tags);
+                this.form.metadata = this.formatJson(model.metadata);
+                this.form.is_active = model.is_active !== false;
+            },
+            get pageTitle() {
+                if (this.mode === 'edit') {
+                    return `Edit ${this.form.display_name || this.form.name || 'SIP trunk'}`;
                 }
+                return 'Create SIP trunk';
+            },
+            get selectedTemplateLabel() {
+                if (this.form.billing_template_id === 'none') {
+                    return 'Not linked';
+                }
+                const found = this.templateOptions.find((opt) => opt.value === this.form.billing_template_id);
+                return found ? found.label : `Template #${this.form.billing_template_id}`;
+            },
+            statusBadgeLabel(value) {
+                const normalized = String(value || '').toLowerCase();
+                if (!normalized) return 'Unknown';
+                return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+            },
+            statusBadgeClasses(value) {
+                const normalized = String(value || '').toLowerCase();
+                if (normalized === 'healthy') return 'bg-emerald-50 text-emerald-600 ring-emerald-200';
+                if (normalized === 'warning') return 'bg-amber-50 text-amber-600 ring-amber-200';
+                if (normalized === 'offline') return 'bg-rose-50 text-rose-600 ring-rose-200';
+                if (normalized === 'standby') return 'bg-sky-50 text-sky-600 ring-sky-200';
+                return 'bg-slate-100 text-slate-600 ring-slate-200';
+            },
+            statusDotClasses(value) {
+                const normalized = String(value || '').toLowerCase();
+                if (normalized === 'healthy') return 'bg-emerald-400';
+                if (normalized === 'warning') return 'bg-amber-400';
+                if (normalized === 'offline') return 'bg-rose-400';
+                if (normalized === 'standby') return 'bg-sky-400';
+                return 'bg-slate-400';
             },
             directionLabel(value) {
-                switch ((value || '').toLowerCase()) {
-                    case 'inbound':
-                        return 'Inbound';
-                    case 'outbound':
-                        return 'Outbound';
-                    case 'bidirectional':
-                        return 'Bi-directional';
-                    default:
-                        return value || 'Unknown';
-                }
+                const normalized = String(value || '').toLowerCase();
+                if (normalized === 'inbound') return 'Inbound';
+                if (normalized === 'outbound') return 'Outbound';
+                if (normalized === 'bidirectional') return 'Bi-directional';
+                return value || 'Unknown';
             },
-            formatNumber(value) {
-                if (value === null || value === undefined || Number.isNaN(Number(value))) {
-                    return '—';
-                }
-                if (value >= 1000) {
-                    return Number(value).toLocaleString();
-                }
-                return Number(value).toFixed(Number(value) % 1 === 0 ? 0 : 1);
+            toggleActive() {
+                this.form.is_active = !this.form.is_active;
             },
-            formatDuration(value) {
-                const duration = Number(value || 0);
-                if (!duration) {
-                    return '—';
-                }
-                if (duration >= 3600) {
-                    return `${Math.round(duration / 60)} min`;
-                }
-                if (duration >= 60) {
-                    return `${Math.round(duration / 60)} min`;
-                }
-                return `${duration} sec`;
+            formatDate(value) {
+                if (!value) return '—';
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) return value;
+                return date.toLocaleString();
             },
-            formatCurrency(amount, currency) {
-                if (amount === null || amount === undefined || Number.isNaN(Number(amount))) {
-                    return currency ? `${currency}0.00` : '0.00';
-                }
-                const value = Number(amount).toFixed(2);
-                return currency ? `${currency}${value}` : value;
-            },
-            formatTimestamp(value) {
-                if (!value) {
-                    return '—';
+            formatJson(value) {
+                if (!value || (typeof value === 'string' && !value.trim())) {
+                    return '';
                 }
                 try {
-                    const date = new Date(value);
-                    if (Number.isNaN(date.getTime())) {
-                        return value;
+                    if (typeof value === 'string') {
+                        const parsed = JSON.parse(value);
+                        return JSON.stringify(parsed, null, 2);
                     }
-                    return date.toLocaleString();
+                    return JSON.stringify(value, null, 2);
                 } catch (err) {
-                    return value;
+                    return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+            },
+            submitUrl() {
+                if (this.mode === 'edit') {
+                    if (this.updateUrl) {
+                        return this.updateUrl;
+                    }
+                    if (this.model?.id) {
+                        return `${this.basePath}/sip-trunk/${this.model.id}`;
+                    }
+                } else if (this.createUrl) {
+                    return this.createUrl;
+                }
+                return `${this.basePath}/sip-trunk`;
+            },
+            submitMethod() {
+                return this.mode === 'edit' ? 'PATCH' : 'PUT';
+            },
+            buildPayload() {
+                const params = new URLSearchParams();
+                params.set('name', this.form.name.trim());
+                params.set('display_name', this.form.display_name.trim());
+                params.set('carrier', this.form.carrier.trim());
+                params.set('description', this.form.description.trim());
+                params.set('status', this.form.status.trim());
+                params.set('direction', this.form.direction.trim());
+                params.set('sip_transport', this.form.sip_transport.trim());
+
+                if (this.form.sip_server.trim()) params.set('sip_server', this.form.sip_server.trim());
+                if (this.form.outbound_proxy.trim()) params.set('outbound_proxy', this.form.outbound_proxy.trim());
+                if (this.form.auth_username.trim()) params.set('auth_username', this.form.auth_username.trim());
+                if (this.form.auth_password.trim()) params.set('auth_password', this.form.auth_password.trim());
+                if (this.form.default_route_label.trim()) params.set('default_route_label', this.form.default_route_label.trim());
+
+                if (this.form.billing_template_id === 'none') {
+                    if (this.mode === 'edit') {
+                        params.set('clear_billing_template', 'true');
+                    }
+                } else if (this.form.billing_template_id) {
+                    params.set('billing_template_id', this.form.billing_template_id);
+                }
+
+                const numericFields = [
+                    ['max_cps', this.form.max_cps],
+                    ['max_concurrent', this.form.max_concurrent],
+                    ['max_call_duration', this.form.max_call_duration],
+                ];
+                numericFields.forEach(([key, value]) => {
+                    if (value !== '' && value !== null && value !== undefined) {
+                        const num = Number(value);
+                        if (!Number.isNaN(num)) {
+                            params.set(key, String(Math.max(0, Math.round(num))));
+                        }
+                    }
+                });
+
+                params.set('allowed_ips', this.form.allowed_ips.trim());
+                params.set('did_numbers', this.form.did_numbers.trim());
+                params.set('billing_snapshot', this.form.billing_snapshot.trim());
+                params.set('analytics', this.form.analytics.trim());
+                params.set('tags', this.form.tags.trim());
+                params.set('metadata', this.form.metadata.trim());
+                params.set('is_active', this.form.is_active ? 'true' : 'false');
+
+                return params;
+            },
+            async submit() {
+                if (!this.form.name.trim()) {
+                    this.error = 'Trunk name is required.';
+                    return;
+                }
+                this.saving = true;
+                this.error = null;
+                this.success = null;
+                try {
+                    const response = await fetch(this.submitUrl(), {
+                        method: this.submitMethod(),
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                        },
+                        body: this.buildPayload().toString(),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to save SIP trunk');
+                    }
+                    if (this.mode === 'create' && data?.id) {
+                        window.location.href = `${this.basePath}/sip-trunk/${data.id}`;
+                        return;
+                    }
+                    this.success = 'Changes saved successfully.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to save SIP trunk';
+                } finally {
+                    this.saving = false;
                 }
             },
         }));
     });
 </script>
+
 {% endblock %}

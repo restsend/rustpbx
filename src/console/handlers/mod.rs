@@ -5,6 +5,7 @@ use axum::{
 };
 use std::sync::Arc;
 
+pub mod bill_template;
 pub mod call_record;
 pub mod dashboard;
 pub mod diagnostics;
@@ -20,6 +21,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     let routes = Router::new()
         .merge(user::urls())
         .merge(extension::urls())
+        .merge(bill_template::urls())
+        .merge(sip_trunk::urls())
         .merge(setting::urls())
         .route(
             "/routing",
@@ -31,11 +34,6 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             get(self::routing::page_routing_edit).post(self::routing::update_routing),
         )
         .route("/routing/{id}/delete", post(self::routing::delete_routing))
-        .route("/sip-trunk", get(self::sip_trunk::page_sip_trunk))
-        .route(
-            "/sip-trunk/{id}",
-            get(self::sip_trunk::page_sip_trunk_detail),
-        )
         .route("/call-records", get(self::call_record::page_call_records))
         .route(
             "/call-records/{id}",

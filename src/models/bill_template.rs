@@ -4,8 +4,9 @@ use sea_orm_migration::schema::{
     double, integer, json_null, pk_auto, string, string_null, text_null, timestamp,
 };
 use sea_query::Expr;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "rustpbx_bill_templates")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]

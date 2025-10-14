@@ -1,0 +1,395 @@
+{% extends "console/layout.html" %}
+{% set has_model = model is defined and model is not none %}
+{% set mode_text = '"edit"' if has_model else '"create"' %}
+{% set model_data = model if has_model else {} %}
+{% block title %}{{ model_data.display_name | default(model_data.name | default('New billing template')) }} · {{
+site_name | default('RustPBX') }}{% endblock %}
+{% block content %}
+{% set base_url = base_path | default('/console') %}
+<div class="p-6" x-data='billTemplateDetailPage({
+        basePath: {{ base_url | tojson }},
+        mode: {{ mode_text }},
+        model: {{ model_data | tojson }},
+        filters: {{ filters | default({}) | tojson }},
+        createUrl: {{ create_url | default(null) | tojson }},
+        updateUrl: {{ update_url | default(null) | tojson }}
+    })' x-init="init()">
+    <div class="mx-auto max-w-4xl space-y-6">
+        <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="space-y-2">
+                <a :href="listUrl"
+                    class="inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-700">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
+                    </svg>
+                    Back to billing templates
+                </a>
+                <div>
+                    <h1 class="text-2xl font-semibold text-slate-900" x-text="pageTitle"></h1>
+                    <p class="mt-2 text-sm text-slate-500"
+                        x-text="mode === 'create' ? 'Define allowances, pricing, and currency for a new billing template.' : 'Update pricing, allowances, and metadata for this billing template.'">
+                    </p>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm ring-1 ring-black/5"
+                x-show="mode === 'edit'" x-cloak>
+                <div class="font-semibold text-slate-900">Summary</div>
+                <dl class="mt-3 space-y-3 text-xs text-slate-500">
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Template</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.display_name || form.name || '—'"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Currency</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.currency || '—'"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Interval</dt>
+                        <dd class="text-sm text-slate-700" x-text="intervalLabel(form.billing_interval)"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Updated</dt>
+                        <dd class="text-sm text-slate-700" x-text="formatDate(model?.updated_at)"></dd>
+                    </div>
+                </dl>
+            </div>
+        </header>
+
+        <template x-if="success">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="success"></div>
+        </template>
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
+            </div>
+        </template>
+
+        <form class="space-y-6" @submit.prevent="submit">
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Template details</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Template name
+                        <input type="text" x-model.trim="form.name" maxlength="160" required
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="premium-hk-voice">
+                        <span class="text-xs font-normal text-slate-400">Used internally and in routing logic.</span>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Display name
+                        <input type="text" x-model.trim="form.display_name" maxlength="160"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Premium voice (HK)">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Currency
+                        <select x-model="form.currency"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in currencyOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
+                            </template>
+                        </select>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Billing interval
+                        <select x-model="form.billing_interval"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="option in intervalOptions" :key="option.value">
+                                <option :value="option.value" x-text="option.label"></option>
+                            </template>
+                        </select>
+                    </label>
+                </div>
+                <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                    Description
+                    <textarea rows="4" x-model.trim="form.description"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="Internal notes about allowances, routing policies, or discounts."></textarea>
+                </label>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Allowances</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Included minutes
+                        <input type="number" min="0" step="1" x-model="form.included_minutes"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 15000">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Included messages
+                        <input type="number" min="0" step="1" x-model="form.included_messages"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 5000">
+                    </label>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Pricing</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-3">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Overage rate (per minute)
+                        <input type="number" step="0.0001" min="0" x-model="form.overage_rate_per_minute"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 0.018">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Setup fee
+                        <input type="number" step="0.01" min="0" x-model="form.setup_fee"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 25">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Tax percent
+                        <input type="number" step="0.01" min="0" x-model="form.tax_percent"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 7.5">
+                    </label>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-900">Metadata</h2>
+                <p class="mt-1 text-xs text-slate-500">Optional JSON payload stored alongside the template (for
+                    reporting or enrichment).</p>
+                <textarea rows="6" x-model="form.metadata"
+                    class="mt-4 font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder='{"bundle": "apac-premium", "notes": "Includes weekend minutes"}'></textarea>
+            </section>
+
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p class="text-xs text-slate-400">Updates are saved through the API without reloading this page.</p>
+                <div class="flex items-center gap-3">
+                    <a :href="listUrl"
+                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                        Cancel
+                    </a>
+                    <button type="submit"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                        :disabled="saving">
+                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6" x-show="saving">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
+                        </svg>
+                        <span x-text="mode === 'edit' ? 'Save changes' : 'Create template'"></span>
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('billTemplateDetailPage', (options) => ({
+            basePath: options.basePath || '/console',
+            mode: options.mode || 'create',
+            model: options.model || null,
+            filters: options.filters || {},
+            createUrl: options.createUrl || null,
+            updateUrl: options.updateUrl || null,
+            listUrl: `${options.basePath || '/console'}/bill-templates`,
+            currencyOptions: [],
+            intervalOptions: [],
+            form: {
+                name: '',
+                display_name: '',
+                description: '',
+                currency: 'USD',
+                billing_interval: 'monthly',
+                included_minutes: '',
+                included_messages: '',
+                overage_rate_per_minute: '',
+                setup_fee: '',
+                tax_percent: '',
+                metadata: '',
+            },
+            success: null,
+            error: null,
+            saving: false,
+            init() {
+                this.loadOptions();
+                if (this.model) {
+                    this.populateFromModel();
+                }
+            },
+            loadOptions() {
+                const currencies = Array.isArray(this.filters.currencies) ? this.filters.currencies : [];
+                const intervals = Array.isArray(this.filters.billing_intervals) ? this.filters.billing_intervals : [];
+                const uniqueCurrencies = currencies.length ? currencies : ['USD', 'EUR', 'CNY'];
+                const uniqueIntervals = intervals.length ? intervals : ['monthly', 'yearly'];
+                this.currencyOptions = uniqueCurrencies.map((value) => ({
+                    value: String(value).toUpperCase(),
+                    label: String(value).toUpperCase(),
+                }));
+                if (!this.currencyOptions.length) {
+                    this.currencyOptions = [
+                        { value: 'USD', label: 'USD' },
+                        { value: 'EUR', label: 'EUR' },
+                        { value: 'CNY', label: 'CNY' },
+                    ];
+                }
+                this.intervalOptions = uniqueIntervals.map((value) => ({
+                    value: String(value).toLowerCase(),
+                    label: this.intervalLabel(value),
+                }));
+                if (!this.intervalOptions.length) {
+                    this.intervalOptions = [
+                        { value: 'monthly', label: 'Monthly' },
+                        { value: 'yearly', label: 'Yearly' },
+                    ];
+                }
+            },
+            populateFromModel() {
+                const model = this.model || {};
+                this.form.name = model.name || '';
+                this.form.display_name = model.display_name || '';
+                this.form.description = model.description || '';
+                this.form.currency = (model.currency || 'USD').toUpperCase();
+                this.form.billing_interval = (model.billing_interval || 'monthly').toLowerCase();
+                this.form.included_minutes = model.included_minutes != null ? String(model.included_minutes) : '';
+                this.form.included_messages = model.included_messages != null ? String(model.included_messages) : '';
+                this.form.overage_rate_per_minute = model.overage_rate_per_minute != null ? String(model.overage_rate_per_minute) : '';
+                this.form.setup_fee = model.setup_fee != null ? String(model.setup_fee) : '';
+                this.form.tax_percent = model.tax_percent != null ? String(model.tax_percent) : '';
+                this.form.metadata = this.formatJson(model.metadata);
+            },
+            get pageTitle() {
+                if (this.mode === 'edit') {
+                    return `Edit ${this.form.display_name || this.form.name || 'billing template'}`;
+                }
+                return 'Create billing template';
+            },
+            intervalLabel(value) {
+                const normalized = String(value || '').toLowerCase();
+                if (normalized === 'hourly') return 'Hourly';
+                if (normalized === 'daily') return 'Daily';
+                if (normalized === 'weekly') return 'Weekly';
+                if (normalized === 'monthly') return 'Monthly';
+                if (normalized === 'quarterly') return 'Quarterly';
+                if (normalized === 'yearly') return 'Yearly';
+                return value || 'Custom';
+            },
+            formatDate(value) {
+                if (!value) return '—';
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) return value;
+                return date.toLocaleString();
+            },
+            formatJson(value) {
+                if (!value || (typeof value === 'string' && !value.trim())) {
+                    return '';
+                }
+                try {
+                    if (typeof value === 'string') {
+                        const parsed = JSON.parse(value);
+                        return JSON.stringify(parsed, null, 2);
+                    }
+                    return JSON.stringify(value, null, 2);
+                } catch (err) {
+                    return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+            },
+            submitUrl() {
+                if (this.mode === 'edit') {
+                    if (this.updateUrl) {
+                        return this.updateUrl;
+                    }
+                    if (this.model?.id) {
+                        return `${this.basePath}/bill-templates/${this.model.id}`;
+                    }
+                } else if (this.createUrl) {
+                    return this.createUrl;
+                }
+                return `${this.basePath}/bill-templates`;
+            },
+            submitMethod() {
+                return this.mode === 'edit' ? 'PATCH' : 'PUT';
+            },
+            buildPayload() {
+                const params = new URLSearchParams();
+                params.set('name', this.form.name.trim());
+                params.set('display_name', this.form.display_name.trim());
+                params.set('description', this.form.description.trim());
+                params.set('currency', this.form.currency.trim());
+                params.set('billing_interval', this.form.billing_interval.trim());
+
+                const numericIntFields = [
+                    ['included_minutes', this.form.included_minutes],
+                    ['included_messages', this.form.included_messages],
+                ];
+                numericIntFields.forEach(([key, value]) => {
+                    if (value !== '' && value !== null && value !== undefined) {
+                        const num = Number(value);
+                        if (!Number.isNaN(num)) {
+                            params.set(key, String(Math.max(0, Math.round(num))));
+                        }
+                    }
+                });
+
+                const numericFloatFields = [
+                    ['overage_rate_per_minute', this.form.overage_rate_per_minute],
+                    ['setup_fee', this.form.setup_fee],
+                    ['tax_percent', this.form.tax_percent],
+                ];
+                numericFloatFields.forEach(([key, value]) => {
+                    if (value !== '' && value !== null && value !== undefined) {
+                        const num = Number(value);
+                        if (!Number.isNaN(num)) {
+                            params.set(key, String(num));
+                        }
+                    }
+                });
+
+                params.set('metadata', this.form.metadata.trim());
+                return params;
+            },
+            async submit() {
+                if (!this.form.name.trim()) {
+                    this.error = 'Template name is required.';
+                    return;
+                }
+                if (!this.form.currency.trim()) {
+                    this.error = 'Currency is required.';
+                    return;
+                }
+                if (!this.form.billing_interval.trim()) {
+                    this.error = 'Billing interval is required.';
+                    return;
+                }
+                this.saving = true;
+                this.success = null;
+                this.error = null;
+                try {
+                    const response = await fetch(this.submitUrl(), {
+                        method: this.submitMethod(),
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                        },
+                        body: this.buildPayload().toString(),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to save billing template');
+                    }
+                    if (this.mode === 'create' && data?.id) {
+                        window.location.href = `${this.basePath}/bill-templates/${data.id}`;
+                        return;
+                    }
+                    this.success = 'Changes saved successfully.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to save billing template';
+                } finally {
+                    this.saving = false;
+                }
+            },
+        }));
+    });
+</script>
+
+{% endblock %}

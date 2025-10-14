@@ -1,4 +1,4 @@
-use crate::console::handlers::forms::{self, ExtensionForm, ListQuery};
+use crate::console::handlers::forms::{self, ExtensionPayload, ListQuery};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
     department::Column as DepartmentColumn,
@@ -128,10 +128,14 @@ async fn page_extension_create(
 async fn create_extension(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<ExtensionForm>,
+    Json(payload): Json<ExtensionPayload>,
 ) -> Response {
     let db = state.db();
-    let extension = match form.extension {
+    let department_ids = match parse_department_ids(payload.department_ids.clone()) {
+        Ok(ids) => ids,
+        Err(resp) => return resp,
+    };
+    let extension = match payload.extension {
         Some(ref ext) if !ext.is_empty() => ext,
         _ => {
             return (
@@ -144,15 +148,15 @@ async fn create_extension(
     let now = chrono::Utc::now();
     let active = ExtensionActiveModel {
         extension: Set(extension.clone()),
-        display_name: Set(form.display_name),
-        email: Set(form.email),
-        sip_password: Set(form.sip_password),
-        call_forwarding_mode: Set(form.call_forwarding_mode),
-        call_forwarding_destination: Set(form.call_forwarding_destination),
-        call_forwarding_timeout: Set(form.call_forwarding_timeout),
-        login_disabled: Set(form.login_disabled.unwrap_or(false)),
-        voicemail_disabled: Set(form.voicemail_disabled.unwrap_or(false)),
-        notes: Set(form.notes),
+        display_name: Set(payload.display_name),
+        email: Set(payload.email),
+        sip_password: Set(payload.sip_password),
+        call_forwarding_mode: Set(payload.call_forwarding_mode),
+        call_forwarding_destination: Set(payload.call_forwarding_destination),
+        call_forwarding_timeout: Set(payload.call_forwarding_timeout),
+        login_disabled: Set(payload.login_disabled.unwrap_or(false)),
+        voicemail_disabled: Set(payload.voicemail_disabled.unwrap_or(false)),
+        notes: Set(payload.notes),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -168,7 +172,6 @@ async fn create_extension(
                 .into_response();
         }
     };
-    let department_ids = form.department_ids.unwrap_or_default();
     if let Err(err) = ExtensionEntity::replace_departments(db, model.id, &department_ids).await {
         warn!(
             "failed to set departments for extension {}: {}",
@@ -217,9 +220,13 @@ async fn update_extension(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<ExtensionForm>,
+    Json(payload): Json<ExtensionPayload>,
 ) -> Response {
     let db = state.db();
+    let department_ids = match parse_department_ids(payload.department_ids.clone()) {
+        Ok(ids) => ids,
+        Err(resp) => return resp,
+    };
     let model = match ExtensionEntity::find_by_id(id).one(db).await {
         Ok(Some(result)) => result,
         Ok(None) => {
@@ -240,34 +247,34 @@ async fn update_extension(
     };
 
     let mut active: ExtensionActiveModel = model.into();
-    if let Some(extension) = form.extension {
+    if let Some(extension) = payload.extension {
         active.extension = Set(extension);
     }
-    if let Some(display_name) = form.display_name {
+    if let Some(display_name) = payload.display_name {
         active.display_name = Set(Some(display_name));
     }
-    if let Some(email) = form.email {
+    if let Some(email) = payload.email {
         active.email = Set(Some(email));
     }
-    if let Some(sip_password) = form.sip_password {
+    if let Some(sip_password) = payload.sip_password {
         active.sip_password = Set(Some(sip_password));
     }
-    if let Some(call_forwarding_mode) = form.call_forwarding_mode {
+    if let Some(call_forwarding_mode) = payload.call_forwarding_mode {
         active.call_forwarding_mode = Set(Some(call_forwarding_mode));
     }
-    if let Some(call_forwarding_destination) = form.call_forwarding_destination {
+    if let Some(call_forwarding_destination) = payload.call_forwarding_destination {
         active.call_forwarding_destination = Set(Some(call_forwarding_destination));
     }
-    if let Some(call_forwarding_timeout) = form.call_forwarding_timeout {
+    if let Some(call_forwarding_timeout) = payload.call_forwarding_timeout {
         active.call_forwarding_timeout = Set(Some(call_forwarding_timeout));
     }
-    if let Some(notes) = form.notes {
+    if let Some(notes) = payload.notes {
         active.notes = Set(Some(notes));
     }
-    if let Some(login_disabled) = form.login_disabled {
+    if let Some(login_disabled) = payload.login_disabled {
         active.login_disabled = Set(login_disabled);
     }
-    if let Some(voicemail_disabled) = form.voicemail_disabled {
+    if let Some(voicemail_disabled) = payload.voicemail_disabled {
         active.voicemail_disabled = Set(voicemail_disabled);
     }
     active.updated_at = Set(chrono::Utc::now());
@@ -280,7 +287,6 @@ async fn update_extension(
         )
             .into_response();
     }
-    let department_ids = form.department_ids.unwrap_or_default();
     if let Err(err) = ExtensionEntity::replace_departments(db, id, &department_ids).await {
         warn!("failed to update departments for extension {}: {}", id, err);
         return (
@@ -328,4 +334,38 @@ async fn delete_extension(
     }
 
     Json(json!({"status": "ok"})).into_response()
+}
+
+fn parse_department_ids(raw: Option<Vec<String>>) -> Result<Vec<i64>, Response> {
+    let mut ids = Vec::new();
+
+    if let Some(values) = raw {
+        for value in values {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<i64>() {
+                Ok(id) => ids.push(id),
+                Err(_) => {
+                    return Err(bad_request(format!(
+                        "department_ids must be integers, found `{}`",
+                        value
+                    )));
+                }
+            }
+        }
+    }
+
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn bad_request(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"message": message.into()})),
+    )
+        .into_response()
 }

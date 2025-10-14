@@ -170,6 +170,16 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>SIP Trunk / DID</span>
                     </a>
+                    <a href="{{ bp }}/bill-templates"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='bill-templates' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Billing templates">
+                        <svg class="h-5 w-5 flex-shrink-0 {{ 'text-sky-600' if nav_active=='bill-templates' else 'text-slate-400 group-hover:text-slate-600' }}"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M7.5 3h9a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25h-9A2.25 2.25 0 0 1 5.25 18V5.25A2.25 2.25 0 0 1 7.5 3zm0 4.5h9m-9 4.5h9m-9 4.5h4.5" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Billing templates</span>
+                    </a>
                     <a href="{{ bp }}/call-records"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='call-records' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Call Records">

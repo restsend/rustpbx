@@ -1,13 +1,14 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, double, integer, json_null, pk_auto, string, string_null, text_null, timestamp,
-    timestamp_null,
+    boolean, double_null, integer_null, json_null, pk_auto, string, string_null, text_null,
+    timestamp, timestamp_null,
 };
 use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "rustpbx_sip_trunks")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -91,12 +92,12 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::AuthUsername).char_len(160))
                     .col(string_null(Column::AuthPassword).char_len(160))
                     .col(string_null(Column::DefaultRouteLabel).char_len(160))
-                    .col(integer(Column::BillingTemplateId).null())
-                    .col(integer(Column::MaxCps).null())
-                    .col(integer(Column::MaxConcurrent).null())
-                    .col(integer(Column::MaxCallDuration).null())
-                    .col(double(Column::UtilisationPercent).null())
-                    .col(double(Column::WarningThresholdPercent).null())
+                    .col(integer_null(Column::BillingTemplateId))
+                    .col(integer_null(Column::MaxCps))
+                    .col(integer_null(Column::MaxConcurrent))
+                    .col(integer_null(Column::MaxCallDuration))
+                    .col(double_null(Column::UtilisationPercent))
+                    .col(double_null(Column::WarningThresholdPercent))
                     .col(json_null(Column::AllowedIps))
                     .col(json_null(Column::DidNumbers))
                     .col(json_null(Column::BillingSnapshot))

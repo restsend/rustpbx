@@ -34,7 +34,7 @@ pub struct ResetForm {
 }
 
 #[derive(Deserialize, Default, Clone)]
-pub struct ExtensionForm {
+pub struct ExtensionPayload {
     pub extension: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
@@ -43,9 +43,54 @@ pub struct ExtensionForm {
     pub call_forwarding_destination: Option<String>,
     pub call_forwarding_timeout: Option<i32>,
     pub notes: Option<String>,
-    pub department_ids: Option<Vec<i64>>,
+    pub department_ids: Option<Vec<String>>,
     pub login_disabled: Option<bool>,
     pub voicemail_disabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SipTrunkForm {
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub carrier: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub direction: Option<String>,
+    pub sip_server: Option<String>,
+    pub sip_transport: Option<String>,
+    pub outbound_proxy: Option<String>,
+    pub auth_username: Option<String>,
+    pub auth_password: Option<String>,
+    pub default_route_label: Option<String>,
+    pub billing_template_id: Option<i64>,
+    pub clear_billing_template: Option<bool>,
+    pub max_cps: Option<i32>,
+    pub max_concurrent: Option<i32>,
+    pub max_call_duration: Option<i32>,
+    pub utilisation_percent: Option<f64>,
+    pub warning_threshold_percent: Option<f64>,
+    pub allowed_ips: Option<String>,
+    pub did_numbers: Option<String>,
+    pub billing_snapshot: Option<String>,
+    pub analytics: Option<String>,
+    pub tags: Option<String>,
+    pub metadata: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct BillTemplateForm {
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub currency: Option<String>,
+    pub billing_interval: Option<String>,
+    pub included_minutes: Option<i32>,
+    pub included_messages: Option<i32>,
+    pub overage_rate_per_minute: Option<f64>,
+    pub setup_fee: Option<f64>,
+    pub tax_percent: Option<f64>,
+    pub metadata: Option<String>,
 }
 
 fn default_per_page_min() -> u32 {
