@@ -30,7 +30,7 @@ use crate::{
     useragent::invitation::PendingDialog,
 };
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rsipstack::dialog::{
     dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
 };
