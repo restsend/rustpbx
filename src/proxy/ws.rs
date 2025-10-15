@@ -3,7 +3,6 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use rsip::{
     SipMessage,
-    param::OtherParam,
     prelude::{HasHeaders, HeadersExt, ToTypedHeader, UntypedHeader},
 };
 use rsipstack::{
