@@ -549,7 +549,10 @@ impl RtpTrack {
                 .media_name
                 .formats
                 .push(codec.payload_type().to_string());
-
+            media.attributes.push(Attribute {
+                key: "rtpmap".to_string(),
+                value: Some(format!("{} {}", codec.payload_type(), codec.rtpmap())),
+            });
             if let Some(fmtp) = codec.fmtp() {
                 media.attributes.push(Attribute {
                     key: "fmtp".to_string(),

@@ -91,7 +91,7 @@ impl CodecType {
             #[cfg(feature = "g729")]
             CodecType::G729 => "G729/8000",
             #[cfg(feature = "opus")]
-            CodecType::Opus => "opus/48000/1",
+            CodecType::Opus => "opus/48000/2",
             CodecType::TelephoneEvent => "telephone-event/8000",
         }
     }
@@ -122,7 +122,11 @@ impl CodecType {
     }
 
     pub fn channels(&self) -> u16 {
-        1
+        match self {
+            #[cfg(feature = "opus")]
+            CodecType::Opus => 2,
+            _ => 1,
+        }
     }
 
     pub fn payload_type(&self) -> u8 {

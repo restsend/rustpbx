@@ -36,9 +36,9 @@ impl OpusDecoder {
         }
     }
 
-    /// Create a default Opus decoder (48kHz, mono)
+    /// Create a default Opus decoder (48kHz, stereo)
     pub fn new_default() -> Self {
-        Self::new(48000, 1)
+        Self::new(48000, 2)
     }
 }
 
@@ -55,6 +55,19 @@ impl Decoder for OpusDecoder {
         match self.decoder.decode(data, &mut output, false) {
             Ok(len) => {
                 output.truncate(len);
+                if self.channels == 2 {
+                    // stero to mono
+                    output = output
+                        .chunks(2)
+                        .map(|chunk| {
+                            if chunk.len() == 2 {
+                                ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16
+                            } else {
+                                chunk[0]
+                            }
+                        })
+                        .collect();
+                }
                 output
             }
             Err(_) => {
@@ -103,20 +116,13 @@ impl OpusEncoder {
         }
     }
 
-    /// Create a default Opus encoder (48kHz, mono)
+    /// Create a default Opus encoder (48kHz, stereo)
     pub fn new_default() -> Self {
-        Self::new(48000, 1)
+        Self::new(48000, 2)
     }
-}
 
-unsafe impl Send for OpusEncoder {}
-unsafe impl Sync for OpusEncoder {}
-
-impl Encoder for OpusEncoder {
-    fn encode(&mut self, samples: &[Sample]) -> Vec<u8> {
-        // Allocate output buffer - Opus encoded data is typically smaller than raw data
+    fn encode_stereo(&mut self, samples: &[Sample]) -> Vec<u8> {
         let mut output = vec![0u8; samples.len()];
-
         match self.encoder.encode(samples, &mut output) {
             Ok(len) => {
                 output.truncate(len);
@@ -127,6 +133,19 @@ impl Encoder for OpusEncoder {
                 vec![]
             }
         }
+    }
+}
+
+unsafe impl Send for OpusEncoder {}
+unsafe impl Sync for OpusEncoder {}
+
+impl Encoder for OpusEncoder {
+    fn encode(&mut self, samples: &[Sample]) -> Vec<u8> {
+        if self.channels == 2 {
+            let stereo_samples: Vec<i16> = samples.iter().flat_map(|&s| vec![s, s]).collect();
+            return self.encode_stereo(&stereo_samples);
+        }
+        return self.encode_stereo(samples);
     }
 
     fn sample_rate(&self) -> u32 {
