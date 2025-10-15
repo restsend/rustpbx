@@ -103,9 +103,9 @@ impl OpusEncoder {
         }
     }
 
-    /// Create a default Opus encoder (48kHz, stereo)
+    /// Create a default Opus encoder (48kHz, mono)
     pub fn new_default() -> Self {
-        Self::new(48000, 2)
+        Self::new(48000, 1)
     }
 }
 
