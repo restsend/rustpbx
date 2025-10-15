@@ -4,9 +4,35 @@ use sea_orm_migration::schema::{
     double, integer, json_null, pk_auto, string, string_null, text_null, timestamp,
 };
 use sea_query::Expr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    EnumIter,
+    PartialOrd,
+    Ord,
+    DeriveActiveEnum,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum BillingInterval {
+    #[sea_orm(string_value = "daily")]
+    Daily,
+    #[sea_orm(string_value = "weekly")]
+    Weekly,
+    #[sea_orm(string_value = "monthly")]
+    Monthly,
+    #[sea_orm(string_value = "yearly")]
+    Yearly,
+}
+
+#[derive(Clone, Debug, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_bill_templates")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -16,15 +42,15 @@ pub struct Model {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub currency: String,
-    pub billing_interval: String,
+    pub billing_interval: BillingInterval,
     pub included_minutes: i32,
     pub included_messages: i32,
     pub overage_rate_per_minute: f64,
     pub setup_fee: f64,
     pub tax_percent: f64,
     pub metadata: Option<Json>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

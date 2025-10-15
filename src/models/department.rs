@@ -2,9 +2,9 @@ use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{json_null, pk_auto, string, string_null, text_null, timestamp};
 use sea_query::Expr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_departments")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]

@@ -16,8 +16,8 @@ pub struct Model {
     pub display_id: Option<String>,
     pub direction: String,
     pub status: String,
-    pub started_at: DateTime,
-    pub ended_at: Option<DateTime>,
+    pub started_at: DateTimeUtc,
+    pub ended_at: Option<DateTimeUtc>,
     pub duration_secs: i32,
     pub from_number: Option<String>,
     pub to_number: Option<String>,
@@ -41,9 +41,9 @@ pub struct Model {
     pub quality_packet_loss_percent: Option<f64>,
     pub analytics: Option<Json>,
     pub metadata: Option<Json>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
-    pub archived_at: Option<DateTime>,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+    pub archived_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

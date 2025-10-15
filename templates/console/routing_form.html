@@ -2,9 +2,16 @@
 {% block title %}{{ page_title }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-5xl space-y-6" data-direction-options='{{ direction_options | tojson  }}'
-        data-status-options='{{ status_options | tojson  }}'
-        x-data='routingForm({{ route_data | tojson }}, {{ trunk_options | tojson }}, {{ selection_algorithms | tojson }})'>
+    <div class="mx-auto max-w-5xl space-y-6" x-data='routingForm({
+            mode: {{ mode | tojson }},
+            route: {{ route_data | tojson }},
+            trunks: {{ trunk_options | tojson }},
+            algorithms: {{ selection_algorithms | tojson }},
+            directionOptions: {{ direction_options | tojson }},
+            statusOptions: {{ status_options | tojson }},
+            formAction: {{ form_action | tojson }},
+            listUrl: {{ back_url | tojson }}
+    })'>
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
                 <nav class="text-xs font-medium text-slate-400">
@@ -23,8 +30,15 @@
                     Cancel
                 </a>
                 <button type="submit" form="routing-form"
-                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                    {{ submit_label }}
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                    :class="saving ? 'cursor-not-allowed opacity-80' : ''" :disabled="saving">
+                    <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                        stroke-width="1.6" x-show="saving" x-cloak>
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
+                    </svg>
+                    <span x-show="!saving" x-cloak>{{ submit_label }}</span>
+                    <span x-show="saving" x-cloak>Saving…</span>
                 </button>
             </div>
         </div>
@@ -35,9 +49,15 @@
         </div>
         {% endif %}
 
-        <form id="routing-form" action="{{ form_action }}" method="post" class="space-y-6">
-            <input type="hidden" name="disabled" :value="route.disabled">
-            <input type="hidden" name="payload" :value="jsonPreview">
+        <form id="routing-form" class="space-y-6" @submit.prevent="submit">
+            <template x-if="error">
+                <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+                    x-text="error"></div>
+            </template>
+            <template x-if="success">
+                <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                    x-text="success"></div>
+            </template>
 
             <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
                 <nav class="flex flex-wrap gap-2 text-sm font-medium">
@@ -337,7 +357,7 @@
                     <div class="grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
-                                trunk</label>
+                                trunk (optional)</label>
                             <select name="source_trunk" x-model="route.source_trunk"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="">Select source trunk</option>
@@ -348,7 +368,7 @@
                         </div>
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
-                                trunks</label>
+                                trunks (optional)</label>
                             <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
                                 <template x-for="option in trunkOptions" :key="'target-' + option.name">
                                     <label class="mb-2 flex items-center gap-2">
@@ -420,11 +440,15 @@
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('routingForm', (routePayload, trunkPayload, algorithms) => ({
-            mode: '{{ mode }}',
+        Alpine.data('routingForm', (options = {}) => ({
+            mode: options.mode || 'create',
             activeTab: 'overview',
-            directionOptions: [],
-            statusOptions: [],
+            listUrl: options.listUrl || '/console/routing',
+            formAction: options.formAction || options.listUrl || '/console/routing',
+            directionOptions: Array.isArray(options.directionOptions) ? options.directionOptions : [],
+            statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
+            trunkOptions: [],
+            algorithmOptions: [],
             route: {
                 id: null,
                 name: '',
@@ -442,40 +466,55 @@
             matchHeaders: [],
             rewriteHeaders: [],
             notes: [],
-            trunkOptions: [],
-            algorithmOptions: [],
+            saving: false,
+            error: null,
+            success: null,
             init() {
-                this.algorithmOptions = Array.isArray(algorithms) ? algorithms : [];
-                this.directionOptions = this.parseJson(this.$el.dataset.directionOptions, []);
-                this.statusOptions = this.parseJson(this.$el.dataset.statusOptions, []);
-                const routeData = this.parseJson(routePayload, {});
-                const trunksData = this.parseJson(trunkPayload, {});
-                this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData.trunks || []);
-                const normalised = this.normaliseRoute(routeData || {});
+                this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
+                this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
+                this.algorithmOptions = Array.isArray(options.algorithms) ? options.algorithms : [];
+                this.directionOptions = (Array.isArray(options.directionOptions) ? options.directionOptions : [])
+                    .map((value) => this.trimString(value))
+                    .filter((value) => value.length);
+                this.statusOptions = Array.isArray(options.statusOptions) ? options.statusOptions : [];
+                const trunksData = options.trunks;
+                this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
+                const normalised = this.normaliseRoute(options.route || {});
                 this.route = normalised.route;
                 this.matchHeaders = normalised.matchHeaders;
                 this.rewriteHeaders = normalised.rewriteHeaders;
                 this.notes = normalised.notes;
             },
-            parseJson(input, fallback) {
-                if (!input) return fallback;
-                if (typeof input === 'object') return input;
-                try {
-                    return JSON.parse(input);
-                } catch (error) {
-                    console.warn('Failed to parse JSON payload for routing form', error);
-                    return fallback;
-                }
-            },
             normaliseRoute(raw) {
+                const toBoolean = (value) => {
+                    if (typeof value === 'boolean') return value;
+                    if (typeof value === 'string') {
+                        const trimmed = value.trim().toLowerCase();
+                        if (['true', '1', 'yes', 'enabled'].includes(trimmed)) return true;
+                        if (['false', '0', 'no', 'disabled'].includes(trimmed)) return false;
+                    }
+                    return Boolean(value);
+                };
+                const normalizeDirection = (value) => {
+                    if (typeof value === 'string' && value.trim().length) {
+                        return value.trim().toLowerCase();
+                    }
+                    return 'outbound';
+                };
+                const normalizeSelection = (value) => {
+                    if (typeof value === 'string' && value.trim().length) {
+                        return value.trim().toLowerCase();
+                    }
+                    return 'rr';
+                };
                 const route = {
-                    id: raw.id ?? null,
-                    name: raw.name ?? '',
-                    description: raw.description ?? '',
-                    owner: raw.owner ?? '',
-                    direction: raw.direction ?? 'outbound',
-                    priority: typeof raw.priority === 'number' ? raw.priority : Number(raw.priority) || 10,
-                    disabled: Boolean(raw.disabled),
+                    id: raw?.id ?? null,
+                    name: raw?.name ?? '',
+                    description: raw?.description ?? '',
+                    owner: raw?.owner ?? '',
+                    direction: normalizeDirection(raw?.direction),
+                    priority: typeof raw?.priority === 'number' ? raw.priority : Number(raw?.priority) || 10,
+                    disabled: toBoolean(raw?.disabled),
                     match: Object.assign({
                         from_user: '',
                         from_host: '',
@@ -484,7 +523,7 @@
                         request_uri_user: '',
                         request_uri_host: '',
                         request_uri_port: '',
-                    }, raw.match || {}),
+                    }, raw?.match || {}),
                     rewrite: Object.assign({
                         from_user: '',
                         from_host: '',
@@ -492,19 +531,19 @@
                         to_host: '',
                         request_uri_user: '',
                         request_uri_host: '',
-                    }, raw.rewrite || {}),
+                    }, raw?.rewrite || {}),
                     action: {
-                        select: (raw.action && raw.action.select) || 'rr',
-                        hash_key: raw.action ? raw.action.hash_key : null,
-                        trunks: Array.isArray(raw.action?.trunks)
+                        select: normalizeSelection(raw?.action?.select),
+                        hash_key: raw?.action?.hash_key || null,
+                        trunks: Array.isArray(raw?.action?.trunks)
                             ? raw.action.trunks.map((item) => ({
-                                name: item.name || '',
-                                weight: typeof item.weight === 'number' ? item.weight : Number(item.weight) || 0,
+                                name: item?.name || '',
+                                weight: typeof item?.weight === 'number' ? item.weight : Number(item?.weight) || 0,
                             }))
                             : [],
                     },
-                    source_trunk: raw.source_trunk || '',
-                    target_trunks: Array.isArray(raw.target_trunks) ? raw.target_trunks.slice() : [],
+                    source_trunk: raw?.source_trunk || '',
+                    target_trunks: Array.isArray(raw?.target_trunks) ? raw.target_trunks.slice() : [],
                 };
 
                 const matchHeaders = [];
@@ -529,9 +568,23 @@
                     }
                 });
 
-                const notes = Array.isArray(raw.notes) ? raw.notes.slice() : [];
+                const notes = Array.isArray(raw?.notes) ? raw.notes.slice() : [];
 
                 return { route, matchHeaders, rewriteHeaders, notes };
+            },
+            trimString(value) {
+                if (value == null) return '';
+                return typeof value === 'string' ? value.trim() : String(value).trim();
+            },
+            sanitizeKeyValue(object) {
+                const result = {};
+                Object.entries(object || {}).forEach(([key, value]) => {
+                    const trimmedValue = this.trimString(value);
+                    if (trimmedValue.length) {
+                        result[key] = trimmedValue;
+                    }
+                });
+                return result;
             },
             get matchFields() {
                 return [
@@ -573,17 +626,27 @@
                 this.route.action.trunks.splice(index, 1);
             },
             setAlgorithm(value) {
-                this.route.action.select = value;
-                if (value !== 'hash') {
+                if (typeof value === 'string' && value.trim().length) {
+                    this.route.action.select = value.trim().toLowerCase();
+                } else {
+                    this.route.action.select = 'rr';
+                }
+                if (this.route.action.select !== 'hash') {
                     this.route.action.hash_key = null;
                 }
             },
             toggleTarget(name) {
-                const current = new Set(this.route.target_trunks);
-                if (current.has(name)) {
-                    current.delete(name);
+                const candidate = this.trimString(name);
+                if (!candidate.length) return;
+                const current = new Set(
+                    (this.route.target_trunks || [])
+                        .map((value) => this.trimString(value))
+                        .filter((value) => value.length),
+                );
+                if (current.has(candidate)) {
+                    current.delete(candidate);
                 } else {
-                    current.add(name);
+                    current.add(candidate);
                 }
                 this.route.target_trunks = Array.from(current);
             },
@@ -599,56 +662,141 @@
             get normalizedWeights() {
                 const total = this.totalWeight || 1;
                 return this.route.action.trunks
-                    .filter((trunk) => trunk.name)
                     .map((trunk) => ({
-                        name: trunk.name,
-                        label: trunk.name,
+                        name: this.trimString(trunk.name),
+                        label: this.trimString(trunk.name) || '—',
                         percent: Math.round(((Number(trunk.weight) || 0) / total) * 100),
-                    }));
+                    }))
+                    .filter((item) => item.name.length);
             },
             get routeSummary() {
                 return `${this.route.direction} · priority ${this.route.priority}`;
             },
+            submitUrl() {
+                return this.formAction || this.listUrl;
+            },
+            submitMethod() {
+                return this.mode === 'edit' ? 'PATCH' : 'PUT';
+            },
+            validate() {
+                const name = this.trimString(this.route.name);
+                if (!name.length) {
+                    throw new Error('Route name is required.');
+                }
+                const source = this.trimString(this.route.source_trunk);
+                if (source.length) {
+                    const exists = this.trunkOptions.some((option) => {
+                        const candidate = this.trimString(option?.name);
+                        return candidate.length && candidate.toLowerCase() === source.toLowerCase();
+                    });
+                    if (!exists) {
+                        throw new Error(`Source trunk "${source}" is not available.`);
+                    }
+                }
+            },
             buildPayload() {
-                const match = { ...this.route.match };
+                const match = this.sanitizeKeyValue(this.route.match);
                 this.matchHeaders.forEach((header) => {
-                    if (!header.name) return;
-                    match[`header.${header.name}`] = header.value || '';
+                    const name = this.trimString(header.name);
+                    const value = this.trimString(header.value);
+                    if (name.length && value.length) {
+                        match[`header.${name}`] = value;
+                    }
                 });
 
-                const rewrite = { ...this.route.rewrite };
+                const rewrite = this.sanitizeKeyValue(this.route.rewrite);
                 this.rewriteHeaders.forEach((header) => {
-                    if (!header.name) return;
-                    rewrite[`header.${header.name}`] = header.value || '';
+                    const name = this.trimString(header.name);
+                    const value = this.trimString(header.value);
+                    if (name.length && value.length) {
+                        rewrite[`header.${name}`] = value;
+                    }
                 });
+
+                const trunks = this.route.action.trunks
+                    .map((trunk) => ({
+                        name: this.trimString(trunk.name),
+                        weight: Math.max(0, Math.round(Number(trunk.weight) || 0)),
+                    }))
+                    .filter((trunk) => trunk.name.length);
+
+                const hashKey = this.route.action.select === 'hash'
+                    ? this.trimString(this.route.action.hash_key)
+                    : '';
+
+                const targetTrunks = Array.from(
+                    new Set(
+                        (this.route.target_trunks || [])
+                            .map((name) => this.trimString(name))
+                            .filter((name) => name.length),
+                    ),
+                );
+
+                const description = this.trimString(this.route.description);
+                const owner = this.trimString(this.route.owner);
 
                 return {
                     id: this.route.id,
-                    name: this.route.name,
-                    description: this.route.description,
-                    owner: this.route.owner,
-                    direction: this.route.direction,
-                    priority: Number(this.route.priority) || 0,
+                    name: this.trimString(this.route.name),
+                    description: description || null,
+                    owner: owner || null,
+                    direction: this.route.direction || 'outbound',
+                    priority: Math.max(0, Math.round(Number(this.route.priority) || 0)),
                     disabled: Boolean(this.route.disabled),
                     match,
                     rewrite,
                     action: {
-                        select: this.route.action.select,
-                        hash_key: this.route.action.select === 'hash' ? this.route.action.hash_key : null,
-                        trunks: this.route.action.trunks
-                            .filter((trunk) => trunk.name)
-                            .map((trunk) => ({
-                                name: trunk.name,
-                                weight: Number(trunk.weight) || 0,
-                            })),
+                        select: this.route.action.select || 'rr',
+                        hash_key: hashKey.length ? hashKey : null,
+                        trunks,
                     },
-                    source_trunk: this.route.source_trunk || null,
-                    target_trunks: this.route.target_trunks,
-                    notes: this.notes.filter((note) => note.trim().length > 0),
+                    source_trunk: this.trimString(this.route.source_trunk) || null,
+                    target_trunks: targetTrunks,
+                    notes: this.notes
+                        .map((note) => this.trimString(note))
+                        .filter((note) => note.length > 0),
                 };
             },
             get jsonPreview() {
                 return JSON.stringify(this.buildPayload(), null, 2);
+            },
+            async submit() {
+                try {
+                    this.validate();
+                } catch (err) {
+                    this.error = err?.message || 'Validation failed.';
+                    this.success = null;
+                    return;
+                }
+                this.saving = true;
+                this.error = null;
+                this.success = null;
+                const payload = this.buildPayload();
+                try {
+                    const response = await fetch(this.submitUrl(), {
+                        method: this.submitMethod(),
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to save routing rule');
+                    }
+                    if (this.mode === 'create' && data?.id) {
+                        window.location.href = `${this.listUrl}/${data.id}`;
+                        return;
+                    }
+                    this.mode = 'edit';
+                    this.success = 'Changes saved successfully.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to save routing rule';
+                } finally {
+                    this.saving = false;
+                }
             },
             copyJson() {
                 const json = this.jsonPreview;

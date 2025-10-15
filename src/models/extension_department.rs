@@ -13,7 +13,7 @@ pub struct Model {
     pub extension_id: i64,
     #[sea_orm(primary_key, auto_increment = false)]
     pub department_id: i64,
-    pub created_at: DateTime,
+    pub created_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

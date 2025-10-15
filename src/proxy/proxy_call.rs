@@ -399,12 +399,16 @@ impl CallSession {
         let mut pending_dialog_id = dialog_id.clone();
         pending_dialog_id.to_tag = String::new();
         self.callee_dialogs.retain(|id| *id != pending_dialog_id);
-
         self.callee_dialogs.push(dialog_id);
-        debug!(callee = %callee, "Call accepted, will not send reject on cleanup");
         self.connected_callee = Some(callee);
         self.answer_time = Some(Instant::now());
 
+        info!(
+            server_dialog_id = %self.server_dialog.id(),
+            use_media_proxy = self.use_media_proxy,
+            has_answer = self.answer.is_some(),
+            "Call answered"
+        );
         if self.use_media_proxy {
             if self.answer.is_none() {
                 let answer_for_caller = self.create_caller_answer_from_offer().await?;
@@ -539,7 +543,14 @@ impl ProxyCall {
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
         let use_media_proxy = self.needs_media_proxy(&offer_sdp);
         let all_webrtc_target = self.dialplan.all_webrtc_target();
-        info!(session_id = %self.session_id, use_media_proxy, all_webrtc_target,  "starting proxy call processing");
+
+        info!(
+            session_id = %self.session_id,
+            server_dialog_id = %server_dialog.id(),
+            use_media_proxy,
+            all_webrtc_target,
+            "starting proxy call processing"
+        );
 
         let external_addr = self
             .dialplan
@@ -1121,8 +1132,8 @@ impl ProxyCall {
                 other_state => {
                     debug!(
                         session_id = %self.session_id,
-                        "Received state in established call: {:?}",
-                        std::mem::discriminant(&other_state)
+                        "Received state in established call: {}",
+                        other_state
                     );
                 }
             }

@@ -2,7 +2,11 @@
 {% block title %}Routing · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl space-y-6" x-data='routingConsole({{ routing_data | tojson }})'>
+    <div class="mx-auto max-w-7xl space-y-6" x-data='routingConsole({
+        basePath: {{ base_path | tojson }},
+        filters: {{ filters | tojson }},
+        createUrl: {{ create_url | tojson }}
+    })' x-init="init()">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
                 <h1 class="text-2xl font-semibold text-slate-900">Routing control</h1>
@@ -10,7 +14,7 @@
                     forward traffic based on your voice policies.</p>
             </div>
             <div class="flex flex-wrap gap-3">
-                <a href="{{ create_url }}"
+                <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
@@ -52,6 +56,11 @@
             </div>
         </section>
 
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
+            </div>
+        </template>
+
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -61,7 +70,7 @@
                 </div>
                 <div class="flex flex-wrap items-center gap-3">
                     <div class="relative">
-                        <input type="search" x-model.debounce.300ms="search"
+                        <input type="search" x-model.debounce.300ms="search" @input.debounce.400ms="applyFilters()"
                             class="w-72 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="Search routes, regex, trunks...">
                         <svg class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
@@ -73,31 +82,31 @@
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="directionFilter = 'all'">All</button>
+                            @click="setDirection('all')">All</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'inbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="directionFilter = 'inbound'">Inbound</button>
+                            @click="setDirection('inbound')">Inbound</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'outbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="directionFilter = 'outbound'">Outbound</button>
+                            @click="setDirection('outbound')">Outbound</button>
                     </div>
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'all' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
-                            @click="statusFilter = 'all'">Any status</button>
+                            @click="setStatus('all')">Any status</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
-                            @click="statusFilter = 'active'">Active</button>
+                            @click="setStatus('active')">Active</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'disabled' ? 'bg-rose-100 text-rose-700' : 'hover:bg-slate-100'"
-                            @click="statusFilter = 'disabled'">Paused</button>
+                            @click="setStatus('disabled')">Paused</button>
                     </div>
                     <div class="flex gap-1 text-xs">
                         <template x-for="option in algorithmOptions" :key="option.value">
                             <button type="button"
                                 class="rounded-lg border border-slate-200 px-3 py-1 font-medium transition"
-                                :class="algorithmFilter.includes(option.value) ? 'border-sky-300 bg-sky-50 text-sky-700' : 'hover:bg-slate-100'"
-                                @click="toggleAlgorithm(option.value)">
+                                :class="algorithmFilter === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="setAlgorithm(option.value)">
                                 <span x-text="option.label"></span>
                             </button>
                         </template>
@@ -106,7 +115,18 @@
             </div>
 
             <div class="mt-5 divide-y divide-slate-100">
-                <template x-if="!filteredRoutes.length">
+                <template x-if="loading">
+                    <div
+                        class="flex flex-col items-center justify-center gap-3 py-14 text-center text-sm text-slate-400">
+                        <svg class="h-10 w-10 animate-spin text-slate-300" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                        </svg>
+                        <div>Loading routes…</div>
+                    </div>
+                </template>
+                <template x-if="!loading && !filteredRoutes.length">
                     <div
                         class="flex flex-col items-center justify-center gap-3 py-14 text-center text-sm text-slate-400">
                         <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -151,100 +171,252 @@
                                         <span x-text="route.action.select.toUpperCase()"></span>
                                     </span>
                                     <template x-if="route.disabled">
-                                        <span
-                                            class="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-600 ring-1 ring-rose-200">
-                                            Paused
-                                        </span>
-                                    </template>
-                                </div>
-                                <p class="text-sm text-slate-500"
-                                    x-text="route.description || 'No description provided.'"></p>
-                                <div class="flex flex-wrap gap-3 text-xs text-slate-500">
-                                    <div class="inline-flex items-center gap-1">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                                        </svg>
-                                        <span>Owner: </span>
-                                        <span class="font-medium text-slate-600" x-text="route.owner || '—'"></span>
-                                    </div>
-                                    <div class="inline-flex items-center gap-1">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M6 2l.344 1.376A2 2 0 008.29 5h3.42a2 2 0 001.947-1.624L14 2" />
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M4 7h12v9a2 2 0 01-2 2H6a2 2 0 01-2-2V7z" />
-                                        </svg>
-                                        <span x-text="formatDate(route.last_modified)"></span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <button type="button"
-                                    class="hidden rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 md:inline-flex">
-                                    History
-                                </button>
-                                <a :href="route.edit_url || '{{ create_url }}'"
-                                    class="hidden rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 md:inline-flex">
-                                    Edit
-                                </a>
-                                <button type="button"
-                                    class="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600"
-                                    @click="open = !open">
-                                    <svg class="h-4 w-4 transition" :class="open ? 'rotate-180' : ''"
-                                        viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                                    </svg>
-                                </button>
-                            </div>
-                        </header>
+                                        <span Alpine.data('routingConsole', (options={})=> ({
+                                            basePath: '',
+                                            listEndpoint: '',
+                                            createUrl: '',
+                                            filtersRaw: {},
+                                            routes: [],
+                                            summary: { total_routes: 0, active_routes: 0, last_deploy: null },
+                                            pagination: null,
+                                            loading: false,
+                                            error: null,
+                                            search: '',
+                                            directionFilter: 'all',
+                                            statusFilter: 'all',
+                                            algorithmFilter: 'all',
+                                            algorithmOptions: [],
+                                            directionOptions: [],
+                                            statusOptions: [],
+                                            perPage: 20,
+                                            page: 1,
+                                            init() {
+                                            this.basePath = this.normalizeBasePath(options.basePath);
+                                            this.listEndpoint = this.resolvePath(`${this.basePath}/routing`);
+                                            this.createUrl = options.createUrl ||
+                                            this.resolvePath(`${this.basePath}/routing/new`);
+                                            this.filtersRaw = options.filters || {};
+                                            this.setupFilterOptions();
+                                            this.fetchRoutes();
+                                            },
+                                            normalizeBasePath(path) {
+                                            if (!path) {
+                                            return '';
+                                            }
+                                            const trimmed = String(path).trim();
+                                            if (!trimmed.length || trimmed === '/') {
+                                            return '';
+                                            }
+                                            return trimmed.replace(/\/$/, '');
+                                            },
+                                            resolvePath(path) {
+                                            const raw = (path || '').toString().trim();
+                                            if (!raw.length) {
+                                            return '/';
+                                            }
+                                            if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                                            return raw;
+                                            }
+                                            const normalized = raw.replace(/\/+ /g, '/');
+                                            const withLeading = normalized.startsWith('/') ? normalized :
+                                            `/${normalized}`;
+                                            return withLeading.replace(/\/+/, '/');
+                                            },
+                                            setupFilterOptions() {
+                                            const raw = this.filtersRaw || {};
+                                            this.algorithmOptions =
+                                            this.normalizeAlgorithmOptions(raw.selection_algorithms);
+                                            if (!this.algorithmOptions.length) {
+                                            this.algorithmOptions = [
+                                            { value: 'rr', label: 'Round robin' },
+                                            { value: 'weight', label: 'Weighted' },
+                                            { value: 'hash', label: 'Deterministic hash' },
+                                            ];
+                                            }
+                                            this.directionOptions =
+                                            this.normalizeDirectionOptions(raw.direction_options);
+                                            this.statusOptions = this.normalizeStatusOptions(raw.status_options);
+                                            },
+                                            normalizeAlgorithmOptions(input) {
+                                            if (!Array.isArray(input)) {
+                                            return [];
+                                            }
+                                            return input
+                                            .map((item) => {
+                                            if (item && typeof item === 'object') {
+                                            const value = item.value ?? item.name ?? item.id ?? '';
+                                            const label = item.label ?? item.title ?? value;
+                                            if (!value || !label) return null;
+                                            return { value: String(value), label: String(label) };
+                                            }
+                                            if (typeof item === 'string') {
+                                            const pretty = item.replace(/_/g, ' ');
+                                            return {
+                                            value: item,
+                                            label: pretty.charAt(0).toUpperCase() + pretty.slice(1),
+                                            };
+                                            }
+                                            return null;
+                                            })
+                                            .filter(Boolean);
+                                            },
+                                            normalizeDirectionOptions(input) {
+                                            if (!Array.isArray(input)) {
+                                            return [];
+                                            }
+                                            return input
+                                            .map((value) => (typeof value === 'string' && value.trim().length ?
+                                            value.trim() : null))
+                                            .filter(Boolean);
+                                            },
+                                            normalizeStatusOptions(input) {
+                                            if (!Array.isArray(input)) {
+                                            return [];
+                                            }
+                                            return input
+                                            .map((item) => {
+                                            if (item && typeof item === 'object') {
+                                            return {
+                                            value: item.value,
+                                            label: item.label,
+                                            };
+                                            }
+                                            return null;
+                                            })
+                                            .filter((entry) => entry && entry.value !== undefined && entry.label);
+                                            },
+                                            buildPayload() {
+                                            const filters = {};
+                                            const term = this.search.trim();
+                                            if (term.length) {
+                                            filters.q = term;
+                                            }
+                                            if (this.directionFilter !== 'all') {
+                                            filters.direction = this.directionFilter;
+                                            }
+                                            if (this.statusFilter !== 'all') {
+                                            filters.status = this.statusFilter === 'disabled' ? 'paused' :
+                                            this.statusFilter;
+                                            }
+                                            if (this.algorithmFilter !== 'all') {
+                                            filters.selection = this.algorithmFilter;
+                                            }
 
-                        <div x-show="open" x-collapse
-                            class="mt-3 space-y-4 rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">
-                            <div class="grid gap-4 md:grid-cols-2">
-                                <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Match
-                                        conditions</div>
-                                    <ul class="mt-3 space-y-2">
-                                        <template x-for="item in matchEntries(route)" :key="item.key">
-                                            <li class="flex items-start gap-2">
-                                                <span
-                                                    class="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-600 ring-1 ring-sky-100">
-                                                    Rx
-                                                </span>
-                                                <div>
-                                                    <div class="text-xs font-semibold text-slate-500"
-                                                        x-text="item.label"></div>
-                                                    <code class="text-xs text-slate-600" x-text="item.value"></code>
-                                                </div>
-                                            </li>
-                                        </template>
-                                        <template x-if="!matchEntries(route).length">
-                                            <li class="text-xs text-slate-400">Matches all traffic</li>
-                                        </template>
-                                    </ul>
-                                </div>
-                                <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Rewrite &
-                                        headers</div>
-                                    <ul class="mt-3 space-y-2">
-                                        <template x-for="item in rewriteEntries(route)" :key="item.key">
-                                            <li class="flex items-start gap-2">
-                                                <span
+                                            return {
+                                            page: this.page,
+                                            per_page: this.perPage,
+                                            filters,
+                                            };
+                                            },
+                                            async fetchRoutes() {
+                                            this.loading = true;
+                                            this.error = null;
+                                            try {
+                                            const response = await fetch(this.listEndpoint, {
+                                            method: 'POST',
+                                            headers: {
+                                            'Content-Type': 'application/json',
+                                            'Accept': 'application/json',
+                                            },
+                                            body: JSON.stringify(this.buildPayload()),
+                                            });
+                                            const data = await response.json().catch(() => ({}));
+                                            if (!response.ok) {
+                                            throw new Error(data?.message || 'Failed to load routing rules');
+                                            }
+
+                                            this.routes = Array.isArray(data?.items) ? data.items : [];
+                                            this.summary = Object.assign(
+                                            { total_routes: 0, active_routes: 0, last_deploy: null },
+                                            data?.summary || {}
+                                            );
+                                            this.updateFiltersFromResponse(data?.filters);
+                                            this.updatePagination(data);
+                                            } catch (err) {
+                                            console.error(err);
+                                            this.error = err?.message || 'Unable to load routing rules';
+                                            } finally {
+                                            this.loading = false;
+                                            }
+                                            },
+                                            updateFiltersFromResponse(filters) {
+                                            if (!filters || typeof filters !== 'object') {
+                                            return;
+                                            }
+                                            this.filtersRaw = filters;
+                                            this.setupFilterOptions();
+                                            },
+                                            updatePagination(meta) {
+                                            const perPageRaw = Number(meta?.per_page);
+                                            const currentPageRaw = Number(meta?.page);
+                                            const totalItemsRaw = Number(meta?.total_items);
+                                            const totalPagesRaw = Number(meta?.total_pages);
+
+                                            const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw :
+                                            this.perPage;
+                                            const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0
+                                            ? totalItemsRaw
+                                            : this.routes.length;
+                                            const inferredPages = Math.max(Math.ceil(totalItems / perPage), 1);
+                                            const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
+                                            ? Math.max(Math.min(totalPagesRaw, inferredPages || 1), 1)
+                                            : inferredPages;
+                                            const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
+                                            ? Math.min(currentPageRaw, totalPages)
+                                            : Math.min(this.page || 1, totalPages);
+
+                                            const resultsCount = this.routes.length;
+                                            const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
+                                            const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1,
+                                            totalItems) : 0;
+
+                                            this.pagination = {
+                                            current_page: currentPage,
+                                            per_page: perPage,
+                                            total_items: totalItems,
+                                            total_pages: totalPages,
+                                            has_prev: currentPage > 1,
+                                            has_next: currentPage < totalPages, prev_page: currentPage> 1 ? currentPage
+                                                - 1 : null,
+                                                next_page: currentPage < totalPages ? currentPage + 1 : null,
+                                                    showing_from: showingFrom, showing_to: showingTo, };
+                                                    this.perPage=perPage; this.page=currentPage; }, applyFilters() {
+                                                    this.page=1; this.fetchRoutes(); }, setDirection(value) { if
+                                                    (this.directionFilter===value) { if (value !=='all' ) {
+                                                    this.directionFilter='all' ; this.applyFilters(); } return; }
+                                                    this.directionFilter=value; this.applyFilters(); }, setStatus(value)
+                                                    { if (this.statusFilter===value) { if (value !=='all' ) {
+                                                    this.statusFilter='all' ; this.applyFilters(); } return; }
+                                                    this.statusFilter=value; this.applyFilters(); }, setAlgorithm(value)
+                                                    { this.algorithmFilter=this.algorithmFilter===value ? 'all' : value;
+                                                    this.applyFilters(); }, get filteredRoutes() { return
+                                                    Array.isArray(this.routes) ? this.routes : []; }, get pausedRoutes()
+                                                    { const total=Number(this.summary.total_routes) || 0; const
+                                                    active=Number(this.summary.active_routes) || 0; return
+                                                    Math.max(total - active, 0); }, goToPage(target) { if
+                                                    (!this.pagination) return; const
+                                                    totalPages=this.pagination.total_pages || 1; const
+                                                    page=Math.min(Math.max(target, 1), totalPages); if
+                                                    (page===this.page) return; this.page=page; this.fetchRoutes(); },
+                                                    prevPage() { if (this.pagination?.has_prev) {
+                                                    this.goToPage(this.pagination.prev_page || (this.page - 1)); } },
+                                                    nextPage() { if (this.pagination?.has_next) {
+                                                    this.goToPage(this.pagination.next_page || (this.page + 1)); } },
+                                                    formatDate(value) { if (!value) return '—' ; const date=new
+                                                    Date(value); if (Number.isNaN(date.getTime())) { return value; }
+                                                    return date.toLocaleString(); }, matchEntries(route) {
                                                     class="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-600 ring-1 ring-amber-100">
                                                     ↺
-                                                </span>
-                                                <div>
-                                                    <div class="text-xs font-semibold text-slate-500"
-                                                        x-text="item.label"></div>
-                                                    <code class="text-xs text-slate-600" x-text="item.value"></code>
-                                                </div>
-                                            </li>
-                                        </template>
-                                        <template x-if="!rewriteEntries(route).length">
-                                            <li class="text-xs text-slate-400">No rewrite applied</li>
-                                        </template>
+                                        </span>
+                                        <div>
+                                            <div class="text-xs font-semibold text-slate-500" x-text="item.label"></div>
+                                            <code class="text-xs text-slate-600" x-text="item.value"></code>
+                                        </div>
+                                        </li>
+                                    </template>
+                                    <template x-if="!rewriteEntries(route).length">
+                                        <li class="text-xs text-slate-400">No rewrite applied</li>
+                                    </template>
                                     </ul>
                                 </div>
                             </div>
@@ -353,90 +525,283 @@
                                     </template>
                                 </ul>
                             </div>
-                        </div>
-                    </article>
-                </template>
             </div>
-        </section>
-
+            </article>
+            </template>
     </div>
+    </section>
+
+</div>
 </div>
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('routingConsole', (payload) => ({
-            init() {
-                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
-                this.routes = Array.isArray(data.routes) ? data.routes : [];
-                this.summary = Object.assign({ total_routes: 0, active_routes: 0, last_deploy: null }, data.summary || {});
-            },
+        Alpine.data('routingConsole', (options = {}) => ({
+            basePath: '',
+            listEndpoint: '',
+            createUrl: '',
+            filtersRaw: {},
             routes: [],
             summary: { total_routes: 0, active_routes: 0, last_deploy: null },
+            pagination: null,
+            loading: false,
+            error: null,
             search: '',
             directionFilter: 'all',
             statusFilter: 'all',
-            algorithmFilter: [],
-            algorithmOptions: [
-                { value: 'rr', label: 'Round robin' },
-                { value: 'weight', label: 'Weighted' },
-                { value: 'hash', label: 'Hash' },
-            ],
+            algorithmFilter: 'all',
+            algorithmOptions: [],
+            directionOptions: [],
+            statusOptions: [],
+            perPage: 20,
+            page: 1,
+
+            init() {
+                this.basePath = this.normalizeBasePath(options.basePath);
+                this.listEndpoint = this.resolvePath(`${this.basePath}/routing`);
+                this.createUrl = options.createUrl || this.resolvePath(`${this.basePath}/routing/new`);
+                this.filtersRaw = options.filters || {};
+                this.setupFilterOptions();
+                this.fetchRoutes();
+            },
+            normalizeBasePath(path) {
+                if (!path) return '';
+                const trimmed = String(path).trim();
+                if (!trimmed.length || trimmed === '/') {
+                    return '';
+                }
+                return trimmed.replace(/\/+$/, '');
+            },
+            resolvePath(path) {
+                if (!path) return '/';
+                const raw = String(path).trim();
+                if (!raw.length) return '/';
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    return raw;
+                }
+                const collapsed = raw.replace(/\/{2,}/g, '/');
+                return collapsed.startsWith('/') ? collapsed : `/${collapsed}`;
+            },
+            setupFilterOptions() {
+                const raw = this.filtersRaw || {};
+                this.algorithmOptions = this.normalizeAlgorithmOptions(raw.selection_algorithms);
+                if (!this.algorithmOptions.length) {
+                    this.algorithmOptions = [
+                        { value: 'rr', label: 'Round robin' },
+                        { value: 'weight', label: 'Weighted' },
+                        { value: 'hash', label: 'Deterministic hash' },
+                    ];
+                }
+                this.directionOptions = this.normalizeDirectionOptions(raw.direction_options);
+                this.statusOptions = this.normalizeStatusOptions(raw.status_options);
+            },
+            normalizeAlgorithmOptions(input) {
+                if (!Array.isArray(input)) {
+                    return [];
+                }
+                return input
+                    .map((item) => {
+                        if (item && typeof item === 'object') {
+                            const value = item.value ?? item.name ?? item.id ?? '';
+                            const label = item.label ?? item.title ?? value;
+                            if (!value || !label) return null;
+                            return { value: String(value), label: String(label) };
+                        }
+                        if (typeof item === 'string') {
+                            const pretty = item.replace(/_/g, ' ');
+                            return {
+                                value: item,
+                                label: pretty.charAt(0).toUpperCase() + pretty.slice(1),
+                            };
+                        }
+                        return null;
+                    })
+                    .filter(Boolean);
+            },
+            normalizeDirectionOptions(input) {
+                if (!Array.isArray(input)) {
+                    return [];
+                }
+                return input
+                    .map((value) => (typeof value === 'string' && value.trim().length ? value.trim() : null))
+                    .filter(Boolean);
+            },
+            normalizeStatusOptions(input) {
+                if (!Array.isArray(input)) {
+                    return [];
+                }
+                return input
+                    .map((item) => {
+                        if (item && typeof item === 'object') {
+                            return {
+                                value: item.value,
+                                label: item.label,
+                            };
+                        }
+                        return null;
+                    })
+                    .filter((entry) => entry && entry.value !== undefined && entry.label);
+            },
+            buildPayload() {
+                const filters = {};
+                const term = this.search.trim();
+                if (term.length) {
+                    filters.q = term;
+                }
+                if (this.directionFilter !== 'all') {
+                    filters.direction = this.directionFilter;
+                }
+                if (this.statusFilter !== 'all') {
+                    filters.status = this.statusFilter === 'disabled' ? 'paused' : this.statusFilter;
+                }
+                if (this.algorithmFilter !== 'all') {
+                    filters.selection = this.algorithmFilter;
+                }
+
+                return {
+                    page: this.page,
+                    per_page: this.perPage,
+                    filters,
+                };
+            },
+            async fetchRoutes() {
+                this.loading = true;
+                this.error = null;
+                try {
+                    const response = await fetch(this.listEndpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                        },
+                        body: JSON.stringify(this.buildPayload()),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to load routing rules');
+                    }
+
+                    const items = Array.isArray(data?.items) ? data.items : [];
+                    this.routes = items.map((item) => ({
+                        ...item,
+                        disabled: Boolean(item?.disabled),
+                        direction: item?.direction || 'outbound',
+                        action: item?.action || {},
+                    }));
+
+                    this.summary = Object.assign(
+                        { total_routes: 0, active_routes: 0, last_deploy: null },
+                        data?.summary || {}
+                    );
+                    this.updateFiltersFromResponse(data?.filters);
+                    this.updatePagination(data);
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Unable to load routing rules';
+                } finally {
+                    this.loading = false;
+                }
+            },
+            updateFiltersFromResponse(filters) {
+                if (!filters || typeof filters !== 'object') {
+                    return;
+                }
+                this.filtersRaw = filters;
+                this.setupFilterOptions();
+            },
+            updatePagination(meta) {
+                const perPageRaw = Number(meta?.per_page);
+                const currentPageRaw = Number(meta?.page);
+                const totalItemsRaw = Number(meta?.total_items);
+                const totalPagesRaw = Number(meta?.total_pages);
+
+                const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw : this.perPage;
+                const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0
+                    ? totalItemsRaw
+                    : this.routes.length;
+                const inferredPages = Math.max(Math.ceil(totalItems / perPage), 1);
+                const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
+                    ? Math.max(Math.min(totalPagesRaw, inferredPages || 1), 1)
+                    : inferredPages;
+                const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
+                    ? Math.min(currentPageRaw, totalPages)
+                    : Math.min(this.page || 1, totalPages);
+
+                const resultsCount = this.routes.length;
+                const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
+                const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1, totalItems) : 0;
+
+                this.pagination = {
+                    current_page: currentPage,
+                    per_page: perPage,
+                    total_items: totalItems,
+                    total_pages: totalPages,
+                    has_prev: currentPage > 1,
+                    has_next: currentPage < totalPages,
+                    prev_page: currentPage > 1 ? currentPage - 1 : null,
+                    next_page: currentPage < totalPages ? currentPage + 1 : null,
+                    showing_from: showingFrom,
+                    showing_to: showingTo,
+                };
+
+                this.perPage = perPage;
+                this.page = currentPage;
+            },
+            applyFilters() {
+                this.page = 1;
+                this.fetchRoutes();
+            },
+            setDirection(value) {
+                if (this.directionFilter === value) {
+                    if (value !== 'all') {
+                        this.directionFilter = 'all';
+                        this.applyFilters();
+                    }
+                    return;
+                }
+                this.directionFilter = value;
+                this.applyFilters();
+            },
+            setStatus(value) {
+                if (this.statusFilter === value) {
+                    if (value !== 'all') {
+                        this.statusFilter = 'all';
+                        this.applyFilters();
+                    }
+                    return;
+                }
+                this.statusFilter = value;
+                this.applyFilters();
+            },
+            setAlgorithm(value) {
+                this.algorithmFilter = this.algorithmFilter === value ? 'all' : value;
+                this.applyFilters();
+            },
+            get filteredRoutes() {
+                return Array.isArray(this.routes) ? this.routes : [];
+            },
             get pausedRoutes() {
                 const total = Number(this.summary.total_routes) || 0;
                 const active = Number(this.summary.active_routes) || 0;
                 return Math.max(total - active, 0);
             },
-            toggleAlgorithm(value) {
-                if (this.algorithmFilter.includes(value)) {
-                    this.algorithmFilter = this.algorithmFilter.filter((item) => item !== value);
-                } else {
-                    this.algorithmFilter = [...this.algorithmFilter, value];
+            goToPage(target) {
+                if (!this.pagination) return;
+                const totalPages = this.pagination.total_pages || 1;
+                const page = Math.min(Math.max(target, 1), totalPages);
+                if (page === this.page) return;
+                this.page = page;
+                this.fetchRoutes();
+            },
+            prevPage() {
+                if (this.pagination?.has_prev) {
+                    this.goToPage(this.pagination.prev_page || (this.page - 1));
                 }
             },
-            get filteredRoutes() {
-                return this.routes
-                    .map((route) => ({
-                        ...route,
-                        disabled: Boolean(route.disabled),
-                        direction: route.direction || 'outbound',
-                        action: route.action || {},
-                    }))
-                    .filter((route) => {
-                        if (this.directionFilter !== 'all' && route.direction !== this.directionFilter) {
-                            return false;
-                        }
-                        if (this.statusFilter === 'active' && route.disabled) {
-                            return false;
-                        }
-                        if (this.statusFilter === 'disabled' && !route.disabled) {
-                            return false;
-                        }
-                        if (this.algorithmFilter.length && !this.algorithmFilter.includes((route.action?.select || 'rr').toLowerCase())) {
-                            return false;
-                        }
-                        if (!this.matchesSearch(route, this.search)) {
-                            return false;
-                        }
-                        return true;
-                    })
-                    .sort((a, b) => a.priority - b.priority);
-            },
-            matchesSearch(route, term) {
-                if (!term) return true;
-                const needle = term.toLowerCase();
-                const haystack = [
-                    route.name,
-                    route.description,
-                    route.owner,
-                    route.source_trunk,
-                    ...(route.target_trunks || []),
-                    JSON.stringify(route.match || {}),
-                    JSON.stringify(route.rewrite || {}),
-                ]
-                    .filter(Boolean)
-                    .join(' ')
-                    .toLowerCase();
-                return haystack.includes(needle);
+            nextPage() {
+                if (this.pagination?.has_next) {
+                    this.goToPage(this.pagination.next_page || (this.page + 1));
+                }
             },
             formatDate(value) {
                 if (!value) return '—';

@@ -136,7 +136,7 @@ async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(Stri
         cancel_token: cancel_token.clone(),
     };
     let mut local_desc = None;
-    match webrtc_track.setup_webrtc_track(offer.sdp.sdp, None).await {
+    match webrtc_track.setup_with_offer(offer.sdp.sdp, None).await {
         Ok(answer) => {
             info!("Webrtc track setup complete {}", answer.sdp);
             let file_track_id = format!("file-{}", Uuid::new_v4());

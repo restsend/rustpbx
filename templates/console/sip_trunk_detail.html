@@ -340,7 +340,7 @@ default('RustPBX') }}{% endblock %}
                 }
             },
             loadOptions() {
-                const statuses = Array.isArray(this.filters.statuses) ? this.filters.statuses : ['healthy', 'warning', 'standby'];
+                const statuses = Array.isArray(this.filters.statuses) ? this.filters.statuses : ['healthy', 'warning', 'standby', 'offline'];
                 const directions = Array.isArray(this.filters.directions) ? this.filters.directions : ['inbound', 'outbound', 'bidirectional'];
 
                 this.statusOptions = statuses.map((value) => ({

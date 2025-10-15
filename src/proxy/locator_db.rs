@@ -21,8 +21,8 @@ pub struct Model {
     pub destination: String,
     pub transport: String,
     pub last_modified: i64,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
     pub supports_webrtc: bool,
 }
 
@@ -180,7 +180,7 @@ impl Locator for DbLocator {
                 active_model.aor = Set(aor);
                 active_model.transport = Set(transport);
                 active_model.last_modified = Set(now);
-                active_model.updated_at = Set(chrono::Utc::now().naive_utc());
+                active_model.updated_at = Set(chrono::Utc::now());
                 active_model.supports_webrtc = Set(location.supports_webrtc);
 
                 active_model
@@ -190,7 +190,7 @@ impl Locator for DbLocator {
             }
             None => {
                 // Create new record - let the database assign the ID
-                let now_dt = chrono::Utc::now().naive_utc();
+                let now_dt = chrono::Utc::now();
 
                 // Create a new active model with all fields except id
                 let mut active_model = ActiveModel::new();

@@ -1,28 +1,39 @@
 use crate::console::handlers::forms::{self, ExtensionPayload, ListQuery};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
-    department::Column as DepartmentColumn,
-    department::Entity as DepartmentEntity,
+    department::{Column as DepartmentColumn, Entity as DepartmentEntity},
     extension::{
         ActiveModel as ExtensionActiveModel, Column as ExtensionColumn, Entity as ExtensionEntity,
+    },
+    extension_department::{
+        Column as ExtensionDepartmentColumn, Entity as ExtensionDepartmentEntity,
     },
 };
 use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
-    extract::{Form, Path as AxumPath, Query, State},
+    extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, QueryOrder};
+use sea_orm::sea_query::{Expr, Query as SeaQuery};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
+    QueryOrder,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize, Default)]
-struct QueryExtensionsFilters {}
+struct QueryExtensionsFilters {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    department_ids: Option<Vec<i64>>,
+}
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
@@ -131,10 +142,6 @@ async fn create_extension(
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
     let db = state.db();
-    let department_ids = match parse_department_ids(payload.department_ids.clone()) {
-        Ok(ids) => ids,
-        Err(resp) => return resp,
-    };
     let extension = match payload.extension {
         Some(ref ext) if !ext.is_empty() => ext,
         _ => {
@@ -172,32 +179,71 @@ async fn create_extension(
                 .into_response();
         }
     };
-    if let Err(err) = ExtensionEntity::replace_departments(db, model.id, &department_ids).await {
-        warn!(
-            "failed to set departments for extension {}: {}",
-            model.id, err
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": err.to_string()})),
-        )
-            .into_response();
+
+    if let Some(ref dept_ids) = payload.department_ids {
+        if let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await {
+            warn!(
+                "failed to set departments for extension {}: {}",
+                model.id, err
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": err.to_string()})),
+            )
+                .into_response();
+        }
     }
+
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
 async fn query_extensions(
     State(state): State<Arc<ConsoleState>>,
-    Query(query): Query<ListQuery<QueryExtensionsFilters>>,
     AuthRequired(_): AuthRequired,
+    Json(payload): Json<ListQuery<QueryExtensionsFilters>>,
 ) -> Response {
     let db = state.db();
-    let (_, per_page) = query.normalize();
-    let filters = build_filters(state.clone()).await;
-    let selector = ExtensionEntity::find().order_by_asc(ExtensionColumn::CreatedAt);
+    let (_, per_page) = payload.normalize();
 
+    let mut selector = ExtensionEntity::find().order_by_asc(ExtensionColumn::CreatedAt);
+    if let Some(filters) = &payload.filters {
+        if let Some(ref q_raw) = filters.q {
+            let trimmed = q_raw.trim();
+            if !trimmed.is_empty() {
+                let mut condition = Condition::any();
+                condition = condition.add(ExtensionColumn::Extension.contains(trimmed));
+                condition = condition.add(ExtensionColumn::DisplayName.contains(trimmed));
+                condition = condition.add(ExtensionColumn::Email.contains(trimmed));
+                selector = selector.filter(condition);
+            }
+        }
+
+        if let Some(mut department_ids) = filters.department_ids.clone() {
+            department_ids.sort_unstable();
+            department_ids.dedup();
+
+            if !department_ids.is_empty() {
+                let mut subquery = SeaQuery::select();
+                subquery
+                    .column(ExtensionDepartmentColumn::ExtensionId)
+                    .from(ExtensionDepartmentEntity)
+                    .and_where(
+                        Expr::col(ExtensionDepartmentColumn::DepartmentId)
+                            .is_in(department_ids.clone()),
+                    )
+                    .group_by_col(ExtensionDepartmentColumn::ExtensionId)
+                    .and_having(
+                        Expr::col(ExtensionDepartmentColumn::DepartmentId)
+                            .count_distinct()
+                            .eq(department_ids.len() as i32),
+                    );
+
+                selector = selector.filter(ExtensionColumn::Id.in_subquery(subquery.to_owned()));
+            }
+        }
+    }
     let paginator = selector.paginate(db, per_page);
-    let pagination = match forms::paginate(paginator, query).await {
+    let pagination = match forms::paginate(paginator, &payload).await {
         Ok(pagination) => pagination,
         Err(err) => {
             warn!("failed to query extensions: {}", err);
@@ -209,11 +255,27 @@ async fn query_extensions(
         }
     };
 
-    Json(json!({
-        "pagination": pagination,
-        "filters": filters,
-    }))
-    .into_response()
+    let mut items = vec![];
+
+    for ext in &pagination.items {
+        let departments = ext
+            .find_related(crate::models::department::Entity)
+            .all(db)
+            .await
+            .ok();
+        items.push(json!({
+            "extension": ext,
+            "departments": departments,
+        }));
+    }
+    let result = json!({
+        "page": pagination.current_page,
+        "per_page": pagination.per_page,
+        "total_pages": pagination.total_pages,
+        "total_items": pagination.total_items,
+        "items": items,
+    });
+    Json(result).into_response()
 }
 
 async fn update_extension(
@@ -223,10 +285,6 @@ async fn update_extension(
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
     let db = state.db();
-    let department_ids = match parse_department_ids(payload.department_ids.clone()) {
-        Ok(ids) => ids,
-        Err(resp) => return resp,
-    };
     let model = match ExtensionEntity::find_by_id(id).one(db).await {
         Ok(Some(result)) => result,
         Ok(None) => {
@@ -287,13 +345,15 @@ async fn update_extension(
         )
             .into_response();
     }
-    if let Err(err) = ExtensionEntity::replace_departments(db, id, &department_ids).await {
-        warn!("failed to update departments for extension {}: {}", id, err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": err.to_string()})),
-        )
-            .into_response();
+    if let Some(ref dept_ids) = payload.department_ids {
+        if let Err(err) = ExtensionEntity::replace_departments(db, id, dept_ids).await {
+            warn!("failed to update departments for extension {}: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": err.to_string()})),
+            )
+                .into_response();
+        }
     }
     Json(json!({"status": "ok"})).into_response()
 }
@@ -303,69 +363,147 @@ async fn delete_extension(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let db = state.db();
-    let model = match ExtensionEntity::find_by_id(id).one(db).await {
-        Ok(Some(result)) => result,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"message": "Extension not found"})),
-            )
-                .into_response();
-        }
+    match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
+        Ok(r) => Json(json!({"status": r.rows_affected})).into_response(),
         Err(err) => {
-            warn!("failed to load extension {} for delete: {}", id, err);
+            warn!("failed to delete extension {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"message": err.to_string()})),
             )
                 .into_response();
         }
-    };
-
-    let active: ExtensionActiveModel = model.into();
-    if let Err(err) = active.delete(db).await {
-        warn!("failed to delete extension {}: {}", id, err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": err.to_string()})),
-        )
-            .into_response();
     }
-
-    Json(json!({"status": "ok"})).into_response()
 }
 
-fn parse_department_ids(raw: Option<Vec<String>>) -> Result<Vec<i64>, Response> {
-    let mut ids = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ConsoleConfig,
+        console::handlers::forms::ListQuery,
+        models::{department, extension::Model as ExtensionModel, migration::Migrator, user},
+    };
+    use axum::{Json, body::to_bytes, extract::State, http::StatusCode};
+    use chrono::Utc;
+    use sea_orm::{ActiveValue::Set, Database};
+    use sea_orm_migration::MigratorTrait;
+    use serde_json::Value;
+    use std::sync::Arc;
 
-    if let Some(values) = raw {
-        for value in values {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match trimmed.parse::<i64>() {
-                Ok(id) => ids.push(id),
-                Err(_) => {
-                    return Err(bad_request(format!(
-                        "department_ids must be integers, found `{}`",
-                        value
-                    )));
-                }
-            }
+    fn dummy_user() -> user::Model {
+        let now = Utc::now();
+        user::Model {
+            id: 1,
+            email: "tester@example.com".into(),
+            username: "tester".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
         }
     }
 
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
-}
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(db, ConsoleConfig::default())
+            .await
+            .expect("initialize console state")
+    }
 
-fn bad_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"message": message.into()})),
-    )
-        .into_response()
+    async fn insert_extension(db: &sea_orm::DatabaseConnection, extension: &str) -> ExtensionModel {
+        ExtensionActiveModel {
+            extension: Set(extension.to_string()),
+            login_disabled: Set(false),
+            voicemail_disabled: Set(false),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert extension")
+    }
+
+    #[tokio::test]
+    async fn query_extensions_filters_by_department() {
+        let state = setup_state().await;
+        let db = state.db();
+
+        let sales = department::ActiveModel {
+            name: Set("Sales".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert sales department");
+
+        let support = department::ActiveModel {
+            name: Set("Support".to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert support department");
+
+        let ext_sales = insert_extension(db, "1001").await;
+        let ext_support = insert_extension(db, "2002").await;
+        let ext_both = insert_extension(db, "3003").await;
+
+        ExtensionEntity::replace_departments(db, ext_sales.id, &[sales.id])
+            .await
+            .expect("map sales department");
+        ExtensionEntity::replace_departments(db, ext_support.id, &[support.id])
+            .await
+            .expect("map support department");
+        ExtensionEntity::replace_departments(db, ext_both.id, &[sales.id, support.id])
+            .await
+            .expect("map both departments");
+
+        async fn fetch_extension_ids(state: Arc<ConsoleState>, dept_ids: Vec<i64>) -> Vec<i64> {
+            let mut query: ListQuery<QueryExtensionsFilters> = Default::default();
+            query.filters = Some(QueryExtensionsFilters {
+                department_ids: Some(dept_ids),
+                ..Default::default()
+            });
+
+            let response =
+                query_extensions(State(state), AuthRequired(dummy_user()), Json(query)).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let parsed: Value = serde_json::from_slice(&body).expect("parse json");
+            parsed["items"]
+                .as_array()
+                .expect("items as array")
+                .iter()
+                .map(|item| {
+                    item["extension"]["id"]
+                        .as_i64()
+                        .expect("extension id as i64")
+                })
+                .collect()
+        }
+
+        let mut sales_ids = fetch_extension_ids(state.clone(), vec![sales.id]).await;
+        sales_ids.sort_unstable();
+        assert_eq!(sales_ids, vec![ext_sales.id, ext_both.id]);
+
+        let mut support_ids = fetch_extension_ids(state.clone(), vec![support.id]).await;
+        support_ids.sort_unstable();
+        assert_eq!(support_ids, vec![ext_support.id, ext_both.id]);
+
+        let combined_ids = fetch_extension_ids(state.clone(), vec![sales.id, support.id]).await;
+        assert_eq!(combined_ids, vec![ext_both.id]);
+    }
 }

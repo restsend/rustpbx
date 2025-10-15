@@ -1,3 +1,5 @@
+use crate::models::bill_template::BillingInterval;
+use crate::models::sip_trunk::{SipTransport, SipTrunkDirection, SipTrunkStatus};
 use sea_orm::{DatabaseConnection, DbErr, Paginator, SelectorTrait};
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -43,7 +45,7 @@ pub struct ExtensionPayload {
     pub call_forwarding_destination: Option<String>,
     pub call_forwarding_timeout: Option<i32>,
     pub notes: Option<String>,
-    pub department_ids: Option<Vec<String>>,
+    pub department_ids: Option<Vec<i64>>,
     pub login_disabled: Option<bool>,
     pub voicemail_disabled: Option<bool>,
 }
@@ -54,10 +56,10 @@ pub struct SipTrunkForm {
     pub display_name: Option<String>,
     pub carrier: Option<String>,
     pub description: Option<String>,
-    pub status: Option<String>,
-    pub direction: Option<String>,
+    pub status: Option<SipTrunkStatus>,
+    pub direction: Option<SipTrunkDirection>,
     pub sip_server: Option<String>,
-    pub sip_transport: Option<String>,
+    pub sip_transport: Option<SipTransport>,
     pub outbound_proxy: Option<String>,
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
@@ -79,12 +81,12 @@ pub struct SipTrunkForm {
 }
 
 #[derive(Deserialize, Default, Clone)]
-pub struct BillTemplateForm {
+pub struct BillTemplatePayload {
     pub name: Option<String>,
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub currency: Option<String>,
-    pub billing_interval: Option<String>,
+    pub billing_interval: Option<BillingInterval>,
     pub included_minutes: Option<i32>,
     pub included_messages: Option<i32>,
     pub overage_rate_per_minute: Option<f64>,
@@ -140,17 +142,13 @@ pub struct Pagination<T> {
     pub per_page: u32,
     pub total_items: u64,
     pub total_pages: u32,
-    pub showing_from: u32,
-    pub showing_to: u32,
     pub has_prev: bool,
     pub has_next: bool,
-    pub prev_page: u32,
-    pub next_page: u32,
 }
 
 pub async fn paginate<S, F>(
     paginator: Paginator<'_, DatabaseConnection, S>,
-    query: ListQuery<F>,
+    query: &ListQuery<F>,
 ) -> Result<Pagination<S::Item>, DbErr>
 where
     S: SelectorTrait + Send,
@@ -174,27 +172,8 @@ where
     let items = paginator.fetch_page(page_index).await?;
 
     let current_page = (page_index as u32) + 1;
-    let showing_from = if items.is_empty() {
-        0
-    } else {
-        cmp::min((page_index * per_page) + 1, u32::MAX as u64) as u32
-    };
-    let showing_to = if items.is_empty() {
-        0
-    } else {
-        showing_from
-            .saturating_add(items.len() as u32)
-            .saturating_sub(1)
-    };
-
     let has_prev = current_page > 1;
     let has_next = current_page < total_pages;
-    let prev_page = if has_prev { current_page - 1 } else { 1 };
-    let next_page = if has_next {
-        current_page + 1
-    } else {
-        cmp::max(total_pages, 1)
-    };
 
     Ok(Pagination {
         items,
@@ -202,11 +181,7 @@ where
         per_page: per_page as u32,
         total_items,
         total_pages,
-        showing_from,
-        showing_to,
         has_prev,
         has_next,
-        prev_page,
-        next_page,
     })
 }

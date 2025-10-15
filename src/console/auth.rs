@@ -9,7 +9,7 @@ use argon2::{
 };
 use axum::http::HeaderValue;
 use base64::engine::{Engine, general_purpose::STANDARD_NO_PAD};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sea_orm::sea_query::Condition;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
@@ -177,7 +177,7 @@ impl ConsoleState {
             .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
             .to_string();
 
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let mut model = <UserActiveModel as Default>::default();
         model.email = Set(email.to_string());
         model.username = Set(username.to_string());
@@ -194,16 +194,13 @@ impl ConsoleState {
             .context("failed to insert new user")
     }
 
-    pub async fn upsert_reset_token(
-        &self,
-        user: &UserModel,
-    ) -> Result<(String, chrono::NaiveDateTime)> {
+    pub async fn upsert_reset_token(&self, user: &UserModel) -> Result<(String, DateTime<Utc>)> {
         let token = uuid::Uuid::new_v4().to_string();
-        let expires = Utc::now().naive_utc() + Duration::from_secs(RESET_TOKEN_VALID_MINUTES * 60);
+        let expires = Utc::now() + Duration::from_secs(RESET_TOKEN_VALID_MINUTES * 60);
         let mut model: UserActiveModel = user.clone().into();
         model.reset_token = Set(Some(token.clone()));
         model.reset_token_expires = Set(Some(expires));
-        model.updated_at = Set(Utc::now().naive_utc());
+        model.updated_at = Set(Utc::now());
         model
             .update(&self.db)
             .await
@@ -226,7 +223,7 @@ impl ConsoleState {
             .hash_password(new_password.as_bytes(), &salt)
             .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
             .to_string();
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let mut model: UserActiveModel = user.clone().into();
         model.password_hash = Set(hashed);
         model.reset_token = Set(None);
@@ -240,7 +237,7 @@ impl ConsoleState {
 
     pub async fn mark_login(&self, user: &UserModel, last_login_ip: String) -> Result<()> {
         let mut model: UserActiveModel = user.clone().into();
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         model.last_login_at = Set(Some(now));
         model.last_login_ip = Set(Some(last_login_ip));
         model.updated_at = Set(now);

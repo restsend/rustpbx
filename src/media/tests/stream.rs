@@ -54,6 +54,9 @@ impl Track for TestTrack {
     async fn handshake(&mut self, _offer: String, _timeout: Option<Duration>) -> Result<String> {
         Ok("".to_string())
     }
+    async fn update_remote_description(&mut self, _answer: &String) -> Result<()> {
+        Ok(())
+    }
     async fn start(
         &self,
         _event_sender: EventSender,
