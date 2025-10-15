@@ -9,7 +9,7 @@ use crate::{
 use dotenv::dotenv;
 use once_cell::sync::OnceCell;
 use rustls::crypto::ring::default_provider;
-use std::env;
+use std::{collections::HashMap, env};
 use tokio::time::{Duration, timeout};
 
 static CRYPTO_PROVIDER: OnceCell<()> = OnceCell::new();
@@ -159,6 +159,33 @@ async fn test_aliyun_asr() {
     let config = TranscriptionOption {
         secret_key: Some(api_key),
         samplerate: Some(sample_rate),
+        model_type: Some("paraformer-realtime-v2".to_string()),
+        language: Some("zh".to_string()),
+        extra: Some(HashMap::from([
+            (
+                "vocabulary_id".to_string(),
+                "vocab-testpfx-707ac9a9dc0f44cf98796191f0563b4b".to_string(),
+            ),
+            ("disfluency_removal_enabled".to_string(), "true".to_string()),
+            (
+                "semantic_punctuation_enabled".to_string(),
+                "true".to_string(),
+            ),
+            ("max_sentence_silence".to_string(), "800".to_string()),
+            (
+                "multi_threshold_mode_enabled".to_string(),
+                "true".to_string(),
+            ),
+            (
+                "punctuation_prediction_enabled".to_string(),
+                "true".to_string(),
+            ),
+            ("heartbeat".to_string(), "true".to_string()),
+            (
+                "inverse_text_normalization_enabled".to_string(),
+                "true".to_string(),
+            ),
+        ])),
         ..Default::default()
     };
 

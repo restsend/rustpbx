@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -29,18 +30,68 @@ pub struct AliyunAsrClient {
 }
 
 #[derive(Debug, Serialize)]
-pub struct RunTaskCommand {
-    pub header: CommandHeader,
-    pub payload: RunTaskPayload,
+struct RunTaskCommand {
+    header: CommandHeader,
+    payload: RunTaskPayload,
 }
 
 impl RunTaskCommand {
-    pub fn new(
-        task_id: String,
-        sample_rate: u32,
-        model: String,
-        language_hints: Vec<String>,
-    ) -> Self {
+    pub fn new(task_id: String, option: &TranscriptionOption) -> Self {
+        let model_type = option
+            .model_type
+            .clone()
+            .unwrap_or("paraformer-realtime-v2".to_string());
+        let format = "pcm";
+        let sample_rate = option.samplerate.unwrap_or(16000);
+        let vocabulary_id = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("vocabulary_id"))
+            .cloned();
+        let disfluency_removal_enabled = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("disfluency_removal_enabled"))
+            .and_then(|v| v.parse::<bool>().ok());
+        let mut language_hints = Vec::new();
+        if let Some(language) = option.language.clone() {
+            language_hints.push(language);
+        }
+        let semantic_punctuation_enabled = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("semantic_punctuation_enabled"))
+            .and_then(|v| v.parse::<bool>().ok());
+        let max_sentence_silence = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("max_sentence_silence"))
+            .and_then(|v| v.parse::<u32>().ok());
+
+        let multi_threshold_mode_enabled = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("multi_threshold_mode_enabled"))
+            .and_then(|v| v.parse::<bool>().ok());
+
+        let punctuation_prediction_enabled = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("punctuation_prediction_enabled"))
+            .and_then(|v| v.parse::<bool>().ok());
+
+        let heartbeat = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("heartbeat"))
+            .and_then(|v| v.parse::<bool>().ok());
+
+        let inverse_text_normalization_enabled = option
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("inverse_text_normalization_enabled"))
+            .and_then(|v| v.parse::<bool>().ok());
+
         Self {
             header: CommandHeader {
                 action: "run-task".to_string(),
@@ -51,12 +102,20 @@ impl RunTaskCommand {
                 task_group: "audio".to_string(),
                 task: "asr".to_string(),
                 function: "recognition".to_string(),
-                model,
+                model: model_type,
                 input: CommandInput {},
                 parameters: RunTaskCommandParameters {
-                    format: "pcm".to_string(),
+                    format: format.to_string(),
                     sample_rate,
+                    vocabulary_id,
+                    disfluency_removal_enabled,
                     language_hints,
+                    semantic_punctuation_enabled,
+                    max_sentence_silence,
+                    multi_threshold_mode_enabled,
+                    punctuation_prediction_enabled,
+                    heartbeat,
+                    inverse_text_normalization_enabled,
                 },
             },
         }
@@ -92,21 +151,30 @@ pub struct CommandHeader {
 }
 
 #[derive(Debug, Serialize)]
-pub struct RunTaskPayload {
-    pub task_group: String,
-    pub task: String,
-    pub function: String,
-    pub model: String,
-    pub input: CommandInput,
-    pub parameters: RunTaskCommandParameters,
+struct RunTaskPayload {
+    task_group: String,
+    task: String,
+    function: String,
+    model: String,
+    input: CommandInput,
+    parameters: RunTaskCommandParameters,
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Serialize)]
-pub struct RunTaskCommandParameters {
-    pub format: String,
-    pub sample_rate: u32,
+struct RunTaskCommandParameters {
+    format: String,
+    sample_rate: u32,
+    vocabulary_id: Option<String>,
+    disfluency_removal_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub language_hints: Vec<String>,
+    language_hints: Vec<String>,
+    semantic_punctuation_enabled: Option<bool>,
+    max_sentence_silence: Option<u32>, // 200ms - 600ms,  works only when semantic_punctuation_enabled is false
+    multi_threshold_mode_enabled: Option<bool>, // prevent vad cutted sentences too long, works only when semantic_punctuation_enabled is false
+    punctuation_prediction_enabled: Option<bool>,
+    heartbeat: Option<bool>,
+    inverse_text_normalization_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,9 +268,7 @@ impl AliyunAsrClientInner {
 /// Context for websocket message handling to reduce function arguments
 struct WebSocketContext {
     track_id: TrackId,
-    sample_rate: u32,
-    model: String,
-    language_hints: Vec<String>,
+    option: TranscriptionOption,
 }
 
 impl AliyunAsrClient {
@@ -215,12 +281,7 @@ impl AliyunAsrClient {
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let begin_time = crate::get_timestamp();
-        let start_msg = RunTaskCommand::new(
-            ctx.track_id.clone(),
-            ctx.sample_rate,
-            ctx.model,
-            ctx.language_hints,
-        );
+        let start_msg = RunTaskCommand::new(ctx.track_id.clone(), &ctx.option);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
             if let Err(e) = ws_sender.send(Message::Text(msg_json.into())).await {
@@ -425,18 +486,6 @@ impl AliyunAsrClientBuilder {
 
     pub async fn build(self) -> Result<AliyunAsrClient> {
         let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
-        let model_type = self
-            .option
-            .model_type
-            .clone()
-            .unwrap_or("paraformer-realtime-v2".to_string());
-        let sample_rate = self.option.samplerate.unwrap_or(16000);
-        let mut language_hints = Vec::new();
-        if model_type == "paraformer-realtime-v2" {
-            if let Some(language) = self.option.language.clone() {
-                language_hints.push(language);
-            }
-        }
 
         let event_sender_rx = match self.option.start_when_answer {
             Some(true) => Some(self.event_sender.subscribe()),
@@ -445,7 +494,7 @@ impl AliyunAsrClientBuilder {
 
         let inner = Arc::new(AliyunAsrClientInner {
             audio_tx,
-            option: self.option,
+            option: self.option.clone(),
         });
 
         let client = AliyunAsrClient {
@@ -487,9 +536,7 @@ impl AliyunAsrClientBuilder {
 
             let ctx = WebSocketContext {
                 track_id: track_id.clone(),
-                sample_rate,
-                model: model_type,
-                language_hints,
+                option: self.option,
             };
 
             match AliyunAsrClient::handle_websocket_message(
