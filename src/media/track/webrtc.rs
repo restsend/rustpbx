@@ -73,7 +73,7 @@ impl WebrtcTrack {
             RTCRtpCodecCapability {
                 mime_type: codec.mime_type().to_string(),
                 clock_rate: codec.clock_rate(),
-                channels: 1,
+                channels: codec.channels(),
                 ..Default::default()
             },
             "audio".to_string(),
@@ -88,7 +88,7 @@ impl WebrtcTrack {
                 capability: RTCRtpCodecCapability {
                     mime_type: "audio/opus".to_owned(),
                     clock_rate: 48000,
-                    channels: 1,
+                    channels: 2,
                     sdp_fmtp_line: "minptime=10".to_owned(),
                     rtcp_feedback: vec![],
                 },
@@ -314,7 +314,7 @@ impl WebrtcTrack {
         Ok(())
     }
 
-    pub async fn setup_webrtc_track(
+    pub async fn setup_with_offer(
         &mut self,
         offer: String,
         timeout: Option<Duration>,
@@ -405,9 +405,19 @@ impl Track for WebrtcTrack {
     }
 
     async fn handshake(&mut self, offer: String, timeout: Option<Duration>) -> Result<String> {
-        self.setup_webrtc_track(offer, timeout)
+        self.setup_with_offer(offer, timeout)
             .await
             .map(|answer| answer.sdp)
+    }
+
+    async fn update_remote_description(&mut self, answer: &String) -> Result<()> {
+        let peer_connection = self
+            .peer_connection
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Peer connection is not created"))?;
+        let remote_desc = RTCSessionDescription::answer(answer.clone())?;
+        peer_connection.set_remote_description(remote_desc).await?;
+        Ok(())
     }
 
     async fn start(

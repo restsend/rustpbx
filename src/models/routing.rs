@@ -1,12 +1,67 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer, json_null, pk_auto, string, string_null, text_null, timestamp, timestamp_null,
+    boolean, integer, integer_null, json_null, pk_auto, string, string_null, text_null, timestamp,
+    timestamp_null,
 };
 use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum RoutingDirection {
+    #[sea_orm(string_value = "inbound")]
+    Inbound,
+    #[sea_orm(string_value = "outbound")]
+    Outbound,
+}
+
+impl RoutingDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        }
+    }
+}
+
+impl Default for RoutingDirection {
+    fn default() -> Self {
+        Self::Outbound
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum RoutingSelectionStrategy {
+    #[sea_orm(string_value = "rr")]
+    RoundRobin,
+    #[sea_orm(string_value = "weight")]
+    Weighted,
+    #[sea_orm(string_value = "hash")]
+    Hash,
+}
+
+impl RoutingSelectionStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "rr",
+            Self::Weighted => "weight",
+            Self::Hash => "hash",
+        }
+    }
+}
+
+impl Default for RoutingSelectionStrategy {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_routes")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -14,10 +69,10 @@ pub struct Model {
     #[sea_orm(unique)]
     pub name: String,
     pub description: Option<String>,
-    pub direction: String,
+    pub direction: RoutingDirection,
     pub priority: i32,
     pub is_active: bool,
-    pub selection_strategy: String,
+    pub selection_strategy: RoutingSelectionStrategy,
     pub hash_key: Option<String>,
     pub source_trunk_id: Option<i64>,
     pub default_trunk_id: Option<i64>,
@@ -29,9 +84,9 @@ pub struct Model {
     pub owner: Option<String>,
     pub notes: Option<Json>,
     pub metadata: Option<Json>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
-    pub last_deployed_at: Option<DateTime>,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+    pub last_deployed_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -70,13 +125,21 @@ impl MigrationTrait for Migration {
                     .col(pk_auto(Column::Id))
                     .col(string(Column::Name).char_len(160))
                     .col(text_null(Column::Description))
-                    .col(string(Column::Direction).char_len(32).default("outbound"))
+                    .col(
+                        string(Column::Direction)
+                            .char_len(32)
+                            .default(RoutingDirection::default().as_str()),
+                    )
                     .col(integer(Column::Priority).not_null().default(100))
                     .col(boolean(Column::IsActive).default(true))
-                    .col(string(Column::SelectionStrategy).char_len(32).default("rr"))
+                    .col(
+                        string(Column::SelectionStrategy)
+                            .char_len(32)
+                            .default(RoutingSelectionStrategy::default().as_str()),
+                    )
                     .col(string_null(Column::HashKey).char_len(120))
-                    .col(integer(Column::SourceTrunkId).null())
-                    .col(integer(Column::DefaultTrunkId).null())
+                    .col(integer_null(Column::SourceTrunkId))
+                    .col(integer_null(Column::DefaultTrunkId))
                     .col(string_null(Column::SourcePattern).char_len(160))
                     .col(string_null(Column::DestinationPattern).char_len(160))
                     .col(json_null(Column::HeaderFilters))

@@ -6,9 +6,96 @@ use sea_orm_migration::schema::{
 };
 use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum SipTrunkStatus {
+    #[sea_orm(string_value = "healthy")]
+    Healthy,
+    #[sea_orm(string_value = "warning")]
+    Warning,
+    #[sea_orm(string_value = "standby")]
+    Standby,
+    #[sea_orm(string_value = "offline")]
+    Offline,
+}
+
+impl SipTrunkStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Warning => "warning",
+            Self::Standby => "standby",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+impl Default for SipTrunkStatus {
+    fn default() -> Self {
+        Self::Healthy
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum SipTrunkDirection {
+    #[sea_orm(string_value = "inbound")]
+    Inbound,
+    #[sea_orm(string_value = "outbound")]
+    Outbound,
+    #[sea_orm(string_value = "bidirectional")]
+    Bidirectional,
+}
+
+impl SipTrunkDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+            Self::Bidirectional => "bidirectional",
+        }
+    }
+}
+
+impl Default for SipTrunkDirection {
+    fn default() -> Self {
+        Self::Bidirectional
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum SipTransport {
+    #[sea_orm(string_value = "udp")]
+    Udp,
+    #[sea_orm(string_value = "tcp")]
+    Tcp,
+    #[sea_orm(string_value = "tls")]
+    Tls,
+}
+
+impl SipTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+            Self::Tls => "tls",
+        }
+    }
+}
+
+impl Default for SipTransport {
+    fn default() -> Self {
+        Self::Udp
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_sip_trunks")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -18,10 +105,10 @@ pub struct Model {
     pub display_name: Option<String>,
     pub carrier: Option<String>,
     pub description: Option<String>,
-    pub status: String,
-    pub direction: String,
+    pub status: SipTrunkStatus,
+    pub direction: SipTrunkDirection,
     pub sip_server: Option<String>,
-    pub sip_transport: String,
+    pub sip_transport: SipTransport,
     pub outbound_proxy: Option<String>,
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
@@ -39,9 +126,9 @@ pub struct Model {
     pub tags: Option<Json>,
     pub is_active: bool,
     pub metadata: Option<Json>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
-    pub last_health_check_at: Option<DateTime>,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+    pub last_health_check_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -80,14 +167,22 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::DisplayName).char_len(160))
                     .col(string_null(Column::Carrier).char_len(160))
                     .col(text_null(Column::Description))
-                    .col(string(Column::Status).char_len(32).default("healthy"))
+                    .col(
+                        string(Column::Status)
+                            .char_len(32)
+                            .default(SipTrunkStatus::default().as_str()),
+                    )
                     .col(
                         string(Column::Direction)
                             .char_len(32)
-                            .default("bidirectional"),
+                            .default(SipTrunkDirection::default().as_str()),
                     )
                     .col(string_null(Column::SipServer).char_len(160))
-                    .col(string(Column::SipTransport).char_len(16).default("udp"))
+                    .col(
+                        string(Column::SipTransport)
+                            .char_len(16)
+                            .default(SipTransport::default().as_str()),
+                    )
                     .col(string_null(Column::OutboundProxy).char_len(160))
                     .col(string_null(Column::AuthUsername).char_len(160))
                     .col(string_null(Column::AuthPassword).char_len(160))

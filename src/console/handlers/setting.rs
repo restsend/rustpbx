@@ -9,12 +9,12 @@ use crate::models::user::{
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -67,10 +67,10 @@ struct UserView {
     pub id: i64,
     pub email: String,
     pub username: String,
-    pub last_login_at: Option<chrono::NaiveDateTime>,
+    pub last_login_at: Option<DateTime<Utc>>,
     pub last_login_ip: Option<String>,
-    pub created_at: chrono::NaiveDateTime,
-    pub updated_at: chrono::NaiveDateTime,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub is_active: bool,
     pub is_staff: bool,
     pub is_superuser: bool,
@@ -222,12 +222,12 @@ pub async fn page_settings(
 
 async fn query_departments(
     State(state): State<Arc<ConsoleState>>,
-    Query(query): Query<forms::ListQuery<QueryDepartmentFilters>>,
     AuthRequired(_): AuthRequired,
+    Json(payload): Json<forms::ListQuery<QueryDepartmentFilters>>,
 ) -> Response {
     let db = state.db();
     let mut selector = DepartmentEntity::find().order_by_asc(DepartmentColumn::Name);
-    if let Some(filters) = query.filters.as_ref() {
+    if let Some(filters) = payload.filters.as_ref() {
         if let Some(keyword) = filters
             .q
             .as_ref()
@@ -244,8 +244,8 @@ async fn query_departments(
         }
     }
 
-    let paginator = selector.paginate(db, query.normalize().1);
-    let pagination = match forms::paginate(paginator, query).await {
+    let paginator = selector.paginate(db, payload.normalize().1);
+    let pagination = match forms::paginate(paginator, &payload).await {
         Ok(pagination) => pagination,
         Err(err) => {
             warn!("failed to query departments: {}", err);
@@ -257,7 +257,26 @@ async fn query_departments(
         }
     };
 
-    Json(json!({ "pagination": pagination })).into_response()
+    let forms::Pagination {
+        items,
+        current_page,
+        per_page,
+        total_items,
+        total_pages,
+        has_prev,
+        has_next,
+    } = pagination;
+
+    Json(json!({
+        "page": current_page,
+        "per_page": per_page,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_prev": has_prev,
+        "has_next": has_next,
+        "items": items,
+    }))
+    .into_response()
 }
 
 async fn get_department(
@@ -424,8 +443,8 @@ async fn delete_department(
 
 async fn query_users(
     State(state): State<Arc<ConsoleState>>,
-    Query(query): Query<forms::ListQuery<QueryUserFilters>>,
     AuthRequired(_): AuthRequired,
+    Json(query): Json<forms::ListQuery<QueryUserFilters>>,
 ) -> Response {
     let db = state.db();
     let mut selector = UserEntity::find().order_by_asc(UserColumn::Username);
@@ -451,7 +470,7 @@ async fn query_users(
     }
 
     let paginator = selector.paginate(db, query.normalize().1);
-    let pagination = match forms::paginate(paginator, query).await {
+    let pagination = match forms::paginate(paginator, &query).await {
         Ok(pagination) => pagination,
         Err(err) => {
             warn!("failed to query users: {}", err);
@@ -469,29 +488,22 @@ async fn query_users(
         per_page,
         total_items,
         total_pages,
-        showing_from,
-        showing_to,
         has_prev,
         has_next,
-        prev_page,
-        next_page,
     } = pagination;
 
-    let view = forms::Pagination {
-        items: items.into_iter().map(UserView::from).collect(),
-        current_page,
-        per_page,
-        total_items,
-        total_pages,
-        showing_from,
-        showing_to,
-        has_prev,
-        has_next,
-        prev_page,
-        next_page,
-    };
+    let view_items: Vec<UserView> = items.into_iter().map(UserView::from).collect();
 
-    Json(json!({"pagination": view})).into_response()
+    Json(json!({
+        "page": current_page,
+        "per_page": per_page,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_prev": has_prev,
+        "has_next": has_next,
+        "items": view_items,
+    }))
+    .into_response()
 }
 
 async fn get_user(
@@ -562,7 +574,7 @@ async fn create_user(
             .into_response();
     }
 
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let hashed = match hash_password(&password) {
         Ok(hash) => hash,
         Err(err) => {
@@ -658,7 +670,7 @@ async fn update_user(
     active.is_active = Set(payload.is_active.unwrap_or(true));
     active.is_staff = Set(payload.is_staff.unwrap_or(false));
     active.is_superuser = Set(payload.is_superuser.unwrap_or(false));
-    active.updated_at = Set(Utc::now().naive_utc());
+    active.updated_at = Set(Utc::now());
 
     if let Some(password) = payload
         .password

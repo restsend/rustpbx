@@ -1,8 +1,7 @@
 use crate::console::ConsoleState;
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use axum::{Json, Router, response::IntoResponse, routing::get};
+use http::StatusCode;
+use serde_json::json;
 use std::sync::Arc;
 
 pub mod bill_template;
@@ -16,6 +15,26 @@ pub mod setting;
 pub mod sip_trunk;
 pub mod user;
 
+pub fn bad_request(message: impl Into<String>) -> axum::response::Response {
+    let text = message.into();
+    (StatusCode::BAD_REQUEST, Json(json!({ "message": text }))).into_response()
+}
+
+pub fn require_field(
+    value: &Option<String>,
+    field: &str,
+) -> Result<String, axum::response::Response> {
+    normalize_optional_string(value).ok_or_else(|| bad_request(format!("{} is required", field)))
+}
+
+pub fn normalize_optional_string(value: &Option<String>) -> Option<String> {
+    value
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
 pub fn router(state: Arc<ConsoleState>) -> Router {
     let base_path = state.base_path().to_string();
     let routes = Router::new()
@@ -24,16 +43,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(bill_template::urls())
         .merge(sip_trunk::urls())
         .merge(setting::urls())
-        .route(
-            "/routing",
-            get(self::routing::page_routing).post(self::routing::create_routing),
-        )
-        .route("/routing/new", get(self::routing::page_routing_create))
-        .route(
-            "/routing/{id}",
-            get(self::routing::page_routing_edit).post(self::routing::update_routing),
-        )
-        .route("/routing/{id}/delete", post(self::routing::delete_routing))
+        .merge(routing::urls())
         .route("/call-records", get(self::call_record::page_call_records))
         .route(
             "/call-records/{id}",

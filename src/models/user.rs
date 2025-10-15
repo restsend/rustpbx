@@ -11,8 +11,9 @@ use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     boolean, pk_auto, string, string_null, string_uniq, timestamp, timestamp_null,
 };
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "rustpbx_users")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -21,13 +22,16 @@ pub struct Model {
     pub email: String,
     #[sea_orm(unique)]
     pub username: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
+    #[serde(skip_serializing)]
     pub reset_token: Option<String>,
-    pub reset_token_expires: Option<DateTime>,
-    pub last_login_at: Option<DateTime>,
+    #[serde(skip_serializing)]
+    pub reset_token_expires: Option<DateTimeUtc>,
+    pub last_login_at: Option<DateTimeUtc>,
     pub last_login_ip: Option<String>,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
     pub is_active: bool,
     pub is_staff: bool,
     pub is_superuser: bool,
@@ -41,7 +45,7 @@ impl ActiveModelBehavior for ActiveModel {}
 impl Model {
     pub fn token_expired(&self) -> bool {
         match (self.reset_token.as_ref(), self.reset_token_expires) {
-            (Some(_), Some(expiry)) => expiry < Utc::now().naive_utc(),
+            (Some(_), Some(expiry)) => expiry < Utc::now(),
             _ => true,
         }
     }
@@ -64,7 +68,7 @@ impl Model {
             .map_err(|e| anyhow::anyhow!("failed to hash password: {}", e))?
             .to_string();
 
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         let mut user = Entity::find()
             .filter(Column::Username.eq(username))

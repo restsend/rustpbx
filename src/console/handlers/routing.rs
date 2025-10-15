@@ -1,20 +1,23 @@
+use crate::console::handlers::{bad_request, forms};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
     routing::{
         ActiveModel as RoutingActiveModel, Column as RoutingColumn, Entity as RoutingEntity,
-        Model as RoutingModel,
+        Model as RoutingModel, RoutingDirection, RoutingSelectionStrategy,
     },
     sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
 };
 use axum::{
-    extract::{Form, Path as AxumPath, State},
+    Router,
+    extract::{Json, Path as AxumPath, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
+    routing::get,
 };
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
+    EntityTrait, Iterable, PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
@@ -25,59 +28,29 @@ use std::{
 use tracing::warn;
 
 const DEFAULT_PRIORITY: i32 = 100;
-const MIN_PRIORITY: i32 = 0;
 const MAX_PRIORITY: i32 = 10_000;
-const DEFAULT_DIRECTION: &str = "outbound";
-const ALLOWED_DIRECTIONS: &[&str] = &["inbound", "outbound"];
-const SELECTION_ALGORITHMS: &[&str] = &["rr", "weight", "hash"];
+const DEFAULT_DIRECTION: RoutingDirection = RoutingDirection::Outbound;
+const DEFAULT_SELECTION: RoutingSelectionStrategy = RoutingSelectionStrategy::RoundRobin;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RoutingForm {
-    #[serde(default)]
-    payload: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RouteInput {
-    #[serde(default)]
-    id: Option<i64>,
-    name: Option<String>,
-    description: Option<String>,
-    owner: Option<String>,
-    direction: Option<String>,
-    priority: Option<i32>,
-    #[serde(default)]
-    disabled: Option<bool>,
-    #[serde(rename = "match")]
-    matchers: Option<JsonMap<String, Value>>,
-    #[serde(default)]
-    rewrite: Option<JsonMap<String, Value>>,
-    #[serde(default)]
-    action: Option<RouteActionInput>,
-    #[serde(default)]
-    source_trunk: Option<String>,
-    #[serde(default)]
-    target_trunks: Option<Vec<String>>,
-    #[serde(default)]
-    notes: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RouteActionInput {
-    select: Option<String>,
-    hash_key: Option<String>,
-    #[serde(default)]
-    trunks: Vec<RouteTrunkInput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RouteTrunkInput {
-    name: Option<String>,
-    weight: Option<i32>,
+pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route(
+            "/routing",
+            get(page_routing).post(query_routing).put(create_routing),
+        )
+        .route("/routing/new", get(page_routing_create))
+        .route(
+            "/routing/{id}",
+            get(page_routing_edit)
+                .patch(update_routing)
+                .delete(delete_routing),
+        )
+        .route("/routing/{id}/data", get(route_detail_data))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RouteDocument {
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteDocument {
     #[serde(default)]
     id: Option<i64>,
     #[serde(default)]
@@ -86,8 +59,8 @@ struct RouteDocument {
     description: Option<String>,
     #[serde(default)]
     owner: Option<String>,
-    #[serde(default = "default_direction_string")]
-    direction: String,
+    #[serde(default = "default_direction_value")]
+    direction: RoutingDirection,
     #[serde(default = "default_priority_value")]
     priority: i32,
     #[serde(default)]
@@ -106,9 +79,29 @@ struct RouteDocument {
     notes: Vec<String>,
 }
 
+impl Default for RouteDocument {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            description: None,
+            owner: None,
+            direction: DEFAULT_DIRECTION,
+            priority: DEFAULT_PRIORITY,
+            disabled: false,
+            matchers: JsonMap::new(),
+            rewrite: JsonMap::new(),
+            action: RouteActionDocument::default(),
+            source_trunk: None,
+            target_trunks: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RouteActionDocument {
-    select: String,
+pub(crate) struct RouteActionDocument {
+    select: RoutingSelectionStrategy,
     #[serde(default)]
     hash_key: Option<String>,
     #[serde(default)]
@@ -116,9 +109,23 @@ struct RouteActionDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RouteTrunkDocument {
+pub(crate) struct RouteTrunkDocument {
     name: String,
     weight: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct QueryRoutingFilters {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    selection: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 #[derive(Debug)]
@@ -138,92 +145,16 @@ impl RouteError {
     }
 }
 
-impl RoutingForm {
-    fn parse_document(&self) -> Result<RouteDocument, RouteError> {
-        if self.payload.trim().is_empty() {
-            return Err(RouteError::new("Route payload is required"));
-        }
-
-        let raw_value: Value = serde_json::from_str(&self.payload)
-            .map_err(|err| RouteError::new(format!("Invalid route payload: {}", err)))?;
-        let input: RouteInput = serde_json::from_value(raw_value)
-            .map_err(|err| RouteError::new(format!("Invalid route payload: {}", err)))?;
-
-        let mut doc = RouteDocument::from_input(input);
-        doc.ensure_consistency();
-        Ok(doc)
-    }
-}
-
 impl Default for RouteActionDocument {
     fn default() -> Self {
         Self {
-            select: SELECTION_ALGORITHMS[0].to_string(),
+            select: DEFAULT_SELECTION,
             hash_key: None,
             trunks: Vec::new(),
         }
     }
 }
-
-impl Default for RouteDocument {
-    fn default() -> Self {
-        Self {
-            id: None,
-            name: String::new(),
-            description: None,
-            owner: None,
-            direction: DEFAULT_DIRECTION.to_string(),
-            priority: DEFAULT_PRIORITY,
-            disabled: false,
-            matchers: JsonMap::new(),
-            rewrite: JsonMap::new(),
-            action: RouteActionDocument::default(),
-            source_trunk: None,
-            target_trunks: Vec::new(),
-            notes: Vec::new(),
-        }
-    }
-}
-
-impl RouteActionDocument {
-    fn from_input(input: Option<RouteActionInput>) -> Self {
-        if let Some(raw) = input {
-            let mut action = RouteActionDocument {
-                select: normalize_selection(raw.select),
-                hash_key: sanitize_optional_string(raw.hash_key),
-                trunks: sanitize_trunks(raw.trunks),
-            };
-            if action.select != "hash" {
-                action.hash_key = None;
-            }
-            action
-        } else {
-            RouteActionDocument::default()
-        }
-    }
-}
-
 impl RouteDocument {
-    fn from_input(input: RouteInput) -> Self {
-        let mut doc = RouteDocument {
-            id: input.id,
-            name: sanitize_optional_string(input.name).unwrap_or_default(),
-            description: sanitize_optional_string(input.description),
-            owner: sanitize_optional_string(input.owner),
-            direction: sanitize_direction(input.direction),
-            priority: clamp_priority(input.priority),
-            disabled: input.disabled.unwrap_or(false),
-            matchers: sanitize_map(input.matchers),
-            rewrite: sanitize_map(input.rewrite),
-            action: RouteActionDocument::from_input(input.action),
-            source_trunk: sanitize_optional_string(input.source_trunk),
-            target_trunks: sanitize_target_trunks(input.target_trunks),
-            notes: sanitize_notes(input.notes),
-        };
-        doc.ensure_consistency();
-        doc
-    }
-
     fn from_model(model: &RoutingModel) -> Self {
         if let Some(meta) = model.metadata.clone() {
             if let Ok(mut doc) = serde_json::from_value::<RouteDocument>(meta) {
@@ -231,11 +162,11 @@ impl RouteDocument {
                 doc.name = model.name.clone();
                 doc.description = model.description.clone();
                 doc.owner = model.owner.clone();
-                doc.direction = model.direction.clone();
+                doc.direction = model.direction;
                 doc.priority = model.priority;
                 doc.disabled = !model.is_active;
-                doc.action.select = normalize_selection(Some(doc.action.select.clone()));
-                doc.action.hash_key = if doc.action.select == "hash" {
+                doc.action.select = model.selection_strategy;
+                doc.action.hash_key = if doc.action.select == RoutingSelectionStrategy::Hash {
                     sanitize_optional_string(model.hash_key.clone()).or(doc.action.hash_key)
                 } else {
                     None
@@ -263,7 +194,7 @@ impl RouteDocument {
             name: model.name.clone(),
             description: model.description.clone(),
             owner: model.owner.clone(),
-            direction: model.direction.clone(),
+            direction: model.direction,
             priority: model.priority,
             disabled: !model.is_active,
             matchers: model
@@ -277,8 +208,8 @@ impl RouteDocument {
                 .map(value_to_map)
                 .unwrap_or_default(),
             action: RouteActionDocument {
-                select: normalize_selection(Some(model.selection_strategy.clone())),
-                hash_key: if model.selection_strategy.eq_ignore_ascii_case("hash") {
+                select: model.selection_strategy,
+                hash_key: if model.selection_strategy == RoutingSelectionStrategy::Hash {
                     sanitize_optional_string(model.hash_key.clone())
                 } else {
                     None
@@ -301,8 +232,7 @@ impl RouteDocument {
     }
 
     fn ensure_consistency(&mut self) {
-        self.action.select = normalize_selection(Some(self.action.select.clone()));
-        if self.action.select != "hash" {
+        if self.action.select != RoutingSelectionStrategy::Hash {
             self.action.hash_key = None;
         }
 
@@ -368,8 +298,8 @@ impl RouteDocument {
     }
 }
 
-fn default_direction_string() -> String {
-    DEFAULT_DIRECTION.to_string()
+fn default_direction_value() -> RoutingDirection {
+    DEFAULT_DIRECTION
 }
 
 fn default_priority_value() -> i32 {
@@ -382,80 +312,15 @@ fn sanitize_optional_string(value: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn sanitize_direction(value: Option<String>) -> String {
+fn normalize_selection(value: Option<String>) -> RoutingSelectionStrategy {
     value
-        .and_then(|v| {
-            let normalized = v.trim().to_ascii_lowercase();
-            if ALLOWED_DIRECTIONS.contains(&normalized.as_str()) {
-                Some(normalized)
-            } else {
-                None
-            }
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "rr" | "round_robin" | "round-robin" => Some(RoutingSelectionStrategy::RoundRobin),
+            "weight" | "weighted" => Some(RoutingSelectionStrategy::Weighted),
+            "hash" => Some(RoutingSelectionStrategy::Hash),
+            _ => None,
         })
-        .unwrap_or_else(|| DEFAULT_DIRECTION.to_string())
-}
-
-fn normalize_selection(value: Option<String>) -> String {
-    value
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| SELECTION_ALGORITHMS.contains(&v.as_str()))
-        .unwrap_or_else(|| SELECTION_ALGORITHMS[0].to_string())
-}
-
-fn clamp_priority(value: Option<i32>) -> i32 {
-    value
-        .unwrap_or(DEFAULT_PRIORITY)
-        .clamp(MIN_PRIORITY, MAX_PRIORITY)
-}
-
-fn sanitize_map(map: Option<JsonMap<String, Value>>) -> JsonMap<String, Value> {
-    let mut result = JsonMap::new();
-    if let Some(entries) = map {
-        for (key, value) in entries {
-            let trimmed_key = key.trim();
-            if trimmed_key.is_empty() {
-                continue;
-            }
-            let sanitized_value = extract_string(value);
-            if sanitized_value.is_empty() {
-                continue;
-            }
-            result.insert(trimmed_key.to_string(), Value::String(sanitized_value));
-        }
-    }
-    result
-}
-
-fn sanitize_trunks(items: Vec<RouteTrunkInput>) -> Vec<RouteTrunkDocument> {
-    let mut result = Vec::new();
-    for item in items {
-        if let Some(name) = sanitize_optional_string(item.name) {
-            let weight = item.weight.unwrap_or(0).clamp(0, MAX_PRIORITY);
-            result.push(RouteTrunkDocument { name, weight });
-        }
-    }
-    result
-}
-
-fn sanitize_target_trunks(targets: Option<Vec<String>>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for value in targets.unwrap_or_default() {
-        if let Some(name) = sanitize_optional_string(Some(value)) {
-            if seen.insert(name.clone()) {
-                result.push(name);
-            }
-        }
-    }
-    result
-}
-
-fn sanitize_notes(notes: Option<Vec<String>>) -> Vec<String> {
-    notes
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|note| sanitize_optional_string(Some(note)))
-        .collect()
+        .unwrap_or(DEFAULT_SELECTION)
 }
 
 fn extract_string(value: Value) -> String {
@@ -565,10 +430,6 @@ fn notes_value(notes: &[String]) -> Option<Value> {
     }
 }
 
-fn format_timestamp(value: NaiveDateTime) -> String {
-    Utc.from_utc_datetime(&value).to_rfc3339()
-}
-
 async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbErr> {
     SipTrunkEntity::find()
         .order_by_asc(SipTrunkColumn::Name)
@@ -606,22 +467,22 @@ fn build_route_console_payload(
         "name": doc.name,
         "description": doc.description.clone().unwrap_or_default(),
         "owner": doc.owner.clone().unwrap_or_default(),
-        "direction": doc.direction,
+            "direction": doc.direction,
         "priority": doc.priority,
         "disabled": doc.disabled,
         "match": doc.matchers.clone(),
         "rewrite": doc.rewrite.clone(),
         "action": {
-            "select": doc.action.select.clone(),
+            "select": doc.action.select,
             "hash_key": doc.action.hash_key.clone(),
             "trunks": doc.action.trunks.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.target_trunks.clone(),
         "notes": doc.notes.clone(),
-        "created_at": format_timestamp(model.created_at),
-        "last_modified": format_timestamp(model.updated_at),
-        "last_deploy": model.last_deployed_at.map(format_timestamp),
+        "created_at": model.created_at.to_rfc3339(),
+        "last_modified": model.updated_at.to_rfc3339(),
+        "last_deploy": model.last_deployed_at.map(|t|t.to_rfc3339()),
         "status": status,
         "detail_url": state.url_for(&format!("/routing/{}", model.id)),
         "edit_url": state.url_for(&format!("/routing/{}", model.id)),
@@ -636,7 +497,7 @@ fn build_routes_summary(routes: &[RoutingModel]) -> Value {
         .iter()
         .filter_map(|route| route.last_deployed_at)
         .max()
-        .map(format_timestamp);
+        .map(|t| t.to_rfc3339());
 
     json!({
         "total_routes": total_routes,
@@ -646,11 +507,38 @@ fn build_routes_summary(routes: &[RoutingModel]) -> Value {
 }
 
 fn selection_algorithms() -> Vec<Value> {
-    vec![
-        json!({"value": "rr", "label": "Round robin"}),
-        json!({"value": "weight", "label": "Weighted"}),
-        json!({"value": "hash", "label": "Deterministic hash"}),
-    ]
+    RoutingSelectionStrategy::iter()
+        .map(|strategy| {
+            let label = match strategy {
+                RoutingSelectionStrategy::RoundRobin => "Round robin",
+                RoutingSelectionStrategy::Weighted => "Weighted",
+                RoutingSelectionStrategy::Hash => "Deterministic hash",
+            };
+            json!({
+                "value": strategy.as_str(),
+                "label": label,
+            })
+        })
+        .collect()
+}
+
+fn selection_algorithms_value() -> Value {
+    Value::Array(selection_algorithms())
+}
+
+fn direction_options_value() -> Value {
+    json!(
+        RoutingDirection::iter()
+            .map(|direction| direction.as_str())
+            .collect::<Vec<_>>()
+    )
+}
+
+fn status_options_value() -> Value {
+    json!([
+        {"value": false, "label": "Active"},
+        {"value": true, "label": "Paused"},
+    ])
 }
 
 fn render_route_form(
@@ -663,12 +551,9 @@ fn render_route_form(
 ) -> Response {
     let route_value = serde_json::to_value(doc).unwrap_or(Value::Null);
     let trunk_options = Value::Array(build_trunk_options(trunks));
-    let selection_algorithms = Value::Array(selection_algorithms());
-    let direction_options = json!(ALLOWED_DIRECTIONS);
-    let status_options = json!([
-        {"value": false, "label": "Active"},
-        {"value": true, "label": "Paused"},
-    ]);
+    let selection_algorithms = selection_algorithms_value();
+    let direction_options = direction_options_value();
+    let status_options = status_options_value();
     let submit_label = if mode == "edit" {
         "Save changes"
     } else {
@@ -703,15 +588,15 @@ fn apply_document_to_active(
     active: &mut RoutingActiveModel,
     doc: &RouteDocument,
     trunk_lookup: &HashMap<String, i64>,
-    now: NaiveDateTime,
+    now: DateTime<Utc>,
 ) {
     active.name = Set(doc.name.clone());
     active.description = Set(doc.description.clone());
     active.owner = Set(doc.owner.clone());
-    active.direction = Set(doc.direction.clone());
+    active.direction = Set(doc.direction);
     active.priority = Set(doc.priority);
     active.is_active = Set(!doc.disabled);
-    active.selection_strategy = Set(doc.action.select.clone());
+    active.selection_strategy = Set(doc.action.select);
     active.hash_key = Set(doc.action.hash_key.clone());
     active.header_filters = Set(value_from_map(&doc.matchers));
     active.rewrite_rules = Set(value_from_map(&doc.rewrite));
@@ -734,55 +619,152 @@ pub async fn page_routing(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let routes = match RoutingEntity::find()
-        .order_by_asc(RoutingColumn::Priority)
-        .order_by_asc(RoutingColumn::Name)
-        .all(db)
-        .await
-    {
-        Ok(list) => list,
+    let base_path = state.url_for("/");
+    let trunk_options = match load_trunks(db).await {
+        Ok(trunks) => Value::Array(build_trunk_options(&trunks)),
         Err(err) => {
-            warn!("failed to load routes: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing rules",
-            )
-                .into_response();
+            warn!("failed to load trunks for routing filters: {}", err);
+            Value::Array(vec![])
         }
     };
-
-    let trunk_map: HashMap<i64, SipTrunkModel> = match load_trunks(db).await {
-        Ok(trunks) => trunks.into_iter().map(|trunk| (trunk.id, trunk)).collect(),
-        Err(err) => {
-            warn!("failed to load trunks for routing list: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing rules",
-            )
-                .into_response();
-        }
-    };
-
-    let mut payload_routes = Vec::with_capacity(routes.len());
-    for model in &routes {
-        let mut doc = RouteDocument::from_model(model);
-        doc.apply_trunk_context(model, &trunk_map);
-        payload_routes.push(build_route_console_payload(state.as_ref(), &doc, model));
-    }
-
-    let summary = build_routes_summary(&routes);
 
     state.render(
         "console/routing.html",
         json!({
             "nav_active": "routing",
-            "routing_data": json!({
-                "routes": payload_routes,
-                "summary": summary,
-            }),
+            "base_path": base_path,
+            "filters": {
+                "trunks": trunk_options,
+                "selection_algorithms": selection_algorithms_value(),
+                "direction_options": direction_options_value(),
+                "status_options": status_options_value(),
+            },
             "create_url": state.url_for("/routing/new"),
         }),
     )
+}
+
+pub async fn query_routing(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<forms::ListQuery<QueryRoutingFilters>>,
+) -> Response {
+    let db = state.db();
+    let mut selector = RoutingEntity::find()
+        .order_by_asc(RoutingColumn::Priority)
+        .order_by_asc(RoutingColumn::Name);
+
+    if let Some(filters) = &payload.filters {
+        if let Some(ref raw_q) = filters.q {
+            let trimmed = raw_q.trim();
+            if !trimmed.is_empty() {
+                let mut condition = Condition::any();
+                condition = condition.add(RoutingColumn::Name.contains(trimmed));
+                condition = condition.add(RoutingColumn::Description.contains(trimmed));
+                condition = condition.add(RoutingColumn::Owner.contains(trimmed));
+                selector = selector.filter(condition);
+            }
+        }
+
+        if let Some(ref raw_direction) = filters.direction {
+            let direction = match raw_direction.trim().to_ascii_lowercase().as_str() {
+                "inbound" => Some(RoutingDirection::Inbound),
+                "outbound" => Some(RoutingDirection::Outbound),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                selector = selector.filter(RoutingColumn::Direction.eq(direction));
+            }
+        }
+
+        if let Some(ref raw_status) = filters.status {
+            match raw_status.trim().to_ascii_lowercase().as_str() {
+                "active" => selector = selector.filter(RoutingColumn::IsActive.eq(true)),
+                "paused" | "disabled" => {
+                    selector = selector.filter(RoutingColumn::IsActive.eq(false))
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(ref raw_selection) = filters.selection {
+            let strategy = normalize_selection(Some(raw_selection.clone()));
+            selector = selector.filter(RoutingColumn::SelectionStrategy.eq(strategy));
+        }
+
+        if let Some(ref owner) = filters.owner {
+            let trimmed = owner.trim();
+            if !trimmed.is_empty() {
+                selector = selector.filter(RoutingColumn::Owner.contains(trimmed));
+            }
+        }
+    }
+
+    let trunks = match load_trunks(db).await {
+        Ok(trunks) => trunks,
+        Err(err) => {
+            warn!("failed to load trunks for routing query: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+    let trunk_map: HashMap<i64, SipTrunkModel> =
+        trunks.iter().cloned().map(|t| (t.id, t)).collect();
+
+    let summary_routes = match selector.clone().all(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load routes for summary: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+
+    let (_, per_page) = payload.normalize();
+    let paginator = selector.clone().paginate(db, per_page);
+    let pagination = match forms::paginate(paginator, &payload).await {
+        Ok(pagination) => pagination,
+        Err(err) => {
+            warn!("failed to paginate routing list: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+
+    let items: Vec<Value> = pagination
+        .items
+        .into_iter()
+        .map(|model| {
+            let mut doc = RouteDocument::from_model(&model);
+            doc.apply_trunk_context(&model, &trunk_map);
+            build_route_console_payload(state.as_ref(), &doc, &model)
+        })
+        .collect();
+
+    Json(json!({
+        "page": pagination.current_page,
+        "per_page": pagination.per_page,
+        "total_pages": pagination.total_pages,
+        "total_items": pagination.total_items,
+        "items": items,
+        "summary": build_routes_summary(&summary_routes),
+        "filters": {
+            "trunks": build_trunk_options(&trunks),
+            "selection_algorithms": selection_algorithms(),
+            "direction_options": direction_options_value(),
+            "status_options": status_options_value(),
+        },
+    }))
+    .into_response()
 }
 
 pub async fn page_routing_create(
@@ -863,80 +845,94 @@ pub async fn page_routing_edit(
     )
 }
 
+pub async fn route_detail_data(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match RoutingEntity::find_by_id(id).one(db).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "Routing rule not found"})),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!("failed to load route {} detail data: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+
+    let trunks = match load_trunks(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load trunks for route detail {}: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+
+    let trunk_map: HashMap<i64, SipTrunkModel> =
+        trunks.iter().cloned().map(|t| (t.id, t)).collect();
+    let mut doc = RouteDocument::from_model(&model);
+    doc.apply_trunk_context(&model, &trunk_map);
+
+    Json(json!({
+        "route": doc,
+        "trunk_options": build_trunk_options(&trunks),
+        "selection_algorithms": selection_algorithms(),
+        "direction_options": direction_options_value(),
+        "status_options": status_options_value(),
+        "meta": {
+            "update_url": state.url_for(&format!("/routing/{}", id)),
+            "delete_url": state.url_for(&format!("/routing/{}", id)),
+            "detail_url": state.url_for(&format!("/routing/{}", id)),
+        }
+    }))
+    .into_response()
+}
+
 pub async fn create_routing(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<RoutingForm>,
+    Json(mut doc): Json<RouteDocument>,
 ) -> Response {
     let db = state.db();
+    doc.id = None;
+    doc.ensure_consistency();
+
+    if let Err(err) = doc.validate() {
+        return bad_request(err.message().to_string());
+    }
+
     let trunks = match load_trunks(db).await {
         Ok(list) => list,
         Err(err) => {
             warn!("failed to load trunks for route create: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create routing rule",
+                Json(json!({"message": "Failed to create routing rule"})),
             )
                 .into_response();
         }
     };
-    let form_action = state.url_for("/routing");
-
-    if trunks.is_empty() {
-        return render_route_form(
-            state.as_ref(),
-            "create",
-            &RouteDocument::default(),
-            &trunks,
-            Some("Add at least one SIP trunk before creating a route".to_string()),
-            form_action,
-        );
-    }
-
-    let doc_result = form.parse_document();
-    let doc = match doc_result {
-        Ok(doc) => doc,
-        Err(err) => {
-            return render_route_form(
-                state.as_ref(),
-                "create",
-                &RouteDocument::default(),
-                &trunks,
-                Some(err.message().to_string()),
-                form_action,
-            );
-        }
-    };
-
-    if let Err(err) = doc.validate() {
-        return render_route_form(
-            state.as_ref(),
-            "create",
-            &doc,
-            &trunks,
-            Some(err.message().to_string()),
-            form_action,
-        );
-    }
 
     let trunk_lookup = build_trunk_name_lookup(&trunks);
-
-    let source_id = resolve_trunk_id(&trunk_lookup, doc.source_trunk.as_deref());
-    if source_id.is_none() {
-        let message = match doc.source_trunk.as_ref() {
-            Some(name) if !name.is_empty() => {
-                format!("Source trunk \"{}\" was not found", name)
-            }
-            _ => "Source trunk is required".to_string(),
-        };
-        return render_route_form(
-            state.as_ref(),
-            "create",
-            &doc,
-            &trunks,
-            Some(message),
-            form_action,
-        );
+    doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
+    if let Some(ref name) = doc.source_trunk {
+        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+            return bad_request(format!("Source trunk \"{}\" was not found", name));
+        }
     }
 
     let tx = match db.begin().await {
@@ -945,7 +941,7 @@ pub async fn create_routing(
             warn!("failed to start transaction for route create: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create routing rule",
+                Json(json!({"message": "Failed to create routing rule"})),
             )
                 .into_response();
         }
@@ -958,14 +954,7 @@ pub async fn create_routing(
     {
         Ok(Some(_)) => {
             let _ = tx.rollback().await;
-            return render_route_form(
-                state.as_ref(),
-                "create",
-                &doc,
-                &trunks,
-                Some("Route name already exists".to_string()),
-                form_action,
-            );
+            return bad_request("Route name already exists");
         }
         Ok(None) => {}
         Err(err) => {
@@ -973,55 +962,64 @@ pub async fn create_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create routing rule",
+                Json(json!({"message": "Failed to create routing rule"})),
             )
                 .into_response();
         }
     }
 
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let mut active: RoutingActiveModel = Default::default();
     active.created_at = Set(now);
     apply_document_to_active(&mut active, &doc, &trunk_lookup, now);
 
-    if let Err(err) = active.insert(&tx).await {
-        warn!("failed to insert routing rule {}: {}", doc.name, err);
-        let _ = tx.rollback().await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create routing rule",
-        )
-            .into_response();
-    }
+    let model = match active.insert(&tx).await {
+        Ok(model) => model,
+        Err(err) => {
+            warn!("failed to insert routing rule {}: {}", doc.name, err);
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to create routing rule"})),
+            )
+                .into_response();
+        }
+    };
 
     if let Err(err) = tx.commit().await {
         warn!("failed to commit routing rule create {}: {}", doc.name, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create routing rule",
+            Json(json!({"message": "Failed to create routing rule"})),
         )
             .into_response();
     }
 
-    Redirect::to(&state.url_for("/routing")).into_response()
+    Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
 pub async fn update_routing(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<RoutingForm>,
+    Json(mut doc): Json<RouteDocument>,
 ) -> Response {
     let db = state.db();
 
     let model = match RoutingEntity::find_by_id(id).one(db).await {
         Ok(Some(route)) => route,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Route not found").into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "Route not found"})),
+            )
+                .into_response();
+        }
         Err(err) => {
             warn!("failed to load route {} for update: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update routing rule",
+                Json(json!({"message": "Failed to update routing rule"})),
             )
                 .into_response();
         }
@@ -1033,77 +1031,29 @@ pub async fn update_routing(
             warn!("failed to load trunks for route update: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update routing rule",
+                Json(json!({"message": "Failed to update routing rule"})),
             )
                 .into_response();
         }
     };
-    let trunk_map_by_id: HashMap<i64, SipTrunkModel> = trunks
-        .iter()
-        .cloned()
-        .map(|trunk| (trunk.id, trunk))
-        .collect();
-    let trunk_lookup = build_trunk_name_lookup(&trunks);
-    let form_action = state.url_for(&format!("/routing/{}", id));
+    if trunks.is_empty() {
+        return bad_request("Add at least one SIP trunk before editing routes");
+    }
 
-    let doc_result = form.parse_document();
-    let doc = match doc_result {
-        Ok(mut doc) => {
-            doc.id = Some(id);
-            doc.ensure_consistency();
-            doc
-        }
-        Err(err) => {
-            let mut existing_doc = RouteDocument::from_model(&model);
-            existing_doc.apply_trunk_context(&model, &trunk_map_by_id);
-            return render_route_form(
-                state.as_ref(),
-                "edit",
-                &existing_doc,
-                &trunks,
-                Some(err.message().to_string()),
-                form_action,
-            );
-        }
-    };
+    let trunk_lookup = build_trunk_name_lookup(&trunks);
+
+    doc.id = Some(id);
+    doc.ensure_consistency();
 
     if let Err(err) = doc.validate() {
-        return render_route_form(
-            state.as_ref(),
-            "edit",
-            &doc,
-            &trunks,
-            Some(err.message().to_string()),
-            form_action,
-        );
+        return bad_request(err.message().to_string());
     }
 
-    if trunks.is_empty() {
-        return render_route_form(
-            state.as_ref(),
-            "edit",
-            &doc,
-            &trunks,
-            Some("Add at least one SIP trunk before editing routes".to_string()),
-            form_action,
-        );
-    }
-
-    if resolve_trunk_id(&trunk_lookup, doc.source_trunk.as_deref()).is_none() {
-        let message = match doc.source_trunk.as_ref() {
-            Some(name) if !name.is_empty() => {
-                format!("Source trunk \"{}\" was not found", name)
-            }
-            _ => "Source trunk is required".to_string(),
-        };
-        return render_route_form(
-            state.as_ref(),
-            "edit",
-            &doc,
-            &trunks,
-            Some(message),
-            form_action,
-        );
+    doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
+    if let Some(ref name) = doc.source_trunk {
+        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+            return bad_request(format!("Source trunk \"{}\" was not found", name));
+        }
     }
 
     let tx = match db.begin().await {
@@ -1115,7 +1065,7 @@ pub async fn update_routing(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update routing rule",
+                Json(json!({"message": "Failed to update routing rule"})),
             )
                 .into_response();
         }
@@ -1128,14 +1078,7 @@ pub async fn update_routing(
     {
         Ok(Some(existing)) if existing.id != id => {
             let _ = tx.rollback().await;
-            return render_route_form(
-                state.as_ref(),
-                "edit",
-                &doc,
-                &trunks,
-                Some("Route name already exists".to_string()),
-                form_action,
-            );
+            return bad_request("Route name already exists");
         }
         Ok(_) => {}
         Err(err) => {
@@ -1146,14 +1089,14 @@ pub async fn update_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update routing rule",
+                Json(json!({"message": "Failed to update routing rule"})),
             )
                 .into_response();
         }
     }
 
     let mut active: RoutingActiveModel = model.clone().into();
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     apply_document_to_active(&mut active, &doc, &trunk_lookup, now);
 
     if let Err(err) = active.update(&tx).await {
@@ -1161,7 +1104,7 @@ pub async fn update_routing(
         let _ = tx.rollback().await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to update routing rule",
+            Json(json!({"message": "Failed to update routing rule"})),
         )
             .into_response();
     }
@@ -1170,12 +1113,12 @@ pub async fn update_routing(
         warn!("failed to commit routing rule update {}: {}", id, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to update routing rule",
+            Json(json!({"message": "Failed to update routing rule"})),
         )
             .into_response();
     }
 
-    Redirect::to(&state.url_for("/routing")).into_response()
+    Json(json!({"status": "ok", "id": id})).into_response()
 }
 
 pub async fn delete_routing(
@@ -1187,16 +1130,20 @@ pub async fn delete_routing(
     match RoutingEntity::delete_by_id(id).exec(db).await {
         Ok(result) => {
             if result.rows_affected == 0 {
-                (StatusCode::NOT_FOUND, "Route not found").into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"message": "Route not found"})),
+                )
+                    .into_response()
             } else {
-                Redirect::to(&state.url_for("/routing")).into_response()
+                Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
         }
         Err(err) => {
             warn!("failed to delete routing rule {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to delete routing rule",
+                Json(json!({"message": "Failed to delete routing rule"})),
             )
                 .into_response()
         }

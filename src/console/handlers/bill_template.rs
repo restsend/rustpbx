@@ -1,19 +1,19 @@
 use crate::{
-    console::handlers::forms::{self, BillTemplateForm, ListQuery},
+    console::handlers::forms::{self, BillTemplatePayload, ListQuery},
     console::{ConsoleState, middleware::AuthRequired},
     models::bill_template::{
-        ActiveModel as BillTemplateActiveModel, Column as BillTemplateColumn,
+        ActiveModel as BillTemplateActiveModel, BillingInterval, Column as BillTemplateColumn,
         Entity as BillTemplateEntity,
     },
 };
 use axum::{
     Json, Router,
-    extract::{Form, Path as AxumPath, Query, State},
+    extract::{Form, Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::{NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder,
@@ -30,7 +30,7 @@ struct QueryBillTemplateFilters {
     #[serde(default)]
     currency: Option<String>,
     #[serde(default)]
-    billing_interval: Option<String>,
+    billing_interval: Option<BillingInterval>,
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -121,10 +121,10 @@ async fn page_bill_template_detail(
 async fn create_bill_template(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<BillTemplateForm>,
+    Form(form): Form<BillTemplatePayload>,
 ) -> Response {
     let db = state.db();
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let mut active = BillTemplateActiveModel {
         ..Default::default()
     };
@@ -150,7 +150,7 @@ async fn update_bill_template(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
-    Form(form): Form<BillTemplateForm>,
+    Form(form): Form<BillTemplatePayload>,
 ) -> Response {
     let db = state.db();
     let model = match BillTemplateEntity::find_by_id(id).one(db).await {
@@ -173,7 +173,7 @@ async fn update_bill_template(
     };
 
     let mut active: BillTemplateActiveModel = model.into();
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     if let Err(response) = apply_form_to_active_model(&mut active, &form, now, true) {
         return response;
     }
@@ -232,14 +232,14 @@ async fn delete_bill_template(
 
 async fn query_bill_templates(
     State(state): State<Arc<ConsoleState>>,
-    Query(query): Query<ListQuery<QueryBillTemplateFilters>>,
     AuthRequired(_): AuthRequired,
+    Json(payload): Json<ListQuery<QueryBillTemplateFilters>>,
 ) -> Response {
     let db = state.db();
     let filters_payload = build_filters_payload(db).await;
 
-    let filters = query.filters.clone().unwrap_or_default();
-    let (_, per_page) = query.normalize();
+    let filters = payload.filters.clone().unwrap_or_default();
+    let (_, per_page) = payload.normalize();
 
     let mut selector = BillTemplateEntity::find();
 
@@ -260,17 +260,14 @@ async fn query_bill_templates(
         }
     }
 
-    if let Some(ref interval_raw) = filters.billing_interval {
-        let interval = interval_raw.trim().to_lowercase();
-        if !interval.is_empty() {
-            selector = selector.filter(BillTemplateColumn::BillingInterval.eq(interval));
-        }
+    if let Some(interval) = filters.billing_interval {
+        selector = selector.filter(BillTemplateColumn::BillingInterval.eq(interval));
     }
 
     selector = selector.order_by_desc(BillTemplateColumn::UpdatedAt);
 
     let paginator = selector.paginate(db, per_page);
-    let pagination = match forms::paginate(paginator, query).await {
+    let pagination = match forms::paginate(paginator, &payload).await {
         Ok(pagination) => pagination,
         Err(err) => {
             warn!("failed to paginate billing templates: {}", err);
@@ -288,12 +285,8 @@ async fn query_bill_templates(
         per_page,
         total_items,
         total_pages,
-        showing_from,
-        showing_to,
         has_prev,
         has_next,
-        prev_page,
-        next_page,
     } = pagination;
 
     let serialized_items: Vec<Value> = items
@@ -302,19 +295,13 @@ async fn query_bill_templates(
         .collect();
 
     Json(json!({
-        "pagination": {
-            "items": serialized_items,
-            "current_page": current_page,
-            "per_page": per_page,
-            "total_items": total_items,
-            "total_pages": total_pages,
-            "showing_from": showing_from,
-            "showing_to": showing_to,
-            "has_prev": has_prev,
-            "has_next": has_next,
-            "prev_page": prev_page,
-            "next_page": next_page,
-        },
+        "page": current_page,
+        "per_page": per_page,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_prev": has_prev,
+        "has_next": has_next,
+        "items": serialized_items,
         "filters": filters_payload,
     }))
     .into_response()
@@ -331,10 +318,9 @@ async fn build_filters_payload(db: &DatabaseConnection) -> Value {
             currencies.sort();
             currencies.dedup();
 
-            let mut intervals: Vec<String> = templates
+            let mut intervals: Vec<_> = templates
                 .iter()
-                .map(|tpl| tpl.billing_interval.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
+                .filter_map(|tpl| Some(tpl.billing_interval.clone()))
                 .collect();
             intervals.sort();
             intervals.dedup();
@@ -356,20 +342,15 @@ async fn build_filters_payload(db: &DatabaseConnection) -> Value {
 
 fn apply_form_to_active_model(
     active: &mut BillTemplateActiveModel,
-    form: &BillTemplateForm,
-    now: NaiveDateTime,
+    form: &BillTemplatePayload,
+    now: DateTime<Utc>,
     is_update: bool,
 ) -> Result<(), Response> {
-    let metadata = parse_json_field(&form.metadata, "metadata")?;
-
     if !is_update {
-        let name = require_field(&form.name, "name")?;
+        let name = form.name.clone().unwrap_or_default();
         active.name = Set(name);
-        active.currency = Set(normalize_currency(form.currency.clone(), "USD")?);
-        active.billing_interval = Set(normalize_interval(
-            form.billing_interval.clone(),
-            "monthly",
-        )?);
+        active.currency = Set(form.currency.clone().unwrap_or("USD".into()));
+        active.billing_interval = Set(form.billing_interval.unwrap_or(BillingInterval::Monthly));
         active.included_minutes = Set(form.included_minutes.unwrap_or(0));
         active.included_messages = Set(form.included_messages.unwrap_or(0));
         active.overage_rate_per_minute = Set(form.overage_rate_per_minute.unwrap_or(0.0));
@@ -377,13 +358,13 @@ fn apply_form_to_active_model(
         active.tax_percent = Set(form.tax_percent.unwrap_or(0.0));
         active.created_at = Set(now);
     } else {
-        if let Some(name) = normalize_optional_string(&form.name) {
-            active.name = Set(name);
+        if let Some(name) = &form.name {
+            active.name = Set(name.clone());
         }
-        if let Some(currency) = normalize_currency_optional(&form.currency)? {
-            active.currency = Set(currency);
+        if let Some(currency) = &form.currency {
+            active.currency = Set(currency.clone());
         }
-        if let Some(interval) = normalize_interval_optional(&form.billing_interval)? {
+        if let Some(interval) = form.billing_interval {
             active.billing_interval = Set(interval);
         }
         if form.included_minutes.is_some() {
@@ -404,100 +385,19 @@ fn apply_form_to_active_model(
     }
 
     if !is_update || form.display_name.is_some() {
-        active.display_name = Set(normalize_optional_string(&form.display_name));
+        active.display_name = Set(form.display_name.clone());
     }
     if !is_update || form.description.is_some() {
-        active.description = Set(normalize_optional_string(&form.description));
+        active.description = Set(form.description.clone());
     }
     if !is_update || form.metadata.is_some() {
-        active.metadata = Set(metadata);
+        active.metadata = Set(form
+            .metadata
+            .as_ref()
+            .map(|s| serde_json::from_str(s).unwrap_or(json!({}))));
     }
 
     active.updated_at = Set(now);
 
     Ok(())
-}
-
-fn require_field(value: &Option<String>, field: &str) -> Result<String, Response> {
-    normalize_optional_string(value).ok_or_else(|| bad_request(format!("{} is required", field)))
-}
-
-fn normalize_optional_string(value: &Option<String>) -> Option<String> {
-    value
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
-}
-
-fn parse_json_field(value: &Option<String>, field: &str) -> Result<Option<Value>, Response> {
-    let Some(raw) = value.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-        return Ok(None);
-    };
-
-    serde_json::from_str(raw)
-        .map(Some)
-        .map_err(|err| bad_request(format!("{} must be valid JSON: {}", field, err)))
-}
-
-fn normalize_currency(value: Option<String>, default: &str) -> Result<String, Response> {
-    if let Some(raw) = value
-        .map(|v| v.trim().to_uppercase())
-        .filter(|v| !v.is_empty())
-    {
-        Ok(raw)
-    } else if default.is_empty() {
-        Err(bad_request("currency is required"))
-    } else {
-        Ok(default.to_string())
-    }
-}
-
-fn normalize_currency_optional(value: &Option<String>) -> Result<Option<String>, Response> {
-    if let Some(raw) = value
-        .as_ref()
-        .map(|v| v.trim().to_uppercase())
-        .filter(|v| !v.is_empty())
-    {
-        Ok(Some(raw))
-    } else if value.is_some() {
-        Err(bad_request("currency cannot be empty"))
-    } else {
-        Ok(None)
-    }
-}
-
-fn normalize_interval(value: Option<String>, default: &str) -> Result<String, Response> {
-    if let Some(raw) = value
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| !v.is_empty())
-    {
-        Ok(raw)
-    } else if default.is_empty() {
-        Err(bad_request("billing_interval is required"))
-    } else {
-        Ok(default.to_string())
-    }
-}
-
-fn normalize_interval_optional(value: &Option<String>) -> Result<Option<String>, Response> {
-    if let Some(raw) = value
-        .as_ref()
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| !v.is_empty())
-    {
-        Ok(Some(raw))
-    } else if value.is_some() {
-        Err(bad_request("billing_interval cannot be empty"))
-    } else {
-        Ok(None)
-    }
-}
-
-fn bad_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"message": message.into()})),
-    )
-        .into_response()
 }

@@ -50,7 +50,7 @@
                 </button>
             </div>
 
-            <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
                 <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                     Search
                     <div class="relative">
@@ -80,6 +80,16 @@
                     <select x-model="directionFilter" @change="applyFilters()"
                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                         <template x-for="option in directionOptions" :key="option.value">
+                            <option :value="option.value" x-text="option.label"></option>
+                        </template>
+                    </select>
+                </label>
+
+                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                    Transport
+                    <select x-model="transportFilter" @change="applyFilters()"
+                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        <template x-for="option in transportOptions" :key="option.value">
                             <option :value="option.value" x-text="option.label"></option>
                         </template>
                     </select>
@@ -240,10 +250,12 @@
             keyword: '',
             statusFilter: 'all',
             directionFilter: 'all',
+            transportFilter: 'all',
             templateFilter: 'all',
             activeOnly: false,
             statusOptions: [],
             directionOptions: [],
+            transportOptions: [],
             templateOptions: [],
             templateMap: {},
             trunks: [],
@@ -261,6 +273,7 @@
             loadFilterOptions() {
                 const statuses = Array.isArray(this.filtersRaw.statuses) ? this.filtersRaw.statuses : [];
                 const directions = Array.isArray(this.filtersRaw.directions) ? this.filtersRaw.directions : [];
+                const transports = Array.isArray(this.filtersRaw.transports) ? this.filtersRaw.transports : [];
                 const templates = Array.isArray(this.filtersRaw.bill_templates) ? this.filtersRaw.bill_templates : [];
 
                 this.statusOptions = [{ value: 'all', label: 'Any status' }]
@@ -275,6 +288,15 @@
                         label: this.directionLabel(value),
                     })));
 
+                this.transportOptions = [{ value: 'all', label: 'Any transport' }]
+                    .concat(transports.map((value) => {
+                        const val = String(value).toLowerCase();
+                        return {
+                            value: val,
+                            label: val.toUpperCase(),
+                        };
+                    }));
+
                 this.templateOptions = [{ value: 'all', label: 'Any template' }]
                     .concat(templates.map((tpl) => {
                         const value = String(tpl.id ?? tpl.name ?? '');
@@ -284,49 +306,88 @@
                     }));
             },
             buildParams() {
-                const params = new URLSearchParams();
-                params.set('page', this.page);
-                params.set('per_page', this.perPage);
-                if (this.keyword.trim()) {
-                    params.set('filters[q]', this.keyword.trim());
-                }
-                if (this.statusFilter !== 'all') {
-                    params.set('filters[status]', this.statusFilter);
-                }
-                if (this.directionFilter !== 'all') {
-                    params.set('filters[direction]', this.directionFilter);
-                }
-                if (this.templateFilter !== 'all') {
-                    params.append('filters[billing_template_ids][]', this.templateFilter);
-                }
-                if (this.activeOnly) {
-                    params.set('filters[only_active]', 'true');
-                }
-                return params;
+                return {
+                    page: this.page,
+                    per_page: this.perPage,
+                    filters: {
+                        q: this.keyword.trim() || undefined,
+                        status: this.statusFilter !== 'all' ? this.statusFilter : undefined,
+                        direction: this.directionFilter !== 'all' ? this.directionFilter : undefined,
+                        transport: this.transportFilter !== 'all' ? this.transportFilter : undefined,
+                        billing_template_ids: this.templateFilter !== 'all' ? [this.templateFilter] : undefined,
+                        only_active: this.activeOnly || undefined,
+                    },
+                };
             },
             async fetchTrunks() {
                 this.loading = true;
                 this.error = null;
                 try {
-                    const response = await fetch(`${this.listEndpoint}?${this.buildParams().toString()}`, {
+                    const response = await fetch(`${this.listEndpoint}`, {
                         method: 'POST',
                         headers: {
                             'Accept': 'application/json',
+                            'Content-Type': 'application/json',
                         },
+                        body: JSON.stringify(this.buildParams()),
                     });
                     const data = await response.json();
                     if (!response.ok) {
                         throw new Error(data?.message || 'Failed to load SIP trunks');
                     }
-                    this.trunks = Array.isArray(data?.pagination?.items) ? data.pagination.items : [];
-                    this.pagination = data?.pagination || null;
-                    if (this.pagination?.per_page) {
-                        this.perPage = this.pagination.per_page;
+
+                    const items = Array.isArray(data?.items) ? data.items : [];
+
+                    const perPageRaw = Number(data?.per_page);
+                    const totalItemsRaw = Number(data?.total_items);
+                    const totalPagesRaw = Number(data?.total_pages);
+                    const currentPageRaw = Number(data?.page);
+
+                    const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw : this.perPage;
+                    const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0 ? totalItemsRaw : items.length;
+                    const inferredTotalPages = Math.max(Math.ceil(totalItems / Math.max(perPage, 1)), 1);
+                    const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
+                        ? Math.max(Math.min(totalPagesRaw, inferredTotalPages || 1), 1)
+                        : inferredTotalPages;
+                    const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw >= 1
+                        ? Math.min(currentPageRaw, totalPages)
+                        : Math.min(this.page || 1, totalPages);
+
+                    const hasPrevApi = typeof data?.has_prev === 'boolean' ? data.has_prev : null;
+                    const hasNextApi = typeof data?.has_next === 'boolean' ? data.has_next : null;
+                    const resultsCount = items.length;
+                    const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
+                    const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1, totalItems) : 0;
+                    const hasPrev = hasPrevApi !== null ? hasPrevApi : currentPage > 1;
+                    const hasNext = hasNextApi !== null ? hasNextApi : currentPage < totalPages;
+                    const prevPage = hasPrev ? Math.max(currentPage - 1, 1) : null;
+                    const nextPage = hasNext ? Math.min(currentPage + 1, totalPages) : null;
+
+                    this.trunks = items;
+                    this.pagination = {
+                        current_page: currentPage,
+                        per_page: perPage,
+                        total_items: totalItems,
+                        total_pages: totalPages,
+                        has_prev: hasPrev,
+                        has_next: hasNext,
+                        prev_page: prevPage,
+                        next_page: nextPage,
+                        showing_from: showingFrom,
+                        showing_to: showingTo,
+                    };
+                    if (data?.filters && typeof data.filters === 'object') {
+                        this.filtersRaw = data.filters;
+                        this.loadFilterOptions();
                     }
+                    this.perPage = perPage;
+                    this.page = currentPage;
                     this.flash = null;
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || 'Unable to load SIP trunks';
+                    this.trunks = [];
+                    this.pagination = null;
                 } finally {
                     this.loading = false;
                 }
@@ -339,6 +400,7 @@
                 this.keyword = '';
                 this.statusFilter = 'all';
                 this.directionFilter = 'all';
+                this.transportFilter = 'all';
                 this.templateFilter = 'all';
                 this.activeOnly = false;
                 this.applyFilters();

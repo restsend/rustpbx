@@ -549,30 +549,14 @@ impl RtpTrack {
                 .media_name
                 .formats
                 .push(codec.payload_type().to_string());
-            media.attributes.push(Attribute {
-                key: "rtpmap".to_string(),
-                value: Some(format!("{} {}", codec.payload_type(), codec.rtpmap())),
-            });
-        }
-        if inner
-            .enabled_codecs
-            .iter()
-            .all(|c| *c == CodecType::TelephoneEvent)
-        {
-            media.attributes.push(Attribute {
-                key: "rtpmap".to_string(),
-                value: Some(format!(
-                    "{} {}",
-                    inner.dtmf_payload_type,
-                    CodecType::TelephoneEvent.rtpmap()
-                )),
-            });
-        }
 
-        media.attributes.push(Attribute {
-            key: "fmtp".to_string(),
-            value: Some(format!("{} 0-16", inner.dtmf_payload_type)),
-        });
+            if let Some(fmtp) = codec.fmtp() {
+                media.attributes.push(Attribute {
+                    key: "fmtp".to_string(),
+                    value: Some(format!("{} {}", codec.payload_type(), fmtp)),
+                });
+            }
+        }
 
         // Add media-level attributes
         if inner.rtcp_mux {

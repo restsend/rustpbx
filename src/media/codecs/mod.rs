@@ -91,8 +91,20 @@ impl CodecType {
             #[cfg(feature = "g729")]
             CodecType::G729 => "G729/8000",
             #[cfg(feature = "opus")]
-            CodecType::Opus => "opus/48000",
+            CodecType::Opus => "opus/48000/2",
             CodecType::TelephoneEvent => "telephone-event/8000",
+        }
+    }
+    pub fn fmtp(&self) -> Option<&str> {
+        match self {
+            CodecType::PCMU => None,
+            CodecType::PCMA => None,
+            CodecType::G722 => None,
+            #[cfg(feature = "g729")]
+            CodecType::G729 => None,
+            #[cfg(feature = "opus")]
+            CodecType::Opus => Some("minptime=10;useinbandfec=1"),
+            CodecType::TelephoneEvent => Some("0-16"),
         }
     }
 
@@ -108,15 +120,24 @@ impl CodecType {
             CodecType::TelephoneEvent => 8000,
         }
     }
+
+    pub fn channels(&self) -> u16 {
+        match self {
+            #[cfg(feature = "opus")]
+            CodecType::Opus => 2,
+            _ => 1,
+        }
+    }
+
     pub fn payload_type(&self) -> u8 {
         match self {
             CodecType::PCMU => 0,
             CodecType::PCMA => 8,
             CodecType::G722 => 9,
             #[cfg(feature = "g729")]
-            CodecType::G729 => 18, // Static payload type
+            CodecType::G729 => 18,
             #[cfg(feature = "opus")]
-            CodecType::Opus => 111, // Static payload type
+            CodecType::Opus => 111,
             CodecType::TelephoneEvent => 101,
         }
     }
