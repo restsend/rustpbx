@@ -56,7 +56,12 @@ where
                 if let Ok(ip) = value.to_str() {
                     // Handle comma-separated IPs (e.g. X-Forwarded-For can have multiple)
                     let first_ip = ip.split(',').next().unwrap_or(ip).trim();
-                    remote_addr.set_ip(IpAddr::V4(first_ip.parse().unwrap()));
+                    match first_ip.parse::<IpAddr>() {
+                        Ok(parsed_ip) => {
+                            remote_addr.set_ip(parsed_ip);
+                        }
+                        Err(_) => {}
+                    }
                     break;
                 }
             }
