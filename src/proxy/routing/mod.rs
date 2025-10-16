@@ -7,42 +7,6 @@ pub mod matcher;
 #[cfg(test)]
 mod tests;
 
-/// Routing state for managing stateful load balancing
-#[derive(Debug)]
-pub struct RoutingState {
-    /// Round-robin counters for each destination group
-    round_robin_counters: Arc<std::sync::Mutex<HashMap<String, AtomicUsize>>>,
-}
-
-impl Default for RoutingState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RoutingState {
-    pub fn new() -> Self {
-        Self {
-            round_robin_counters: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Get the next trunk index for round-robin selection
-    pub fn next_round_robin_index(&self, destination_key: &str, trunk_count: usize) -> usize {
-        if trunk_count == 0 {
-            return 0;
-        }
-
-        let mut counters = self.round_robin_counters.lock().unwrap();
-        let counter = counters
-            .entry(destination_key.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
-
-        let current = counter.fetch_add(1, Ordering::SeqCst);
-        current % trunk_count
-    }
-}
-
 /// Single trunk configuration
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct TrunkConfig {
