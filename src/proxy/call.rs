@@ -5,6 +5,7 @@ use crate::call::Dialplan;
 use crate::call::Location;
 use crate::call::MediaConfig;
 use crate::call::RouteInvite;
+use crate::call::RoutingState;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
 use crate::callrecord::CallRecord;
@@ -54,7 +55,7 @@ pub trait ProxyCallInspector: Send + Sync {
 }
 
 pub struct DefaultRouteInvite {
-    pub routing_state: Arc<crate::proxy::routing::RoutingState>,
+    pub routing_state: Arc<RoutingState>,
     pub config: Arc<ProxyConfig>,
 }
 
@@ -84,7 +85,7 @@ pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
     server: SipServerRef,
     pub dialog_layer: Arc<DialogLayer>,
-    pub routing_state: Arc<crate::proxy::routing::RoutingState>,
+    pub routing_state: Arc<RoutingState>,
 }
 
 #[derive(Clone)]
@@ -104,7 +105,7 @@ impl CallModule {
             config,
             server,
             dialog_layer,
-            routing_state: Arc::new(crate::proxy::routing::RoutingState::new()),
+            routing_state: Arc::new(RoutingState::new()),
         });
         Self { inner }
     }

@@ -12,9 +12,9 @@ use std::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    call::DialDirection,
+    call::{DialDirection, RoutingState},
     config::RouteResult,
-    proxy::routing::{ActionType, DefaultRoute, RouteRule, RoutingState, TrunkConfig},
+    proxy::routing::{ActionType, DefaultRoute, RouteRule, TrunkConfig},
 };
 
 /// Main routing function

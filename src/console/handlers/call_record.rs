@@ -1,621 +1,769 @@
-use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use axum::{
+    Json, Router,
     extract::{Path as AxumPath, State},
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
 };
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+use tracing::warn;
 
-const SAMPLE_AUDIO_URI: &str =
-    "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+use crate::models::{
+    call_record::{
+        Column as CallRecordColumn, Entity as CallRecordEntity, Model as CallRecordModel,
+    },
+    department::{
+        Column as DepartmentColumn, Entity as DepartmentEntity, Model as DepartmentModel,
+    },
+    extension::{Entity as ExtensionEntity, Model as ExtensionModel},
+    sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
+};
 
-fn sample_call_records() -> Vec<Value> {
-    vec![
-        json!({
-            "id": "cr-2025-09-18-001",
-            "display_id": "CR-0925-001",
-            "direction": "inbound",
-            "from": "+852 5800 1234",
-            "to": "800 123 456",
-            "started_at": "2025-09-18T08:30:25Z",
-            "ended_at": "2025-09-18T08:36:21Z",
-            "duration_secs": 356,
-            "status": "completed",
-            "queue": "Support · VIP",
-            "agent": "Evelyn Zhang",
-            "agent_extension": "2088",
-            "sip_gateway": "sip-hk-primary",
-            "codec": "OPUS/48000",
-            "cnam": "Ms. Lee",
-            "tags": ["support", "vip"],
-            "has_transcript": true,
-            "csat": 4,
-            "quality": {
-                "mos": 4.3,
-                "packet_loss": 0.2,
-                "jitter_ms": 12,
-            },
-            "recording": {
-                "format": "wav",
-                "url": SAMPLE_AUDIO_URI,
-                "size_bytes": 24576,
-                "duration_secs": 356,
-            },
-        }),
-        json!({
-            "id": "cr-2025-09-17-014",
-            "display_id": "CR-0917-014",
-            "direction": "outbound",
-            "from": "2075",
-            "to": "+1 415 555 0102",
-            "started_at": "2025-09-17T13:12:04Z",
-            "ended_at": "2025-09-17T13:19:43Z",
-            "duration_secs": 459,
-            "status": "completed",
-            "queue": "Sales · Enterprise",
-            "agent": "Marcus Chen",
-            "agent_extension": "2075",
-            "sip_gateway": "pstn-local",
-            "codec": "G722",
-            "cnam": "Contoso Labs",
-            "tags": ["sales", "demo"],
-            "has_transcript": false,
-            "csat": 5,
-            "quality": {
-                "mos": 4.5,
-                "packet_loss": 0.1,
-                "jitter_ms": 9,
-            },
-            "recording": {
-                "format": "wav",
-                "url": SAMPLE_AUDIO_URI,
-                "size_bytes": 31542,
-                "duration_secs": 459,
-            },
-        }),
-        json!({
-            "id": "cr-2025-09-17-022",
-            "display_id": "CR-0917-022",
-            "direction": "inbound",
-            "from": "+86 1088 001 888",
-            "to": "400 660 8800",
-            "started_at": "2025-09-17T03:42:10Z",
-            "ended_at": "2025-09-17T03:42:32Z",
-            "duration_secs": 22,
-            "status": "missed",
-            "queue": "Support · General",
-            "agent": "Queue",
-            "agent_extension": Value::Null,
-            "sip_gateway": "pstn-backup",
-            "codec": "PCMU",
-            "cnam": "Unknown",
-            "tags": ["missed", "after-hours"],
-            "has_transcript": false,
-            "csat": Value::Null,
-            "quality": {
-                "mos": 3.8,
-                "packet_loss": 0.0,
-                "jitter_ms": 4,
-            },
-            "recording": Value::Null,
-        }),
-        json!({
-            "id": "cr-2025-09-16-008",
-            "display_id": "CR-0916-008",
-            "direction": "internal",
-            "from": "2010",
-            "to": "2012",
-            "started_at": "2025-09-16T10:02:18Z",
-            "ended_at": "2025-09-16T10:04:01Z",
-            "duration_secs": 103,
-            "status": "failed",
-            "queue": "Ops Bridge",
-            "agent": "Automation",
-            "agent_extension": "BOT",
-            "sip_gateway": "internal-cluster",
-            "codec": "OPUS/48000",
-            "cnam": "Voicebot",
-            "tags": ["automation", "alert"],
-            "has_transcript": true,
-            "csat": Value::Null,
-            "quality": {
-                "mos": 3.1,
-                "packet_loss": 0.6,
-                "jitter_ms": 28,
-            },
-            "recording": {
-                "format": "wav",
-                "url": SAMPLE_AUDIO_URI,
-                "size_bytes": 10240,
-                "duration_secs": 103,
-            },
-        }),
-    ]
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct QueryCallRecordFilters {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    date_from: Option<String>,
+    #[serde(default)]
+    date_to: Option<String>,
+    #[serde(default)]
+    only_transcribed: Option<bool>,
+    #[serde(default)]
+    department_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    sip_trunk_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
 }
 
-fn sample_call_detail(id: &str) -> Value {
-    let record = sample_call_records()
-        .into_iter()
-        .find(|value| {
-            value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|candidate| candidate.eq_ignore_ascii_case(id))
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| {
-            json!({
-                "id": id,
-                "display_id": id,
-                "direction": "inbound",
-                "from": "Unknown",
-                "to": "Unknown",
-                "started_at": "2025-09-18T00:00:00Z",
-                "ended_at": Value::Null,
-                "duration_secs": 0,
-                "status": "unknown",
-                "queue": Value::Null,
-                "agent": Value::Null,
-                "agent_extension": Value::Null,
-                "sip_gateway": Value::Null,
-                "codec": "OPUS/48000",
-                "cnam": Value::Null,
-                "tags": Value::Array(vec![]),
-                "has_transcript": false,
-                "csat": Value::Null,
-                "quality": Value::Null,
-                "recording": Value::Null,
-            })
-        });
-
-    let has_transcript = record
-        .get("has_transcript")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let sip_flow = match id {
-        "cr-2025-09-18-001" => vec![
-            json!({
-                "timestamp": "2025-09-18T08:30:25.120Z",
-                "offset": "00:00.000",
-                "direction": "inbound",
-                "type": "request",
-                "method": "INVITE",
-                "status_code": Value::Null,
-                "summary": "Carrier INVITE routed to support VIP queue (codec OPUS).",
-                "raw": "INVITE sip:800123456@pbx.rustpbx.local SIP/2.0\r\nVia: SIP/2.0/TLS carrier.net;branch=z9hG4bK...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:30:25.248Z",
-                "offset": "00:00.128",
-                "direction": "internal",
-                "type": "response",
-                "method": "TRYING",
-                "status_code": 100,
-                "summary": "PBX responded 100 Trying to acknowledge INVITE.",
-                "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/TLS carrier.net;branch=z9hG4bK...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:30:28.032Z",
-                "offset": "00:02.912",
-                "direction": "internal",
-                "type": "response",
-                "method": "RINGING",
-                "status_code": 180,
-                "summary": "Agent extension 2088 alerted.",
-                "raw": "SIP/2.0 180 Ringing\r\nContact: <sip:2088@10.10.1.50>...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:30:31.877Z",
-                "offset": "00:06.757",
-                "direction": "internal",
-                "type": "response",
-                "method": "OK",
-                "status_code": 200,
-                "summary": "Agent answered, SDP answer negotiated (OPUS).",
-                "raw": "SIP/2.0 200 OK\r\nContact: <sip:2088@10.10.1.50>\r\nContent-Type: application/sdp\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:30:31.981Z",
-                "offset": "00:06.861",
-                "direction": "inbound",
-                "type": "request",
-                "method": "ACK",
-                "status_code": Value::Null,
-                "summary": "Carrier ACK confirming dialog establishment.",
-                "raw": "ACK sip:2088@10.10.1.50 SIP/2.0\r\nVia: SIP/2.0/TLS carrier.net...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:36:21.420Z",
-                "offset": "06:56.300",
-                "direction": "inbound",
-                "type": "request",
-                "method": "BYE",
-                "status_code": Value::Null,
-                "summary": "Caller hung up after resolution.",
-                "raw": "BYE sip:800123456@pbx.rustpbx.local SIP/2.0\r\nVia: SIP/2.0/TLS carrier.net...",
-            }),
-            json!({
-                "timestamp": "2025-09-18T08:36:21.512Z",
-                "offset": "06:56.392",
-                "direction": "internal",
-                "type": "response",
-                "method": "OK",
-                "status_code": 200,
-                "summary": "PBX acknowledged BYE and released channels.",
-                "raw": "SIP/2.0 200 OK\r\nVia: SIP/2.0/TLS carrier.net...",
-            }),
-        ],
-        "cr-2025-09-17-014" => vec![
-            json!({
-                "timestamp": "2025-09-17T13:12:04.010Z",
-                "offset": "00:00.000",
-                "direction": "outbound",
-                "type": "request",
-                "method": "INVITE",
-                "status_code": Value::Null,
-                "summary": "Agent 2075 dialed customer via pstn-local trunk.",
-                "raw": "INVITE sip:+14155550102@pstn.local SIP/2.0\r\nFrom: <sip:2075@pbx>...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T13:12:04.120Z",
-                "offset": "00:00.110",
-                "direction": "internal",
-                "type": "response",
-                "method": "TRYING",
-                "status_code": 100,
-                "summary": "Carrier acknowledged outbound INVITE.",
-                "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 10.10.2.14;branch=...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T13:12:06.820Z",
-                "offset": "00:02.810",
-                "direction": "inbound",
-                "type": "response",
-                "method": "RINGING",
-                "status_code": 180,
-                "summary": "Destination ringing.",
-                "raw": "SIP/2.0 180 Ringing\r\nContact: <sip:+14155550102@carrier>...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T13:12:08.031Z",
-                "offset": "00:04.021",
-                "direction": "inbound",
-                "type": "response",
-                "method": "OK",
-                "status_code": 200,
-                "summary": "Customer answered, codec negotiated to G722.",
-                "raw": "SIP/2.0 200 OK\r\nContent-Type: application/sdp\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T13:19:43.812Z",
-                "offset": "07:39.802",
-                "direction": "outbound",
-                "type": "request",
-                "method": "BYE",
-                "status_code": Value::Null,
-                "summary": "Agent terminated call after demo wrap-up.",
-                "raw": "BYE sip:+14155550102@carrier SIP/2.0\r\nFrom: <sip:2075@pbx>...",
-            }),
-        ],
-        "cr-2025-09-17-022" => vec![
-            json!({
-                "timestamp": "2025-09-17T03:42:10.004Z",
-                "offset": "00:00.000",
-                "direction": "inbound",
-                "type": "request",
-                "method": "INVITE",
-                "status_code": Value::Null,
-                "summary": "Inbound hotline call outside staffed hours.",
-                "raw": "INVITE sip:4006608800@pbx SIP/2.0\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T03:42:10.118Z",
-                "offset": "00:00.114",
-                "direction": "internal",
-                "type": "response",
-                "method": "TRYING",
-                "status_code": 100,
-                "summary": "PBX acknowledged and pushed to queue timer.",
-                "raw": "SIP/2.0 100 Trying\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-17T03:42:32.440Z",
-                "offset": "00:22.436",
-                "direction": "internal",
-                "type": "response",
-                "method": "DECLINE",
-                "status_code": 603,
-                "summary": "Queue timeout reached, failover message played.",
-                "raw": "SIP/2.0 603 Decline\r\nReason: Q.850;cause=17;text=\"User busy\"...",
-            }),
-        ],
-        "cr-2025-09-16-008" => vec![
-            json!({
-                "timestamp": "2025-09-16T10:02:18.514Z",
-                "offset": "00:00.000",
-                "direction": "internal",
-                "type": "request",
-                "method": "INVITE",
-                "status_code": Value::Null,
-                "summary": "Automation dialed Ops on-call bridge.",
-                "raw": "INVITE sip:2012@cluster.local SIP/2.0\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-16T10:02:18.620Z",
-                "offset": "00:00.106",
-                "direction": "internal",
-                "type": "response",
-                "method": "TRYING",
-                "status_code": 100,
-                "summary": "Cluster acknowledged automation INVITE.",
-                "raw": "SIP/2.0 100 Trying\r\n...",
-            }),
-            json!({
-                "timestamp": "2025-09-16T10:02:19.882Z",
-                "offset": "00:01.368",
-                "direction": "internal",
-                "type": "response",
-                "method": "SERVICE_UNAVAILABLE",
-                "status_code": 503,
-                "summary": "Endpoint 2012 unreachable, failover triggered.",
-                "raw": "SIP/2.0 503 Service Unavailable\r\nRetry-After: 120\r\n...",
-            }),
-        ],
-        _ => vec![json!({
-            "timestamp": "2025-09-18T00:00:00.000Z",
-            "offset": "00:00.000",
-            "direction": "internal",
-            "type": "note",
-            "method": "INFO",
-            "status_code": Value::Null,
-            "summary": "No detailed SIP trace stored for this record.",
-            "raw": "",
-        })],
-    };
-
-    let transcript = if has_transcript {
-        json!({
-            "available": true,
-            "language": "zh-CN",
-            "generated_at": "2025-09-18T08:40:31Z",
-            "segments": [
-                {"speaker": "客户", "start": "00:05.2", "text": "你好，我的账单有问题想咨询。"},
-                {"speaker": "坐席", "start": "00:08.9", "text": "好的，我来帮您查一下最近的费用。"},
-                {"speaker": "客户", "start": "02:14.3", "text": "我收到了一条欠费短信。"},
-                {"speaker": "坐席", "start": "02:20.8", "text": "已经帮您核对，稍后会发送确认邮件。"}
-            ],
-            "text": "客户询问账单异常，坐席核实后确认系统误报，已补发确认邮件。",
-        })
-    } else {
-        json!({
-            "available": false,
-            "language": Value::Null,
-            "generated_at": Value::Null,
-            "segments": Value::Array(vec![]),
-            "text": "",
-        })
-    };
-
-    let transcript_preview = if has_transcript {
-        Value::Null
-    } else {
-        json!({
-            "language": "en-US",
-            "segments": [
-                {"speaker": "Agent", "start": "00:03.6", "text": "Hi, thanks for taking the demo today."},
-                {"speaker": "Customer", "start": "00:12.1", "text": "We're evaluating AI voice for our support team."},
-                {"speaker": "Agent", "start": "01:45.0", "text": "I'll send over the pricing and integration playbook."}
-            ],
-            "text": "Agent walked through outbound demo call and promised to share follow-up collateral.",
-        })
-    };
-
-    let media_metrics = json!({
-        "audio_codec": record
-            .get("codec")
-            .and_then(|v| v.as_str())
-            .unwrap_or("OPUS/48000"),
-        "rtp_packets": match id {
-            "cr-2025-09-18-001" => 5232,
-            "cr-2025-09-17-014" => 6120,
-            "cr-2025-09-16-008" => 1100,
-            _ => 0,
-        },
-        "avg_jitter_ms": match id {
-            "cr-2025-09-18-001" => 11.2,
-            "cr-2025-09-17-014" => 8.4,
-            "cr-2025-09-16-008" => 26.5,
-            _ => 0.0,
-        },
-        "packet_loss_percent": match id {
-            "cr-2025-09-18-001" => 0.24,
-            "cr-2025-09-17-014" => 0.11,
-            "cr-2025-09-16-008" => 0.62,
-            _ => 0.0,
-        },
-        "mos": record
-            .get("quality")
-            .and_then(|v| v.get("mos"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(3.5),
-        "rtcp_observations": [
-            {"time": "+60s", "rtt_ms": 45, "fraction_lost": 0.1},
-            {"time": "+180s", "rtt_ms": 39, "fraction_lost": 0.05}
-        ],
-    });
-
-    let notes = match id {
-        "cr-2025-09-18-001" => json!({
-            "text": "客户账单误报，已提交工单 #SR-4921 并发送确认邮件。",
-            "updated_at": "2025-09-18T09:10:00Z",
-        }),
-        "cr-2025-09-17-014" => json!({
-            "text": "客户计划下周内部评审，等待报价模板。",
-            "updated_at": "2025-09-17T14:05:12Z",
-        }),
-        _ => json!({
-            "text": "",
-            "updated_at": Value::Null,
-        }),
-    };
-
-    let participants = json!([
-        {
-            "role": "caller",
-            "label": "Caller",
-            "name": record.get("cnam").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-            "number": record.get("from").and_then(|v| v.as_str()).unwrap_or("Unknown"),
-            "network": record.get("sip_gateway").and_then(|v| v.as_str()).unwrap_or("PSTN"),
-        },
-        {
-            "role": "agent",
-            "label": "Agent",
-            "name": record.get("agent").and_then(|v| v.as_str()).unwrap_or(""),
-            "number": record
-                .get("agent_extension")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-            "network": "PBX",
-        }
-    ]);
-
-    let actions = json!({
-        "download_recording": record
-            .get("recording")
-            .and_then(|rec| rec.get("url"))
-            .cloned()
-            .unwrap_or(Value::Null),
-        "download_metadata": format!("/console/api/call-records/{id}/metadata.json"),
-        "download_sip_flow": format!("/console/api/call-records/{id}/sip-flow.json"),
-    });
-
-    json!({
-        "record": record,
-        "sip_flow": sip_flow,
-        "media_metrics": media_metrics,
-        "transcript": transcript,
-        "transcript_preview": transcript_preview,
-        "notes": notes,
-        "participants": participants,
-        "actions": actions,
-    })
+pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route(
+            "/call-records",
+            get(page_call_records).post(query_call_records),
+        )
+        .route("/call-records/{id}", get(page_call_record_detail))
 }
 
-pub async fn page_call_records(
+async fn page_call_records(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let mut records = sample_call_records();
-    let mut answered = 0usize;
-    let mut missed = 0usize;
-    let mut failed = 0usize;
-    let mut transcribed = 0usize;
-    let mut total_duration_secs = 0f64;
-    let mut unique_dids: HashSet<String> = HashSet::new();
+    let filters = match load_filters(state.db()).await {
+        Ok(filters) => filters,
+        Err(err) => {
+            warn!("failed to load call record filters: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call records" })),
+            )
+                .into_response();
+        }
+    };
 
-    for record in records.iter_mut() {
-        if let Some(obj) = record.as_object_mut() {
-            if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
-                obj.insert(
-                    "detail_url".to_string(),
-                    json!(state.url_for(&format!("/call-records/{id}"))),
-                );
-            }
-            if let Some(to_number) = obj.get("to").and_then(|v| v.as_str()) {
-                unique_dids.insert(to_number.to_string());
-            }
-            if obj
-                .get("has_transcript")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                transcribed += 1;
+    state.render(
+        "console/call_records.html",
+        json!({
+            "nav_active": "call-records",
+            "base_path": state.base_path(),
+            "filters": filters,
+        }),
+    )
+}
+
+async fn query_call_records(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<forms::ListQuery<QueryCallRecordFilters>>,
+) -> Response {
+    let db = state.db();
+    let filters = payload.filters.clone();
+    let condition = build_condition(&filters);
+
+    let selector = CallRecordEntity::find()
+        .filter(condition.clone())
+        .order_by_desc(CallRecordColumn::StartedAt);
+
+    let paginator = selector.paginate(db, payload.normalize().1);
+    let pagination = match forms::paginate(paginator, &payload).await {
+        Ok(pagination) => pagination,
+        Err(err) => {
+            warn!("failed to paginate call records: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let related = match load_related_context(db, &pagination.items).await {
+        Ok(related) => related,
+        Err(err) => {
+            warn!("failed to load related data for call records: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let items: Vec<Value> = pagination
+        .items
+        .iter()
+        .map(|record| build_record_payload(record, &related, &state))
+        .collect();
+
+    let summary = match build_summary(db, condition).await {
+        Ok(summary) => summary,
+        Err(err) => {
+            warn!("failed to build call record summary: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    Json(json!({
+        "page": pagination.current_page,
+        "per_page": pagination.per_page,
+        "total_pages": pagination.total_pages,
+        "total_items": pagination.total_items,
+        "items": items,
+        "summary": summary,
+    }))
+    .into_response()
+}
+
+async fn page_call_record_detail(
+    AxumPath(call_id): AxumPath<String>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match CallRecordEntity::find()
+        .filter(CallRecordColumn::CallId.eq(call_id.clone()))
+        .one(db)
+        .await
+    {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!("failed to load call record '{}': {}", call_id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let related = match load_related_context(db, &[model.clone()]).await {
+        Ok(related) => related,
+        Err(err) => {
+            warn!(
+                "failed to load related data for call record '{}': {}",
+                call_id, err
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let payload = build_detail_payload(&model, &related, &state);
+
+    state.render(
+        "console/call_record_detail.html",
+        json!({
+            "nav_active": "call-records",
+            "page_title": format!("Call record · {}", call_id),
+            "call_id": call_id,
+            "call_data": serde_json::to_string(&payload).unwrap_or_default(),
+        }),
+    )
+}
+
+async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
+    let departments: Vec<Value> = DepartmentEntity::find()
+        .order_by_asc(DepartmentColumn::Name)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|dept| json!({ "id": dept.id, "name": dept.name }))
+        .collect();
+
+    let sip_trunks: Vec<Value> = SipTrunkEntity::find()
+        .order_by_asc(SipTrunkColumn::Name)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|trunk| {
+            json!({
+                "id": trunk.id,
+                "name": trunk.name,
+                "display_name": trunk.display_name,
+            })
+        })
+        .collect();
+
+    let tags = load_distinct_tags(db).await?;
+
+    Ok(json!({
+        "status": ["any", "completed", "missed", "failed"],
+        "direction": ["any", "inbound", "outbound", "internal"],
+        "departments": departments,
+        "sip_trunks": sip_trunks,
+        "tags": tags,
+    }))
+}
+
+async fn load_distinct_tags(db: &DatabaseConnection) -> Result<Vec<String>, DbErr> {
+    let rows: Vec<Option<Value>> = CallRecordEntity::find()
+        .select_only()
+        .column(CallRecordColumn::Tags)
+        .filter(CallRecordColumn::Tags.is_not_null())
+        .into_tuple::<Option<Value>>()
+        .all(db)
+        .await?;
+
+    let mut tags: HashSet<String> = HashSet::new();
+    for value in rows.into_iter().flatten() {
+        if let Some(array) = value.as_array() {
+            for tag in array {
+                if let Some(tag_str) = tag.as_str() {
+                    let trimmed = tag_str.trim();
+                    if !trimmed.is_empty() {
+                        tags.insert(trimmed.to_string());
+                    }
+                }
             }
         }
-
-        let status = record
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        match status.as_str() {
-            "completed" => answered += 1,
-            "missed" => missed += 1,
-            "failed" => failed += 1,
-            _ => {}
-        }
-
-        total_duration_secs += record
-            .get("duration_secs")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
     }
 
-    let total = records.len();
+    let mut list: Vec<String> = tags.into_iter().collect();
+    list.sort();
+    Ok(list)
+}
+
+fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
+    let mut condition = Condition::all();
+
+    if let Some(filters) = filters {
+        if let Some(q_raw) = filters.q.as_ref() {
+            let trimmed = q_raw.trim();
+            if !trimmed.is_empty() {
+                let mut any_match = Condition::any();
+                any_match = any_match.add(CallRecordColumn::CallId.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::DisplayId.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::FromNumber.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::ToNumber.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::CallerName.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::AgentName.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::Queue.contains(trimmed));
+                any_match = any_match.add(CallRecordColumn::SipGateway.contains(trimmed));
+                condition = condition.add(any_match);
+            }
+        }
+
+        if let Some(status_raw) = filters.status.as_ref() {
+            let status_trimmed = status_raw.trim();
+            if !status_trimmed.is_empty() && !equals_ignore_ascii_case(status_trimmed, "any") {
+                condition = condition.add(CallRecordColumn::Status.eq(status_trimmed));
+            }
+        }
+
+        if let Some(direction_raw) = filters.direction.as_ref() {
+            let direction_trimmed = direction_raw.trim();
+            if !direction_trimmed.is_empty() && !equals_ignore_ascii_case(direction_trimmed, "any")
+            {
+                condition = condition.add(CallRecordColumn::Direction.eq(direction_trimmed));
+            }
+        }
+
+        if let Some(from) = parse_date(filters.date_from.as_ref(), false) {
+            condition = condition.add(CallRecordColumn::StartedAt.gte(from));
+        }
+        if let Some(to) = parse_date(filters.date_to.as_ref(), true) {
+            condition = condition.add(CallRecordColumn::StartedAt.lte(to));
+        }
+
+        if filters.only_transcribed.unwrap_or(false) {
+            condition = condition.add(CallRecordColumn::HasTranscript.eq(true));
+        }
+
+        let department_ids = normalize_i64_list(filters.department_ids.as_ref());
+        if !department_ids.is_empty() {
+            condition = condition.add(CallRecordColumn::DepartmentId.is_in(department_ids));
+        }
+
+        let sip_trunk_ids = normalize_i64_list(filters.sip_trunk_ids.as_ref());
+        if !sip_trunk_ids.is_empty() {
+            condition = condition.add(CallRecordColumn::SipTrunkId.is_in(sip_trunk_ids));
+        }
+
+        let tags = normalize_string_list(filters.tags.as_ref());
+        if !tags.is_empty() {
+            let mut any_tag = Condition::any();
+            for tag in tags {
+                let escaped = tag.replace('"', "\\\"");
+                let pattern = format!("%\"{}\"%", escaped);
+                any_tag = any_tag.add(CallRecordColumn::Tags.like(pattern));
+            }
+            condition = condition.add(any_tag);
+        }
+    }
+
+    condition
+}
+
+fn parse_date(raw: Option<&String>, end_of_day: bool) -> Option<DateTime<Utc>> {
+    let value = raw?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()?;
+    let naive = if end_of_day {
+        date.and_hms_opt(23, 59, 59)?
+    } else {
+        date.and_hms_opt(0, 0, 0)?
+    };
+    Utc.from_local_datetime(&naive).single()
+}
+
+fn normalize_i64_list(input: Option<&Vec<i64>>) -> Vec<i64> {
+    let mut values = input.cloned().unwrap_or_default();
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn normalize_string_list(input: Option<&Vec<String>>) -> Vec<String> {
+    let mut values: Vec<String> = input
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort();
+    values.dedup();
+    values
+}
+
+async fn load_related_context(
+    db: &DatabaseConnection,
+    records: &[CallRecordModel],
+) -> Result<RelatedContext, DbErr> {
+    let mut extension_ids = HashSet::new();
+    let mut department_ids = HashSet::new();
+    let mut sip_trunk_ids = HashSet::new();
+
+    for record in records {
+        if let Some(id) = record.extension_id {
+            extension_ids.insert(id);
+        }
+        if let Some(id) = record.department_id {
+            department_ids.insert(id);
+        }
+        if let Some(id) = record.sip_trunk_id {
+            sip_trunk_ids.insert(id);
+        }
+    }
+
+    let extensions = if extension_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let ids: Vec<i64> = extension_ids.into_iter().collect();
+        ExtensionEntity::find()
+            .filter(crate::models::extension::Column::Id.is_in(ids.clone()))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|model| (model.id, model))
+            .collect()
+    };
+
+    let departments = if department_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let ids: Vec<i64> = department_ids.into_iter().collect();
+        DepartmentEntity::find()
+            .filter(DepartmentColumn::Id.is_in(ids.clone()))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|model| (model.id, model))
+            .collect()
+    };
+
+    let sip_trunks = if sip_trunk_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let ids: Vec<i64> = sip_trunk_ids.into_iter().collect();
+        SipTrunkEntity::find()
+            .filter(SipTrunkColumn::Id.is_in(ids.clone()))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|model| (model.id, model))
+            .collect()
+    };
+
+    Ok(RelatedContext {
+        extensions,
+        departments,
+        sip_trunks,
+    })
+}
+
+struct RelatedContext {
+    extensions: HashMap<i64, ExtensionModel>,
+    departments: HashMap<i64, DepartmentModel>,
+    sip_trunks: HashMap<i64, SipTrunkModel>,
+}
+
+fn build_record_payload(
+    record: &CallRecordModel,
+    related: &RelatedContext,
+    state: &ConsoleState,
+) -> Value {
+    let tags = extract_tags(&record.tags);
+    let extension_number = record
+        .extension_id
+        .and_then(|id| related.extensions.get(&id))
+        .map(|ext| ext.extension.clone());
+    let department_name = record
+        .department_id
+        .and_then(|id| related.departments.get(&id))
+        .map(|dept| dept.name.clone());
+    let sip_trunk_name = record
+        .sip_trunk_id
+        .and_then(|id| related.sip_trunks.get(&id))
+        .map(|trunk| {
+            trunk
+                .display_name
+                .clone()
+                .unwrap_or_else(|| trunk.name.clone())
+        });
+    let sip_gateway = record
+        .sip_gateway
+        .clone()
+        .or_else(|| sip_trunk_name.clone());
+
+    let quality = if record.quality_mos.is_some()
+        || record.quality_latency_ms.is_some()
+        || record.quality_jitter_ms.is_some()
+        || record.quality_packet_loss_percent.is_some()
+    {
+        Some(json!({
+            "mos": record.quality_mos,
+            "latency_ms": record.quality_latency_ms,
+            "jitter_ms": record.quality_jitter_ms,
+            "packet_loss": record.quality_packet_loss_percent,
+        }))
+    } else {
+        None
+    };
+
+    let recording = record.recording_url.as_ref().map(|url| {
+        json!({
+            "url": url,
+            "duration_secs": record.recording_duration_secs,
+        })
+    });
+
+    json!({
+        "id": record.call_id,
+        "display_id": record.display_id,
+        "direction": record.direction,
+        "status": record.status,
+        "from": record.from_number,
+        "to": record.to_number,
+        "cnam": record.caller_name,
+        "agent": record.agent_name,
+        "agent_extension": extension_number,
+        "department": department_name,
+        "queue": record.queue,
+        "sip_gateway": sip_gateway,
+        "sip_trunk": sip_trunk_name,
+        "tags": tags,
+        "has_transcript": record.has_transcript,
+        "transcript_status": record.transcript_status,
+        "transcript_language": record.transcript_language,
+        "duration_secs": record.duration_secs,
+        "recording": recording,
+        "quality": quality,
+        "started_at": record.started_at.to_rfc3339(),
+        "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
+        "detail_url": state.url_for(&format!("/call-records/{}", record.call_id)),
+    })
+}
+
+fn build_detail_payload(
+    record: &CallRecordModel,
+    related: &RelatedContext,
+    state: &ConsoleState,
+) -> Value {
+    let record_payload = build_record_payload(record, related, state);
+    let participants = build_participants(record, related);
+    let transcript_payload = json!({
+        "available": record.has_transcript,
+        "language": record.transcript_language,
+        "status": record.transcript_status,
+        "generated_at": record.updated_at.to_rfc3339(),
+        "segments": Value::Array(vec![]),
+        "text": "",
+    });
+
+    let media_metrics = json!({
+        "audio_codec": json_lookup_str(&record.metadata, "audio_codec"),
+        "rtp_packets": json_lookup_number(&record.analytics, "rtp_packets"),
+        "avg_jitter_ms": record.quality_jitter_ms,
+        "packet_loss_percent": record.quality_packet_loss_percent,
+        "mos": record.quality_mos,
+        "rtcp_observations": Value::Array(vec![]),
+    });
+
+    json!({
+        "back_url": state.url_for("/call-records"),
+        "record": record_payload,
+        "sip_flow": Value::Array(vec![]),
+        "media_metrics": media_metrics,
+        "transcript": transcript_payload,
+        "transcript_preview": Value::Null,
+        "notes": Value::Null,
+        "participants": participants,
+        "actions": json!({
+            "download_recording": record.recording_url,
+            "download_metadata": Value::Null,
+            "download_sip_flow": Value::Null,
+        }),
+    })
+}
+
+fn build_participants(record: &CallRecordModel, related: &RelatedContext) -> Value {
+    let extension_number = record
+        .extension_id
+        .and_then(|id| related.extensions.get(&id))
+        .map(|ext| ext.extension.clone());
+
+    Value::Array(vec![
+        json!({
+            "role": "caller",
+            "label": "Caller",
+            "name": record.caller_name,
+            "number": record.from_number,
+            "network": record.sip_gateway.clone(),
+        }),
+        json!({
+            "role": "agent",
+            "label": "Agent",
+            "name": record.agent_name,
+            "number": extension_number,
+            "network": "PBX",
+        }),
+    ])
+}
+
+fn extract_tags(tags: &Option<Value>) -> Vec<String> {
+    match tags {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_lookup_str(source: &Option<Value>, key: &str) -> Option<String> {
+    source
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn json_lookup_number(source: &Option<Value>, key: &str) -> Option<f64> {
+    source
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_f64())
+}
+
+async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
+    let total = CallRecordEntity::find()
+        .filter(condition.clone())
+        .count(db)
+        .await?;
+
+    let answered = CallRecordEntity::find()
+        .filter(condition.clone())
+        .filter(CallRecordColumn::Status.eq("completed"))
+        .count(db)
+        .await?;
+
+    let missed = CallRecordEntity::find()
+        .filter(condition.clone())
+        .filter(CallRecordColumn::Status.eq("missed"))
+        .count(db)
+        .await?;
+
+    let failed = CallRecordEntity::find()
+        .filter(condition.clone())
+        .filter(CallRecordColumn::Status.eq("failed"))
+        .count(db)
+        .await?;
+
+    let transcribed = CallRecordEntity::find()
+        .filter(condition.clone())
+        .filter(CallRecordColumn::HasTranscript.eq(true))
+        .count(db)
+        .await?;
+
+    let total_duration_secs = CallRecordEntity::find()
+        .select_only()
+        .column_as(CallRecordColumn::DurationSecs.sum(), "total_duration")
+        .filter(condition.clone())
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await?
+        .flatten()
+        .unwrap_or(0);
+
+    let total_minutes = total_duration_secs as f64 / 60.0;
     let avg_duration = if total > 0 {
-        total_duration_secs / total as f64
+        total_duration_secs as f64 / total as f64
     } else {
         0.0
     };
 
-    let summary = json!({
+    let unique_dids = CallRecordEntity::find()
+        .select_only()
+        .column_as(
+            Expr::col(CallRecordColumn::ToNumber).count_distinct(),
+            "unique_dids",
+        )
+        .filter(condition)
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await?
+        .flatten()
+        .unwrap_or(0);
+
+    Ok(json!({
         "total": total,
         "answered": answered,
         "missed": missed,
         "failed": failed,
         "transcribed": transcribed,
         "avg_duration": (avg_duration * 10.0).round() / 10.0,
-        "total_minutes": (total_duration_secs / 60.0).round(),
-        "unique_dids": unique_dids.len(),
-    });
-
-    let payload = json!({
-        "records": records,
-        "summary": summary,
-        "filter_options": {
-            "status": ["any", "completed", "missed", "failed"],
-            "direction": ["any", "inbound", "outbound", "internal"],
-        },
-    });
-
-    state.render(
-        "console/call_records.html",
-        json!({
-            "nav_active": "call-records",
-            "page_title": "Call records",
-            "call_data": serde_json::to_string(&payload).unwrap_or_default(),
-        }),
-    )
+        "total_minutes": (total_minutes * 10.0).round() / 10.0,
+        "unique_dids": unique_dids,
+    }))
 }
 
-pub async fn page_call_record_detail(
-    AxumPath(id): AxumPath<String>,
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-) -> Response {
-    let mut detail = sample_call_detail(&id);
+fn equals_ignore_ascii_case(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
 
-    if let Some(obj) = detail.as_object_mut() {
-        obj.insert(
-            "back_url".to_string(),
-            json!(state.url_for("/call-records")),
-        );
-        if let Some(record) = obj.get_mut("record").and_then(|v| v.as_object_mut()) {
-            record
-                .entry("detail_url".to_string())
-                .or_insert_with(|| json!(state.url_for(&format!("/call-records/{id}"))));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ConsoleConfig,
+        console::ConsoleState,
+        models::{call_record, migration::Migrator},
+    };
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+
+    async fn setup_db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        Migrator::up(&db, None).await.expect("migrations succeed");
+        db
     }
 
-    state.render(
-        "console/call_record_detail.html",
-        json!({
-            "nav_active": "call-records",
-            "page_title": format!("Call record · {}", id),
-            "call_id": id,
-            "call_data": serde_json::to_string(&detail).unwrap_or_default(),
-            "js_files": vec!["https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"],
-        }),
-    )
+    async fn create_console_state(db: DatabaseConnection) -> Arc<ConsoleState> {
+        ConsoleState::initialize(
+            db,
+            ConsoleConfig {
+                session_secret: "secret".into(),
+                base_path: "/console".into(),
+            },
+        )
+        .await
+        .expect("console state")
+    }
+
+    #[tokio::test]
+    async fn load_filters_returns_defaults() {
+        let db = setup_db().await;
+        let filters = load_filters(&db).await.expect("filters");
+        assert!(filters.get("status").is_some());
+        assert!(filters.get("direction").is_some());
+    }
+
+    #[tokio::test]
+    async fn build_record_payload_contains_basic_fields() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+
+        let record = call_record::ActiveModel {
+            call_id: Set("call-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(60),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let related = load_related_context(&db, &[record.clone()])
+            .await
+            .expect("related context");
+        let payload = build_record_payload(&record, &related, &state);
+        assert_eq!(payload["id"], "call-1");
+    }
 }

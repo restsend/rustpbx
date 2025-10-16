@@ -1,9 +1,8 @@
-use crate::call::DialDirection;
+use crate::call::{DialDirection, RoutingState};
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::match_invite;
 use crate::proxy::routing::{
-    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteRule, RoutingState,
-    TrunkConfig,
+    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteRule, TrunkConfig,
 };
 use rsipstack::dialog::invitation::InviteOption;
 use std::collections::HashMap;

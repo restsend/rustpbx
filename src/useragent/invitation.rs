@@ -1,4 +1,8 @@
-use crate::{config::InviteHandlerConfig, useragent::webhook::WebhookInvitationHandler};
+use std::sync::Arc;
+
+use crate::{
+    call::RoutingState, config::InviteHandlerConfig, useragent::webhook::WebhookInvitationHandler,
+};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::dialog::{dialog::DialogStateReceiver, server_dialog::ServerInviteDialog};
@@ -18,6 +22,7 @@ pub trait InvitationHandler: Send + Sync {
         _session_id: String,
         _cancel_token: CancellationToken,
         _dialog: ServerInviteDialog,
+        _routing_state: Arc<RoutingState>,
     ) -> Result<()> {
         return Err(anyhow!("invite not handled"));
     }
@@ -29,13 +34,23 @@ pub fn default_create_invite_handler(
     match config {
         Some(InviteHandlerConfig::Webhook {
             url,
+            urls,
             method,
             headers,
-        }) => Some(Box::new(WebhookInvitationHandler::new(
-            url.clone(),
-            method.clone(),
-            headers.clone(),
-        ))),
+        }) => {
+            let all_urls = if let Some(urls) = urls {
+                urls.clone()
+            } else if let Some(url) = url {
+                vec![url.clone()]
+            } else {
+                vec![]
+            };
+            Some(Box::new(WebhookInvitationHandler::new(
+                all_urls,
+                method.clone(),
+                headers.clone(),
+            )))
+        }
         _ => None,
     }
 }

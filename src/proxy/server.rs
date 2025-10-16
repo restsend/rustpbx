@@ -11,6 +11,7 @@ use crate::{
         FnCreateRouteInvite,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector, ProxyCallInspector},
+        locator::DialogTargetLocator,
     },
 };
 use anyhow::{Result, anyhow};
@@ -49,7 +50,7 @@ pub struct SipServerInner {
     pub call_router: Option<Box<dyn CallRouter>>,
     pub dialplan_inspector: Option<Box<dyn DialplanInspector>>,
     pub proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
-    pub locator: Box<dyn Locator>,
+    pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
     pub dialog_layer: Arc<DialogLayer>,
@@ -188,6 +189,7 @@ impl SipServerBuilder {
                 }
             }
         };
+        let locator = Arc::new(locator);
         let rtp_config = self.rtp_config.unwrap_or_default();
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
@@ -264,6 +266,9 @@ impl SipServerBuilder {
         if let Some(inspector) = self.message_inspector {
             endpoint_builder = endpoint_builder.with_inspector(inspector);
         }
+
+        endpoint_builder =
+            endpoint_builder.with_target_locator(DialogTargetLocator::new(locator.clone()));
 
         let endpoint = endpoint_builder.build();
 

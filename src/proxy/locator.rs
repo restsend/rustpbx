@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use rsipstack::{transaction::endpoint::TargetLocator, transport::SipAddr};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -24,6 +25,39 @@ pub trait Locator: Send + Sync {
     -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>>;
+}
+
+pub struct DialogTargetLocator {
+    locator: Arc<Box<dyn Locator>>,
+}
+
+impl DialogTargetLocator {
+    pub fn new(locator: Arc<Box<dyn Locator>>) -> Box<dyn TargetLocator> {
+        Box::new(Self { locator }) as Box<dyn TargetLocator>
+    }
+}
+
+#[async_trait]
+impl TargetLocator for DialogTargetLocator {
+    async fn locate(&self, uri: &rsip::Uri) -> Result<SipAddr, rsipstack::Error> {
+        match self.locator.lookup(uri).await {
+            Ok(locs) => {
+                if let Some(loc) = locs.first() {
+                    if let Some(dest) = &loc.destination {
+                        return Ok(dest.clone());
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+
+        SipAddr::try_from(uri).map_err(|e| {
+            rsipstack::Error::Error(format!(
+                "failed to convert uri to sip addr: {}, error: {}",
+                uri, e
+            ))
+        })
+    }
 }
 
 pub struct MemoryLocator {

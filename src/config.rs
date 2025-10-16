@@ -137,7 +137,8 @@ pub struct UseragentConfig {
 #[serde(tag = "type")]
 pub enum InviteHandlerConfig {
     Webhook {
-        url: String,
+        url: Option<String>,
+        urls: Option<Vec<String>>,
         method: Option<String>,
         headers: Option<Vec<(String, String)>>,
     },
@@ -421,7 +422,7 @@ impl Default for Config {
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
             #[cfg(feature = "console")]
-            console: Some(ConsoleConfig::default()),
+            console: None,
             database_url: default_database_url(),
         }
     }

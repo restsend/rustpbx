@@ -619,7 +619,6 @@ pub async fn page_routing(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let base_path = state.url_for("/");
     let trunk_options = match load_trunks(db).await {
         Ok(trunks) => Value::Array(build_trunk_options(&trunks)),
         Err(err) => {
@@ -632,7 +631,6 @@ pub async fn page_routing(
         "console/routing.html",
         json!({
             "nav_active": "routing",
-            "base_path": base_path,
             "filters": {
                 "trunks": trunk_options,
                 "selection_algorithms": selection_algorithms_value(),

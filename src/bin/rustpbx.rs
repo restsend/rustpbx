@@ -105,11 +105,11 @@ async fn main() -> Result<()> {
         env_filter = env_filter.add_directive(level.into());
     }
 
-    let console_enabled = cli.tokio_console.is_some()
+    let tokio_console_enabled = cli.tokio_console.is_some()
         || std::env::var_os("TOKIO_CONSOLE").is_some()
         || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();
     let mut console_layer = None;
-    if console_enabled {
+    if tokio_console_enabled {
         use console_subscriber::ServerAddr;
         let mut builder = console_subscriber::ConsoleLayer::builder()
             .retention(std::time::Duration::from_secs(60));
