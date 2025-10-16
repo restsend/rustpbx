@@ -16,7 +16,6 @@ pub mod presence;
 pub mod proxy_call;
 pub mod registrar;
 pub mod routing;
-pub use routing::RoutingState;
 pub mod server;
 #[cfg(test)]
 pub mod tests;
