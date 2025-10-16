@@ -1,4 +1,4 @@
-use crate::useragent::invitation::InvitationHandler;
+use crate::{call::RoutingState, useragent::invitation::InvitationHandler};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -6,24 +6,24 @@ use reqwest::Client;
 use rsip::prelude::{HasHeaders, HeadersExt};
 use rsipstack::dialog::server_dialog::ServerInviteDialog;
 use serde_json::json;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct WebhookInvitationHandler {
-    url: String,
+    urls: Vec<String>,
     method: Option<String>,
     headers: Option<Vec<(String, String)>>,
 }
 
 impl WebhookInvitationHandler {
     pub fn new(
-        url: String,
+        urls: Vec<String>,
         method: Option<String>,
         headers: Option<Vec<(String, String)>>,
     ) -> Self {
         Self {
-            url,
+            urls,
             method,
             headers,
         }
@@ -37,6 +37,7 @@ impl InvitationHandler for WebhookInvitationHandler {
         dialog_id: String,
         _cancel_token: CancellationToken,
         dialog: ServerInviteDialog,
+        routing_state: Arc<RoutingState>,
     ) -> Result<()> {
         let client = Client::new();
         let create_time = Utc::now().to_rfc3339();
@@ -60,17 +61,25 @@ impl InvitationHandler for WebhookInvitationHandler {
             "headers": headers,
             "offer": String::from_utf8_lossy(invite_request.body()),
         });
+        // TODO: better load balancing strategy
+        // just use round-robin for now
+        let idx = routing_state.next_round_robin_index("useragent_webhook", self.urls.len());
+        let url = match self.urls.get(idx) {
+            Some(u) => u,
+            None => {
+                return Err(anyhow::anyhow!("no webhook URL configured"));
+            }
+        };
 
         let method = self.method.as_deref().unwrap_or("POST");
-        let mut request =
-            client.request(reqwest::Method::from_bytes(method.as_bytes())?, &self.url);
+        let mut request = client.request(reqwest::Method::from_bytes(method.as_bytes())?, url);
 
         if let Some(headers) = &self.headers {
             for (key, value) in headers {
                 request = request.header(key, value);
             }
         }
-        let url = self.url.clone();
+
         let start_time = Instant::now();
         match request.json(&payload).send().await {
             Ok(response) => {

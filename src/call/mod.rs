@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use std::{
     collections::HashMap,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
 pub mod active_call;
 pub mod cookie;
 pub mod sip;
@@ -552,4 +554,40 @@ pub trait RouteInvite: Sync + Send {
         origin: &rsip::Request,
         direction: &DialDirection,
     ) -> Result<RouteResult>;
+}
+
+/// Routing state for managing stateful load balancing
+#[derive(Debug)]
+pub struct RoutingState {
+    /// Round-robin counters for each destination group
+    round_robin_counters: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Default for RoutingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RoutingState {
+    pub fn new() -> Self {
+        Self {
+            round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get the next trunk index for round-robin selection
+    pub fn next_round_robin_index(&self, destination_key: &str, trunk_count: usize) -> usize {
+        if trunk_count == 0 {
+            return 0;
+        }
+
+        let mut counters = self.round_robin_counters.lock().unwrap();
+        let counter = counters
+            .entry(destination_key.to_string())
+            .or_insert_with(|| 0);
+        let r = *counter % trunk_count;
+        *counter += 1;
+        return r;
+    }
 }

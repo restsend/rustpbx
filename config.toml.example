@@ -5,7 +5,6 @@
 http_addr = "0.0.0.0:8080"
 log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
-stun_server = "stun.l.google.com:19302"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
 # external_ip = "1.2.3.4"
@@ -26,7 +25,7 @@ addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
-# media_proxy = "auto"
+media_proxy = "auto"
 
 # ACL rules
 acl_rules = [

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
 use sea_orm::{ActiveModelTrait, Database, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{boolean, integer, pk_auto, string, timestamp};
+use sea_orm_migration::schema::{boolean, integer, pk_auto, string, string_null, timestamp};
 use std::time::SystemTime;
 use tracing::{info, warn};
 
@@ -51,7 +51,7 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Aor).char_len(255).not_null())
                     .col(integer(Column::Expires).not_null())
                     .col(string(Column::Username).char_len(200).not_null())
-                    .col(string(Column::Realm).char_len(200).null())
+                    .col(string_null(Column::Realm).char_len(200))
                     .col(string(Column::Destination).char_len(255).not_null())
                     .col(string(Column::Transport).char_len(32).not_null())
                     .col(integer(Column::LastModified).not_null())

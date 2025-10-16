@@ -38,6 +38,7 @@ pub struct UserAgent {
     pub dialog_layer: Arc<DialogLayer>,
     pub create_invitation_handler: Option<FnCreateInvitationHandler>,
     pub invitation: Invitation,
+    pub routing_state: Arc<crate::call::RoutingState>,
 }
 
 impl Default for UserAgentBuilder {
@@ -116,6 +117,7 @@ impl UserAgentBuilder {
             dialog_layer: dialog_layer.clone(),
             create_invitation_handler: self.create_invitation_handler,
             invitation: Invitation::new(dialog_layer),
+            routing_state: Arc::new(crate::call::RoutingState::new()),
         })
     }
 }
@@ -264,11 +266,16 @@ impl UserAgent {
                     });
                     let mut dialog_ref = dialog.clone();
                     let token_ref = token.clone();
-
+                    let routing_state = self.routing_state.clone();
                     tokio::spawn(async move {
                         let invite_loop = async {
                             match invitation_handler
-                                .on_invite(dialog_id_str.clone(), token, dialog.clone())
+                                .on_invite(
+                                    dialog_id_str.clone(),
+                                    token,
+                                    dialog.clone(),
+                                    routing_state,
+                                )
                                 .await
                             {
                                 Ok(_) => (),

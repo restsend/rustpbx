@@ -3,7 +3,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use rsip::{
     SipMessage,
-    prelude::{HasHeaders, HeadersExt, ToTypedHeader, UntypedHeader},
+    prelude::{HeadersExt, UntypedHeader},
 };
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
@@ -74,7 +74,7 @@ pub async fn sip_ws_handler(
                                 "WebSocket received: \n{}",
                                 text
                             );
-                            let mut msg = match SipConnection::update_msg_received(
+                            let msg = match SipConnection::update_msg_received(
                                 sip_msg,
                                 client_addr.addr,
                                 transport_type,
@@ -85,43 +85,6 @@ pub async fn sip_ws_handler(
                                     continue;
                                 }
                             };
-
-                            for h in msg.headers_mut().iter_mut() {
-                                match h {
-                                    rsip::Header::Contact(c) => match c.typed() {
-                                        Ok(mut typed) => {
-                                            typed.uri.params.retain_mut(|p| match p {
-                                                rsip::Param::Other(name, _)
-                                                    if name
-                                                        .value()
-                                                        .eq_ignore_ascii_case("rport") =>
-                                                {
-                                                    false
-                                                }
-                                                rsip::Param::Transport(_)
-                                                | rsip::Param::Received(_) => false,
-                                                _ => true,
-                                            });
-                                            typed.uri.params.push(rsip::Param::Transport(
-                                                transport_type.clone(),
-                                            ));
-                                            typed.uri.params.push(rsip::Param::Received(
-                                                client_addr.addr.ip().to_string().into(),
-                                            ));
-                                            typed.uri.params.push(rsip::Param::Other(
-                                                rsip::param::OtherParam::new("rport"),
-                                                Some(rsip::param::OtherParamValue::new(
-                                                    client_addr.addr.port().to_string(),
-                                                )),
-                                            ));
-                                            *c = typed.into();
-                                        }
-                                        Err(_) => {}
-                                    },
-                                    _ => {}
-                                }
-                            }
-
                             if let Err(e) = from_ws_tx.send(TransportEvent::Incoming(
                                 msg,
                                 sip_connection_clone.clone(),

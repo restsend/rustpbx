@@ -44,11 +44,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(sip_trunk::urls())
         .merge(setting::urls())
         .merge(routing::urls())
-        .route("/call-records", get(self::call_record::page_call_records))
-        .route(
-            "/call-records/{id}",
-            get(self::call_record::page_call_record_detail),
-        )
+        .merge(call_record::urls())
         .route("/diagnostics", get(self::diagnostics::page_diagnostics));
 
     Router::new()

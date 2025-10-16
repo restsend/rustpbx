@@ -75,192 +75,232 @@ default('RustPBX') }}{% endblock %}
         </template>
 
         <form class="space-y-6" @submit.prevent="submit">
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">General</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Trunk name
-                        <input type="text" x-model.trim="form.name" maxlength="120" required
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="sip-hk-primary">
-                        <span class="text-xs font-normal text-slate-400">Unique identifier used in routing rules.</span>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Display name
-                        <input type="text" x-model.trim="form.display_name" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Hong Kong primary trunk">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Carrier
-                        <input type="text" x-model.trim="form.carrier" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Carrier name">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Status
-                        <select x-model="form.status"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="option in statusOptions" :key="option.value">
-                                <option :value="option.value" x-text="option.label"></option>
-                            </template>
-                        </select>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Direction
-                        <select x-model="form.direction"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="option in directionOptions" :key="option.value">
-                                <option :value="option.value" x-text="option.label"></option>
-                            </template>
-                        </select>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        SIP transport
-                        <select x-model="form.sip_transport"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="option in transportOptions" :key="option.value">
-                                <option :value="option.value" x-text="option.label"></option>
-                            </template>
-                        </select>
-                    </label>
-                    <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        SIP server / realm
-                        <input type="text" x-model.trim="form.sip_server" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="sip:provider.example.com">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Outbound proxy
-                        <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="proxy.example.com">
-                    </label>
-                    <div class="flex flex-col gap-2">
-                        <span class="text-sm font-medium text-slate-700">Active</span>
-                        <button type="button" @click="toggleActive()"
-                            class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
-                            :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
-                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.6">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8"
-                                    x-show="form.is_active"></path>
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
-                                    x-show="!form.is_active"></path>
-                            </svg>
-                            <span x-text="form.is_active ? 'Enabled' : 'Disabled'"></span>
-                        </button>
+            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
+                <nav class="flex flex-wrap gap-2 text-sm font-medium">
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'general' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'general'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5V21h15V10.5" />
+                        </svg>
+                        General
+                    </button>
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'access' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'access'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 5v8l-7 5-7-5V8z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 12l7-4" />
+                        </svg>
+                        Access
+                    </button>
+                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
+                        :class="activeTab === 'metadata' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                        @click="activeTab = 'metadata'">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 5h16v4H4z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h16v4H4z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 17h10v4H4z" />
+                        </svg>
+                        Metadata
+                    </button>
+                </nav>
+            </div>
+
+            <div class="space-y-6" x-show="activeTab === 'general'" x-transition.opacity x-cloak>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">General</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Trunk name
+                            <input type="text" x-model.trim="form.name" maxlength="120" required
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="sip-hk-primary">
+                            <span class="text-xs font-normal text-slate-400">Unique identifier used in routing
+                                rules.</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Display name
+                            <input type="text" x-model.trim="form.display_name" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Hong Kong primary trunk">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Carrier
+                            <input type="text" x-model.trim="form.carrier" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Carrier name">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Status
+                            <select x-model="form.status"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in statusOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Direction
+                            <select x-model="form.direction"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in directionOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            SIP transport
+                            <select x-model="form.sip_transport"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in transportOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            SIP server / realm
+                            <input type="text" x-model.trim="form.sip_server" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="sip:provider.example.com">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Outbound proxy
+                            <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="proxy.example.com">
+                        </label>
+                        <div class="flex flex-col gap-2">
+                            <span class="text-sm font-medium text-slate-700">Active</span>
+                            <button type="button" @click="toggleActive()"
+                                class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
+                                :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
+                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8"
+                                        x-show="form.is_active"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
+                                        x-show="!form.is_active"></path>
+                                </svg>
+                                <span x-text="form.is_active ? 'Enabled' : 'Disabled'"></span>
+                            </button>
+                        </div>
                     </div>
-                </div>
-                <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Description
-                    <textarea rows="3" x-model.trim="form.description"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder="Internal notes about provisioning or escalation."></textarea>
-                </label>
-            </section>
+                    <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Description
+                        <textarea rows="3" x-model.trim="form.description"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="Internal notes about provisioning or escalation."></textarea>
+                    </label>
+                </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Authentication & routing</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Auth username
-                        <input type="text" x-model.trim="form.auth_username" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Provided by carrier">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Auth password
-                        <input type="text" x-model.trim="form.auth_password" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Encrypted storage recommended">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Default route label
-                        <input type="text" x-model.trim="form.default_route_label" maxlength="160"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Internal label for default routing">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Billing template
-                        <select x-model="form.billing_template_id"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="option in templateOptions" :key="option.value">
-                                <option :value="option.value" x-text="option.label"></option>
-                            </template>
-                        </select>
-                    </label>
-                </div>
-            </section>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">Capacity limits</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-3">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Max CPS
+                            <input type="number" min="0" step="1" x-model="form.max_cps"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="e.g. 30">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Max concurrent calls
+                            <input type="number" min="0" step="1" x-model="form.max_concurrent"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="e.g. 120">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Max call duration (sec)
+                            <input type="number" min="0" step="1" x-model="form.max_call_duration"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="e.g. 3600">
+                        </label>
+                    </div>
+                </section>
+            </div>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Capacity limits</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-3">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Max CPS
-                        <input type="number" min="0" step="1" x-model="form.max_cps"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 30">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Max concurrent calls
-                        <input type="number" min="0" step="1" x-model="form.max_concurrent"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 120">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Max call duration (sec)
-                        <input type="number" min="0" step="1" x-model="form.max_call_duration"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 3600">
-                    </label>
-                </div>
-            </section>
+            <div class="space-y-6" x-show="activeTab === 'access'" x-transition.opacity x-cloak>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">Authentication & routing</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Auth username
+                            <input type="text" x-model.trim="form.auth_username" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Provided by carrier">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Auth password
+                            <input type="text" x-model.trim="form.auth_password" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Encrypted storage recommended">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Default route label
+                            <input type="text" x-model.trim="form.default_route_label" maxlength="160"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Internal label for default routing">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Billing template
+                            <select x-model="form.billing_template_id"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in templateOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                        </label>
+                    </div>
+                </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Allowed IPs (JSON array)
-                        <textarea rows="6" x-model="form.allowed_ips"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder='[{"label": "POP", "cidr": "203.0.113.10/32"}]'></textarea>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        DID numbers (JSON array)
-                        <textarea rows="6" x-model="form.did_numbers"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder='[{"number": "+85258001234", "label": "Sales"}]'></textarea>
-                    </label>
-                </div>
-            </section>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Allowed IPs (JSON array)
+                            <textarea rows="6" x-model="form.allowed_ips"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder='[{"label": "POP", "cidr": "203.0.113.10/32"}]'></textarea>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            DID numbers (JSON array)
+                            <textarea rows="6" x-model="form.did_numbers"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder='[{"number": "+85258001234", "label": "Sales"}]'></textarea>
+                        </label>
+                    </div>
+                </section>
+            </div>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Metadata (optional)</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Billing snapshot (JSON)
-                        <textarea rows="5" x-model="form.billing_snapshot"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Leave blank to keep unchanged"></textarea>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Analytics payload (JSON)
-                        <textarea rows="5" x-model="form.analytics"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Tags (JSON)
-                        <textarea rows="4" x-model="form.tags"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Metadata (JSON)
-                        <textarea rows="4" x-model="form.metadata"
-                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
-                    </label>
-                </div>
-            </section>
+            <div class="space-y-6" x-show="activeTab === 'metadata'" x-transition.opacity x-cloak>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">Metadata (optional)</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Billing snapshot (JSON)
+                            <textarea rows="5" x-model="form.billing_snapshot"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Leave blank to keep unchanged"></textarea>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Analytics payload (JSON)
+                            <textarea rows="5" x-model="form.analytics"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Tags (JSON)
+                            <textarea rows="4" x-model="form.tags"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Metadata (JSON)
+                            <textarea rows="4" x-model="form.metadata"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                        </label>
+                    </div>
+                </section>
+            </div>
 
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400">Changes are saved via the API without page reloads.</p>
@@ -333,6 +373,7 @@ default('RustPBX') }}{% endblock %}
             success: null,
             error: null,
             saving: false,
+            activeTab: 'general',
             init() {
                 this.loadOptions();
                 if (this.model) {

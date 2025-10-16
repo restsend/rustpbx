@@ -28,7 +28,8 @@ async fn create_test_useragent(webhook_url: String) -> Result<UserAgent> {
     config.udp_port = 0; // Let system assign a port
     config.accept_timeout = Some("30s".to_string()); // Increase accept timeout to 30 seconds
     config.handler = Some(InviteHandlerConfig::Webhook {
-        url: webhook_url,
+        url: Some(webhook_url),
+        urls: None,
         method: Some("POST".to_string()),
         headers: Some({
             vec![

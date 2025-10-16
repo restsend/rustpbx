@@ -1,6 +1,6 @@
 use crate::call::SipUser;
 use crate::config::{ProxyConfig, RtpConfig};
-use crate::proxy::locator::MemoryLocator;
+use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
 use rsip::Header;
@@ -39,7 +39,7 @@ pub async fn create_test_server_with_config(
         .push("example.com".to_string());
 
     let user_backend = Box::new(MemoryUserBackend::new(None));
-    let locator = Box::new(MemoryLocator::new());
+    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
     let config = Arc::new(config);
     let endpoint = EndpointBuilder::new().build();
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
@@ -116,6 +116,7 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
         vec![rsip::Method::Invite, rsip::Method::Register],
+        None,
         None,
         None,
     );

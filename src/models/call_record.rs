@@ -1,7 +1,8 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, double, integer, json_null, pk_auto, string, string_null, timestamp, timestamp_null,
+    boolean, double_null, integer, integer_null, json_null, pk_auto, string, string_null,
+    timestamp, timestamp_null,
 };
 use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
@@ -108,13 +109,13 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::CallerName).char_len(160))
                     .col(string_null(Column::AgentName).char_len(160))
                     .col(string_null(Column::Queue).char_len(120))
-                    .col(integer(Column::DepartmentId).null())
-                    .col(integer(Column::ExtensionId).null())
-                    .col(integer(Column::SipTrunkId).null())
-                    .col(integer(Column::RouteId).null())
+                    .col(integer_null(Column::DepartmentId))
+                    .col(integer_null(Column::ExtensionId))
+                    .col(integer_null(Column::SipTrunkId))
+                    .col(integer_null(Column::RouteId))
                     .col(string_null(Column::SipGateway).char_len(160))
                     .col(string_null(Column::RecordingUrl).char_len(255))
-                    .col(integer(Column::RecordingDurationSecs).null())
+                    .col(integer_null(Column::RecordingDurationSecs))
                     .col(boolean(Column::HasTranscript).default(false))
                     .col(
                         string(Column::TranscriptStatus)
@@ -123,10 +124,10 @@ impl MigrationTrait for Migration {
                     )
                     .col(string_null(Column::TranscriptLanguage).char_len(16))
                     .col(json_null(Column::Tags))
-                    .col(double(Column::QualityMos).null())
-                    .col(double(Column::QualityLatencyMs).null())
-                    .col(double(Column::QualityJitterMs).null())
-                    .col(double(Column::QualityPacketLossPercent).null())
+                    .col(double_null(Column::QualityMos))
+                    .col(double_null(Column::QualityLatencyMs))
+                    .col(double_null(Column::QualityJitterMs))
+                    .col(double_null(Column::QualityPacketLossPercent))
                     .col(json_null(Column::Analytics))
                     .col(json_null(Column::Metadata))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))

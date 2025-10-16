@@ -20,12 +20,6 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Voice Activity Detection**: WebRTC and Silero VAD and Ten VAD support for optimal speech processing
 - **Noise Suppression**: Real-time audio denoising(rnnoise) for crystal-clear conversations
 
-### WebRTC Integration
-- **Direct WebRTC Calls**: Native WebRTC support for web-based communications
-- **STUN/TURN Support**: Built-in ICE server management for NAT traversal
-- **Codec Support**: Multiple audio codecs (PCMU, PCMA, G.722, PCM)
-- **Real-time Media**: Low-latency audio streaming and processing
-
 ### RESTful API & WebSocket
 - **RESTful Endpoints**: Complete REST API for call management and control
 - **WebSocket Commands**: Real-time call control via WebSocket connections
@@ -78,25 +72,15 @@ Access the web interface at `http://localhost:8080` to test voice agent features
 ```bash
 docker pull ghcr.io/restsend/rustpbx:latest
 ```
+2. **Create config.toml:**
+> Proxy and UserAgent both worked.
+>
 
-2. **Create environment configuration:**
-```bash
-# Create .env file
-cat > .env << EOF
-# Tencent Cloud ASR/TTS Configuration
-TENCENT_APPID=your_tencent_app_id
-TENCENT_SECRET_ID=your_tencent_secret_id
-TENCENT_SECRET_KEY=your_tencent_secret_key
-EOF
-```
-
-3. **Create config.toml:**
 ```bash
 # Create config.toml
 cat > config.toml << EOF
 http_addr = "0.0.0.0:8080"
 log_level = "info"
-stun_server = "stun.l.google.com:19302"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
 
@@ -110,6 +94,7 @@ addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
+media_prxoy = "auto"
 
 # ACL rules
 acl_rules = [
@@ -159,15 +144,6 @@ The following environment variables are required for Tencent Cloud ASR/TTS servi
 | `TENCENT_APPID`      | Your Tencent Cloud App ID     | Yes      |
 | `TENCENT_SECRET_ID`  | Your Tencent Cloud Secret ID  | Yes      |
 | `TENCENT_SECRET_KEY` | Your Tencent Cloud Secret Key | Yes      |
-
-### Configuration Options
-
-Key configuration options in `config.toml`:
-
-- **HTTP Server**: `http_addr` - Web interface and API endpoint
-- **SIP Proxy**: `proxy.udp_port` - SIP proxy server port
-- **User Agent**: `ua.udp_port` - Outbound call user agent port
-- **Call Recording**: `callrecord.root` - Directory for call recordings
 
 ## 🧪 Go Client Integration
 
