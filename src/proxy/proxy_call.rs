@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use rsip::StatusCode;
+use rsip::{StatusCode, Uri};
 use rsipstack::{
     dialog::{
         DialogId,
@@ -473,6 +473,14 @@ impl ProxyCall {
         &self.session_id
     }
 
+    fn local_contact_uri(&self) -> Option<Uri> {
+        self.dialplan
+            .caller_contact
+            .as_ref()
+            .map(|c| c.uri.clone())
+            .or_else(|| self.server.default_contact_uri())
+    }
+
     fn is_webrtc_sdp(sdp: &str) -> bool {
         sdp.contains("a=ice-ufrag")
             || sdp.contains("a=ice-pwd")
@@ -533,10 +541,13 @@ impl ProxyCall {
 
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
         let (state_tx, state_rx) = mpsc::unbounded_channel();
-        let local_contact = self.dialplan.caller_contact.as_ref().map(|c| c.uri.clone());
-        let mut server_dialog =
-            self.dialog_layer
-                .get_or_create_server_invite(tx, state_tx, None, local_contact)?;
+        let local_contact = self.local_contact_uri();
+        let mut server_dialog = self.dialog_layer.get_or_create_server_invite(
+            tx,
+            state_tx,
+            None,
+            local_contact.clone(),
+        )?;
 
         // Extract initial offer SDP
         let initial_request = server_dialog.initial_request();
@@ -744,6 +755,8 @@ impl ProxyCall {
             }
         };
 
+        let local_contact = self.local_contact_uri();
+
         for (idx, target) in targets.iter().enumerate() {
             let (state_tx, mut state_rx) = mpsc::unbounded_channel();
             let ev_tx_c = ev_tx.clone();
@@ -765,12 +778,7 @@ impl ProxyCall {
                 content_type,
                 offer,
                 destination: target.destination.clone(),
-                contact: self
-                    .dialplan
-                    .caller_contact
-                    .as_ref()
-                    .map(|c| c.uri.clone())
-                    .unwrap_or_else(|| caller.clone()),
+                contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
                 credential: target.credential.clone(),
                 headers: target.headers.clone(),
                 ..Default::default()
@@ -956,6 +964,8 @@ impl ProxyCall {
             None
         };
 
+        let local_contact = self.local_contact_uri();
+
         let invite_option = InviteOption {
             caller_display_name: caller_display_name.cloned(),
             callee: target.aor.clone(),
@@ -963,12 +973,7 @@ impl ProxyCall {
             content_type,
             offer,
             destination: target.destination.clone(),
-            contact: self
-                .dialplan
-                .caller_contact
-                .as_ref()
-                .map(|c| c.uri.clone())
-                .unwrap_or_else(|| caller.clone()),
+            contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
             headers: target.headers.clone(),
             ..Default::default()

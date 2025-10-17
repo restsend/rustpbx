@@ -19,7 +19,7 @@
         <nav
             class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
             <template x-for="tab in tabs" :key="tab.id">
-                <button type="button" @click="activeTab = tab.id" class="rounded-md px-3 py-1.5 transition"
+                <button type="button" @click="selectTab(tab.id)" class="rounded-md px-3 py-1.5 transition"
                     :class="activeTab === tab.id ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'">
                     <span x-text="tab.label"></span>
                 </button>
@@ -223,6 +223,333 @@
             </div>
         </section>
 
+        <section x-show="activeTab === 'sip'" x-cloak x-transition.opacity class="space-y-6">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Active SIP dialogs</h2>
+                        <p class="text-xs text-slate-500">Inspect INVITE dialogs currently tracked by the SIP
+                            server.</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button" @click="refreshDialogs" :disabled="dialogsLoading"
+                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M4 4v4h4M16 16v-4h-4M5.172 14.828A6 6 0 0 0 15 10M4.998 10a6 6 0 0 1 9.828-4.828" />
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div class="mt-4 space-y-3">
+                    <template x-if="dialogsError">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                            x-text="dialogsError"></div>
+                    </template>
+
+                    <template x-if="dialogsLoading">
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                            Loading dialogs…
+                        </div>
+                    </template>
+
+                    <template x-if="!dialogsLoading && !dialogsError && dialogs.length">
+                        <div class="space-y-3">
+                            <div class="text-xs text-slate-500">
+                                <span class="font-semibold text-slate-700" x-text="dialogsMeta?.total || 0"></span>
+                                active dialogs · refreshed
+                                <span x-text="formatDateTime(dialogsMeta?.generated_at)"></span>
+                            </div>
+                            <div class="grid gap-3">
+                                <template x-for="item in dialogs" :key="item.id">
+                                    <article class="rounded-lg border border-slate-200 bg-white p-4"
+                                        x-data="{ expand: false }">
+                                        <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                            <div class="space-y-1">
+                                                <div
+                                                    class="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
+                                                    <span class="text-sm text-slate-800" x-text="item.call_id"></span>
+                                                    <span class="rounded-full px-2 py-0.5"
+                                                        :class="dialogRolePill(item.role)" x-text="item.role"></span>
+                                                    <span class="rounded-full px-2 py-0.5"
+                                                        :class="dialogStatePill(item.state)" x-text="item.state"></span>
+                                                    <template x-if="item.state_detail">
+                                                        <span class="text-slate-500" x-text="item.state_detail"></span>
+                                                    </template>
+                                                </div>
+                                                <div class="text-xs text-slate-500">
+                                                    <span class="font-semibold text-slate-700">From:</span>
+                                                    <span x-text="item.from_display"></span>
+                                                </div>
+                                                <div class="text-xs text-slate-500">
+                                                    <span class="font-semibold text-slate-700">To:</span>
+                                                    <span x-text="item.to_display"></span>
+                                                </div>
+                                                <template x-if="item.remote_contact">
+                                                    <div class="text-xs text-slate-500">
+                                                        <span class="font-semibold text-slate-700">Remote
+                                                            contact:</span>
+                                                        <span x-text="item.remote_contact"></span>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                            <div class="flex flex-col items-start gap-2 md:items-end">
+                                                <button type="button" @click="expand = !expand"
+                                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.6"
+                                                        :class="expand ? 'rotate-180 transition' : 'transition'">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M6 8l4 4 4-4" />
+                                                    </svg>
+                                                    <span x-text="expand ? 'Hide SDP' : 'Show SDP'"></span>
+                                                </button>
+                                                <div class="text-[11px] text-slate-400">Dialog ID</div>
+                                                <div class="max-w-xs break-all font-mono text-[11px] text-slate-500"
+                                                    x-text="item.id"></div>
+                                            </div>
+                                        </div>
+                                        <div class="mt-3 space-y-2" x-show="expand" x-transition>
+                                            <template x-if="item.offer">
+                                                <div>
+                                                    <div
+                                                        class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                        Offer
+                                                    </div>
+                                                    <pre class="mt-1 max-h-48 overflow-auto rounded-lg bg-slate-900/90 p-3 text-[11px] leading-tight text-slate-100"
+                                                        x-text="item.offer"></pre>
+                                                </div>
+                                            </template>
+                                            <template x-if="item.answer">
+                                                <div>
+                                                    <div
+                                                        class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                        Answer
+                                                    </div>
+                                                    <pre class="mt-1 max-h-48 overflow-auto rounded-lg bg-slate-900/90 p-3 text-[11px] leading-tight text-slate-100"
+                                                        x-text="item.answer"></pre>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </article>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template x-if="!dialogsLoading && !dialogsError && !dialogs.length">
+                        <div
+                            class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
+                            No active dialogs reported.
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="space-y-1">
+                    <h2 class="text-base font-semibold text-slate-900">Locator registry</h2>
+                    <p class="text-xs text-slate-500">Lookup registration bindings or clear stale records.</p>
+                </div>
+                <form class="mt-4 grid gap-4 md:grid-cols-2" @submit.prevent="performLocatorLookup()">
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">User</span>
+                        <input type="text" x-model.trim="locatorUser"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 1001 or 1001@example.com">
+                    </label>
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">SIP URI</span>
+                        <input type="text" x-model.trim="locatorUri"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sip:1001@example.com">
+                    </label>
+                    <div class="md:col-span-2 flex flex-wrap items-center gap-3">
+                        <button type="submit"
+                            class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                            :disabled="locatorLoading || locatorClearing || !hasLocatorInput">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="m13 13 4 4m-2-7A5 5 0 1 1 4 7a5 5 0 0 1 11 0Z" />
+                            </svg>
+                            Lookup registration
+                        </button>
+                        <button type="button" @click="clearLocator"
+                            class="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:border-rose-300 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            :disabled="locatorClearing || !hasLocatorInput">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M6 6h8m-7 0v8m6-8v8M4 6h12M5 6l1-2h8l1 2m-2 0v9a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V6" />
+                            </svg>
+                            Clear registration
+                        </button>
+                        <button type="button" @click="resetLocator"
+                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-700"
+                            :disabled="locatorLoading || locatorClearing">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M4.5 9.5a5.5 5.5 0 1 1 1.742 4.007M4.5 9.5H2m0 0V6" />
+                            </svg>
+                            Reset
+                        </button>
+                    </div>
+                </form>
+
+                <div class="mt-4 space-y-3">
+                    <template x-if="locatorError">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                            x-text="locatorError"></div>
+                    </template>
+                    <template x-if="locatorClearFeedback">
+                        <div class="rounded-lg px-4 py-3 text-xs font-semibold"
+                            :class="locatorClearFeedback?.variant === 'success' ? 'border border-emerald-200 bg-emerald-50 text-emerald-700' : 'border border-amber-200 bg-amber-50 text-amber-700'"
+                            x-text="locatorClearFeedback?.message"></div>
+                    </template>
+                    <template x-if="locatorLoading">
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                            Loading locator records…
+                        </div>
+                    </template>
+                    <template x-if="locatorResult">
+                        <div class="space-y-3">
+                            <div
+                                class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <div>
+                                        <span class="font-semibold text-slate-700">Bindings:</span>
+                                        <span x-text="locatorResult.total"></span>
+                                    </div>
+                                    <div>
+                                        <span class="font-semibold text-slate-700">Generated:</span>
+                                        <span x-text="formatDateTime(locatorResult.generated_at)"></span>
+                                    </div>
+                                    <div>
+                                        <span class="font-semibold text-slate-700">Query:</span>
+                                        <span x-text="locatorResult.query.uri"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <template x-if="locatorResult.records.length">
+                                <div class="space-y-3">
+                                    <template x-for="record in locatorResult.records" :key="record.binding_key">
+                                        <article class="rounded-lg border border-slate-200 bg-white p-4">
+                                            <div
+                                                class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                                <div class="space-y-1">
+                                                    <div class="font-semibold text-slate-800"
+                                                        x-text="record.binding_key"></div>
+                                                    <div class="text-xs text-slate-500">
+                                                        <span class="font-semibold text-slate-700">AoR:</span>
+                                                        <span x-text="record.aor"></span>
+                                                    </div>
+                                                    <template x-if="record.destination">
+                                                        <div class="text-xs text-slate-500">
+                                                            <span
+                                                                class="font-semibold text-slate-700">Destination:</span>
+                                                            <span x-text="record.destination"></span>
+                                                        </div>
+                                                    </template>
+                                                    <template x-if="record.contact">
+                                                        <div class="text-xs text-slate-500">
+                                                            <span class="font-semibold text-slate-700">Contact:</span>
+                                                            <span x-text="record.contact"></span>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <div class="flex flex-col items-start gap-1 md:items-end">
+                                                    <div class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                        :class="record.supports_webrtc ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
+                                                        <span
+                                                            x-text="record.supports_webrtc ? 'WebRTC capable' : 'SIP only'"></span>
+                                                    </div>
+                                                    <div class="text-[11px] text-slate-400">
+                                                        Expires in <span x-text="record.expires"></span> s
+                                                    </div>
+                                                    <template
+                                                        x-if="record.age_seconds !== null && record.age_seconds !== undefined">
+                                                        <div class="text-[11px] text-slate-400">
+                                                            Age <span
+                                                                x-text="formatDuration(record.age_seconds)"></span>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <div class="mt-3 grid gap-2 text-xs text-slate-500 md:grid-cols-2">
+                                                <template x-if="record.transport">
+                                                    <div>
+                                                        <span class="font-semibold text-slate-700">Transport:</span>
+                                                        <span x-text="record.transport"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.instance_id">
+                                                    <div>
+                                                        <span class="font-semibold text-slate-700">Instance ID:</span>
+                                                        <span x-text="record.instance_id"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.gruu">
+                                                    <div>
+                                                        <span class="font-semibold text-slate-700">GRUU:</span>
+                                                        <span x-text="record.gruu"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.temp_gruu">
+                                                    <div>
+                                                        <span class="font-semibold text-slate-700">Temp GRUU:</span>
+                                                        <span x-text="record.temp_gruu"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.registered_aor">
+                                                    <div>
+                                                        <span class="font-semibold text-slate-700">Registered
+                                                            AoR:</span>
+                                                        <span x-text="record.registered_aor"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.path.length">
+                                                    <div class="md:col-span-2">
+                                                        <span class="font-semibold text-slate-700">Path:</span>
+                                                        <span x-text="record.path.join(' → ')"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.service_route.length">
+                                                    <div class="md:col-span-2">
+                                                        <span class="font-semibold text-slate-700">Service
+                                                            route:</span>
+                                                        <span x-text="record.service_route.join(' → ')"></span>
+                                                    </div>
+                                                </template>
+                                                <template x-if="record.contact_params">
+                                                    <div class="md:col-span-2">
+                                                        <span class="font-semibold text-slate-700">Contact
+                                                            params:</span>
+                                                        <span
+                                                            x-text="formatContactParams(record.contact_params)"></span>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </article>
+                                    </template>
+                                </div>
+                            </template>
+                            <template x-if="!locatorResult.records.length">
+                                <div
+                                    class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
+                                    No registration bindings found.
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </section>
+
         <section x-show="activeTab === 'dialer'" x-cloak x-transition.opacity class="space-y-6">
             <div class="max-w-3xl rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <h2 class="text-base font-semibold text-slate-900">Dial a synthetic call</h2>
@@ -287,13 +614,13 @@
                 </form>
                 <div class="mt-4" x-show="dialResult">
                     <div class="rounded-lg border px-4 py-3 text-xs"
-                        :class="dialResult.status === 'pass' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'">
+                        :class="(dialResult && dialResult.status === 'pass') ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'">
                         <div class="flex items-center justify-between">
                             <span class="font-semibold"
-                                x-text="dialResult.status === 'pass' ? 'Simulation successful' : 'Simulation failed'"></span>
-                            <span x-text="dialResult.timestamp"></span>
+                                x-text="dialResult && dialResult.status === 'pass' ? 'Simulation successful' : 'Simulation failed'"></span>
+                            <span x-text="dialResult ? dialResult.timestamp : ''"></span>
                         </div>
-                        <p class="mt-1" x-text="dialResult.details"></p>
+                        <p class="mt-1" x-text="dialResult ? dialResult.details : ''"></p>
                     </div>
                 </div>
             </div>
@@ -348,7 +675,14 @@
                 this.dial.destination = this.dialer.destination_samples?.[0]?.value || '';
                 this.routingInput = this.routingChecks?.[0]?.input || '';
                 this.routingDirection = this.routingChecks?.[0]?.direction || 'outbound';
+                this.basePath = "{{ base_path | default('/console')|safe }}"
+                this.$watch('activeTab', (value) => {
+                    if (value === 'sip') {
+                        this.ensureDialogsLoaded();
+                    }
+                });
             },
+            basePath: '',
             lastAudit: null,
             trunks: [],
             routingChecks: [],
@@ -364,10 +698,17 @@
             tabs: [
                 { id: 'trunks', label: 'Trunks' },
                 { id: 'routing', label: 'Routing' },
+                { id: 'sip', label: 'SIP State' },
                 { id: 'dialer', label: 'Dialer' },
                 { id: 'history', label: 'History' },
             ],
             activeTab: 'trunks',
+            selectTab(id) {
+                this.activeTab = id;
+                if (id === 'sip') {
+                    this.ensureDialogsLoaded();
+                }
+            },
             get healthyTrunks() {
                 return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
             },
@@ -377,6 +718,23 @@
             get recentCall() {
                 return this.history.find((item) => item.type === 'call') || null;
             },
+            get hasLocatorInput() {
+                return Boolean(
+                    (this.locatorUser && this.locatorUser.trim()) || (this.locatorUri && this.locatorUri.trim())
+                );
+            },
+            dialogs: [],
+            dialogsMeta: null,
+            dialogsLoading: false,
+            dialogsError: null,
+            dialogsFetchedAt: null,
+            locatorUser: '',
+            locatorUri: '',
+            locatorLoading: false,
+            locatorClearing: false,
+            locatorError: null,
+            locatorResult: null,
+            locatorClearFeedback: null,
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'healthy':
@@ -515,6 +873,155 @@
             clearHistory() {
                 this.history = [];
             },
+            ensureDialogsLoaded() {
+                if (this.dialogsFetchedAt || this.dialogsLoading) {
+                    return;
+                }
+                this.fetchDialogs();
+            },
+            buildUrl(path) {
+                const clean = path.startsWith('/') ? path : `/${path}`;
+                return `${this.basePath}${clean}`;
+            },
+            async fetchDialogs(force = false) {
+                if (this.dialogsLoading) {
+                    return;
+                }
+                if (!force && this.dialogsFetchedAt) {
+                    return;
+                }
+                this.dialogsLoading = true;
+                this.dialogsError = null;
+                try {
+                    const response = await fetch(this.buildUrl('/diagnostics/dialogs'), {
+                        credentials: 'same-origin',
+                    });
+                    const data = await response.json().catch(() => null);
+                    if (!response.ok) {
+                        const message = data?.message || `Failed to load dialogs (${response.status})`;
+                        throw new Error(message);
+                    }
+                    this.dialogs = Array.isArray(data?.items) ? data.items : [];
+                    this.dialogsMeta = { total: data?.total || 0, generated_at: data?.generated_at || null };
+                    this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
+                } catch (err) {
+                    this.dialogsError = err?.message || 'Failed to load dialogs.';
+                    this.dialogs = [];
+                    this.dialogsMeta = null;
+                    this.dialogsFetchedAt = null;
+                } finally {
+                    this.dialogsLoading = false;
+                }
+            },
+            refreshDialogs() {
+                this.dialogsFetchedAt = null;
+                this.fetchDialogs(true);
+            },
+            dialogRolePill(role) {
+                const key = (role || '').toLowerCase();
+                if (key === 'server') {
+                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+                if (key === 'client') {
+                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                }
+                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+            },
+            dialogStatePill(state) {
+                const key = (state || '').toLowerCase();
+                if (key === 'confirmed') {
+                    return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                }
+                if (['early', 'trying', 'calling'].includes(key)) {
+                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                }
+                if (['waitack', 'updated', 'notify', 'info', 'options'].includes(key)) {
+                    return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                }
+                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+            },
+            async performLocatorLookup(options = {}) {
+                const preserveClearFeedback = Boolean(options?.preserveClearFeedback);
+                if (!this.hasLocatorInput) {
+                    this.locatorError = 'Provide a user or SIP URI to continue.';
+                    return false;
+                }
+                this.locatorError = null;
+                if (!preserveClearFeedback) {
+                    this.locatorClearFeedback = null;
+                }
+                this.locatorLoading = true;
+                try {
+                    const response = await fetch(this.buildUrl('/diagnostics/locator/lookup'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            user: this.locatorUser || null,
+                            uri: this.locatorUri || null,
+                        }),
+                    });
+                    const data = await response.json().catch(() => null);
+                    if (!response.ok) {
+                        const message = data?.message || `Lookup failed (${response.status})`;
+                        throw new Error(message);
+                    }
+                    this.locatorResult = data;
+                    return true;
+                } catch (err) {
+                    this.locatorError = err?.message || 'Lookup failed.';
+                    this.locatorResult = null;
+                    return false;
+                } finally {
+                    this.locatorLoading = false;
+                }
+            },
+            async clearLocator() {
+                if (!this.hasLocatorInput) {
+                    this.locatorError = 'Provide a user or SIP URI before clearing.';
+                    return;
+                }
+                this.locatorError = null;
+                this.locatorClearing = true;
+                try {
+                    const response = await fetch(this.buildUrl('/diagnostics/locator/clear'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            user: this.locatorUser || null,
+                            uri: this.locatorUri || null,
+                        }),
+                    });
+                    const data = await response.json().catch(() => null);
+                    if (!response.ok) {
+                        const message = data?.message || `Clear failed (${response.status})`;
+                        throw new Error(message);
+                    }
+                    const removed = Boolean(data?.removed);
+                    const remaining = typeof data?.remaining === 'number' ? data.remaining : null;
+                    this.locatorClearFeedback = {
+                        message: removed
+                            ? remaining
+                                ? `Cleared registration; ${remaining} binding(s) remain.`
+                                : 'Cleared registration.'
+                            : 'No registration matched the request.',
+                        variant: removed ? 'success' : 'warning',
+                    };
+                    await this.performLocatorLookup({ preserveClearFeedback: true });
+                } catch (err) {
+                    this.locatorError = err?.message || 'Clear failed.';
+                } finally {
+                    this.locatorClearing = false;
+                }
+            },
+            resetLocator() {
+                this.locatorUser = '';
+                this.locatorUri = '';
+                this.locatorResult = null;
+                this.locatorError = null;
+                this.locatorClearFeedback = null;
+            },
             historyPill(kind) {
                 const key = (kind || '').toLowerCase();
                 if (key === 'trunk') {
@@ -553,6 +1060,33 @@
                 } catch (err) {
                     return value;
                 }
+            },
+            formatDuration(value) {
+                if (value === null || value === undefined) {
+                    return '—';
+                }
+                const seconds = Number(value);
+                if (!Number.isFinite(seconds)) {
+                    return '—';
+                }
+                if (seconds >= 3600) {
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    return `${hours}h ${minutes}m`;
+                }
+                if (seconds >= 60) {
+                    const minutes = Math.floor(seconds / 60);
+                    const secs = Math.floor(seconds % 60);
+                    return `${minutes}m ${secs}s`;
+                }
+                return `${Math.floor(seconds)}s`;
+            },
+            formatContactParams(params) {
+                if (!params || typeof params !== 'object') {
+                    return '—';
+                }
+                const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
+                return entries.length ? entries.join(', ') : '—';
             },
         }));
     });

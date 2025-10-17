@@ -137,7 +137,16 @@ impl Locator for DbLocator {
         // Default implementation for standard cases:
         let aor = location.aor.to_string();
         let expires = location.expires as i64;
-        let realm_value = realm.unwrap_or_default().to_string();
+        let username_key = username.trim().to_ascii_lowercase();
+        if username_key.is_empty() {
+            return Err(anyhow::anyhow!("Cannot register location without username"));
+        }
+
+        let realm_key = realm
+            .map(|r| r.trim())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_ascii_lowercase())
+            .unwrap_or_default();
         let destination = match &location.destination {
             Some(dest) => dest,
             None => {
@@ -148,23 +157,33 @@ impl Locator for DbLocator {
         };
         // Extract SipAddr components
         let SipAddr { r#type, addr } = destination;
-        let (host, transport) = {
-            let transport = match r#type {
-                Some(t) => t.to_string(),
-                None => "UDP".to_string(), // Default to UDP if not specified
-            };
-            (addr.to_string(), transport)
-        };
+        let transport = location
+            .transport
+            .or_else(|| r#type.clone())
+            .unwrap_or(rsip::transport::Transport::Udp);
+        let host = addr.to_string();
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
+        if expires <= 0 {
+            Entity::delete_many()
+                .filter(Column::Username.eq(&username_key))
+                .filter(Column::Realm.eq(&realm_key))
+                .filter(Column::Aor.eq(&aor))
+                .exec(&self.db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Database error on register delete: {}", e))?;
+            return Ok(());
+        }
+
         // Check if record exists
         let existing = Entity::find()
-            .filter(Column::Username.eq(username))
-            .filter(Column::Realm.eq(&realm_value))
+            .filter(Column::Username.eq(&username_key))
+            .filter(Column::Realm.eq(&realm_key))
+            .filter(Column::Aor.eq(&aor))
             .one(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on register lookup: {}", e))?;
@@ -174,11 +193,11 @@ impl Locator for DbLocator {
                 // Update existing record
                 let mut active_model: ActiveModel = model.into();
                 active_model.expires = Set(expires);
-                active_model.username = Set(username.to_string());
-                active_model.realm = Set(realm_value);
+                active_model.username = Set(username_key.clone());
+                active_model.realm = Set(realm_key.clone());
                 active_model.destination = Set(host);
                 active_model.aor = Set(aor);
-                active_model.transport = Set(transport);
+                active_model.transport = Set(transport.to_string());
                 active_model.last_modified = Set(now);
                 active_model.updated_at = Set(chrono::Utc::now());
                 active_model.supports_webrtc = Set(location.supports_webrtc);
@@ -196,10 +215,10 @@ impl Locator for DbLocator {
                 let mut active_model = ActiveModel::new();
                 active_model.aor = Set(aor);
                 active_model.expires = Set(expires);
-                active_model.username = Set(username.to_string());
-                active_model.realm = Set(realm_value);
+                active_model.username = Set(username_key);
+                active_model.realm = Set(realm_key);
                 active_model.destination = Set(host);
-                active_model.transport = Set(transport);
+                active_model.transport = Set(transport.to_string());
                 active_model.last_modified = Set(now);
                 active_model.created_at = Set(now_dt);
                 active_model.updated_at = Set(now_dt);
@@ -218,11 +237,20 @@ impl Locator for DbLocator {
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         // Standard implementation for other cases
-        let realm_value = realm.unwrap_or_default();
+        let username_key = username.trim().to_ascii_lowercase();
+        if username_key.is_empty() {
+            return Ok(());
+        }
+
+        let realm_key = realm
+            .map(|r| r.trim())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_ascii_lowercase())
+            .unwrap_or_default();
 
         Entity::delete_many()
-            .filter(Column::Username.eq(username))
-            .filter(Column::Realm.eq(realm_value))
+            .filter(Column::Username.eq(username_key))
+            .filter(Column::Realm.eq(realm_key))
             .exec(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on unregister: {}", e))?;
@@ -231,21 +259,55 @@ impl Locator for DbLocator {
     }
 
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
-        // Default implementation for standard cases
-        let realm = uri.host().to_string();
-        let username = uri.user().unwrap_or_else(|| "");
-        let models = Entity::find()
-            .filter(Column::Username.eq(username))
-            .filter(Column::Realm.eq(realm))
+        let now_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let target_aor = uri.to_string();
+        let mut models = Entity::find()
+            .filter(Column::Aor.eq(&target_aor))
             .all(&self.db)
             .await
-            .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
+
+        if models.is_empty() {
+            let realm_raw = uri.host().to_string();
+            let realm_key = realm_raw.trim().to_ascii_lowercase();
+            let username_raw = uri.user().unwrap_or_else(|| "");
+            let username_trimmed = username_raw.trim();
+            let username_key = username_trimmed.to_ascii_lowercase();
+
+            if !username_key.is_empty() {
+                models = Entity::find()
+                    .filter(Column::Username.eq(&username_key))
+                    .filter(Column::Realm.eq(&realm_key))
+                    .all(&self.db)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
+
+                if models.is_empty() {
+                    models = Entity::find()
+                        .filter(Column::Username.eq(&username_key))
+                        .all(&self.db)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Database error on username lookup: {}", e))?;
+                }
+            }
+        }
 
         if models.is_empty() {
             return Ok(vec![]);
         }
+
         let mut locations = Vec::new();
         for model in models {
+            if model.expires > 0 {
+                let elapsed = now_epoch - model.last_modified;
+                if elapsed >= model.expires {
+                    continue;
+                }
+            }
             let aor = rsip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
             // Parse transport from string
@@ -273,6 +335,8 @@ impl Locator for DbLocator {
                 destination: Some(destination),
                 last_modified: None,
                 supports_webrtc: model.supports_webrtc,
+                transport: Some(transport),
+                registered_aor: Some(uri.clone()),
                 ..Default::default()
             });
         }

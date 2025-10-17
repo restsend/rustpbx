@@ -1,7 +1,32 @@
-use crate::console::{ConsoleState, middleware::AuthRequired};
-use axum::{extract::State, response::Response};
+use crate::{
+    call::Location,
+    console::{ConsoleState, handlers::bad_request, middleware::AuthRequired},
+};
+use axum::{
+    Router,
+    extract::{Json, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use chrono::Utc;
+use rsip::Uri;
+use rsipstack::dialog::{
+    client_dialog::ClientInviteDialog,
+    dialog::{Dialog, DialogState},
+    server_dialog::ServerInviteDialog,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
+
+pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new()
+        .route("/diagnostics", get(page_diagnostics))
+        .route("/diagnostics/dialogs", get(list_dialogs))
+        .route("/diagnostics/locator/lookup", post(locator_lookup))
+        .route("/diagnostics/locator/clear", post(locator_clear))
+}
 
 pub async fn page_diagnostics(
     State(state): State<Arc<ConsoleState>>,
@@ -126,4 +151,436 @@ pub async fn page_diagnostics(
             }
         }),
     )
+}
+
+pub async fn list_dialogs(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> impl IntoResponse {
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+
+    let dialog_layer = server.dialog_layer.clone();
+    let mut items = Vec::new();
+    for id in dialog_layer.all_dialog_ids() {
+        if let Some(dialog) = dialog_layer.get_dialog(&id) {
+            if let Some(summary) = summarize_dialog(&dialog) {
+                items.push(summary);
+            }
+        }
+    }
+
+    Json(DialogListResponse {
+        generated_at: Utc::now().to_rfc3339(),
+        total: items.len(),
+        items,
+    })
+    .into_response()
+}
+
+async fn locator_lookup(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<LocatorPayload>,
+) -> impl IntoResponse {
+    if payload
+        .user
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+        && payload
+            .uri
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return bad_request("user or uri is required");
+    }
+
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+    let locator = server.locator.clone();
+
+    let uri = match resolve_target_uri(&payload) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+
+    let records = match locator.lookup(&uri).await {
+        Ok(items) => items,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("locator lookup failed: {}", err) })),
+            )
+                .into_response();
+        }
+    };
+
+    let response = LocatorLookupResponse {
+        generated_at: Utc::now().to_rfc3339(),
+        total: records.len(),
+        query: LocatorQueryEcho {
+            user: payload.user.clone().filter(|s| !s.trim().is_empty()),
+            uri: uri.to_string(),
+        },
+        records: records.into_iter().map(location_to_view).collect(),
+    };
+
+    Json(response).into_response()
+}
+
+async fn locator_clear(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<LocatorPayload>,
+) -> impl IntoResponse {
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+
+    let locator = server.locator.clone();
+    let uri = match resolve_target_uri(&payload) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+
+    let Some((username, realm)) = extract_user_realm(&payload, &uri) else {
+        return bad_request("user is required to clear registration");
+    };
+
+    let before = locator.lookup(&uri).await.unwrap_or_default();
+    if let Err(err) = locator.unregister(&username, realm.as_deref()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "message": format!("locator clear failed: {}", err) })),
+        )
+            .into_response();
+    }
+    let after = locator.lookup(&uri).await.unwrap_or_default();
+
+    Json(LocatorClearResponse {
+        removed: !before.is_empty(),
+        remaining: after.len(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct LocatorPayload {
+    user: Option<String>,
+    uri: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DialogListResponse {
+    generated_at: String,
+    total: usize,
+    items: Vec<DialogSummary>,
+}
+
+#[derive(Serialize)]
+struct DialogSummary {
+    id: String,
+    call_id: String,
+    from_tag: String,
+    to_tag: String,
+    role: String,
+    state: String,
+    state_detail: Option<String>,
+    from_display: String,
+    to_display: String,
+    remote_contact: Option<String>,
+    offer: Option<String>,
+    answer: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LocatorLookupResponse {
+    generated_at: String,
+    total: usize,
+    query: LocatorQueryEcho,
+    records: Vec<LocatorRecordView>,
+}
+
+#[derive(Serialize)]
+struct LocatorQueryEcho {
+    user: Option<String>,
+    uri: String,
+}
+
+#[derive(Serialize)]
+struct LocatorRecordView {
+    binding_key: String,
+    aor: String,
+    destination: Option<String>,
+    expires: u32,
+    supports_webrtc: bool,
+    contact: Option<String>,
+    registered_aor: Option<String>,
+    gruu: Option<String>,
+    temp_gruu: Option<String>,
+    instance_id: Option<String>,
+    transport: Option<String>,
+    path: Vec<String>,
+    service_route: Vec<String>,
+    contact_params: Option<std::collections::HashMap<String, String>>,
+    age_seconds: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct LocatorClearResponse {
+    removed: bool,
+    remaining: usize,
+}
+
+struct DialogStateSnapshot {
+    label: String,
+    detail: Option<String>,
+    answer: Option<String>,
+}
+
+fn summarize_dialog(dialog: &Dialog) -> Option<DialogSummary> {
+    let id = dialog.id();
+    let from_display = dialog.from().to_string();
+    let to_display = dialog.to().to_string();
+    let remote_contact = dialog.remote_contact().map(|uri| uri.to_string());
+
+    match dialog {
+        Dialog::ServerInvite(server) => {
+            summarize_server_dialog(server, id, from_display, to_display, remote_contact)
+        }
+        Dialog::ClientInvite(client) => {
+            summarize_client_dialog(client, id, from_display, to_display, remote_contact)
+        }
+    }
+}
+
+fn summarize_server_dialog(
+    server: &ServerInviteDialog,
+    id: rsipstack::dialog::DialogId,
+    from_display: String,
+    to_display: String,
+    remote_contact: Option<String>,
+) -> Option<DialogSummary> {
+    let state = server.state();
+    let snapshot = summarize_state(&state)?;
+    let offer = decode_body(server.initial_request().body.as_slice());
+
+    Some(DialogSummary {
+        id: id.to_string(),
+        call_id: id.call_id.clone(),
+        from_tag: id.from_tag.clone(),
+        to_tag: id.to_tag.clone(),
+        role: "server".to_string(),
+        state: snapshot.label,
+        state_detail: snapshot.detail,
+        from_display,
+        to_display,
+        remote_contact,
+        offer,
+        answer: snapshot.answer,
+    })
+}
+
+fn summarize_client_dialog(
+    client: &ClientInviteDialog,
+    id: rsipstack::dialog::DialogId,
+    from_display: String,
+    to_display: String,
+    remote_contact: Option<String>,
+) -> Option<DialogSummary> {
+    let state = client.state();
+    let snapshot = summarize_state(&state)?;
+
+    Some(DialogSummary {
+        id: id.to_string(),
+        call_id: id.call_id.clone(),
+        from_tag: id.from_tag.clone(),
+        to_tag: id.to_tag.clone(),
+        role: "client".to_string(),
+        state: snapshot.label,
+        state_detail: snapshot.detail,
+        from_display,
+        to_display,
+        remote_contact,
+        offer: None,
+        answer: snapshot.answer,
+    })
+}
+
+fn summarize_state(state: &DialogState) -> Option<DialogStateSnapshot> {
+    match state {
+        DialogState::Calling(_) => Some(DialogStateSnapshot {
+            label: "Calling".to_string(),
+            detail: None,
+            answer: None,
+        }),
+        DialogState::Trying(_) => Some(DialogStateSnapshot {
+            label: "Trying".to_string(),
+            detail: None,
+            answer: None,
+        }),
+        DialogState::Early(_, resp) => Some(DialogStateSnapshot {
+            label: "Early".to_string(),
+            detail: Some(resp.status_code.to_string()),
+            answer: decode_body(resp.body()),
+        }),
+        DialogState::WaitAck(_, resp) => Some(DialogStateSnapshot {
+            label: "WaitAck".to_string(),
+            detail: Some(resp.status_code.to_string()),
+            answer: decode_body(resp.body()),
+        }),
+        DialogState::Confirmed(_, resp) => Some(DialogStateSnapshot {
+            label: "Confirmed".to_string(),
+            detail: Some(resp.status_code.to_string()),
+            answer: decode_body(resp.body()),
+        }),
+        DialogState::Updated(_, req) => Some(DialogStateSnapshot {
+            label: "Updated".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Notify(_, req) => Some(DialogStateSnapshot {
+            label: "Notify".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Info(_, req) => Some(DialogStateSnapshot {
+            label: "Info".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Options(_, req) => Some(DialogStateSnapshot {
+            label: "Options".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Terminated(_, _) => None,
+    }
+}
+
+fn decode_body(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let text: Cow<'_, str> = String::from_utf8_lossy(body);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(truncate(trimmed, 4096))
+    }
+}
+
+fn truncate(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit).collect::<String>() + "…"
+}
+
+fn resolve_target_uri(payload: &LocatorPayload) -> Result<Uri, Response> {
+    if let Some(uri) = payload.uri.as_ref().and_then(|s| normalize_non_empty(s)) {
+        return parse_uri(&uri);
+    }
+    if let Some(user) = payload.user.as_ref().and_then(|s| normalize_non_empty(s)) {
+        let formatted = if user.contains('@') {
+            format!("sip:{}", user)
+        } else {
+            format!("sip:{}@localhost", user)
+        };
+        return parse_uri(&formatted);
+    }
+    Err(bad_request("user or uri is required"))
+}
+
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_uri(value: &str) -> Result<Uri, Response> {
+    Uri::try_from(value).map_err(|err| bad_request(&format!("invalid uri: {}", err)))
+}
+
+fn extract_user_realm(payload: &LocatorPayload, uri: &Uri) -> Option<(String, Option<String>)> {
+    if let Some(user_raw) = payload.user.as_ref().and_then(|s| normalize_non_empty(s)) {
+        let (user, realm) = split_user_realm(&user_raw);
+        if realm.is_some() {
+            return Some((user, realm));
+        }
+        let realm = Some(uri.host().to_string());
+        return Some((user, realm));
+    }
+
+    let username = uri.user()?.to_string();
+    if username.trim().is_empty() {
+        return None;
+    }
+    let realm = Some(uri.host().to_string());
+    Some((username, realm))
+}
+
+fn split_user_realm(input: &str) -> (String, Option<String>) {
+    if let Some((user, realm)) = input.split_once('@') {
+        (user.to_string(), Some(realm.to_string()))
+    } else {
+        (input.to_string(), None)
+    }
+}
+
+fn location_to_view(location: Location) -> LocatorRecordView {
+    let path = location
+        .path
+        .as_ref()
+        .into_iter()
+        .flat_map(|vec| vec.iter())
+        .map(|uri| uri.to_string())
+        .collect::<Vec<_>>();
+    let service_route = location
+        .service_route
+        .as_ref()
+        .into_iter()
+        .flat_map(|vec| vec.iter())
+        .map(|uri| uri.to_string())
+        .collect::<Vec<_>>();
+
+    LocatorRecordView {
+        binding_key: location.binding_key(),
+        aor: location.aor.to_string(),
+        destination: location.destination.map(|dest| dest.to_string()),
+        expires: location.expires,
+        supports_webrtc: location.supports_webrtc,
+        contact: location.contact_raw,
+        registered_aor: location.registered_aor.map(|uri| uri.to_string()),
+        gruu: location.gruu,
+        temp_gruu: location.temp_gruu,
+        instance_id: location.instance_id,
+        transport: location.transport.map(|t| t.to_string()),
+        path,
+        service_route,
+        contact_params: location.contact_params,
+        age_seconds: location
+            .last_modified
+            .map(|instant| instant.elapsed().as_secs()),
+    }
 }

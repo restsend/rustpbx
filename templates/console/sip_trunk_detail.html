@@ -75,40 +75,66 @@ default('RustPBX') }}{% endblock %}
         </template>
 
         <form class="space-y-6" @submit.prevent="submit">
-            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
-                <nav class="flex flex-wrap gap-2 text-sm font-medium">
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'general' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+                <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                    role="tablist" aria-label="SIP trunk configuration tabs">
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'general' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'general'" aria-controls="sip-trunk-tab-general"
                         @click="activeTab = 'general'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5V21h15V10.5" />
-                        </svg>
-                        General
+                        <div class="flex items-center gap-2">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5V21h15V10.5" />
+                            </svg>
+                            <div>
+                                <span class="text-sm">General</span>
+                                <span class="block text-[11px] font-normal text-slate-400">Identity, status,
+                                    limits</span>
+                            </div>
+                        </div>
                     </button>
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'access' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'access' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'access'" aria-controls="sip-trunk-tab-access"
                         @click="activeTab = 'access'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 5v8l-7 5-7-5V8z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 12l7-4" />
-                        </svg>
-                        Access
+                        <div class="flex items-center gap-2">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 3l7 5v8l-7 5-7-5V8z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 12l7-4" />
+                            </svg>
+                            <div>
+                                <span class="text-sm">Access</span>
+                                <span class="block text-[11px] font-normal text-slate-400">Credentials, routing,
+                                    ACLs</span>
+                            </div>
+                        </div>
                     </button>
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'metadata' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'metadata' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'metadata'" aria-controls="sip-trunk-tab-metadata"
                         @click="activeTab = 'metadata'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 5h16v4H4z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h16v4H4z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 17h10v4H4z" />
-                        </svg>
-                        Metadata
+                        <div class="flex items-center gap-2">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 5h16v4H4z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h16v4H4z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 17h10v4H4z" />
+                            </svg>
+                            <div>
+                                <span class="text-sm">Metadata</span>
+                                <span class="block text-[11px] font-normal text-slate-400">Snapshots, analytics,
+                                    tags</span>
+                            </div>
+                        </div>
                     </button>
                 </nav>
             </div>
 
-            <div class="space-y-6" x-show="activeTab === 'general'" x-transition.opacity x-cloak>
+            <div class="space-y-6" x-show="activeTab === 'general'" x-transition.opacity x-cloak
+                id="sip-trunk-tab-general" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-sm font-semibold text-slate-900">General</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -220,7 +246,8 @@ default('RustPBX') }}{% endblock %}
                 </section>
             </div>
 
-            <div class="space-y-6" x-show="activeTab === 'access'" x-transition.opacity x-cloak>
+            <div class="space-y-6" x-show="activeTab === 'access'" x-transition.opacity x-cloak
+                id="sip-trunk-tab-access" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-sm font-semibold text-slate-900">Authentication & routing</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -273,7 +300,8 @@ default('RustPBX') }}{% endblock %}
                 </section>
             </div>
 
-            <div class="space-y-6" x-show="activeTab === 'metadata'" x-transition.opacity x-cloak>
+            <div class="space-y-6" x-show="activeTab === 'metadata'" x-transition.opacity x-cloak
+                id="sip-trunk-tab-metadata" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-sm font-semibold text-slate-900">Metadata (optional)</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">

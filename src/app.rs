@@ -233,6 +233,15 @@ impl AppStateBuilder {
             }
         };
 
+        #[cfg(feature = "console")]
+        {
+            if let Some(console_state) = &console_state {
+                if let Some(sip_server) = &sip_server {
+                    console_state.set_sip_server(Some(sip_server.get_inner()));
+                }
+            }
+        }
+
         let app_state = Arc::new(AppStateInner {
             config,
             useragent,

@@ -16,6 +16,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
+use rsip::{Auth, Param, Transport};
 use rsipstack::{
     EndpointBuilder,
     dialog::dialog_layer::DialogLayer,
@@ -541,6 +542,26 @@ impl Drop for SipServerInner {
 }
 
 impl SipServerInner {
+    pub fn default_contact_uri(&self) -> Option<rsip::Uri> {
+        let addr = self.endpoint.get_addrs().first()?.clone();
+        let mut params = Vec::new();
+        if let Some(transport) = addr.r#type {
+            if !matches!(transport, Transport::Udp) {
+                params.push(Param::Transport(transport));
+            }
+        }
+        Some(rsip::Uri {
+            scheme: addr.r#type.map(|t| t.sip_scheme()),
+            auth: Some(Auth {
+                user: "rustpbx".to_string(),
+                password: None,
+            }),
+            host_with_port: addr.addr,
+            params,
+            ..Default::default()
+        })
+    }
+
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
         match callee_realm {
             "localhost" | "127.0.0.1" | "::1" => true,

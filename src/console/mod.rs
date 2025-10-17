@@ -1,11 +1,12 @@
 use crate::config::ConsoleConfig;
 use crate::console::middleware::RenderTemplate;
+use crate::proxy::server::SipServerRef;
 use anyhow::Result;
 use axum::response::{IntoResponse, Response};
 use minijinja::{Environment, path_loader};
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::debug;
 
 pub mod auth;
@@ -18,6 +19,7 @@ pub struct ConsoleState {
     db: DatabaseConnection,
     session_key: Arc<Vec<u8>>,
     base_path: String,
+    sip_server: Arc<RwLock<Option<SipServerRef>>>,
 }
 
 impl ConsoleState {
@@ -35,6 +37,7 @@ impl ConsoleState {
             db,
             session_key,
             base_path,
+            sip_server: Arc::new(RwLock::new(None)),
         }))
     }
 
@@ -99,6 +102,16 @@ impl ConsoleState {
 
     pub fn db(&self) -> &DatabaseConnection {
         &self.db
+    }
+
+    pub fn set_sip_server(&self, server: Option<SipServerRef>) {
+        if let Ok(mut slot) = self.sip_server.write() {
+            *slot = server;
+        }
+    }
+
+    pub fn sip_server(&self) -> Option<SipServerRef> {
+        self.sip_server.read().ok().and_then(|guard| guard.clone())
     }
 
     pub fn url_for(&self, suffix: &str) -> String {

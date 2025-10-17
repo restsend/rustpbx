@@ -45,7 +45,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(setting::urls())
         .merge(routing::urls())
         .merge(call_record::urls())
-        .route("/diagnostics", get(self::diagnostics::page_diagnostics));
+        .merge(diagnostics::urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

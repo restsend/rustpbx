@@ -4,7 +4,9 @@
 <div class="p-6">
     <div class="mx-auto max-w-7xl space-y-6" x-data='callRecordsConsole({
             basePath: {{ (base_path | default("/console")) | tojson }},
-            filters: {{ filters | default({}) | tojson }}
+            filter_options: {{ filter_options | default({}) | tojson }},
+            list_url: {{ list_url | default("/console/call-records") | tojson }},
+            page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }}
         })' x-init="init()">
         <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="space-y-1">
@@ -210,6 +212,20 @@
                 </div>
             </template>
 
+            <template x-if="error">
+                <div class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                    x-text="error"></div>
+            </template>
+
+            <div class="mt-4 flex items-center gap-2 text-xs text-slate-500" x-show="loading">
+                <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"
+                        fill="none"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                </svg>
+                <span>Loading records…</span>
+            </div>
+
             <template x-if="!filteredRecords.length">
                 <div
                     class="mt-8 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-200 py-16 text-center text-sm text-slate-400">
@@ -392,10 +408,173 @@
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordsConsole', (payload) => ({
+            basePath: '/console',
+            listEndpoint: '/console/call-records',
+            records: [],
+            summary: {
+                total: 0,
+                answered: 0,
+                missed: 0,
+                failed: 0,
+                transcribed: 0,
+                avg_duration: 0,
+                total_minutes: 0,
+                unique_dids: 0,
+            },
+            filterOptions: {
+                status: ['any'],
+                direction: ['any'],
+                departments: [],
+                sip_trunks: [],
+                tags: [],
+            },
+            search: '',
+            statusFilter: 'any',
+            directionFilter: 'any',
+            dateFrom: '',
+            dateTo: '',
+            onlyTranscribed: false,
+            selectedDepartments: [],
+            selectedSipTrunks: [],
+            selectedTags: [],
+            exportedAt: null,
+            loading: false,
+            error: null,
+            pageSizeOptions: [10, 25, 50],
+            pageSize: 10,
+            currentPage: 1,
+            totalPages: 1,
+            totalItems: 0,
+            debounceTimer: null,
+            _sync: {
+                filters: false,
+                pageSize: false,
+            },
+            _activeRequest: null,
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
-                this.records = Array.isArray(data.records) ? data.records : [];
-                this.summary = Object.assign({
+
+                if (typeof data.basePath === 'string' && data.basePath) {
+                    this.basePath = data.basePath;
+                }
+
+                if (typeof data.list_url === 'string' && data.list_url) {
+                    this.listEndpoint = data.list_url;
+                } else {
+                    const normalizedBase = this.basePath === '/'
+                        ? ''
+                        : (this.basePath.endsWith('/')
+                            ? this.basePath.slice(0, -1)
+                            : this.basePath);
+                    this.listEndpoint = `${normalizedBase}/call-records` || '/call-records';
+                }
+                if (!this.listEndpoint.startsWith('/')) {
+                    this.listEndpoint = `/${this.listEndpoint}`;
+                }
+
+                const options = (data.filter_options && typeof data.filter_options === 'object')
+                    ? data.filter_options
+                    : {};
+                this.filterOptions = Object.assign({
+                    status: ['any'],
+                    direction: ['any'],
+                    departments: [],
+                    sip_trunks: [],
+                    tags: [],
+                }, options || {});
+                this.filterOptions.status = Array.isArray(this.filterOptions.status)
+                    ? this.filterOptions.status
+                    : ['any'];
+                this.filterOptions.direction = Array.isArray(this.filterOptions.direction)
+                    ? this.filterOptions.direction
+                    : ['any'];
+                this.filterOptions.departments = Array.isArray(this.filterOptions.departments)
+                    ? this.filterOptions.departments
+                    : [];
+                this.filterOptions.sip_trunks = Array.isArray(this.filterOptions.sip_trunks)
+                    ? this.filterOptions.sip_trunks
+                    : [];
+                this.filterOptions.tags = Array.isArray(this.filterOptions.tags)
+                    ? this.filterOptions.tags
+                    : [];
+
+                if (Array.isArray(data.page_size_options) && data.page_size_options.length) {
+                    const normalized = data.page_size_options
+                        .map((value) => Number(value))
+                        .filter((value) => Number.isFinite(value) && value > 0);
+                    if (normalized.length) {
+                        this.pageSizeOptions = normalized;
+                    }
+                }
+
+                const initialPerPage = Number(data.initial_per_page);
+                if (Number.isFinite(initialPerPage) && initialPerPage > 0) {
+                    this.pageSize = initialPerPage;
+                } else if (this.pageSizeOptions.length) {
+                    this.pageSize = this.pageSizeOptions[0];
+                }
+
+                if (!this.pageSizeOptions.includes(this.pageSize)) {
+                    this.pageSizeOptions = [...this.pageSizeOptions, this.pageSize]
+                        .filter((value, index, array) => array.indexOf(value) === index)
+                        .sort((a, b) => a - b);
+                }
+
+                if (Array.isArray(data.records) && data.records.length) {
+                    this.records = data.records;
+                }
+
+                this.summary = this.normalizeSummary(data.summary);
+
+                const totalItemsRaw = Number(data.total_items);
+                if (Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0) {
+                    this.totalItems = totalItemsRaw;
+                }
+
+                const totalPagesRaw = Number(data.total_pages);
+                if (Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1) {
+                    this.totalPages = totalPagesRaw;
+                }
+
+                const currentPageRaw = Number(data.page);
+                if (Number.isFinite(currentPageRaw) && currentPageRaw >= 1) {
+                    this.currentPage = currentPageRaw;
+                }
+
+                const scheduleWatcher = () => {
+                    if (this._sync.filters) return;
+                    this.scheduleFetch();
+                };
+                const immediateWatcher = () => {
+                    if (this._sync.filters) return;
+                    this.applyFilters();
+                };
+
+                this.$watch('search', scheduleWatcher);
+                this.$watch('statusFilter', immediateWatcher);
+                this.$watch('directionFilter', immediateWatcher);
+                this.$watch('dateFrom', immediateWatcher);
+                this.$watch('dateTo', immediateWatcher);
+                this.$watch('onlyTranscribed', immediateWatcher);
+                this.$watch('selectedDepartments', immediateWatcher);
+                this.$watch('selectedSipTrunks', immediateWatcher);
+                this.$watch('selectedTags', immediateWatcher);
+                this.$watch('pageSize', (value, oldValue) => {
+                    if (this._sync.pageSize) {
+                        return;
+                    }
+                    if (!Number.isFinite(value) || value <= 0 || value === oldValue) {
+                        return;
+                    }
+                    this.applyPageSize(value);
+                });
+
+                if (!Array.isArray(data.records) || !data.records.length) {
+                    this.fetchRecords({ page: this.currentPage });
+                }
+            },
+            normalizeSummary(summary) {
+                const defaults = {
                     total: 0,
                     answered: 0,
                     missed: 0,
@@ -404,38 +583,313 @@
                     avg_duration: 0,
                     total_minutes: 0,
                     unique_dids: 0,
-                }, data.summary || {});
-                this.filterOptions = Object.assign({ status: ['any'], direction: ['any'] }, data.filter_options || {});
-                const resetPagination = () => this.resetPage();
-                this.$watch('search', resetPagination);
-                this.$watch('statusFilter', resetPagination);
-                this.$watch('directionFilter', resetPagination);
-                this.$watch('dateFrom', resetPagination);
-                this.$watch('dateTo', resetPagination);
-                this.$watch('onlyTranscribed', resetPagination);
-                this.$watch('pageSize', () => this.setPage(1));
+                };
+                if (!summary || typeof summary !== 'object') {
+                    return defaults;
+                }
+                return Object.assign({}, defaults, summary);
             },
-            records: [],
-            summary: {},
-            filterOptions: { status: ['any'], direction: ['any'] },
-            search: '',
-            statusFilter: 'any',
-            directionFilter: 'any',
-            dateFrom: '',
-            dateTo: '',
-            onlyTranscribed: false,
-            exportedAt: null,
-            pageSizeOptions: [10, 25, 50],
-            pageSize: 10,
-            currentPage: 1,
+            scheduleFetch() {
+                if (this.debounceTimer) {
+                    clearTimeout(this.debounceTimer);
+                }
+                this.debounceTimer = setTimeout(() => {
+                    this.debounceTimer = null;
+                    this.currentPage = 1;
+                    this.fetchRecords({ page: 1 });
+                }, 300);
+            },
+            applyFilters() {
+                this.currentPage = 1;
+                this.fetchRecords({ page: 1 });
+            },
+            applyPageSize(size) {
+                const perPage = Number(size);
+                if (!Number.isFinite(perPage) || perPage <= 0) {
+                    return;
+                }
+                this.currentPage = 1;
+                this.fetchRecords({ page: 1, per_page: perPage });
+            },
+            buildRequestPayload(overrides = {}) {
+                const filters = {};
+                const query = (this.search || '').trim();
+                if (query) {
+                    filters.q = query;
+                }
+
+                const status = (this.statusFilter || '').toLowerCase();
+                if (status && status !== 'any') {
+                    filters.status = status;
+                }
+
+                const direction = (this.directionFilter || '').toLowerCase();
+                if (direction && direction !== 'any') {
+                    filters.direction = direction;
+                }
+
+                if (this.dateFrom) {
+                    filters.date_from = this.dateFrom;
+                }
+
+                if (this.dateTo) {
+                    filters.date_to = this.dateTo;
+                }
+
+                if (this.onlyTranscribed) {
+                    filters.only_transcribed = true;
+                }
+
+                const deptIds = (Array.isArray(this.selectedDepartments) ? this.selectedDepartments : [])
+                    .map((value) => parseInt(value, 10))
+                    .filter((value) => Number.isInteger(value));
+                if (deptIds.length) {
+                    filters.department_ids = deptIds;
+                }
+
+                const sipIds = (Array.isArray(this.selectedSipTrunks) ? this.selectedSipTrunks : [])
+                    .map((value) => parseInt(value, 10))
+                    .filter((value) => Number.isInteger(value));
+                if (sipIds.length) {
+                    filters.sip_trunk_ids = sipIds;
+                }
+
+                const tags = (Array.isArray(this.selectedTags) ? this.selectedTags : [])
+                    .map((value) => (value || '').toString().trim())
+                    .filter((value) => value.length)
+                    .filter((value, index, array) => array.indexOf(value) === index);
+                if (tags.length) {
+                    filters.tags = tags;
+                }
+
+                const page = Number.isFinite(overrides.page) && overrides.page ? overrides.page : this.currentPage;
+                const perPage = Number.isFinite(overrides.per_page) && overrides.per_page > 0
+                    ? overrides.per_page
+                    : this.pageSize;
+
+                const payload = {
+                    page: Math.max(1, page),
+                    per_page: Math.max(1, perPage),
+                };
+
+                if (Object.keys(filters).length) {
+                    payload.filters = filters;
+                }
+
+                return payload;
+            },
+            async fetchRecords(options = {}) {
+                const token = Symbol('call-records-request');
+                this._activeRequest = token;
+                this.loading = true;
+                this.error = null;
+                try {
+                    const payload = this.buildRequestPayload(options);
+                    const response = await fetch(this.listEndpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to load call records');
+                    }
+
+                    if (this._activeRequest !== token) {
+                        return;
+                    }
+
+                    const items = Array.isArray(data?.items) ? data.items : [];
+                    this.records = items;
+
+                    const perPageRaw = Number(data?.per_page);
+                    const totalItemsRaw = Number(data?.total_items);
+                    const totalPagesRaw = Number(data?.total_pages);
+                    const currentPageRaw = Number(data?.page);
+
+                    const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0
+                        ? perPageRaw
+                        : payload.per_page;
+
+                    if (this.pageSize !== perPage) {
+                        this._sync.pageSize = true;
+                        this.pageSize = perPage;
+                        this.$nextTick(() => {
+                            this._sync.pageSize = false;
+                        });
+                    }
+
+                    const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0
+                        ? totalItemsRaw
+                        : items.length;
+                    const inferredTotalPages = Math.max(Math.ceil(totalItems / (perPage || 1)), 1);
+                    const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
+                        ? Math.max(totalPagesRaw, 1)
+                        : inferredTotalPages;
+                    const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw >= 1
+                        ? Math.min(currentPageRaw, totalPages)
+                        : Math.min(payload.page, totalPages);
+
+                    this.currentPage = currentPage;
+                    this.totalItems = totalItems;
+                    this.totalPages = totalPages;
+                    this.summary = this.normalizeSummary(data?.summary);
+                } catch (err) {
+                    console.error(err);
+                    if (this._activeRequest !== token) {
+                        return;
+                    }
+                    this.error = err?.message || 'Unable to load call records';
+                    this.records = [];
+                    this.summary = this.normalizeSummary(null);
+                    this.totalItems = 0;
+                    this.totalPages = 1;
+                    this.currentPage = 1;
+                } finally {
+                    if (this._activeRequest === token) {
+                        this.loading = false;
+                    }
+                }
+            },
+            setPage(page) {
+                const target = Math.min(
+                    Math.max(Number(page) || 1, 1),
+                    Math.max(this.totalPages || 1, 1),
+                );
+                if (target === this.currentPage) {
+                    return;
+                }
+                this.currentPage = target;
+                this.fetchRecords({ page: target });
+            },
+            prevPage() {
+                if (this.currentPage > 1) {
+                    this.setPage(this.currentPage - 1);
+                }
+            },
+            nextPage() {
+                if (this.currentPage < this.totalPages) {
+                    this.setPage(this.currentPage + 1);
+                }
+            },
+            get filteredRecords() {
+                return Array.isArray(this.records) ? this.records : [];
+            },
+            get paginatedRecords() {
+                return this.filteredRecords;
+            },
+            get pageRangeStart() {
+                if (!this.filteredRecords.length) {
+                    return 0;
+                }
+                return ((this.currentPage - 1) * this.pageSize) + 1;
+            },
+            get pageRangeEnd() {
+                if (!this.filteredRecords.length) {
+                    return 0;
+                }
+                return Math.min(this.pageRangeStart + this.filteredRecords.length - 1, this.totalItems);
+            },
             clearFilters() {
+                this._sync.filters = true;
                 this.search = '';
                 this.statusFilter = 'any';
                 this.directionFilter = 'any';
                 this.dateFrom = '';
                 this.dateTo = '';
                 this.onlyTranscribed = false;
-                this.resetPage();
+                this.selectedDepartments = [];
+                this.selectedSipTrunks = [];
+                this.selectedTags = [];
+                this.$nextTick(() => {
+                    this._sync.filters = false;
+                    this.applyFilters();
+                });
+            },
+            async exportCsv() {
+                try {
+                    this.exportedAt = null;
+                    const desired = Math.max(this.totalItems || 0, this.pageSize || 1);
+                    const payload = this.buildRequestPayload({
+                        page: 1,
+                        per_page: Math.min(Math.max(desired, 1000), 10000),
+                    });
+                    const response = await fetch(this.listEndpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to export CSV');
+                    }
+                    const rows = Array.isArray(data?.items) ? data.items : [];
+                    if (!rows.length) {
+                        this.exportedAt = 'No data to export';
+                        return;
+                    }
+                    const csv = this.buildCsv(rows);
+                    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `call-records-${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                    this.exportedAt = new Date().toLocaleString();
+                } catch (err) {
+                    console.error(err);
+                    this.exportedAt = err?.message || 'Export failed';
+                }
+            },
+            buildCsv(records) {
+                const header = [
+                    'Call ID',
+                    'Display ID',
+                    'Started At',
+                    'Direction',
+                    'Status',
+                    'From',
+                    'To',
+                    'Duration (s)',
+                    'Agent',
+                    'Queue',
+                    'Tags',
+                    'Transcript',
+                ];
+                return [header]
+                    .concat(
+                        records.map((record) => [
+                            record?.id || '',
+                            record?.display_id || '',
+                            this.formatDateTime(record?.started_at),
+                            this.directionLabel(record?.direction),
+                            this.statusLabel(record?.status),
+                            record?.from || '',
+                            record?.to || '',
+                            record?.duration_secs || 0,
+                            record?.agent || '',
+                            record?.queue || '',
+                            (Array.isArray(record?.tags) ? record.tags : []).join('|'),
+                            record?.has_transcript ? 'Yes' : 'No',
+                        ])
+                    )
+                    .map((line) =>
+                        line
+                            .map((cell) => {
+                                const value = cell === null || cell === undefined ? '' : String(cell);
+                                const escaped = value.replace(/"/g, '""');
+                                return `"${escaped}"`;
+                            })
+                            .join(',')
+                    )
+                    .join('\n');
             },
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
@@ -567,184 +1021,6 @@
                 } catch (err) {
                     return value;
                 }
-            },
-            matchesSearch(record) {
-                if (!this.search) {
-                    return true;
-                }
-                const needle = this.search.toLowerCase();
-                const haystack = [
-                    record.id,
-                    record.display_id,
-                    record.from,
-                    record.to,
-                    record.agent,
-                    record.queue,
-                    ...(record.tags || []),
-                ]
-                    .filter(Boolean)
-                    .join(' ')
-                    .toLowerCase();
-                return haystack.includes(needle);
-            },
-            matchesDate(record) {
-                if (!this.dateFrom && !this.dateTo) {
-                    return true;
-                }
-                const start = new Date(record.started_at || 0);
-                if (Number.isNaN(start.getTime())) {
-                    return false;
-                }
-                if (this.dateFrom) {
-                    const from = new Date(`${this.dateFrom}T00:00:00Z`);
-                    if (start < from) {
-                        return false;
-                    }
-                }
-                if (this.dateTo) {
-                    const to = new Date(`${this.dateTo}T23:59:59Z`);
-                    if (start > to) {
-                        return false;
-                    }
-                }
-                return true;
-            },
-            get filteredRecords() {
-                return this.records
-                    .filter((record) => {
-                        if (this.statusFilter !== 'any') {
-                            const status = (record.status || '').toLowerCase();
-                            if (status !== this.statusFilter) {
-                                return false;
-                            }
-                        }
-                        if (this.directionFilter !== 'any') {
-                            const direction = (record.direction || '').toLowerCase();
-                            if (direction !== this.directionFilter) {
-                                return false;
-                            }
-                        }
-                        if (this.onlyTranscribed && !record.has_transcript) {
-                            return false;
-                        }
-                        if (!this.matchesSearch(record)) {
-                            return false;
-                        }
-                        if (!this.matchesDate(record)) {
-                            return false;
-                        }
-                        return true;
-                    })
-                    .sort((a, b) => {
-                        const aTime = new Date(a.started_at || 0).getTime();
-                        const bTime = new Date(b.started_at || 0).getTime();
-                        return bTime - aTime;
-                    });
-            },
-            get totalPages() {
-                const total = this.filteredRecords.length;
-                if (!total) {
-                    return 1;
-                }
-                return Math.max(1, Math.ceil(total / this.pageSize));
-            },
-            get paginatedRecords() {
-                const total = this.filteredRecords.length;
-                if (!total) {
-                    this.currentPage = 1;
-                    return [];
-                }
-                const totalPages = this.totalPages;
-                if (this.currentPage > totalPages) {
-                    this.currentPage = totalPages;
-                }
-                if (this.currentPage < 1) {
-                    this.currentPage = 1;
-                }
-                const start = (this.currentPage - 1) * this.pageSize;
-                return this.filteredRecords.slice(start, start + this.pageSize);
-            },
-            get pageRangeStart() {
-                if (!this.filteredRecords.length) {
-                    return 0;
-                }
-                return (this.currentPage - 1) * this.pageSize + 1;
-            },
-            get pageRangeEnd() {
-                if (!this.filteredRecords.length) {
-                    return 0;
-                }
-                return this.pageRangeStart + this.paginatedRecords.length - 1;
-            },
-            exportCsv() {
-                const rows = this.filteredRecords;
-                if (!rows.length) {
-                    this.exportedAt = 'No data to export';
-                    return;
-                }
-                const header = [
-                    'Call ID',
-                    'Display ID',
-                    'Started At',
-                    'Direction',
-                    'Status',
-                    'From',
-                    'To',
-                    'Duration (s)',
-                    'Agent',
-                    'Queue',
-                    'Tags',
-                    'Transcript',
-                ];
-                const csv = [header]
-                    .concat(
-                        rows.map((record) => [
-                            record.id,
-                            record.display_id || '',
-                            this.formatDateTime(record.started_at),
-                            this.directionLabel(record.direction),
-                            this.statusLabel(record.status),
-                            record.from || '',
-                            record.to || '',
-                            record.duration_secs || 0,
-                            record.agent || '',
-                            record.queue || '',
-                            (record.tags || []).join('|'),
-                            record.has_transcript ? 'Yes' : 'No',
-                        ])
-                    )
-                    .map((line) => line
-                        .map((cell) => {
-                            const value = cell === null || cell === undefined ? '' : String(cell);
-                            const escaped = value.replace(/"/g, '""');
-                            return `"${escaped}"`;
-                        })
-                        .join(','))
-                    .join('\n');
-
-                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `call-records-${new Date().toISOString().slice(0, 10)}.csv`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-                this.exportedAt = new Date().toLocaleString();
-            },
-            resetPage() {
-                this.currentPage = 1;
-            },
-            setPage(page) {
-                const target = Math.min(Math.max(page, 1), this.totalPages);
-                this.currentPage = target;
-            },
-            prevPage() {
-                this.setPage(this.currentPage - 1);
-            },
-            nextPage() {
-                this.setPage(this.currentPage + 1);
             },
         }));
     });
