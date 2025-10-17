@@ -25,6 +25,7 @@ use rsipstack::{
     transaction::transaction::Transaction,
 };
 use std::{
+    collections::HashSet,
     net::IpAddr,
     str::FromStr,
     sync::Arc,
@@ -481,6 +482,83 @@ impl ProxyCall {
             .or_else(|| self.server.default_contact_uri())
     }
 
+    fn should_forward_header(header: &rsip::Header) -> bool {
+        use rsip::Header;
+
+        match header {
+            Header::Via(_)
+            | Header::Contact(_)
+            | Header::From(_)
+            | Header::To(_)
+            | Header::CallId(_)
+            | Header::CSeq(_)
+            | Header::MaxForwards(_)
+            | Header::ContentLength(_)
+            | Header::ContentType(_)
+            | Header::Authorization(_)
+            | Header::ProxyAuthorization(_)
+            | Header::ProxyAuthenticate(_)
+            | Header::WwwAuthenticate(_)
+            | Header::Route(_)
+            | Header::RecordRoute(_) => false,
+            Header::Other(name, _) => {
+                let lower = name.to_ascii_lowercase();
+                !matches!(
+                    lower.as_str(),
+                    "via"
+                        | "from"
+                        | "to"
+                        | "contact"
+                        | "call-id"
+                        | "cseq"
+                        | "max-forwards"
+                        | "content-length"
+                        | "content-type"
+                        | "route"
+                        | "record-route"
+                        | "authorization"
+                        | "proxy-authorization"
+                        | "proxy-authenticate"
+                        | "www-authenticate"
+                )
+            }
+            _ => true,
+        }
+    }
+
+    fn build_invite_headers(&self, target: &Location) -> Option<Vec<rsip::Header>> {
+        let mut headers = target.headers.clone().unwrap_or_default();
+
+        let mut custom_names: HashSet<String> = headers
+            .iter()
+            .filter_map(|h| match h {
+                rsip::Header::Other(name, _) => Some(name.to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+
+        if self.dialplan.with_original_headers {
+            for header in self.dialplan.original.headers.iter() {
+                if !Self::should_forward_header(header) {
+                    continue;
+                }
+                if let rsip::Header::Other(name, _) = header {
+                    let key = name.to_ascii_lowercase();
+                    if !custom_names.insert(key) {
+                        continue;
+                    }
+                }
+                headers.push(header.clone());
+            }
+        }
+
+        if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        }
+    }
+
     fn is_webrtc_sdp(sdp: &str) -> bool {
         sdp.contains("a=ice-ufrag")
             || sdp.contains("a=ice-pwd")
@@ -780,7 +858,7 @@ impl ProxyCall {
                 destination: target.destination.clone(),
                 contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
                 credential: target.credential.clone(),
-                headers: target.headers.clone(),
+                headers: self.build_invite_headers(target),
                 ..Default::default()
             };
 
@@ -975,7 +1053,7 @@ impl ProxyCall {
             destination: target.destination.clone(),
             contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
-            headers: target.headers.clone(),
+            headers: self.build_invite_headers(target),
             ..Default::default()
         };
 
