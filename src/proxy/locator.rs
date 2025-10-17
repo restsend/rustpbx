@@ -175,8 +175,11 @@ impl Locator for MemoryLocator {
         // Fall back to classic AoR lookup by username/realm
         let username_raw = uri.user().unwrap_or_else(|| "");
         let username = username_raw.trim();
+        let username_lower = username.to_ascii_lowercase();
         let realm_raw = uri.host().to_string();
         let realm_trimmed = realm_raw.trim();
+        let has_realm = !realm_trimmed.is_empty();
+        let realm_lower = realm_trimmed.to_ascii_lowercase();
 
         let mut identifiers = Vec::new();
         if !username.is_empty() {
@@ -203,23 +206,38 @@ impl Locator for MemoryLocator {
                     let mut matched = false;
 
                     if let Some(registered) = &loc.registered_aor {
-                        if registered
+                        let user_match = registered
                             .user()
-                            .map(|u| u.trim().eq_ignore_ascii_case(username))
-                            .unwrap_or(false)
-                        {
+                            .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
+                            .unwrap_or(false);
+                        let realm_match = if has_realm {
+                            let host = registered.host().to_string();
+                            host.trim().eq_ignore_ascii_case(&realm_lower)
+                        } else {
+                            true
+                        };
+
+                        if user_match && realm_match {
                             matched = true;
                         }
                     }
 
-                    if !matched
-                        && loc
+                    if !matched {
+                        let user_match = loc
                             .aor
                             .user()
-                            .map(|u| u.trim().eq_ignore_ascii_case(username))
-                            .unwrap_or(false)
-                    {
-                        matched = true;
+                            .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
+                            .unwrap_or(false);
+                        let realm_match = if has_realm {
+                            let host = loc.aor.host().to_string();
+                            host.trim().eq_ignore_ascii_case(&realm_lower)
+                        } else {
+                            true
+                        };
+
+                        if user_match && realm_match {
+                            matched = true;
+                        }
                     }
 
                     if matched {

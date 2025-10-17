@@ -580,6 +580,10 @@ impl ProxyModule for RegistrarModule {
                 temp_gruu: entry.temp_gruu(),
                 reg_id: entry.reg_id(),
                 transport: entry.transport(),
+                user_agent: tx
+                    .original
+                    .user_agent_header()
+                    .map(|header| header.value().to_string()),
             };
 
             if location.transport.is_none() {
