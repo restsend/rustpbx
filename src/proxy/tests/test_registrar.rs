@@ -42,7 +42,19 @@ async fn test_registrar_register_success() {
         .await;
 
     assert!(locations.is_ok());
-    assert_eq!(locations.unwrap().len(), 1);
+    let locations = locations.unwrap();
+    assert_eq!(locations.len(), 1);
+    let location = &locations[0];
+    let registered_aor = location.registered_aor.as_ref().unwrap();
+    assert_eq!(registered_aor.user().unwrap_or(""), "alice");
+    assert_eq!(registered_aor.host().to_string(), "example.com");
+    assert!(
+        location
+            .contact_raw
+            .as_ref()
+            .unwrap()
+            .contains("expires=60")
+    );
 }
 
 #[tokio::test]

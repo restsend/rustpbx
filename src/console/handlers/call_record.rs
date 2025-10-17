@@ -84,7 +84,9 @@ async fn page_call_records(
         json!({
             "nav_active": "call-records",
             "base_path": state.base_path(),
-            "filters": filters,
+            "filter_options": filters,
+            "list_url": state.url_for("/call-records"),
+            "page_size_options": vec![10, 25, 50],
         }),
     )
 }

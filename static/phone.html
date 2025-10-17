@@ -472,10 +472,6 @@
             incomingCallDiv.classList.add('active');
 
             invitation.delegate = {
-                onBye: (bye) => {
-                    log('Call ended by remote party');
-                    endCall();
-                },
                 onSessionDescriptionHandler: () => {
                     setupMediaElements(invitation);
                 }

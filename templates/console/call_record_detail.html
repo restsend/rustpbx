@@ -93,21 +93,32 @@
         </section>
 
         <section class="space-y-5">
-            <div
-                class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-600">
-                <button type="button" class="rounded-md px-3 py-1.5 transition"
-                    :class="detailTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                    @click="detailTab = 'overview'">
-                    Overview
-                </button>
-                <button type="button" class="rounded-md px-3 py-1.5 transition"
-                    :class="detailTab === 'diagnostics' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                    @click="detailTab = 'diagnostics'">
-                    Diagnostics
-                </button>
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+                <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                    role="tablist" aria-label="Call record detail tabs">
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="detailTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="detailTab === 'overview'" aria-controls="call-record-tab-overview"
+                        @click="detailTab = 'overview'">
+                        <div class="flex flex-col">
+                            <span class="text-sm">Overview</span>
+                            <span class="text-[11px] font-normal text-slate-400">Participants, media, notes</span>
+                        </div>
+                    </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="detailTab === 'diagnostics' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="detailTab === 'diagnostics'" aria-controls="call-record-tab-diagnostics"
+                        @click="detailTab = 'diagnostics'">
+                        <div class="flex flex-col">
+                            <span class="text-sm">Diagnostics</span>
+                            <span class="text-[11px] font-normal text-slate-400">ASR, SIP flow, metrics</span>
+                        </div>
+                    </button>
+                </nav>
             </div>
 
-            <div x-show="detailTab === 'overview'" x-cloak x-transition.opacity class="space-y-4">
+            <div x-show="detailTab === 'overview'" x-cloak x-transition.opacity class="space-y-4"
+                id="call-record-tab-overview" role="tabpanel" tabindex="0">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <h2 class="text-base font-semibold text-slate-900">Recording & participants</h2>
                     <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
@@ -203,7 +214,8 @@
                 </div>
             </div>
 
-            <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4">
+            <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4"
+                id="call-record-tab-diagnostics" role="tabpanel" tabindex="0">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div>
@@ -211,22 +223,30 @@
                             <p class="text-xs text-slate-500">Switch between speech analytics and SIP signalling for
                                 faster troubleshooting.</p>
                         </div>
-                        <div
-                            class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-600">
-                            <button type="button" class="rounded-md px-3 py-1.5 transition"
-                                :class="insightTab === 'transcription' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                                @click="insightTab = 'transcription'">
-                                ASR transcription
-                            </button>
-                            <button type="button" class="rounded-md px-3 py-1.5 transition"
-                                :class="insightTab === 'sip-flow' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                                @click="insightTab = 'sip-flow'">
-                                SIP message flow
-                            </button>
+                        <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+                            <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                                role="tablist" aria-label="Diagnostics insight tabs">
+                                <button type="button"
+                                    class="flex-1 rounded-md px-3 py-2 transition text-left sm:flex-none"
+                                    :class="insightTab === 'transcription' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                    :aria-selected="insightTab === 'transcription'"
+                                    aria-controls="call-record-diagnostics-transcription"
+                                    @click="insightTab = 'transcription'">
+                                    ASR transcription
+                                </button>
+                                <button type="button"
+                                    class="flex-1 rounded-md px-3 py-2 transition text-left sm:flex-none"
+                                    :class="insightTab === 'sip-flow' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                                    :aria-selected="insightTab === 'sip-flow'"
+                                    aria-controls="call-record-diagnostics-sip" @click="insightTab = 'sip-flow'">
+                                    SIP message flow
+                                </button>
+                            </nav>
                         </div>
                     </div>
 
-                    <div x-show="insightTab === 'transcription'" x-cloak x-transition.opacity class="space-y-4">
+                    <div x-show="insightTab === 'transcription'" x-cloak x-transition.opacity class="space-y-4"
+                        id="call-record-diagnostics-transcription" role="tabpanel" tabindex="0">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <p class="text-xs text-slate-500">Generate speech-to-text to accelerate QA and analytics.
                             </p>
@@ -287,7 +307,8 @@
                         </template>
                     </div>
 
-                    <div x-show="insightTab === 'sip-flow'" x-cloak x-transition.opacity>
+                    <div x-show="insightTab === 'sip-flow'" x-cloak x-transition.opacity
+                        id="call-record-diagnostics-sip" role="tabpanel" tabindex="0">
                         <p class="text-xs text-slate-500">Inspect signalling direction, status codes, and raw payloads
                             to debug call setup.</p>
                         <div class="mt-4 divide-y divide-slate-100">

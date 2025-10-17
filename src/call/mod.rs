@@ -5,7 +5,7 @@ use crate::{
     transcription::TranscriptionOption,
 };
 use anyhow::Result;
-use rsip::StatusCode;
+use rsip::{StatusCode, Transport};
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
@@ -231,15 +231,50 @@ pub struct Location {
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
     pub headers: Option<Vec<rsip::Header>>,
+    pub registered_aor: Option<rsip::Uri>,
+    pub contact_raw: Option<String>,
+    pub contact_params: Option<HashMap<String, String>>,
+    pub path: Option<Vec<rsip::Uri>>,
+    pub service_route: Option<Vec<rsip::Uri>>,
+    pub instance_id: Option<String>,
+    pub gruu: Option<String>,
+    pub temp_gruu: Option<String>,
+    pub reg_id: Option<String>,
+    pub transport: Option<Transport>,
 }
 
 impl std::fmt::Display for Location {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
+        let fallback = self.aor.to_string();
+        let contact = self.contact_raw.as_deref().unwrap_or(fallback.as_str());
         match &self.destination {
-            Some(d) => write!(f, "({} -> {} {})", self.aor, d, is_webrtc),
-            None => write!(f, "({} -> ? {})", self.aor, is_webrtc),
+            Some(d) => write!(f, "({} -> {} {})", contact, d, is_webrtc),
+            None => write!(f, "({} -> ? {})", contact, is_webrtc),
         }
+    }
+}
+
+impl Location {
+    pub fn binding_key(&self) -> String {
+        if let Some(instance) = &self.instance_id {
+            return format!("{}|instance={}", self.aor, instance);
+        }
+        if let Some(gruu) = &self.gruu {
+            return format!("{}|gruu={}", self.aor, gruu);
+        }
+        self.aor.to_string()
+    }
+
+    pub fn is_expired_at(&self, now: Instant) -> bool {
+        if self.expires == 0 {
+            return true;
+        }
+        if let Some(last_modified) = self.last_modified {
+            let ttl = std::time::Duration::from_secs(self.expires as u64);
+            return now.duration_since(last_modified) >= ttl;
+        }
+        false
     }
 }
 

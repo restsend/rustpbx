@@ -13,6 +13,7 @@ use tracing::{info, warn};
 pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/lists", get(list_calls))
+        .route("/dialogs", get(list_dialogs))
         .route("/kill/{id}", post(kill_call))
         .route("/shutdown", post(shutdown_handler))
         .route("/reload", post(reload_handler))
@@ -96,6 +97,33 @@ async fn list_calls(State(state): State<AppState>) -> Response {
             })
         }).collect::<Vec<_>>(),
     });
+    Json(result).into_response()
+}
+
+async fn list_dialogs(State(state): State<AppState>) -> Response {
+    let mut result = Vec::new();
+    if let Some(ref sip_server) = state.sip_server {
+        let ids = sip_server.inner.dialog_layer.all_dialog_ids();
+        for id in ids {
+            if let Some(dialog) = sip_server.inner.dialog_layer.get_dialog(&id) {
+                let state = match &dialog {
+                    rsipstack::dialog::dialog::Dialog::ClientInvite(dlg) => dlg.state(),
+                    rsipstack::dialog::dialog::Dialog::ServerInvite(dlg) => dlg.state(),
+                };
+                result.push(serde_json::json!({
+                    "id": dialog.id().to_string(),
+                    "from": dialog.from().to_string(),
+                    "to": dialog.to().to_string(),
+                    "state": state.to_string(),
+                }));
+            } else {
+                result.push(serde_json::json!({
+                    "id": id.to_string(),
+                    "error": "Dialog not found",
+                }));
+            }
+        }
+    }
     Json(result).into_response()
 }
 

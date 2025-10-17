@@ -59,381 +59,399 @@
                     x-text="success"></div>
             </template>
 
-            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
-                <nav class="flex flex-wrap gap-2 text-sm font-medium">
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'overview' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+                <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+                    role="tablist" aria-label="Routing configuration tabs">
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'overview'" aria-controls="routing-tab-overview"
                         @click="activeTab = 'overview'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5V21h15V10.5" />
-                        </svg>
-                        Overview
+                        <div class="flex flex-col">
+                            <span class="text-sm">Overview</span>
+                            <span class="text-[11px] font-normal text-slate-400">Summary & status</span>
+                        </div>
                     </button>
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'matching' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'matching' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'matching'" aria-controls="routing-tab-matching"
                         @click="activeTab = 'matching'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h16v4H4z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h16v4H4z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16h16v4H4z" />
-                        </svg>
-                        Match & rewrite
+                        <div class="flex flex-col">
+                            <span class="text-sm">Match & rewrite</span>
+                            <span class="text-[11px] font-normal text-slate-400">Patterns and header rewrites</span>
+                        </div>
                     </button>
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'delivery' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'delivery' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'delivery'" aria-controls="routing-tab-delivery"
                         @click="activeTab = 'delivery'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h8" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8l4 4-4 4" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h16v16H4z" />
-                        </svg>
-                        Trunks & delivery
+                        <div class="flex flex-col">
+                            <span class="text-sm">Trunks & delivery</span>
+                            <span class="text-[11px] font-normal text-slate-400">Selection strategy & weights</span>
+                        </div>
                     </button>
-                    <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 transition"
-                        :class="activeTab === 'notes' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'notes'" aria-controls="routing-tab-notes"
                         @click="activeTab = 'notes'">
-                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 20h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 14h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 8h9" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 6h3v12H3z" />
-                        </svg>
-                        Notes & payload
+                        <div class="flex flex-col">
+                            <span class="text-sm">Notes & payload</span>
+                            <span class="text-[11px] font-normal text-slate-400">Operational log & JSON preview</span>
+                        </div>
                     </button>
                 </nav>
             </div>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'overview'"
-                x-transition.opacity x-cloak>
-                <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <h2 class="text-base font-semibold text-slate-900">Basics</h2>
-                        <p class="text-xs text-slate-500">Set the identity, priority, and rollout status.</p>
-                    </div>
-                    <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
-                        <span class="rounded-full border border-slate-200 px-2 py-1"
-                            x-text="route.id ? 'Rule ID: ' + route.id : 'New rule'"></span>
-                        <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
-                    </div>
-                </div>
-
-                <div class="mt-6 grid gap-4 md:grid-cols-2">
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Name</label>
-                        <input type="text" name="name" x-model="route.name"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Outbound Hong Kong" required>
-                    </div>
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Owner</label>
-                        <input type="text" name="owner" x-model="route.owner"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Voice Ops">
-                    </div>
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Direction</label>
-                        <select name="direction" x-model="route.direction"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="direction in directionOptions" :key="direction">
-                                <option :value="direction" x-text="direction"></option>
-                            </template>
-                        </select>
-                    </div>
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Priority</label>
-                        <input type="number" min="0" name="priority" x-model.number="route.priority"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                    </div>
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</label>
-                        <div class="flex gap-2">
-                            <template x-for="option in statusOptions" :key="option.value">
-                                <button type="button"
-                                    class="flex-1 rounded-lg border px-3 py-2 text-xs font-semibold transition"
-                                    :class="route.disabled === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
-                                    @click="route.disabled = option.value">
-                                    <span x-text="option.label"></span>
-                                </button>
-                            </template>
+            <div x-show="activeTab === 'overview'" x-transition.opacity x-cloak class="space-y-6"
+                id="routing-tab-overview" role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Basics</h2>
+                            <p class="text-xs text-slate-500">Set the identity, priority, and rollout status.</p>
+                        </div>
+                        <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
+                            <span class="rounded-full border border-slate-200 px-2 py-1"
+                                x-text="route.id ? 'Rule ID: ' + route.id : 'New rule'"></span>
+                            <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
                         </div>
                     </div>
-                    <div class="space-y-2 md:col-span-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
-                        <textarea name="description" x-model="route.description"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            rows="3" placeholder="Explain what this route handles and any rollout notes."></textarea>
-                    </div>
-                </div>
-            </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'matching'"
-                x-transition.opacity x-cloak>
-                <div class="flex flex-col gap-2">
-                    <h2 class="text-base font-semibold text-slate-900">Match expressions</h2>
-                    <p class="text-xs text-slate-500">Regular expressions applied to SIP headers before routing takes
-                        effect.</p>
-                </div>
-
-                <div class="mt-6 grid gap-4 md:grid-cols-2">
-                    <template x-for="field in matchFields" :key="field.key">
+                    <div class="mt-6 grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
-                                x-text="field.label"></label>
-                            <input type="text" :name="'match[' + field.key + ']'" x-model="route.match[field.key]"
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Name</label>
+                            <input type="text" name="name" x-model="route.name"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                :placeholder="field.placeholder">
+                                placeholder="Outbound Hong Kong" required>
                         </div>
-                    </template>
-                </div>
-
-                <div class="mt-6 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Header matchers</h3>
-                        <button type="button" @click="addMatchHeader()"
-                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                            Add header
-                        </button>
-                    </div>
-                    <template x-if="!matchHeaders.length">
-                        <p class="text-xs text-slate-400">No header-based regex. Add one if needed.</p>
-                    </template>
-                    <div class="space-y-2">
-                        <template x-for="(header, index) in matchHeaders" :key="index">
-                            <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
-                                <input type="text" :name="'match_headers[' + index + '][name]'" x-model="header.name"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="X-Account-Code">
-                                <input type="text" :name="'match_headers[' + index + '][value]'" x-model="header.value"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="^sales-.*$">
-                                <button type="button" @click="removeMatchHeader(index)"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                    Remove
-                                </button>
-                            </div>
-                        </template>
-                    </div>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'matching'"
-                x-transition.opacity x-cloak>
-                <div class="flex flex-col gap-2">
-                    <h2 class="text-base font-semibold text-slate-900">Rewrite rules</h2>
-                    <p class="text-xs text-slate-500">Rewrite portions of the SIP request before it reaches the
-                        destination.</p>
-                </div>
-
-                <div class="mt-6 grid gap-4 md:grid-cols-2">
-                    <template x-for="field in rewriteFields" :key="field.key">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
-                                x-text="field.label"></label>
-                            <input type="text" :name="'rewrite[' + field.key + ']'" x-model="route.rewrite[field.key]"
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Owner</label>
+                            <input type="text" name="owner" x-model="route.owner"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                :placeholder="field.placeholder">
+                                placeholder="Voice Ops">
                         </div>
-                    </template>
-                </div>
-
-                <div class="mt-6 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Set headers</h3>
-                        <button type="button" @click="addRewriteHeader()"
-                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                            Add header
-                        </button>
-                    </div>
-                    <template x-if="!rewriteHeaders.length">
-                        <p class="text-xs text-slate-400">No header rewrites defined.</p>
-                    </template>
-                    <div class="space-y-2">
-                        <template x-for="(header, index) in rewriteHeaders" :key="index">
-                            <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
-                                <input type="text" :name="'rewrite_headers[' + index + '][name]'" x-model="header.name"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="X-Account-Code">
-                                <input type="text" :name="'rewrite_headers[' + index + '][value]'"
-                                    x-model="header.value"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="sales-apac">
-                                <button type="button" @click="removeRewriteHeader(index)"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                    Remove
-                                </button>
+                        <div class="space-y-2">
+                            <label
+                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">Direction</label>
+                            <select name="direction" x-model="route.direction"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="direction in directionOptions" :key="direction">
+                                    <option :value="direction" x-text="direction"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Priority</label>
+                            <input type="number" min="0" name="priority" x-model.number="route.priority"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</label>
+                            <div class="flex gap-2">
+                                <template x-for="option in statusOptions" :key="option.value">
+                                    <button type="button"
+                                        class="flex-1 rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                        :class="route.disabled === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                        @click="route.disabled = option.value">
+                                        <span x-text="option.label"></span>
+                                    </button>
+                                </template>
                             </div>
-                        </template>
-                    </div>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'delivery'"
-                x-transition.opacity x-cloak>
-                <div class="flex flex-col gap-2">
-                    <h2 class="text-base font-semibold text-slate-900">Action & trunks</h2>
-                    <p class="text-xs text-slate-500">Choose how destinations are selected and how weights are
-                        distributed across trunks.</p>
-                </div>
-
-                <div class="mt-6 space-y-6">
-                    <div class="space-y-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
-                            algorithm</label>
-                        <div class="flex flex-wrap gap-2">
-                            <template x-for="option in algorithmOptions" :key="option.value">
-                                <button type="button"
-                                    class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
-                                    :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
-                                    @click="setAlgorithm(option.value)">
-                                    <span x-text="option.label"></span>
-                                </button>
-                            </template>
                         </div>
-                        <template x-if="route.action.select === 'hash'">
-                            <div class="mt-3 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
-                                    key</label>
-                                <input type="text" name="hash_key" x-model="route.action.hash_key"
+                        <div class="space-y-2 md:col-span-2">
+                            <label
+                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
+                            <textarea name="description" x-model="route.description"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                rows="3"
+                                placeholder="Explain what this route handles and any rollout notes."></textarea>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <div x-show="activeTab === 'matching'" x-transition.opacity x-cloak class="space-y-6"
+                id="routing-tab-matching" role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-base font-semibold text-slate-900">Match expressions</h2>
+                        <p class="text-xs text-slate-500">Regular expressions applied to SIP headers before routing
+                            takes
+                            effect.</p>
+                    </div>
+
+                    <div class="mt-6 grid gap-4 md:grid-cols-2">
+                        <template x-for="field in matchFields" :key="field.key">
+                            <div class="space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                                    x-text="field.label"></label>
+                                <input type="text" :name="'match[' + field.key + ']'" x-model="route.match[field.key]"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="caller">
+                                    :placeholder="field.placeholder">
                             </div>
                         </template>
                     </div>
 
-                    <div class="space-y-3">
+                    <div class="mt-6 space-y-3">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk pool</h3>
-                            <button type="button" @click="addTrunkAssignment()"
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Header matchers
+                            </h3>
+                            <button type="button" @click="addMatchHeader()"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                Add trunk
+                                Add header
                             </button>
                         </div>
-                        <template x-if="!route.action.trunks.length">
-                            <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
-                                fallback will be used.</p>
+                        <template x-if="!matchHeaders.length">
+                            <p class="text-xs text-slate-400">No header-based regex. Add one if needed.</p>
                         </template>
-                        <div class="space-y-3">
-                            <template x-for="(trunk, index) in route.action.trunks" :key="index">
+                        <div class="space-y-2">
+                            <template x-for="(header, index) in matchHeaders" :key="index">
                                 <div
-                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
-                                    <select x-model="trunk.name"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                        <option value="">Select trunk</option>
-                                        <template x-for="option in trunkOptions" :key="option.name">
-                                            <option :value="option.name" x-text="option.display_name || option.name">
-                                            </option>
-                                        </template>
-                                    </select>
-                                    <input type="number" min="0" step="1" x-model.number="trunk.weight"
+                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                                    <input type="text" :name="'match_headers[' + index + '][name]'"
+                                        x-model="header.name"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="Weight">
-                                    <button type="button" @click="removeTrunkAssignment(index)"
+                                        placeholder="X-Account-Code">
+                                    <input type="text" :name="'match_headers[' + index + '][value]'"
+                                        x-model="header.value"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="^sales-.*$">
+                                    <button type="button" @click="removeMatchHeader(index)"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
                                         Remove
                                     </button>
                                 </div>
                             </template>
                         </div>
-                        <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-                            <div class="flex flex-wrap items-center gap-3">
-                                <span>Total weight:</span>
-                                <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
-                                    x-text="totalWeight"></span>
-                                <span>Normalized distribution preview:</span>
-                                <div class="flex flex-wrap gap-2 text-[11px]">
-                                    <template x-for="item in normalizedWeights" :key="item.name">
-                                        <span
-                                            class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
-                                            <span x-text="item.label"></span>
-                                            <span class="text-slate-400" x-text="item.percent + '%' "></span>
-                                        </span>
+                    </div>
+                </section>
+
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-base font-semibold text-slate-900">Rewrite rules</h2>
+                        <p class="text-xs text-slate-500">Rewrite portions of the SIP request before it reaches the
+                            destination.</p>
+                    </div>
+
+                    <div class="mt-6 grid gap-4 md:grid-cols-2">
+                        <template x-for="field in rewriteFields" :key="field.key">
+                            <div class="space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                                    x-text="field.label"></label>
+                                <input type="text" :name="'rewrite[' + field.key + ']'"
+                                    x-model="route.rewrite[field.key]"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="field.placeholder">
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="mt-6 space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Set headers</h3>
+                            <button type="button" @click="addRewriteHeader()"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                Add header
+                            </button>
+                        </div>
+                        <template x-if="!rewriteHeaders.length">
+                            <p class="text-xs text-slate-400">No header rewrites defined.</p>
+                        </template>
+                        <div class="space-y-2">
+                            <template x-for="(header, index) in rewriteHeaders" :key="index">
+                                <div
+                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                                    <input type="text" :name="'rewrite_headers[' + index + '][name]'"
+                                        x-model="header.name"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="X-Account-Code">
+                                    <input type="text" :name="'rewrite_headers[' + index + '][value]'"
+                                        x-model="header.value"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="sales-apac">
+                                    <button type="button" @click="removeRewriteHeader(index)"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                        Remove
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <div x-show="activeTab === 'delivery'" x-transition.opacity x-cloak class="space-y-6"
+                id="routing-tab-delivery" role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-base font-semibold text-slate-900">Action & trunks</h2>
+                        <p class="text-xs text-slate-500">Choose how destinations are selected and how weights are
+                            distributed across trunks.</p>
+                    </div>
+
+                    <div class="mt-6 space-y-6">
+                        <div class="space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
+                                algorithm</label>
+                            <div class="flex flex-wrap gap-2">
+                                <template x-for="option in algorithmOptions" :key="option.value">
+                                    <button type="button"
+                                        class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                        :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                        @click="setAlgorithm(option.value)">
+                                        <span x-text="option.label"></span>
+                                    </button>
+                                </template>
+                            </div>
+                            <template x-if="route.action.select === 'hash'">
+                                <div class="mt-3 space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
+                                        key</label>
+                                    <input type="text" name="hash_key" x-model="route.action.hash_key"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="caller">
+                                </div>
+                            </template>
+                        </div>
+
+                        <div class="space-y-3">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk pool</h3>
+                                <button type="button" @click="addTrunkAssignment()"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                    Add trunk
+                                </button>
+                            </div>
+                            <template x-if="!route.action.trunks.length">
+                                <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
+                                    fallback will be used.</p>
+                            </template>
+                            <div class="space-y-3">
+                                <template x-for="(trunk, index) in route.action.trunks" :key="index">
+                                    <div
+                                        class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
+                                        <select x-model="trunk.name"
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                            <option value="">Select trunk</option>
+                                            <template x-for="option in trunkOptions" :key="option.name">
+                                                <option :value="option.name"
+                                                    x-text="option.display_name || option.name">
+                                                </option>
+                                            </template>
+                                        </select>
+                                        <input type="number" min="0" step="1" x-model.number="trunk.weight"
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="Weight">
+                                        <button type="button" @click="removeTrunkAssignment(index)"
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                            Remove
+                                        </button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <span>Total weight:</span>
+                                    <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
+                                        x-text="totalWeight"></span>
+                                    <span>Normalized distribution preview:</span>
+                                    <div class="flex flex-wrap gap-2 text-[11px]">
+                                        <template x-for="item in normalizedWeights" :key="item.name">
+                                            <span
+                                                class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
+                                                <span x-text="item.label"></span>
+                                                <span class="text-slate-400" x-text="item.percent + '%' "></span>
+                                            </span>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div class="space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
+                                    trunk (optional)</label>
+                                <select name="source_trunk" x-model="route.source_trunk"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Select source trunk</option>
+                                    <template x-for="option in trunkOptions" :key="'source-' + option.name">
+                                        <option :value="option.name" x-text="option.display_name || option.name">
+                                        </option>
+                                    </template>
+                                </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
+                                    trunks (optional)</label>
+                                <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+                                    <template x-for="option in trunkOptions" :key="'target-' + option.name">
+                                        <label class="mb-2 flex items-center gap-2">
+                                            <input type="checkbox" :value="option.name"
+                                                @change="toggleTarget(option.name)"
+                                                :checked="route.target_trunks.includes(option.name)"
+                                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                            <span x-text="option.display_name || option.name"></span>
+                                        </label>
+                                    </template>
+                                    <template x-if="!trunkOptions.length">
+                                        <p class="text-slate-400">No trunks available. Add trunks first.</p>
                                     </template>
                                 </div>
                             </div>
                         </div>
                     </div>
+                </section>
+            </div>
 
-                    <div class="grid gap-4 md:grid-cols-2">
-                        <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
-                                trunk (optional)</label>
-                            <select name="source_trunk" x-model="route.source_trunk"
-                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="">Select source trunk</option>
-                                <template x-for="option in trunkOptions" :key="'source-' + option.name">
-                                    <option :value="option.name" x-text="option.display_name || option.name"></option>
-                                </template>
-                            </select>
-                        </div>
-                        <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
-                                trunks (optional)</label>
-                            <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
-                                <template x-for="option in trunkOptions" :key="'target-' + option.name">
-                                    <label class="mb-2 flex items-center gap-2">
-                                        <input type="checkbox" :value="option.name" @change="toggleTarget(option.name)"
-                                            :checked="route.target_trunks.includes(option.name)"
-                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                                        <span x-text="option.display_name || option.name"></span>
-                                    </label>
-                                </template>
-                                <template x-if="!trunkOptions.length">
-                                    <p class="text-slate-400">No trunks available. Add trunks first.</p>
-                                </template>
-                            </div>
-                        </div>
+            <div x-show="activeTab === 'notes'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-notes"
+                role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-base font-semibold text-slate-900">Operational notes</h2>
+                        <p class="text-xs text-slate-500">Document change log, rollout guardrails, or diagnostics.</p>
                     </div>
-                </div>
-            </section>
 
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'notes'"
-                x-transition.opacity x-cloak>
-                <div class="flex flex-col gap-2">
-                    <h2 class="text-base font-semibold text-slate-900">Operational notes</h2>
-                    <p class="text-xs text-slate-500">Document change log, rollout guardrails, or diagnostics.</p>
-                </div>
-
-                <div class="mt-4 space-y-3">
-                    <button type="button" @click="addNote()"
-                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                        Add note
-                    </button>
-                    <template x-if="!notes.length">
-                        <p class="text-xs text-slate-400">No notes recorded yet.</p>
-                    </template>
-                    <div class="space-y-3">
-                        <template x-for="(note, index) in notes" :key="index">
-                            <div class="flex gap-2">
-                                <textarea x-model="notes[index]"
-                                    class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    rows="2"></textarea>
-                                <button type="button" @click="removeNote(index)"
-                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                    Remove
-                                </button>
-                            </div>
+                    <div class="mt-4 space-y-3">
+                        <button type="button" @click="addNote()"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                            Add note
+                        </button>
+                        <template x-if="!notes.length">
+                            <p class="text-xs text-slate-400">No notes recorded yet.</p>
                         </template>
+                        <div class="space-y-3">
+                            <template x-for="(note, index) in notes" :key="index">
+                                <div class="flex gap-2">
+                                    <textarea x-model="notes[index]"
+                                        class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        rows="2"></textarea>
+                                    <button type="button" @click="removeNote(index)"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                        Remove
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
                     </div>
-                </div>
-            </section>
+                </section>
 
-            <section class="rounded-xl bg-slate-900/95 p-6 text-slate-200 shadow-sm ring-1 ring-black/40"
-                x-show="activeTab === 'notes'" x-transition.opacity x-cloak>
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h2 class="text-base font-semibold text-white">Generated route payload</h2>
-                        <p class="text-xs text-slate-400">Review the JSON that will be submitted with this change.</p>
+                <section class="rounded-xl bg-slate-900/95 p-6 text-slate-200 shadow-sm ring-1 ring-black/40">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-white">Generated route payload</h2>
+                            <p class="text-xs text-slate-400">Review the JSON that will be submitted with this change.
+                            </p>
+                        </div>
+                        <button type="button" @click="copyJson"
+                            class="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10">
+                            Copy JSON
+                        </button>
                     </div>
-                    <button type="button" @click="copyJson"
-                        class="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10">
-                        Copy JSON
-                    </button>
-                </div>
-                <pre class="mt-4 max-h-80 overflow-auto rounded-lg bg-black/30 p-4 text-xs text-emerald-100">
+                    <pre class="mt-4 max-h-80 overflow-auto rounded-lg bg-black/30 p-4 text-xs text-emerald-100">
 <span x-text="jsonPreview"></span>
                 </pre>
-            </section>
+                </section>
+            </div>
         </form>
     </div>
 </div>

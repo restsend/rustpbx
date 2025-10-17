@@ -151,14 +151,23 @@ impl CallModule {
             }
         };
 
-        let caller_contact = match caller.contact.as_ref() {
-            Some(c) => c.clone(),
-            None => {
-                return Err((
-                    anyhow::anyhow!("Missing caller contact"),
-                    Some(rsip::StatusCode::Forbidden),
-                ));
-            }
+        let locs = if callee_is_same_realm {
+            self.inner
+                .server
+                .locator
+                .lookup(&callee_uri)
+                .await
+                .unwrap_or_else(|_| {
+                    vec![Location {
+                        aor: callee_uri.clone(),
+                        ..Default::default()
+                    }]
+                })
+        } else {
+            vec![Location {
+                aor: callee_uri.clone(),
+                ..Default::default()
+            }]
         };
 
         let caller_uri = match caller.from.as_ref() {
@@ -170,17 +179,23 @@ impl CallModule {
                 .map_err(|e| (anyhow::anyhow!(e), None))?,
         };
 
-        let targets = DialStrategy::Sequential(vec![Location {
-            aor: callee_uri.clone(),
-            ..Default::default()
-        }]);
+        let targets = DialStrategy::Sequential(locs);
 
-        let dialplan = Dialplan::new(session_id, original.clone(), direction)
-            .with_caller_contact(caller_contact)
+        let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
             .with_caller(caller_uri)
             .with_media(media_config)
             .with_route_invite(route_invite)
             .with_targets(targets);
+
+        if let Some(contact_uri) = self.inner.server.default_contact_uri() {
+            let contact = rsip::typed::Contact {
+                display_name: None,
+                uri: contact_uri,
+                params: vec![],
+            };
+            dialplan = dialplan.with_caller_contact(contact);
+        }
+
         Ok(dialplan)
     }
 
