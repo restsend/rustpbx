@@ -241,6 +241,7 @@ pub struct Location {
     pub temp_gruu: Option<String>,
     pub reg_id: Option<String>,
     pub transport: Option<Transport>,
+    pub user_agent: Option<String>,
 }
 
 impl std::fmt::Display for Location {

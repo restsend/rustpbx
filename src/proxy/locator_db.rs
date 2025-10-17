@@ -24,6 +24,7 @@ pub struct Model {
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub supports_webrtc: bool,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -58,6 +59,7 @@ impl MigrationTrait for Migration {
                     .col(timestamp(Column::CreatedAt).not_null())
                     .col(timestamp(Column::UpdatedAt).not_null())
                     .col(boolean(Column::SupportsWebrtc).not_null().default(false))
+                    .col(string_null(Column::UserAgent).char_len(255))
                     .to_owned(),
             )
             .await?;
@@ -201,6 +203,7 @@ impl Locator for DbLocator {
                 active_model.last_modified = Set(now);
                 active_model.updated_at = Set(chrono::Utc::now());
                 active_model.supports_webrtc = Set(location.supports_webrtc);
+                active_model.user_agent = Set(location.user_agent.clone());
 
                 active_model
                     .update(&self.db)
@@ -223,6 +226,7 @@ impl Locator for DbLocator {
                 active_model.created_at = Set(now_dt);
                 active_model.updated_at = Set(now_dt);
                 active_model.supports_webrtc = Set(location.supports_webrtc);
+                active_model.user_agent = Set(location.user_agent.clone());
 
                 // Insert without specifying id
                 active_model
@@ -286,7 +290,7 @@ impl Locator for DbLocator {
                     .await
                     .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
-                if models.is_empty() {
+                if models.is_empty() && realm_key.is_empty() {
                     models = Entity::find()
                         .filter(Column::Username.eq(&username_key))
                         .all(&self.db)
@@ -310,6 +314,7 @@ impl Locator for DbLocator {
             }
             let aor = rsip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
+            let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
                 "UDP" => rsip::transport::Transport::Udp,
@@ -336,7 +341,8 @@ impl Locator for DbLocator {
                 last_modified: None,
                 supports_webrtc: model.supports_webrtc,
                 transport: Some(transport),
-                registered_aor: Some(uri.clone()),
+                registered_aor: Some(registered_aor),
+                user_agent: model.user_agent.clone(),
                 ..Default::default()
             });
         }

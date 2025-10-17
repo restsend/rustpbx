@@ -225,13 +225,28 @@
 
         <section x-show="activeTab === 'sip'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                         <h2 class="text-base font-semibold text-slate-900">Active SIP dialogs</h2>
                         <p class="text-xs text-slate-500">Inspect INVITE dialogs currently tracked by the SIP
                             server.</p>
                     </div>
-                    <div class="flex items-center gap-2">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+                        <div class="flex items-center gap-2">
+                            <input type="text" x-model="dialogCallIdInput" @keydown.enter.prevent="applyDialogFilter"
+                                class="w-48 rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Filter by Call-ID">
+                            <button type="button" @click="applyDialogFilter"
+                                :disabled="dialogsLoading || !(dialogCallIdInput && dialogCallIdInput.trim())"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+                                Search
+                            </button>
+                            <button type="button" @click="clearDialogFilter"
+                                :disabled="dialogsLoading || (!dialogCallId && !(dialogCallIdInput && dialogCallIdInput.trim()))"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-500 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                Clear
+                            </button>
+                        </div>
                         <button type="button" @click="refreshDialogs" :disabled="dialogsLoading"
                             class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
@@ -259,8 +274,16 @@
                     <template x-if="!dialogsLoading && !dialogsError && dialogs.length">
                         <div class="space-y-3">
                             <div class="text-xs text-slate-500">
-                                <span class="font-semibold text-slate-700" x-text="dialogsMeta?.total || 0"></span>
-                                active dialogs · refreshed
+                                <span class="font-semibold text-slate-700" x-text="dialogs.length"></span>
+                                active dialogs
+                                <template x-if="dialogsMeta?.has_more">
+                                    <span> · showing latest 20</span>
+                                </template>
+                                <template x-if="dialogCallId">
+                                    <span> · filtered by <span class="font-mono text-slate-600"
+                                            x-text="dialogCallId"></span></span>
+                                </template>
+                                · refreshed
                                 <span x-text="formatDateTime(dialogsMeta?.generated_at)"></span>
                             </div>
                             <div class="grid gap-3">
@@ -341,9 +364,8 @@
                     </template>
 
                     <template x-if="!dialogsLoading && !dialogsError && !dialogs.length">
-                        <div
-                            class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
-                            No active dialogs reported.
+                        <div class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400"
+                            x-text="dialogCallId ? 'No dialogs match this Call-ID filter.' : 'No active dialogs reported.'">
                         </div>
                     </template>
                 </div>
@@ -459,6 +481,13 @@
                                                         <div class="text-xs text-slate-500">
                                                             <span class="font-semibold text-slate-700">Contact:</span>
                                                             <span x-text="record.contact"></span>
+                                                        </div>
+                                                    </template>
+                                                    <template x-if="record.user_agent">
+                                                        <div class="text-xs text-slate-500">
+                                                            <span class="font-semibold text-slate-700">User
+                                                                agent:</span>
+                                                            <span x-text="record.user_agent"></span>
                                                         </div>
                                                     </template>
                                                 </div>
@@ -689,6 +718,8 @@
             routingInput: '',
             routingDirection: 'outbound',
             routingResult: null,
+            dialogCallIdInput: '',
+            dialogCallId: '',
             testing: { trunk: null, state: 'idle', success: false, message: '', mode: 'OPTIONS', completed_at: '' },
             history: [],
             dialer: {},
@@ -717,6 +748,9 @@
             },
             get recentCall() {
                 return this.history.find((item) => item.type === 'call') || null;
+            },
+            get hasDialogFilter() {
+                return Boolean(this.dialogCallId);
             },
             get hasLocatorInput() {
                 return Boolean(
@@ -873,6 +907,31 @@
             clearHistory() {
                 this.history = [];
             },
+            applyDialogFilter() {
+                const trimmed = (this.dialogCallIdInput || '').trim();
+                this.dialogCallIdInput = trimmed;
+                if (!trimmed) {
+                    if (this.dialogCallId) {
+                        this.dialogCallId = '';
+                        this.refreshDialogs();
+                    }
+                    return;
+                }
+                if (trimmed !== this.dialogCallId) {
+                    this.dialogCallId = trimmed;
+                }
+                this.refreshDialogs();
+            },
+            clearDialogFilter() {
+                if (!this.dialogCallId && !(this.dialogCallIdInput && this.dialogCallIdInput.trim())) {
+                    return;
+                }
+                this.dialogCallIdInput = '';
+                if (this.dialogCallId) {
+                    this.dialogCallId = '';
+                }
+                this.refreshDialogs();
+            },
             ensureDialogsLoaded() {
                 if (this.dialogsFetchedAt || this.dialogsLoading) {
                     return;
@@ -893,7 +952,17 @@
                 this.dialogsLoading = true;
                 this.dialogsError = null;
                 try {
-                    const response = await fetch(this.buildUrl('/diagnostics/dialogs'), {
+                    const params = new URLSearchParams();
+                    if (this.dialogCallId) {
+                        params.set('call_id', this.dialogCallId);
+                    }
+                    params.set('limit', '20');
+                    let url = this.buildUrl('/diagnostics/dialogs');
+                    const query = params.toString();
+                    if (query) {
+                        url = `${url}?${query}`;
+                    }
+                    const response = await fetch(url, {
                         credentials: 'same-origin',
                     });
                     const data = await response.json().catch(() => null);
@@ -902,7 +971,11 @@
                         throw new Error(message);
                     }
                     this.dialogs = Array.isArray(data?.items) ? data.items : [];
-                    this.dialogsMeta = { total: data?.total || 0, generated_at: data?.generated_at || null };
+                    this.dialogsMeta = {
+                        total: data?.total || 0,
+                        generated_at: data?.generated_at || null,
+                        has_more: Boolean(data?.has_more),
+                    };
                     this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
                 } catch (err) {
                     this.dialogsError = err?.message || 'Failed to load dialogs.';

@@ -4,7 +4,7 @@ use crate::{
 };
 use axum::{
     Router,
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -156,6 +156,7 @@ pub async fn page_diagnostics(
 pub async fn list_dialogs(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
+    Query(params): Query<DialogListQuery>,
 ) -> impl IntoResponse {
     let Some(server) = state.sip_server() else {
         return (
@@ -166,10 +167,32 @@ pub async fn list_dialogs(
     };
 
     let dialog_layer = server.dialog_layer.clone();
+    const MAX_DIALOGS: usize = 20;
+    let limit = params.limit.unwrap_or(MAX_DIALOGS).max(1).min(MAX_DIALOGS);
+    let call_id_filter = params
+        .call_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
     let mut items = Vec::new();
+    let mut has_more = false;
+
     for id in dialog_layer.all_dialog_ids() {
         if let Some(dialog) = dialog_layer.get_dialog(&id) {
             if let Some(summary) = summarize_dialog(&dialog) {
+                if let Some(ref call_id) = call_id_filter {
+                    if summary.call_id != *call_id {
+                        continue;
+                    }
+                }
+
+                if items.len() >= limit {
+                    has_more = true;
+                    break;
+                }
+
                 items.push(summary);
             }
         }
@@ -178,6 +201,7 @@ pub async fn list_dialogs(
     Json(DialogListResponse {
         generated_at: Utc::now().to_rfc3339(),
         total: items.len(),
+        has_more,
         items,
     })
     .into_response()
@@ -290,7 +314,14 @@ struct LocatorPayload {
 struct DialogListResponse {
     generated_at: String,
     total: usize,
+    has_more: bool,
     items: Vec<DialogSummary>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct DialogListQuery {
+    call_id: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -340,6 +371,7 @@ struct LocatorRecordView {
     service_route: Vec<String>,
     contact_params: Option<std::collections::HashMap<String, String>>,
     age_seconds: Option<u64>,
+    user_agent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -582,5 +614,6 @@ fn location_to_view(location: Location) -> LocatorRecordView {
         age_seconds: location
             .last_modified
             .map(|instant| instant.elapsed().as_secs()),
+        user_agent: location.user_agent,
     }
 }
