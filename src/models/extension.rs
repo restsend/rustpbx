@@ -23,6 +23,7 @@ pub struct Model {
     pub status: Option<String>,
     pub login_disabled: bool,
     pub voicemail_disabled: bool,
+    pub allow_guest_calls: bool,
     pub sip_password: Option<String>,
     pub call_forwarding_mode: Option<String>,
     pub call_forwarding_destination: Option<String>,
@@ -128,6 +129,7 @@ mod tests {
             extension: Set("1001".to_string()),
             login_disabled: Set(false),
             voicemail_disabled: Set(false),
+            allow_guest_calls: Set(false),
             call_forwarding_mode: Set(Some("none".to_string())),
             ..Default::default()
         }
@@ -194,6 +196,7 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::Status).char_len(32))
                     .col(boolean(Column::LoginDisabled))
                     .col(boolean(Column::VoicemailDisabled))
+                    .col(boolean(Column::AllowGuestCalls))
                     .col(string_null(Column::SipPassword).char_len(160))
                     .col(string_null(Column::CallForwardingMode).char_len(32))
                     .col(string_null(Column::CallForwardingDestination).char_len(160))
