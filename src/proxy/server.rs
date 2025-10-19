@@ -1,5 +1,6 @@
 use super::{
     FnCreateProxyModule, ProxyAction, ProxyModule,
+    data::ProxyDataContext,
     locator::{Locator, create_locator},
     user::{UserBackend, create_user_backend},
 };
@@ -29,6 +30,7 @@ use rsipstack::{
         TcpListenerConnection, TransportLayer, WebSocketListenerConnection, udp::UdpConnection,
     },
 };
+use sea_orm::DatabaseConnection;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -46,6 +48,7 @@ pub struct SipServerInner {
     pub cancel_token: CancellationToken,
     pub rtp_config: RtpConfig,
     pub proxy_config: Arc<ProxyConfig>,
+    pub data_context: Arc<ProxyDataContext>,
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Option<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
@@ -80,6 +83,8 @@ pub struct SipServerBuilder {
     dialplan_inspector: Option<Box<dyn DialplanInspector>>,
     proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
+    database: Option<DatabaseConnection>,
+    data_context: Option<Arc<ProxyDataContext>>,
 }
 
 impl SipServerBuilder {
@@ -98,6 +103,8 @@ impl SipServerBuilder {
             message_inspector: None,
             dialplan_inspector: None,
             create_route_invite: None,
+            database: None,
+            data_context: None,
         }
     }
 
@@ -160,6 +167,16 @@ impl SipServerBuilder {
     }
     pub fn with_rtp_config(mut self, config: RtpConfig) -> Self {
         self.rtp_config = Some(config);
+        self
+    }
+
+    pub fn with_database_connection(mut self, db: DatabaseConnection) -> Self {
+        self.database = Some(db);
+        self
+    }
+
+    pub fn with_data_context(mut self, context: Arc<ProxyDataContext>) -> Self {
+        self.data_context = Some(context);
         self
     }
 
@@ -278,10 +295,34 @@ impl SipServerBuilder {
         let proxycall_inspector = self.proxycall_inspector;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
+        let needs_db = self.config.trunks_source == crate::config::ProxyDataSource::Database
+            || self.config.routes_source == crate::config::ProxyDataSource::Database;
+
+        let database = if needs_db {
+            Some(
+                self.database
+                    .clone()
+                    .ok_or_else(|| anyhow!("proxy data requires a database connection"))?,
+            )
+        } else {
+            self.database.clone()
+        };
+
+        let data_context = if let Some(context) = self.data_context {
+            context
+        } else {
+            Arc::new(
+                ProxyDataContext::new(self.config.clone(), database.clone())
+                    .await
+                    .map_err(|err| anyhow!("failed to initialize proxy data context: {err}"))?,
+            )
+        };
+
         let inner = Arc::new(SipServerInner {
             rtp_config,
             proxy_config: self.config.clone(),
             cancel_token,
+            data_context,
             user_backend: user_backend,
             auth_backend: auth_backend,
             call_router: call_router,

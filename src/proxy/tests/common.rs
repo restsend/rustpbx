@@ -1,8 +1,11 @@
 use crate::call::SipUser;
 use crate::config::{ProxyConfig, RtpConfig};
-use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
+use crate::proxy::{
+    data::ProxyDataContext,
+    locator::{Locator, MemoryLocator},
+};
 use rsip::Header;
 use rsip::services::DigestGenerator;
 use rsip::{HostWithPort, prelude::*};
@@ -45,10 +48,17 @@ pub async fn create_test_server_with_config(
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
     // Create server inner directly
+    let data_context = Arc::new(
+        ProxyDataContext::new(config.clone(), None)
+            .await
+            .expect("failed to init proxy data context for tests"),
+    );
+
     let server_inner = Arc::new(SipServerInner {
         rtp_config: RtpConfig::default(),
         proxy_config: config.clone(),
         cancel_token: CancellationToken::new(),
+        data_context,
         user_backend: user_backend,
         auth_backend: None,
         call_router: None,
