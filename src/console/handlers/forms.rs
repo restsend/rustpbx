@@ -48,6 +48,7 @@ pub struct ExtensionPayload {
     pub department_ids: Option<Vec<i64>>,
     pub login_disabled: Option<bool>,
     pub voicemail_disabled: Option<bool>,
+    pub allow_guest_calls: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Clone)]

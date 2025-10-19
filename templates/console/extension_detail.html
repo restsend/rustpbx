@@ -54,6 +54,11 @@
                         <dd class="text-sm text-slate-700"
                             x-text="model?.registered_at ? formatDate(model.registered_at) : 'Not registered'"></dd>
                     </div>
+                    <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Public access</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.public_call_allowed ? 'Allowed' : 'Restricted'">
+                        </dd>
+                    </div>
                 </dl>
             </div>
         </div>
@@ -146,7 +151,7 @@
                         </div>
                     </div>
 
-                    <div class="grid gap-6 md:grid-cols-2">
+                    <div class="grid gap-6 md:grid-cols-3">
                         <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                             <div class="flex items-start justify-between">
                                 <div>
@@ -185,6 +190,27 @@
                                     <span x-text="form.voicemail_enabled ? 'Enabled' : 'Disabled'"></span>
                                 </button>
                             </div>
+                        </div>
+                        <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                            <div class="flex items-start justify-between">
+                                <div>
+                                    <h2 class="text-sm font-semibold text-slate-900">Public inbound calls</h2>
+                                    <p class="text-xs text-slate-500">Allow anonymous SIP INVITEs to reach this
+                                        extension.</p>
+                                </div>
+                                <button type="button" @click="form.public_call_allowed = !form.public_call_allowed"
+                                    :class="form.public_call_allowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
+                                    class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ring-2 transition">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M4.75 3.75h2.5l1 3-1.5.75a7 7 0 0 0 4.5 4.5l.75-1.5 3 1v2.5a1 1 0 0 1-1 1c-6.351 0-11.5-5.149-11.5-11.5a1 1 0 0 1 1-1Z" />
+                                    </svg>
+                                    <span x-text="form.public_call_allowed ? 'Allowed' : 'Restricted'"></span>
+                                </button>
+                            </div>
+                            <p class="text-xs text-slate-500">Registration still requires credentials even when public
+                                calling is enabled.</p>
                         </div>
                     </div>
                 </div>
@@ -296,6 +322,7 @@
                 sip_password: '',
                 login_allowed: !(options.model?.login_disabled ?? false),
                 voicemail_enabled: !(options.model?.voicemail_disabled ?? false),
+                public_call_allowed: !!(options.model?.allow_guest_calls ?? false),
                 call_forwarding_mode: options.model?.call_forwarding_mode || 'none',
                 call_forwarding_destination: options.model?.call_forwarding_destination || '',
                 call_forwarding_timeout: options.model?.call_forwarding_timeout || 30,
@@ -366,6 +393,7 @@
                     'sip_password': this.form.sip_password.trim() || undefined,
                     'login_disabled': this.form.login_allowed ? false : true,
                     'voicemail_disabled': this.form.voicemail_enabled ? false : true,
+                    'allow_guest_calls': this.form.public_call_allowed === true,
                     'call_forwarding_mode': this.form.call_forwarding_mode || 'none',
                     'call_forwarding_destination': this.form.call_forwarding_mode !== 'none' && this.form.call_forwarding_destination.trim()
                         ? this.form.call_forwarding_destination.trim()

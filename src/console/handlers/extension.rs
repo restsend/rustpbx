@@ -16,11 +16,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, NaiveDateTime, Utc};
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
-    QueryOrder,
+    QueryOrder, QuerySelect,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -33,6 +34,36 @@ struct QueryExtensionsFilters {
     q: Option<String>,
     #[serde(default)]
     department_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    call_forwarding_enabled: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    login_allowed: Option<bool>,
+    #[serde(default)]
+    created_at_from: Option<String>,
+    #[serde(default)]
+    created_at_to: Option<String>,
+    #[serde(default)]
+    registered_at_from: Option<String>,
+    #[serde(default)]
+    registered_at_to: Option<String>,
+}
+
+fn parse_datetime_filter(value: &str) -> Option<DateTime<Utc>> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+    None
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -65,8 +96,29 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
         }
     };
 
+    let statuses = match ExtensionEntity::find()
+        .select_only()
+        .column(ExtensionColumn::Status)
+        .distinct()
+        .into_tuple::<Option<String>>()
+        .all(state.db())
+        .await
+    {
+        Ok(results) => results
+            .into_iter()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>(),
+        Err(err) => {
+            warn!("failed to load extension statuses: {}", err);
+            vec![]
+        }
+    };
+
     return json!({
         "departments": departments,
+        "statuses": statuses,
     });
 }
 
@@ -163,6 +215,7 @@ async fn create_extension(
         call_forwarding_timeout: Set(payload.call_forwarding_timeout),
         login_disabled: Set(payload.login_disabled.unwrap_or(false)),
         voicemail_disabled: Set(payload.voicemail_disabled.unwrap_or(false)),
+        allow_guest_calls: Set(payload.allow_guest_calls.unwrap_or(false)),
         notes: Set(payload.notes),
         created_at: Set(now),
         updated_at: Set(now),
@@ -239,6 +292,55 @@ async fn query_extensions(
                     );
 
                 selector = selector.filter(ExtensionColumn::Id.in_subquery(subquery.to_owned()));
+            }
+        }
+
+        if let Some(call_forwarding_enabled) = filters.call_forwarding_enabled {
+            if call_forwarding_enabled {
+                let mut condition = Condition::all();
+                condition = condition.add(ExtensionColumn::CallForwardingMode.is_not_null());
+                condition = condition.add(ExtensionColumn::CallForwardingMode.ne("none"));
+                selector = selector.filter(condition);
+            } else {
+                let mut condition = Condition::any();
+                condition = condition.add(ExtensionColumn::CallForwardingMode.is_null());
+                condition = condition.add(ExtensionColumn::CallForwardingMode.eq("none"));
+                selector = selector.filter(condition);
+            }
+        }
+
+        if let Some(ref status) = filters.status {
+            let trimmed = status.trim();
+            if !trimmed.is_empty() {
+                selector = selector.filter(ExtensionColumn::Status.eq(trimmed));
+            }
+        }
+
+        if let Some(login_allowed) = filters.login_allowed {
+            selector = selector.filter(ExtensionColumn::LoginDisabled.eq(!login_allowed));
+        }
+
+        if let Some(ref from_raw) = filters.created_at_from {
+            if let Some(from) = parse_datetime_filter(from_raw) {
+                selector = selector.filter(ExtensionColumn::CreatedAt.gte(from));
+            }
+        }
+
+        if let Some(ref to_raw) = filters.created_at_to {
+            if let Some(to) = parse_datetime_filter(to_raw) {
+                selector = selector.filter(ExtensionColumn::CreatedAt.lte(to));
+            }
+        }
+
+        if let Some(ref from_raw) = filters.registered_at_from {
+            if let Some(from) = parse_datetime_filter(from_raw) {
+                selector = selector.filter(ExtensionColumn::RegisteredAt.gte(from));
+            }
+        }
+
+        if let Some(ref to_raw) = filters.registered_at_to {
+            if let Some(to) = parse_datetime_filter(to_raw) {
+                selector = selector.filter(ExtensionColumn::RegisteredAt.lte(to));
             }
         }
     }
@@ -335,6 +437,9 @@ async fn update_extension(
     if let Some(voicemail_disabled) = payload.voicemail_disabled {
         active.voicemail_disabled = Set(voicemail_disabled);
     }
+    if let Some(allow_guest_calls) = payload.allow_guest_calls {
+        active.allow_guest_calls = Set(allow_guest_calls);
+    }
     active.updated_at = Set(chrono::Utc::now());
 
     if let Err(err) = active.update(db).await {
@@ -425,6 +530,7 @@ mod tests {
             extension: Set(extension.to_string()),
             login_disabled: Set(false),
             voicemail_disabled: Set(false),
+            allow_guest_calls: Set(false),
             ..Default::default()
         }
         .insert(db)

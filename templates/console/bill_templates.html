@@ -164,7 +164,8 @@
                                         </a>
                                         <button type="button"
                                             class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-50"
-                                            @click="deleteTemplate(template)">
+                                            :disabled="processing.delete === template.id"
+                                            @click="confirmDelete(template)">
                                             Delete
                                         </button>
                                     </div>
@@ -226,6 +227,9 @@
             flash: null,
             page: 1,
             perPage: 20,
+            processing: {
+                delete: null,
+            },
             init() {
                 this.loadFilterOptions();
                 this.fetchTemplates();
@@ -404,13 +408,30 @@
                 const amount = Number(value || 0);
                 return `${amount.toFixed(2)}%`;
             },
+            confirmDelete(template) {
+                if (!template || !template.id) {
+                    return;
+                }
+                const label = template.display_name || template.name;
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete billing template',
+                        message: label
+                            ? `Delete billing template ${label}? This action cannot be undone.`
+                            : 'Delete this billing template? This action cannot be undone.',
+                        confirmLabel: 'Delete',
+                        cancelLabel: 'Cancel',
+                        destructive: true,
+                        onConfirm: () => this.deleteTemplate(template),
+                    },
+                }));
+            },
             async deleteTemplate(template) {
                 if (!template || !template.id) {
                     return;
                 }
-                if (!window.confirm(`Delete billing template ${template.display_name || template.name}? This cannot be undone.`)) {
-                    return;
-                }
+                this.processing.delete = template.id;
+                this.error = null;
                 try {
                     const response = await fetch(this.detailUrl(template.id), {
                         method: 'DELETE',
@@ -427,6 +448,8 @@
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || 'Failed to delete billing template';
+                } finally {
+                    this.processing.delete = null;
                 }
             },
         }));
