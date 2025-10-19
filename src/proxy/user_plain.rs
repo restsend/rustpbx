@@ -67,6 +67,7 @@ impl PlainTextBackend {
                 email: None,
                 phone: None,
                 note: None,
+                allow_guest_calls: false,
             };
             users.insert(username.to_string(), user);
         }

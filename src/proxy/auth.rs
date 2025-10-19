@@ -180,14 +180,14 @@ impl ProxyModule for AuthModule {
             return Ok(ProxyAction::Continue);
         }
 
+        let tx_user = SipUser::try_from(&*tx)?;
+
         if cookie.is_from_trunk() {
-            let tx_user = SipUser::try_from(&*tx)?;
-            cookie.set_user(tx_user);
+            cookie.set_user(tx_user.clone());
             return Ok(ProxyAction::Continue);
         }
 
         if let Some(backend) = self.server.auth_backend.as_ref() {
-            let tx_user = SipUser::try_from(&*tx)?;
             match backend.authenticate(&tx.original).await {
                 Ok(Some(mut user)) => {
                     user.merge_with(&tx_user);
@@ -205,44 +205,86 @@ impl ProxyModule for AuthModule {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
                     cookie.set_user(user);
-                    Ok(ProxyAction::Continue)
-                } else {
-                    let from_uri = tx.original.from_header()?.uri()?;
-                    let realm = tx.original.uri().host().to_string();
-                    let realm = ProxyConfig::normalize_realm(&realm);
-                    // Check which type of authentication was attempted or send both challenges
-                    let has_proxy_auth_header =
-                        rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
-                            .is_some();
-                    if has_proxy_auth_header {
-                        // Send proxy challenge if proxy auth was attempted
-                        let proxy_auth = self.create_proxy_auth_challenge(realm)?;
-                        info!(
-                            from = from_uri.to_string(),
-                            realm = realm,
-                            ?proxy_auth,
-                            "Proxy authentication failed, sending proxy challenge"
-                        );
-                        let headers = vec![Header::ProxyAuthenticate(proxy_auth)];
-                        tx.reply_with(rsip::StatusCode::ProxyAuthenticationRequired, headers, None)
-                            .await
-                            .ok();
-                    } else {
-                        // Send WWW challenge if WWW auth was attempted
-                        let www_auth = self.create_www_auth_challenge(realm)?;
-                        info!(
-                            from = from_uri.to_string(),
-                            realm = realm,
-                            ?www_auth,
-                            "WWW authentication failed, sending WWW challenge"
-                        );
-                        let headers = vec![Header::WwwAuthenticate(www_auth)];
-                        tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
-                            .await
-                            .ok();
-                    }
-                    Ok(ProxyAction::Abort)
+                    return Ok(ProxyAction::Continue);
                 }
+
+                if tx.original.method == rsip::Method::Invite {
+                    if let Ok(to_header) = tx.original.to_header() {
+                        if let Ok(to_uri) = to_header.uri() {
+                            if let Some(callee_user_raw) = to_uri.user() {
+                                let callee_user = callee_user_raw.to_string();
+                                let callee_realm = to_uri.host().to_string();
+                                let realm_ref = if callee_realm.is_empty() {
+                                    None
+                                } else {
+                                    Some(callee_realm.as_str())
+                                };
+                                match self
+                                    .server
+                                    .user_backend
+                                    .get_user(&callee_user, realm_ref)
+                                    .await
+                                {
+                                    Ok(Some(callee_profile))
+                                        if callee_profile.allow_guest_calls =>
+                                    {
+                                        info!(
+                                            caller = %tx_user.username,
+                                            extension = %callee_user,
+                                            "Allowing guest call without authentication"
+                                        );
+                                        cookie.set_user(tx_user.clone());
+                                        return Ok(ProxyAction::Continue);
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        info!(
+                                            extension = %callee_user,
+                                            error = %e,
+                                            "Failed to evaluate guest call permission"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let from_uri = tx.original.from_header()?.uri()?;
+                let realm = tx.original.uri().host().to_string();
+                let realm = ProxyConfig::normalize_realm(&realm);
+                // Check which type of authentication was attempted or send both challenges
+                let has_proxy_auth_header =
+                    rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
+                        .is_some();
+                if has_proxy_auth_header {
+                    // Send proxy challenge if proxy auth was attempted
+                    let proxy_auth = self.create_proxy_auth_challenge(realm)?;
+                    info!(
+                        from = from_uri.to_string(),
+                        realm = realm,
+                        ?proxy_auth,
+                        "Proxy authentication failed, sending proxy challenge"
+                    );
+                    let headers = vec![Header::ProxyAuthenticate(proxy_auth)];
+                    tx.reply_with(rsip::StatusCode::ProxyAuthenticationRequired, headers, None)
+                        .await
+                        .ok();
+                } else {
+                    // Send WWW challenge if WWW auth was attempted
+                    let www_auth = self.create_www_auth_challenge(realm)?;
+                    info!(
+                        from = from_uri.to_string(),
+                        realm = realm,
+                        ?www_auth,
+                        "WWW authentication failed, sending WWW challenge"
+                    );
+                    let headers = vec![Header::WwwAuthenticate(www_auth)];
+                    tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
+                        .await
+                        .ok();
+                }
+                Ok(ProxyAction::Abort)
             }
             Err(e) => {
                 info!(error=%e, key = %tx.key, "Authentication error");

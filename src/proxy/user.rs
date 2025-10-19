@@ -1,7 +1,10 @@
-use super::{user_db::DbBackend, user_http::HttpUserBackend, user_plain::PlainTextBackend};
+use super::{
+    user_db::DbBackend, user_extension::ExtensionUserBackend, user_http::HttpUserBackend,
+    user_plain::PlainTextBackend,
+};
 use crate::{
     call::user::SipUser,
-    config::{ProxyConfig, UserBackendConfig},
+    config::{Config, ProxyConfig, UserBackendConfig},
     proxy::user_db::DbBackendConfig,
 };
 use anyhow::Result;
@@ -202,6 +205,13 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 deleted_at_column: None,
             };
             let backend = DbBackend::new(url.clone(), db_config).await?;
+            Ok(Box::new(backend))
+        }
+        UserBackendConfig::Extension { database_url } => {
+            let url = database_url
+                .clone()
+                .unwrap_or_else(|| Config::default().database_url);
+            let backend = ExtensionUserBackend::connect(&url).await?;
             Ok(Box::new(backend))
         }
     }

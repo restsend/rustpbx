@@ -2,6 +2,7 @@ use crate::{app::AppState, handler::middleware::clientaddr::ClientAddr};
 use axum::{
     Json, Router,
     extract::{Path, State},
+    http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,7 +17,8 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/dialogs", get(list_dialogs))
         .route("/kill/{id}", post(kill_call))
         .route("/shutdown", post(shutdown_handler))
-        .route("/reload", post(reload_handler))
+        .route("/reload/trunks", post(reload_trunks_handler))
+        .route("/reload/routes", post(reload_routes_handler))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -139,7 +141,72 @@ async fn kill_call(
     Json(true).into_response()
 }
 
-async fn reload_handler(State(_state): State<AppState>, client_ip: ClientAddr) -> Response {
-    info!(%client_ip, "Reload configuration initiated via /reload endpoint");
-    Json(serde_json::json!({"status": "configuration reloaded"})).into_response()
+async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
+    info!(%client_ip, "Reload SIP trunks via /reload/trunks endpoint");
+
+    let Some(sip_server) = state.sip_server.as_ref() else {
+        warn!(%client_ip, "Trunk reload ignored: SIP server not running");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "sip_server_not_running",
+            })),
+        )
+            .into_response();
+    };
+
+    match sip_server.inner.data_context.reload_trunks().await {
+        Ok(trunks) => Json(serde_json::json!({
+            "status": "ok",
+            "trunks_reloaded": trunks,
+        }))
+        .into_response(),
+        Err(error) => {
+            warn!(%client_ip, error = %error, "Trunk reload failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
+    info!(%client_ip, "Reload routing rules via /reload/routes endpoint");
+
+    let Some(sip_server) = state.sip_server.as_ref() else {
+        warn!(%client_ip, "Route reload ignored: SIP server not running");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "sip_server_not_running",
+            })),
+        )
+            .into_response();
+    };
+
+    match sip_server.inner.data_context.reload_routes().await {
+        Ok(routes) => Json(serde_json::json!({
+            "status": "ok",
+            "routes_reloaded": routes,
+        }))
+        .into_response(),
+        Err(error) => {
+            warn!(%client_ip, error = %error, "Route reload failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
 }

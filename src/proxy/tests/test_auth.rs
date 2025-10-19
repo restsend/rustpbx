@@ -1,15 +1,22 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use super::common::{
     create_auth_request, create_proxy_auth_request_with_nonce, create_test_request,
     create_test_server, create_transaction, extract_nonce_from_proxy_authenticate,
 };
-use crate::call::TransactionCookie;
+use crate::call::{SipUser, TransactionCookie};
+use crate::config::{ProxyConfig, RtpConfig};
 use crate::proxy::auth::AuthModule;
+use crate::proxy::data::ProxyDataContext;
+use crate::proxy::locator::{Locator, MemoryLocator};
+use crate::proxy::server::SipServerInner;
+use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsip::Header;
 use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
 use rsip::services::DigestGenerator;
+use rsipstack::EndpointBuilder;
+use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
@@ -400,6 +407,149 @@ async fn test_auth_module_bypass_other_methods() {
 
     // Should continue since OPTIONS doesn't require auth
     assert!(matches!(result, ProxyAction::Continue));
+}
+
+#[tokio::test]
+async fn test_guest_call_allowed_extension() {
+    let mut proxy_config = ProxyConfig::default();
+    if proxy_config.realms.is_none() {
+        proxy_config.realms = Some(vec![]);
+    }
+    proxy_config
+        .realms
+        .as_mut()
+        .unwrap()
+        .push("example.com".to_string());
+
+    let builtin_users = vec![SipUser {
+        id: 2000,
+        username: "2000".to_string(),
+        enabled: true,
+        realm: Some("example.com".to_string()),
+        allow_guest_calls: true,
+        ..Default::default()
+    }];
+
+    let user_backend = MemoryUserBackend::new(Some(builtin_users));
+    let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
+    let config = Arc::new(proxy_config);
+    let endpoint = EndpointBuilder::new().build();
+    let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
+
+    let data_context = Arc::new(
+        ProxyDataContext::new(config.clone(), None)
+            .await
+            .expect("failed to init proxy data context for auth test"),
+    );
+
+    let server_inner = Arc::new(SipServerInner {
+        rtp_config: RtpConfig::default(),
+        proxy_config: config,
+        cancel_token: CancellationToken::new(),
+        data_context,
+        user_backend: Box::new(user_backend),
+        auth_backend: None,
+        call_router: None,
+        locator,
+        callrecord_sender: None,
+        endpoint,
+        dialog_layer,
+        dialplan_inspector: None,
+        create_route_invite: None,
+        proxycall_inspector: None,
+    });
+
+    let module = AuthModule::new(server_inner);
+
+    let request = {
+        let realm = "example.com";
+        let caller = "guestuser";
+        let callee = "2000";
+
+        let host_with_port = rsip::HostWithPort {
+            host: realm.parse().unwrap(),
+            port: Some(5060.into()),
+        };
+
+        let to_uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: callee.to_string(),
+                password: None,
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+
+        let from_uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: caller.to_string(),
+                password: None,
+            }),
+            host_with_port: host_with_port.clone(),
+            params: vec![],
+            headers: vec![],
+        };
+
+        let from = rsip::typed::From {
+            display_name: None,
+            uri: from_uri.clone(),
+            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+        };
+
+        let to = rsip::typed::To {
+            display_name: None,
+            uri: to_uri.clone(),
+            params: vec![],
+        };
+
+        let via = rsip::headers::Via::new(format!(
+            "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
+            realm,
+            random_text(8)
+        ));
+
+        let contact = rsip::typed::Contact {
+            display_name: None,
+            uri: from_uri.clone(),
+            params: vec![],
+        };
+
+        let headers = vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            rsip::headers::CallId::new(random_text(16)).into(),
+            rsip::headers::typed::CSeq {
+                seq: 1u32.into(),
+                method: rsip::Method::Invite,
+            }
+            .into(),
+            contact.into(),
+        ];
+
+        rsip::Request {
+            method: rsip::Method::Invite,
+            uri: to_uri,
+            version: rsip::Version::V2,
+            headers: headers.into(),
+            body: vec![],
+        }
+    };
+
+    let (mut tx, _) = create_transaction(request).await;
+    let cookie = TransactionCookie::default();
+    let result = module
+        .on_transaction_begin(CancellationToken::new(), &mut tx, cookie.clone())
+        .await
+        .unwrap();
+
+    assert!(matches!(result, ProxyAction::Continue));
+    assert!(tx.last_response.is_none());
+    let stored_user = cookie.get_user().expect("caller should be stored");
+    assert_eq!(stored_user.username, "guestuser");
 }
 
 // Helper function to create a basic SIP request

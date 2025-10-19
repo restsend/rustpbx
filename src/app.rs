@@ -1,7 +1,7 @@
 use crate::{
     call::ActiveCallRef,
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
-    config::Config,
+    config::{Config, ProxyDataSource, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     media::engine::StreamEngine,
     proxy::{
@@ -216,9 +216,16 @@ impl AppStateBuilder {
         let sip_server = match self.proxy_builder {
             Some(builder) => builder.build().await.ok(),
             None => {
-                if let Some(proxy_config) = config.proxy.clone() {
+                if let Some(mut proxy_config) = config.proxy.clone() {
+                    if let UserBackendConfig::Extension { database_url } =
+                        &mut proxy_config.user_backend
+                    {
+                        if database_url.is_none() {
+                            *database_url = Some(config.database_url.clone());
+                        }
+                    }
                     let proxy_config = Arc::new(proxy_config);
-                    let builder = SipServerBuilder::new(proxy_config)
+                    let mut builder = SipServerBuilder::new(proxy_config.clone())
                         .with_cancel_token(token.child_token())
                         .with_callrecord_sender(callrecord_sender.clone())
                         .with_rtp_config(config.rtp_config())
@@ -226,7 +233,19 @@ impl AppStateBuilder {
                         .register_module("auth", AuthModule::create)
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
-                    builder.build().await.ok()
+                    let needs_proxy_db = proxy_config.trunks_source == ProxyDataSource::Database
+                        || proxy_config.routes_source == ProxyDataSource::Database;
+                    if needs_proxy_db {
+                        let db = crate::models::create_db(&config.database_url).await?;
+                        builder = builder.with_database_connection(db);
+                    }
+                    match builder.build().await {
+                        Ok(server) => Some(server),
+                        Err(err) => {
+                            tracing::error!("Failed to build SIP server: {}", err);
+                            None
+                        }
+                    }
                 } else {
                     None
                 }

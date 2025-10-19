@@ -25,6 +25,8 @@ pub struct SipUser {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub note: Option<String>,
+    #[serde(default)]
+    pub allow_guest_calls: bool,
     /// From the original INVITE
     #[serde(skip)]
     pub origin_contact: Option<rsip::typed::Contact>,
@@ -75,6 +77,7 @@ impl Default for SipUser {
             email: None,
             phone: None,
             note: None,
+            allow_guest_calls: false,
         }
     }
 }
@@ -110,6 +113,9 @@ impl SipUser {
         }
         if self.note.is_none() {
             self.note = other.note.clone();
+        }
+        if !self.allow_guest_calls {
+            self.allow_guest_calls = other.allow_guest_calls;
         }
         if self.origin_contact.is_none() {
             self.origin_contact = other.origin_contact.clone();
@@ -231,6 +237,7 @@ impl TryFrom<&Transaction> for SipUser {
             email: None,
             phone: None,
             note: None,
+            allow_guest_calls: false,
         };
         u.build_contact(tx);
         Ok(u)

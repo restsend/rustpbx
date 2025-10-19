@@ -14,6 +14,25 @@
                     forward traffic based on your voice policies.</p>
             </div>
             <div class="flex flex-wrap gap-3">
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    :class="reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
+                    :disabled="reloading" @click="confirmReload()">
+                    <template x-if="!reloading">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
+                        </svg>
+                    </template>
+                    <template x-if="reloading">
+                        <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                        </svg>
+                    </template>
+                    Reload routes
+                </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -56,6 +75,10 @@
             </div>
         </section>
 
+        <template x-if="flash">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="flash"></div>
+        </template>
         <template x-if="error">
             <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" x-text="error">
             </div>
@@ -544,12 +567,14 @@
             basePath: '',
             listEndpoint: '',
             createUrl: '',
+            amiEndpoint: options.amiEndpoint || '/ami/v1',
             filtersRaw: {},
             routes: [],
             summary: { total_routes: 0, active_routes: 0, last_deploy: null },
             pagination: null,
             loading: false,
             error: null,
+            flash: null,
             search: '',
             directionFilter: 'all',
             statusFilter: 'all',
@@ -559,6 +584,7 @@
             statusOptions: [],
             perPage: 20,
             page: 1,
+            reloading: false,
 
             init() {
                 this.basePath = this.normalizeBasePath(options.basePath);
@@ -937,6 +963,52 @@
                     .map((part) => part[0]?.toUpperCase())
                     .join('')
                     .slice(0, 2);
+            },
+            confirmReload() {
+                if (this.reloading) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Reload routing rules',
+                        message: 'Reload routing definitions from configuration and database? Existing calls will continue but new transactions use updated rules.',
+                        confirmLabel: 'Reload',
+                        cancelLabel: 'Cancel',
+                        destructive: false,
+                        onConfirm: () => this.reloadRoutes(),
+                    },
+                }));
+            },
+            async reloadRoutes() {
+                if (this.reloading) {
+                    return;
+                }
+                this.reloading = true;
+                this.error = null;
+                const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/routes`;
+                let successMessage = null;
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                        credentials: 'include',
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || data?.error || 'Failed to reload routing rules');
+                    }
+                    const count = Number.isFinite(Number(data?.routes_reloaded)) ? Number(data.routes_reloaded) : null;
+                    successMessage = count !== null ? `Reloaded ${count} routing rule${count === 1 ? '' : 's'}.` : 'Routing rules reloaded.';
+                    await this.fetchRoutes();
+                    this.flash = successMessage;
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to reload routing rules';
+                } finally {
+                    this.reloading = false;
+                }
             },
         }));
     });

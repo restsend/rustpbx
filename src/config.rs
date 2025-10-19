@@ -170,6 +170,10 @@ pub enum UserBackendConfig {
         enabled_column: Option<String>,
         realm_column: Option<String>,
     },
+    Extension {
+        #[serde(default)]
+        database_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -226,6 +230,19 @@ pub enum CallRecordConfig {
         with_media: Option<bool>,
         keep_media_copy: Option<bool>,
     },
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyDataSource {
+    Config,
+    Database,
+}
+
+impl Default for ProxyDataSource {
+    fn default() -> Self {
+        Self::Config
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
@@ -289,6 +306,10 @@ pub struct ProxyConfig {
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default)]
     pub default: Option<DefaultRoute>,
+    #[serde(default)]
+    pub trunks_source: ProxyDataSource,
+    #[serde(default)]
+    pub routes_source: ProxyDataSource,
     pub rtp_config: Option<RtpConfig>,
 }
 
@@ -360,6 +381,8 @@ impl Default for ProxyConfig {
             routes: None,
             trunks: HashMap::new(),
             default: None,
+            trunks_source: ProxyDataSource::default(),
+            routes_source: ProxyDataSource::default(),
             rtp_config: None,
         }
     }

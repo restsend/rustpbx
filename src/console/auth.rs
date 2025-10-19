@@ -94,11 +94,9 @@ impl ConsoleState {
     }
 
     fn cookie_path(&self) -> &str {
-        if self.base_path == "/" {
-            "/"
-        } else {
-            self.base_path.as_str()
-        }
+        // Always scope the session cookie to the site root so AMI requests outside the
+        // console base path still receive it.
+        "/"
     }
 
     pub async fn authenticate(

@@ -190,6 +190,7 @@ impl UserBackend for DbBackend {
             email,
             phone,
             note,
+            allow_guest_calls: false,
         }))
     }
 }
