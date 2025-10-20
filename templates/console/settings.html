@@ -51,106 +51,224 @@
 
         <section x-show="activeTab === 'platform'" x-cloak x-transition.opacity class="space-y-6"
             id="settings-tab-platform" role="tabpanel" tabindex="0">
-            <div class="grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-                <div class="space-y-6">
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <h2 class="text-base font-semibold text-slate-900">Runtime overview</h2>
-                                <p class="text-xs text-slate-500">Compact snapshot of cluster health and build metadata.
-                                </p>
-                            </div>
-                            <div class="text-xs font-semibold text-slate-500">
-                                Version · <span class="font-mono text-slate-700" x-text="server.version || '—'"></span>
-                            </div>
+            <div class="space-y-6">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Runtime overview</h2>
+                            <p class="text-xs text-slate-500">Snapshot of core services and configuration provenance.
+                            </p>
                         </div>
-                        <div class="mt-4 grid gap-3 sm:grid-cols-2">
-                            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Cluster
-                                </div>
-                                <div class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="server.cluster || server.cluster_name || 'Unnamed cluster'"></div>
-                                <div class="text-xs text-slate-500"
-                                    x-text="server.region ? ('Region · ' + server.region) : 'Region · —'"></div>
-                            </div>
-                            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Uptime
-                                </div>
-                                <div class="mt-1 text-sm font-semibold text-slate-800" x-text="server.uptime || '—'">
-                                </div>
-                                <div class="text-xs text-slate-500"
-                                    x-text="server.processes ? ('Workers · ' + server.processes) : 'Workers · —'"></div>
-                            </div>
-                            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Media
-                                    engines</div>
-                                <div class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="server.media_nodes !== undefined ? server.media_nodes : '—'"></div>
-                                <div class="text-xs text-slate-500">Nodes registered with the signaling core.</div>
-                            </div>
-                            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">SIP
-                                    endpoints</div>
-                                <div class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="server.sip_users !== undefined ? server.sip_users : '—'"></div>
-                                <div class="text-xs text-slate-500">Provisioned accounts currently online.</div>
-                            </div>
+                        <div class="text-xs font-semibold text-slate-500">
+                            Version · <span class="font-mono text-slate-700"
+                                x-text="platform.version || site_version || '—'"></span>
                         </div>
                     </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <h2 class="text-base font-semibold text-slate-900">Retention policy</h2>
-                                <p class="text-xs text-slate-500">Review how long diagnostics, recordings, and analytics
-                                    are stored.</p>
+                    <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Uptime</div>
+                            <div class="mt-1 text-sm font-semibold text-slate-800"
+                                x-text="platform.uptime_pretty || '—'"></div>
+                            <div class="text-xs text-slate-500"
+                                x-text="stats.generated_at ? ('Updated · ' + formatDateTime(stats.generated_at)) : 'Updated · —'">
                             </div>
                         </div>
-                        <dl class="mt-4 grid gap-3 sm:grid-cols-2">
-                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <dt class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Call
-                                    recordings</dt>
-                                <dd class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="retention.call_recordings_days !== undefined ? retention.call_recordings_days + ' days' : '—'">
-                                </dd>
-                                <dd class="text-xs text-slate-500">Audio captured from active calls.</dd>
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">HTTP bind
                             </div>
-                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <dt class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transcripts
-                                </dt>
-                                <dd class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="retention.transcripts_days !== undefined ? retention.transcripts_days + ' days' : '—'">
-                                </dd>
-                                <dd class="text-xs text-slate-500">Speech-to-text artifacts kept before cleanup.</dd>
+                            <div class="mt-1 text-sm font-semibold text-slate-800" x-text="platform.http_addr || '—'">
                             </div>
-                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <dt class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Analytics
-                                </dt>
-                                <dd class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="retention.analytics_days !== undefined ? retention.analytics_days + ' days' : '—'">
-                                </dd>
-                                <dd class="text-xs text-slate-500">Aggregated dashboards and KPIs.</dd>
+                            <div class="text-xs text-slate-500"
+                                x-text="platform.log_level ? ('Log level · ' + platform.log_level) : 'Log level · default'">
                             </div>
-                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <dt class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Logs</dt>
-                                <dd class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="retention.logs_days !== undefined ? retention.logs_days + ' days' : '—'">
-                                </dd>
-                                <dd class="text-xs text-slate-500">System logs retained for auditability.</dd>
+                        </div>
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Proxy</div>
+                            <div class="mt-1 text-sm font-semibold"
+                                :class="proxyConfig.enabled ? 'text-emerald-600' : 'text-rose-600'"
+                                x-text="proxyConfig.enabled ? 'Online' : 'Offline'"></div>
+                            <div class="text-xs text-slate-500"
+                                x-text="proxyConfig.max_concurrency ? ('Concurrency · ' + proxyConfig.max_concurrency) : 'Concurrency · —'">
                             </div>
-                        </dl>
+                        </div>
+                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">User agent
+                            </div>
+                            <div class="mt-1 text-sm font-semibold"
+                                :class="useragentConfig.enabled ? 'text-emerald-600' : 'text-slate-600'"
+                                x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></div>
+                            <div class="text-xs text-slate-500"
+                                x-text="useragentConfig.register_users ? ('Registrations · ' + useragentConfig.register_users) : 'Registrations · —'">
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="space-y-6">
+                <div class="grid gap-6 lg:grid-cols-2">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Proxy runtime</h2>
+                                <p class="text-xs text-slate-500">Listening sockets, modules, and transaction counters.
+                                </p>
+                            </div>
+                            <span class="rounded-full px-3 py-1 text-xs font-semibold"
+                                :class="proxyConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'">
+                                <span x-text="proxyConfig.enabled ? 'Online' : 'Offline'"></span>
+                            </span>
+                        </div>
+                        <div class="mt-4 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
+                                <span class="font-mono" x-text="proxyConfig.addr || '—'"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Ports</span>
+                                <span class="font-mono"
+                                    x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Modules</span>
+                                <span
+                                    x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Data sources</span>
+                                <span
+                                    x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
+                            </div>
+                        </div>
+                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
+                            </div>
+                            <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.proxy?.transactions?.running)"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.proxy?.transactions?.finished)"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.proxy?.transactions?.waiting_ack)"></div>
+                                </div>
+                            </div>
+                            <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                                Active dialogs · <span class="font-semibold text-slate-700"
+                                    x-text="displayMetric(stats.proxy?.dialogs)"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">User agent runtime</h2>
+                                <p class="text-xs text-slate-500">Registration service state and handshake metrics.</p>
+                            </div>
+                            <span class="rounded-full px-3 py-1 text-xs font-semibold"
+                                :class="useragentConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
+                                <span x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></span>
+                            </span>
+                        </div>
+                        <div class="mt-4 space-y-3 text-sm text-slate-600">
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
+                                <span class="font-mono" x-text="useragentConfig.addr || '—'"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">UDP port</span>
+                                <span class="font-mono" x-text="displayMetric(useragentConfig.udp_port)"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">User-Agent</span>
+                                <span x-text="useragentConfig.useragent || '—'"></span>
+                            </div>
+                            <div class="flex items-baseline justify-between">
+                                <span class="text-xs uppercase tracking-wide text-slate-400">Call-ID suffix</span>
+                                <span class="font-mono" x-text="useragentConfig.callid_suffix || '—'"></span>
+                            </div>
+                        </div>
+                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
+                            </div>
+                            <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.useragent?.transactions?.running)"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.useragent?.transactions?.finished)"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
+                                    <div class="mt-1 font-semibold text-slate-900"
+                                        x-text="displayMetric(stats.useragent?.transactions?.waiting_ack)"></div>
+                                </div>
+                            </div>
+                            <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                                Active dialogs · <span class="font-semibold text-slate-700"
+                                    x-text="displayMetric(stats.useragent?.dialogs)"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Key configuration</h2>
+                            <p class="text-xs text-slate-500">Selected settings from the active configuration file.</p>
+                        </div>
+                    </div>
+                    <div class="mt-4 overflow-x-auto">
+                        <table class="min-w-full divide-y divide-slate-200 text-sm">
+                            <thead
+                                class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                <tr>
+                                    <th class="px-4 py-2">Key</th>
+                                    <th class="px-4 py-2">Value</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                <template x-if="!keyConfigRows().length">
+                                    <tr>
+                                        <td class="px-4 py-3 text-xs text-slate-400" colspan="2">No configuration
+                                            metadata available.</td>
+                                    </tr>
+                                </template>
+                                <template x-for="item in keyConfigRows()" :key="item.label">
+                                    <tr>
+                                        <td class="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400"
+                                            x-text="item.label"></td>
+                                        <td class="px-4 py-3 text-sm text-slate-700">
+                                            <div x-text="item.value"></div>
+                                            <div class="text-xs text-slate-400" x-show="item.hint" x-text="item.hint">
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <template x-if="operations.length">
                     <div class="rounded-xl border border-rose-200 bg-rose-50 p-5">
                         <div class="flex items-center justify-between">
                             <h2 class="text-base font-semibold text-rose-700">Danger zone</h2>
                         </div>
-                        <p class="mt-2 text-xs text-slate-500">These actions impact cluster availability. Review the
-                            context carefully before triggering them.</p>
+                        <p class="mt-2 text-xs text-slate-500">Reload or administrative actions execute immediately on
+                            the running node.</p>
                         <div class="mt-4 space-y-4 text-sm text-slate-600">
-                            <template x-for="action in server.operations || []" :key="action.id">
+                            <template x-for="action in operations" :key="action.id">
                                 <div class="rounded-lg border border-rose-200 bg-rose-50 p-4">
                                     <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                         <div class="space-y-2">
@@ -158,16 +276,18 @@
                                             </div>
                                             <p class="text-xs text-slate-600" x-show="action.description"
                                                 x-text="action.description"></p>
-                                            <p class="text-[11px] text-slate-500" x-show="action.note"
-                                                x-text="action.note"></p>
                                         </div>
-                                        <button type="button" @click="triggerOperation(action)"
-                                            class="inline-flex items-center justify-center gap-2 rounded-md border border-rose-500 bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2">
+                                        <button type="button"
+                                            class="inline-flex items-center justify-center gap-2 rounded-md border border-rose-500 bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2"
+                                            :disabled="action.id === 'reload-acl' ? (!acl.reload_supported || aclReloading) : false"
+                                            @click="triggerOperation(action)">
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
                                             </svg>
-                                            Run action
+                                            <span x-text="action.id === 'reload-acl'
+                                                    ? (aclReloading ? 'Reloading...' : (acl.reload_supported ? 'Run action' : 'Proxy offline'))
+                                                    : 'Run action'"></span>
                                         </button>
                                     </div>
                                 </div>
@@ -182,7 +302,7 @@
                             </div>
                         </template>
                     </div>
-                </div>
+                </template>
             </div>
         </section>
 
@@ -251,12 +371,70 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                             <div>
+                                <h2 class="text-base font-semibold text-slate-900">Access control lists</h2>
+                                <p class="text-xs text-slate-500">Network admission rules from config files and embedded
+                                    sets.</p>
+                            </div>
+                            <div class="text-right text-xs text-slate-500">
+                                <div class="text-sm font-semibold text-slate-800"
+                                    x-text="acl.active_rules.length ? acl.active_rules.length + ' active' : 'No rules'">
+                                </div>
+                                <div class="text-[11px] uppercase tracking-wide">Rule status</div>
+                            </div>
+                        </div>
+                        <div class="mt-4 grid gap-3 sm:grid-cols-3">
+                            <div class="rounded-lg border border-slate-200 px-4 py-3">
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Embedded
+                                    definitions</div>
+                                <div class="mt-1 text-sm font-semibold text-slate-800" x-text="acl.embedded_count || 0">
+                                </div>
+                                <div class="text-xs text-slate-500">Rules baked into config.</div>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 px-4 py-3">
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">File
+                                    sources</div>
+                                <div class="mt-1 text-sm font-semibold text-slate-800"
+                                    x-text="acl.file_patterns.length ? acl.file_patterns.join(', ') : 'Inline only'">
+                                </div>
+                                <div class="text-xs text-slate-500">Glob patterns watched for ACL files.</div>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 px-4 py-3">
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Reload
+                                    support</div>
+                                <div class="mt-1 text-sm font-semibold"
+                                    :class="acl.reload_supported ? 'text-emerald-600' : 'text-rose-600'"
+                                    x-text="acl.reload_supported ? 'Available' : 'Proxy offline'"></div>
+                                <div class="text-xs text-slate-500">Live reload requires the SIP proxy.</div>
+                            </div>
+                        </div>
+                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50">
+                            <div
+                                class="border-b border-slate-200 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                Active rules snapshot
+                            </div>
+                            <pre class="max-h-48 overflow-auto px-4 py-3 text-xs text-slate-600"
+                                x-text="formatAclRules(acl.active_rules)"></pre>
+                        </div>
+                        <template x-if="acl.metrics">
+                            <div class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-3">
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Reload
+                                    metrics</div>
+                                <pre class="mt-2 max-h-40 overflow-auto bg-slate-50 px-3 py-2 text-xs text-slate-600"
+                                    x-text="formatMetadata(acl.metrics)"></pre>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div>
                                 <h2 class="text-base font-semibold text-slate-900">Rate limiting & posture</h2>
                                 <p class="text-xs text-slate-500">Review concurrent call thresholds and registration
                                     safeguards.</p>
                             </div>
                             <span class="rounded-full bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-500">
-                                ACL policy · <span x-text="security.acl_rules || 'allow all'"></span>
+                                <span
+                                    x-text="security.rate_limits?.max_call_concurrency ? ('Max calls ' + security.rate_limits.max_call_concurrency) : 'No explicit cap'"></span>
                             </span>
                         </div>
                         <dl class="mt-4 grid gap-3 sm:grid-cols-2">
@@ -275,12 +453,6 @@
                                     x-text="(security.rate_limits && security.rate_limits.max_registration_concurrency !== undefined) ? security.rate_limits.max_registration_concurrency : '—'">
                                 </dd>
                                 <dd class="text-xs text-slate-500">Simultaneous SIP registrations allowed.</dd>
-                            </div>
-                            <div class="rounded-lg border border-slate-200 px-4 py-3 sm:col-span-2">
-                                <dt class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">ACL rules
-                                </dt>
-                                <dd class="mt-2 font-mono text-xs text-slate-600 whitespace-pre-line"
-                                    x-text="security.acl_rules || 'allow all'"></dd>
                             </div>
                         </dl>
                     </div>
@@ -368,390 +540,6 @@
                 </div>
             </div>
         </section>
-
-        <section x-show="activeTab === 'billing'" x-cloak x-transition.opacity class="space-y-6"
-            id="settings-tab-billing" role="tabpanel" tabindex="0">
-            <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-                <div class="space-y-6">
-                    <div class="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-                        <div class="space-y-1">
-                            <h2 class="text-xl font-semibold text-slate-900">Billing templates</h2>
-                            <p class="text-xs text-slate-500">Define rate cards that trunks can reuse for consistent
-                                cost
-                                calculation.</p>
-                        </div>
-                        <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                            <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                x-text="(billing.templates?.length || 0) + ' templates'"></span>
-                            <button type="button"
-                                class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                                @click="openBillingTemplateCreate()">
-                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                    stroke-width="1.8">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                </svg>
-                                New template
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                        <div class="space-y-2">
-                            <template x-for="template in billing.templates || []" :key="template.id">
-                                <button type="button" @click="selectBillingTemplate(template.id)"
-                                    class="flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition"
-                                    :class="String(selectedBillingTemplateId) === String(template.id) ? 'border-sky-300 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
-                                    <div>
-                                        <div class="font-semibold text-slate-800" x-text="template.name"></div>
-                                        <div class="text-xs text-slate-400"
-                                            x-text="template.description || 'No description'">
-                                        </div>
-                                    </div>
-                                    <div class="flex flex-col items-end gap-1 text-right text-xs text-slate-500">
-                                        <span class="font-semibold text-slate-700"
-                                            x-text="template.currency || billing.default_currency || 'USD'"></span>
-                                        <span
-                                            class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
-                                            x-text="(template.rates?.length || 0) + ' rates'"></span>
-                                    </div>
-                                </button>
-                            </template>
-                            <p class="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400"
-                                x-show="!(billing.templates || []).length">No billing templates defined yet.</p>
-                        </div>
-
-                        <div class="space-y-4">
-                            <div class="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600"
-                                x-show="selectedBillingTemplate">
-                                <template x-if="selectedBillingTemplate">
-                                    <div class="space-y-5">
-                                        <header class="flex flex-wrap items-start justify-between gap-4">
-                                            <div>
-                                                <div class="text-xs uppercase tracking-wide text-slate-400">Template
-                                                </div>
-                                                <h3 class="text-lg font-semibold text-slate-900"
-                                                    x-text="selectedBillingTemplate.name"></h3>
-                                                <p class="mt-1 text-xs text-slate-500"
-                                                    x-text="selectedBillingTemplate.description || 'No additional details provided.'">
-                                                </p>
-                                            </div>
-                                            <div class="flex flex-col items-end gap-2 text-xs text-slate-500">
-                                                <div class="text-right">
-                                                    <div class="font-semibold text-slate-700"
-                                                        x-text="selectedBillingTemplate.currency || billing.default_currency || 'USD'">
-                                                    </div>
-                                                    <div
-                                                        x-text="'Billing increment · ' + (selectedBillingTemplate.increment || '60/60')">
-                                                    </div>
-                                                    <div
-                                                        x-text="'Included minutes · ' + (selectedBillingTemplate.included_minutes ?? 0)">
-                                                    </div>
-                                                </div>
-                                                <div class="flex items-center gap-2">
-                                                    <button type="button"
-                                                        class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
-                                                        @click="openBillingTemplateEdit(selectedBillingTemplate.id)">
-                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
-                                                            stroke="currentColor" stroke-width="1.6">
-                                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                                d="M4 13v3h3l9-9-3-3-9 9z" />
-                                                        </svg>
-                                                        Edit
-                                                    </button>
-                                                    <button type="button"
-                                                        class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
-                                                        @click="deleteBillingTemplate(selectedBillingTemplate.id)">
-                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
-                                                            stroke="currentColor" stroke-width="1.6">
-                                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                                d="M6 6l8 8M6 14l8-8" />
-                                                        </svg>
-                                                        Remove
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </header>
-
-                                        <div class="grid gap-3 text-xs text-slate-500 md:grid-cols-2">
-                                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                                <div class="text-[11px] uppercase tracking-wide text-slate-400">Template
-                                                    ID</div>
-                                                <div class="mt-1 font-mono text-sm text-slate-700"
-                                                    x-text="selectedBillingTemplate.id"></div>
-                                            </div>
-                                            <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                                <div class="text-[11px] uppercase tracking-wide text-slate-400">Rates
-                                                    defined</div>
-                                                <div class="mt-1 text-sm font-semibold text-slate-800"
-                                                    x-text="(selectedBillingTemplate.rates?.length || 0) + ' entries'">
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div class="space-y-3">
-                                            <div class="flex items-center justify-between">
-                                                <h4 class="text-sm font-semibold text-slate-800">Rates</h4>
-                                                <span class="text-xs text-slate-500">Prefix priority · longest match
-                                                    wins</span>
-                                            </div>
-                                            <div class="overflow-hidden rounded-lg border border-slate-200">
-                                                <table
-                                                    class="min-w-full divide-y divide-slate-200 text-xs text-slate-600">
-                                                    <thead
-                                                        class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
-                                                        <tr>
-                                                            <th class="px-3 py-2 text-left">Prefix</th>
-                                                            <th class="px-3 py-2 text-left">Label</th>
-                                                            <th class="px-3 py-2 text-right">Connect fee</th>
-                                                            <th class="px-3 py-2 text-right">Rate / min</th>
-                                                            <th class="px-3 py-2 text-right">Increment</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody class="divide-y divide-slate-100">
-                                                        <template x-for="rate in selectedBillingTemplate.rates || []"
-                                                            :key="rate.prefix + '-' + rate.label">
-                                                            <tr>
-                                                                <td class="px-3 py-2 font-mono text-xs"
-                                                                    x-text="rate.prefix || '*'"
-                                                                    title="Destination prefix"></td>
-                                                                <td class="px-3 py-2" x-text="rate.label || 'Global'">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right font-mono"
-                                                                    x-text="formatCurrency(rate.connect_fee || 0, selectedBillingTemplate.currency || billing.default_currency)">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right font-mono"
-                                                                    x-text="formatCurrency(rate.rate_per_minute ?? rate.rate ?? 0, selectedBillingTemplate.currency || billing.default_currency)">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right font-mono"
-                                                                    x-text="rate.increment || selectedBillingTemplate.increment || '60/60'">
-                                                                </td>
-                                                            </tr>
-                                                        </template>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-
-                                        <div
-                                            class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 p-5 text-sm text-slate-600">
-                                            <header class="flex flex-wrap items-center justify-between gap-3">
-                                                <div>
-                                                    <div class="text-xs uppercase tracking-wide text-slate-400">Cost
-                                                        simulation</div>
-                                                    <p class="text-xs text-slate-500">Estimate billing outcome for a
-                                                        destination and duration.</p>
-                                                </div>
-                                                <button type="button"
-                                                    class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
-                                                    @click="billingSimulation = { destination: '', minutes: 1, result: null }">
-                                                    Reset
-                                                </button>
-                                            </header>
-                                            <div
-                                                class="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-                                                <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                    Destination prefix / number
-                                                    <input type="text" x-model="billingSimulation.destination"
-                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                        placeholder="e.g. +1202555 or 44">
-                                                </label>
-                                                <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                    Call length (minutes)
-                                                    <input type="number" min="0" step="0.1"
-                                                        x-model.number="billingSimulation.minutes"
-                                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                        placeholder="3.5">
-                                                </label>
-                                                <button type="button"
-                                                    class="self-end inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
-                                                    @click="simulateTemplateCost()">
-                                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
-                                                        stroke="currentColor" stroke-width="1.8">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                            d="M5 10h10M10 5l5 5-5 5" />
-                                                    </svg>
-                                                    Simulate
-                                                </button>
-                                            </div>
-                                            <template x-if="billingSimulation.result">
-                                                <div
-                                                    class="mt-4 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
-                                                    <div
-                                                        class="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
-                                                        <div class="text-[11px] uppercase tracking-wide text-slate-400">
-                                                            Estimated cost</div>
-                                                        <div class="text-sm font-semibold text-slate-900"
-                                                            x-text="billingSimulation.result.formatted"></div>
-                                                    </div>
-                                                    <p class="mt-2 text-[11px] text-slate-500"
-                                                        x-text="billingSimulation.result.explanation"></p>
-                                                </div>
-                                            </template>
-                                        </div>
-                                    </div>
-                                </template>
-                            </div>
-                            <template x-if="billingTemplateFormVisible">
-                                <div
-                                    class="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-5 text-sm text-slate-600">
-                                    <form class="space-y-5" @submit.prevent="saveBillingTemplate">
-                                        <header class="flex flex-wrap items-center justify-between gap-3">
-                                            <div>
-                                                <div class="text-xs uppercase tracking-wide text-slate-400"
-                                                    x-text="billingTemplateFormMode === 'edit' ? 'Update template' : 'Create template'">
-                                                </div>
-                                                <h3 class="text-base font-semibold text-slate-900"
-                                                    x-text="billingTemplateFormMode === 'edit' ? 'Edit billing template' : 'New billing template'">
-                                                </h3>
-                                            </div>
-                                            <button type="button"
-                                                class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
-                                                @click="cancelBillingTemplateForm()">Cancel</button>
-                                        </header>
-
-                                        <div class="grid gap-4 md:grid-cols-2">
-                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                Template name
-                                                <input type="text" x-model="billingTemplateDraft.name" required
-                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    placeholder="North America bundle">
-                                            </label>
-                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                Currency
-                                                <input type="text" x-model="billingTemplateDraft.currency"
-                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    placeholder="USD">
-                                            </label>
-                                            <label
-                                                class="flex flex-col gap-1 text-xs font-semibold text-slate-500 md:col-span-2">
-                                                Description
-                                                <textarea rows="2" x-model="billingTemplateDraft.description"
-                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    placeholder="Optional summary for internal notes."></textarea>
-                                            </label>
-                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                Increment (first/next)
-                                                <input type="text" x-model="billingTemplateDraft.increment"
-                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    placeholder="60/60">
-                                            </label>
-                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
-                                                Included minutes
-                                                <input type="number" min="0" step="1"
-                                                    x-model.number="billingTemplateDraft.included_minutes"
-                                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    placeholder="0">
-                                            </label>
-                                        </div>
-
-                                        <div class="space-y-3">
-                                            <div class="flex flex-wrap items-center justify-between gap-2">
-                                                <h4 class="text-sm font-semibold text-slate-800">Rate entries</h4>
-                                                <button type="button"
-                                                    class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                                                    @click="addBillingRateRow()">
-                                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
-                                                        stroke="currentColor" stroke-width="1.8">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                            d="M10 4v12m6-6H4" />
-                                                    </svg>
-                                                    Add rate
-                                                </button>
-                                            </div>
-                                            <div class="overflow-hidden rounded-lg border border-slate-200">
-                                                <table
-                                                    class="min-w-full divide-y divide-slate-200 text-xs text-slate-600">
-                                                    <thead
-                                                        class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
-                                                        <tr>
-                                                            <th class="px-3 py-2 text-left">Prefix</th>
-                                                            <th class="px-3 py-2 text-left">Label</th>
-                                                            <th class="px-3 py-2 text-right">Connect fee</th>
-                                                            <th class="px-3 py-2 text-right">Rate / min</th>
-                                                            <th class="px-3 py-2 text-right">Increment</th>
-                                                            <th class="px-3 py-2 text-right">Actions</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody class="divide-y divide-slate-100">
-                                                        <template
-                                                            x-for="(rate, index) in billingTemplateDraft.rates || []"
-                                                            :key="rate.__key || index">
-                                                            <tr>
-                                                                <td class="px-3 py-2">
-                                                                    <input type="text" x-model="rate.prefix"
-                                                                        class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                                                                        placeholder="*">
-                                                                </td>
-                                                                <td class="px-3 py-2">
-                                                                    <input type="text" x-model="rate.label"
-                                                                        class="w-full rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                                                                        placeholder="Global">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right">
-                                                                    <input type="number" step="0.0001"
-                                                                        x-model.number="rate.connect_fee"
-                                                                        class="w-full rounded-md border border-slate-200 px-2 py-1 text-right font-mono text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                                                                        placeholder="0.0000">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right">
-                                                                    <input type="number" step="0.0001"
-                                                                        x-model.number="rate.rate_per_minute"
-                                                                        class="w-full rounded-md border border-slate-200 px-2 py-1 text-right font-mono text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                                                                        placeholder="0.0185">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right">
-                                                                    <input type="text" x-model="rate.increment"
-                                                                        class="w-full rounded-md border border-slate-200 px-2 py-1 text-right font-mono text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                                                                        placeholder="60/60">
-                                                                </td>
-                                                                <td class="px-3 py-2 text-right">
-                                                                    <button type="button"
-                                                                        class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
-                                                                        @click="removeBillingRateRow(index)">
-                                                                        <svg class="h-3 w-3" viewBox="0 0 20 20"
-                                                                            fill="none" stroke="currentColor"
-                                                                            stroke-width="1.6">
-                                                                            <path stroke-linecap="round"
-                                                                                stroke-linejoin="round"
-                                                                                d="M6 6l8 8M6 14l8-8" />
-                                                                        </svg>
-                                                                        Remove
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        </template>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                            <p class="text-[11px] text-slate-400">Rates are normalized on save.
-                                                Duplicate prefix+label pairs will be merged.</p>
-                                        </div>
-
-                                        <div class="flex items-center justify-end gap-3">
-                                            <button type="button"
-                                                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
-                                                @click="cancelBillingTemplateForm()">Cancel</button>
-                                            <button type="submit"
-                                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
-                                                    stroke="currentColor" stroke-width="1.8">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M5 10l3 3 7-7" />
-                                                </svg>
-                                                <span
-                                                    x-text="billingTemplateFormMode === 'edit' ? 'Save changes' : 'Create template'"></span>
-                                            </button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-        </section>
-
         <section x-show="activeTab === 'asr'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-asr"
             role="tabpanel" tabindex="0">
 
@@ -1386,37 +1174,30 @@
                 { id: 'platform', label: 'Platform overview' },
                 { id: 'storage', label: 'Storage & retention' },
                 { id: 'security', label: 'Security posture' },
-                { id: 'billing', label: 'Billing templates' },
                 { id: 'asr', label: 'ASR integrations' },
                 { id: 'departments', label: 'Departments' },
                 { id: 'users', label: 'Users' },
             ],
             activeTab: 'platform',
+            platform: {},
+            proxyConfig: {},
+            useragentConfig: {},
+            stats: {},
+            configMeta: { key_items: [] },
+            acl: { active_rules: [], embedded_count: 0, file_patterns: [], reload_supported: false, metrics: null },
+            operations: [],
+            aclReloading: false,
             server: {},
             retention: {},
             security: {},
-            billing: { templates: [], default_currency: 'USD' },
             asr: {},
             directory: { departments: [], users: [], pending_invites: [] },
             selectedProvider: '',
             selectedStorageProfile: '',
             selectedDepartmentId: '',
             selectedUserId: '',
-            selectedBillingTemplateId: '',
-            billingSimulation: { destination: '', minutes: 1, result: null },
             lastOperation: null,
             asrProbe: null,
-            billingTemplateFormVisible: false,
-            billingTemplateFormMode: 'create',
-            billingTemplateEditingId: '',
-            billingTemplateDraft: {
-                name: '',
-                description: '',
-                currency: 'USD',
-                increment: '60/60',
-                included_minutes: 0,
-                rates: [],
-            },
             departmentLoading: false,
             departmentError: null,
             departmentPagination: null,
@@ -1454,7 +1235,28 @@
                 const data = typeof this.rawSettings === 'string'
                     ? JSON.parse(this.rawSettings || '{}')
                     : (this.rawSettings || {});
+                this.platform = data.platform || {};
+                this.proxyConfig = data.proxy || {};
+                this.useragentConfig = data.useragent || {};
+                this.stats = data.stats || {};
+                this.configMeta = data.config || { key_items: [] };
+                if (!Array.isArray(this.configMeta.key_items)) {
+                    this.configMeta.key_items = [];
+                }
+                this.acl = data.acl || { active_rules: [], embedded_count: 0, file_patterns: [], reload_supported: false, metrics: null };
+                if (!Array.isArray(this.acl.active_rules)) {
+                    this.acl.active_rules = [];
+                }
+                if (!Array.isArray(this.acl.file_patterns)) {
+                    this.acl.file_patterns = [];
+                }
+                this.operations = Array.isArray(data.operations)
+                    ? data.operations
+                    : (Array.isArray((data.server || {}).operations) ? data.server.operations : []);
                 this.server = data.server || {};
+                if (!this.operations.length && Array.isArray(this.server.operations)) {
+                    this.operations = this.server.operations;
+                }
                 this.retention = data.retention || {};
                 this.security = data.security || { trusted_ips: [], blocked_user_agents: [], rate_limits: {}, threat_feed: [], audit: {} };
                 if (!this.security || typeof this.security !== 'object') {
@@ -1469,26 +1271,7 @@
                 if (this.security.rate_limits.max_registration_concurrency === undefined || this.security.rate_limits.max_registration_concurrency === null) {
                     this.security.rate_limits.max_registration_concurrency = 0;
                 }
-                if (typeof this.security.acl_rules !== 'string') {
-                    if (Array.isArray(this.security.acl)) {
-                        this.security.acl_rules = this.security.acl.join('\n');
-                    } else if (typeof this.security.acl === 'string') {
-                        this.security.acl_rules = this.security.acl;
-                    } else {
-                        this.security.acl_rules = 'allow all';
-                    }
-                }
-                this.billing = data.billing || { templates: [], default_currency: 'USD' };
-                if (!this.billing || typeof this.billing !== 'object') {
-                    this.billing = { templates: [], default_currency: 'USD' };
-                }
-                if (!Array.isArray(this.billing.templates)) {
-                    this.billing.templates = [];
-                }
-                this.billing.templates = this.normalizeBillingTemplates(this.billing.templates);
-                if (!(this.billing.templates || []).length) {
-                    this.billing.templates = this.seedBillingTemplates();
-                }
+                this.security.acl_rules = this.formatAclRules(this.acl.active_rules);
                 this.asr = data.asr || { providers: [], languages: [], callback: {} };
                 this.selectedProvider = this.asr.active_provider || (this.asr.providers?.[0]?.id || '');
                 this.selectedStorageProfile = this.server.storage?.mode || (this.server.storage_profiles?.[0]?.id || '');
@@ -1510,16 +1293,6 @@
                 this.userParams.perPage = 20;
                 this.userParams.q = '';
                 this.userParams.activeOnly = false;
-                const initialTemplateId = data.billing && data.billing.selected_template_id !== undefined && data.billing.selected_template_id !== null
-                    ? String(data.billing.selected_template_id)
-                    : '';
-                if (initialTemplateId && this.billing.templates.some((tpl) => tpl.id === initialTemplateId)) {
-                    this.selectedBillingTemplateId = initialTemplateId;
-                } else {
-                    const firstTemplate = this.billing.templates?.[0];
-                    this.selectedBillingTemplateId = firstTemplate ? String(firstTemplate.id) : '';
-                }
-                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
                 this.departmentDraft = this.defaultDepartmentDraft();
                 this.userDraft = this.defaultUserDraft();
                 this.departmentFormMode = 'create';
@@ -1538,13 +1311,6 @@
             },
             selectStorageProfile(id) {
                 this.selectedStorageProfile = id;
-            },
-            selectBillingTemplate(id) {
-                this.selectedBillingTemplateId = String(id);
-                this.billingSimulation.result = null;
-                if (this.billingTemplateFormVisible) {
-                    this.cancelBillingTemplateForm();
-                }
             },
             get selectedStorageProfileData() {
                 return this.storageProfiles.find((item) => item.id === this.selectedStorageProfile) || null;
@@ -1590,9 +1356,6 @@
                 }
                 const count = (this.directory.departments || []).length;
                 return `${count} ${count === 1 ? 'department' : 'departments'}`;
-            },
-            get selectedBillingTemplate() {
-                return (this.billing.templates || []).find((tpl) => String(tpl.id) === String(this.selectedBillingTemplateId)) || null;
             },
             get selectedUser() {
                 return (this.directory.users || []).find((user) => String(user.id) === String(this.selectedUserId)) || null;
@@ -1680,292 +1443,6 @@
                 } catch (err) {
                     return String(value);
                 }
-            },
-            formatCurrency(amount, currency) {
-                if (amount === null || amount === undefined || Number.isNaN(Number(amount))) {
-                    return currency ? `${currency}0.0000` : '0.0000';
-                }
-                const value = Number(amount).toFixed(4);
-                return currency ? `${currency}${value}` : value;
-            },
-            simulateTemplateCost() {
-                const tpl = this.selectedBillingTemplate;
-                if (!tpl) {
-                    this.billingSimulation.result = null;
-                    return;
-                }
-                const minutes = Number(this.billingSimulation.minutes || 0);
-                const destination = String(this.billingSimulation.destination || '').trim();
-                if (!minutes || minutes <= 0) {
-                    this.billingSimulation.result = {
-                        formatted: '—',
-                        explanation: 'Enter a positive number of minutes to simulate cost.',
-                    };
-                    return;
-                }
-                const rate = this.findMatchingRate(tpl, destination);
-                const currency = tpl.currency || this.billing.default_currency || 'USD';
-                if (!rate) {
-                    this.billingSimulation.result = {
-                        formatted: `${currency}0.0000`,
-                        explanation: 'No matching rate found. Ensure a default (*) rate exists.',
-                    };
-                    return;
-                }
-                const increment = this.parseIncrement(rate.increment || tpl.increment);
-                const billedMinutes = this.applyIncrement(minutes, increment);
-                const connectFee = Number(rate.connect_fee || 0);
-                const perMinute = Number(rate.rate_per_minute || rate.rate || 0);
-                const total = connectFee + billedMinutes * perMinute;
-                this.billingSimulation.result = {
-                    formatted: this.formatCurrency(total, currency),
-                    explanation: `${billedMinutes.toFixed(2)} billed minutes at ${this.formatCurrency(perMinute, currency)}/min plus ${this.formatCurrency(connectFee, currency)} connect fee`,
-                };
-            },
-            normalizeBillingTemplates(input) {
-                if (!Array.isArray(input)) {
-                    return [];
-                }
-                return input
-                    .filter((tpl) => tpl && typeof tpl === 'object')
-                    .map((tpl) => {
-                        const normalized = { ...tpl };
-                        normalized.id = normalized.id !== undefined && normalized.id !== null ? String(normalized.id) : this.generateId('tpl');
-                        normalized.name = normalized.name || 'Untitled template';
-                        normalized.description = normalized.description || '';
-                        normalized.currency = normalized.currency || this.billing.default_currency || 'USD';
-                        normalized.increment = normalized.increment || '60/60';
-                        normalized.included_minutes = normalized.included_minutes !== undefined && normalized.included_minutes !== null
-                            ? Number(normalized.included_minutes) || 0
-                            : 0;
-                        const rates = Array.isArray(normalized.rates) ? normalized.rates : [];
-                        normalized.rates = rates
-                            .filter((rate) => rate && typeof rate === 'object')
-                            .map((rate) => ({
-                                prefix: (rate.prefix ?? '*') === '' ? '*' : String(rate.prefix ?? '*'),
-                                label: rate.label || 'Global',
-                                connect_fee: Number(rate.connect_fee ?? 0) || 0,
-                                rate_per_minute: Number(rate.rate_per_minute ?? rate.rate ?? 0) || 0,
-                                increment: rate.increment || normalized.increment || '60/60',
-                            }));
-                        if (!normalized.rates.length) {
-                            normalized.rates = [{
-                                prefix: '*',
-                                label: 'Global',
-                                connect_fee: 0,
-                                rate_per_minute: 0,
-                                increment: normalized.increment || '60/60',
-                            }];
-                        }
-                        return normalized;
-                    });
-            },
-            seedBillingTemplates() {
-                const samples = [
-                    {
-                        id: 'tpl-sample-global',
-                        name: 'Global default',
-                        description: 'Baseline rates for worldwide outbound calling with a catch-all prefix.',
-                        currency: this.billing.default_currency || 'USD',
-                        increment: '60/60',
-                        included_minutes: 0,
-                        rates: [
-                            { prefix: '*', label: 'All destinations', connect_fee: 0.0200, rate_per_minute: 0.0185, increment: '60/60' },
-                        ],
-                    },
-                    {
-                        id: 'tpl-sample-na',
-                        name: 'North America bundle',
-                        description: 'Preferential pricing for +1 destinations with bundled minutes.',
-                        currency: this.billing.default_currency || 'USD',
-                        increment: '6/6',
-                        included_minutes: 500,
-                        rates: [
-                            { prefix: '1', label: 'US & Canada', connect_fee: 0.0000, rate_per_minute: 0.0120, increment: '6/6' },
-                            { prefix: '44', label: 'UK Mainland', connect_fee: 0.0150, rate_per_minute: 0.0225, increment: '30/6' },
-                            { prefix: '*', label: 'Rest of world', connect_fee: 0.0350, rate_per_minute: 0.0450, increment: '60/60' },
-                        ],
-                    },
-                    {
-                        id: 'tpl-sample-apac',
-                        name: 'APAC premium',
-                        description: 'Premium routing for Asia Pacific call centers with low-latency trunks.',
-                        currency: this.billing.default_currency || 'USD',
-                        increment: '30/6',
-                        included_minutes: 120,
-                        rates: [
-                            { prefix: '81', label: 'Japan', connect_fee: 0.0250, rate_per_minute: 0.0480, increment: '30/6' },
-                            { prefix: '61', label: 'Australia', connect_fee: 0.0200, rate_per_minute: 0.0400, increment: '30/6' },
-                            { prefix: '*', label: 'Fallback global', connect_fee: 0.0450, rate_per_minute: 0.0550, increment: '60/60' },
-                        ],
-                    },
-                ];
-                return this.normalizeBillingTemplates(samples);
-            },
-            openBillingTemplateCreate() {
-                this.billingTemplateFormMode = 'create';
-                this.billingTemplateEditingId = '';
-                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
-                this.billingTemplateFormVisible = true;
-            },
-            openBillingTemplateEdit(id) {
-                const tpl = (this.billing.templates || []).find((item) => item.id === String(id));
-                if (!tpl) {
-                    this.$dispatch('toast', {
-                        title: 'Not found',
-                        message: 'Unable to locate that billing template in the preview data.',
-                    });
-                    return;
-                }
-                this.billingTemplateFormMode = 'edit';
-                this.billingTemplateEditingId = tpl.id;
-                this.billingTemplateDraft = this.templateToDraft(tpl);
-                this.billingTemplateFormVisible = true;
-            },
-            cancelBillingTemplateForm() {
-                this.billingTemplateFormVisible = false;
-                this.billingTemplateEditingId = '';
-                this.billingTemplateFormMode = 'create';
-                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
-            },
-            addBillingRateRow() {
-                if (!this.billingTemplateDraft || !Array.isArray(this.billingTemplateDraft.rates)) {
-                    this.billingTemplateDraft.rates = [];
-                }
-                const increment = this.billingTemplateDraft?.increment || '60/60';
-                this.billingTemplateDraft.rates.push(this.defaultBillingRateRow('', '', 0, 0, increment));
-            },
-            removeBillingRateRow(index) {
-                if (!this.billingTemplateDraft || !Array.isArray(this.billingTemplateDraft.rates)) {
-                    return;
-                }
-                this.billingTemplateDraft.rates.splice(index, 1);
-            },
-            saveBillingTemplate() {
-                const draft = this.billingTemplateDraft || this.defaultBillingTemplateDraft();
-                const name = (draft.name || '').trim();
-                if (!name) {
-                    this.$dispatch('toast', {
-                        title: 'Missing information',
-                        message: 'Template name is required.',
-                    });
-                    return;
-                }
-                let rates = Array.isArray(draft.rates) ? draft.rates : [];
-                rates = rates
-                    .map((rate) => ({
-                        prefix: (rate.prefix || '*').trim() || '*',
-                        label: (rate.label || 'Global').trim() || 'Global',
-                        connect_fee: Number(rate.connect_fee ?? 0) || 0,
-                        rate_per_minute: Number(rate.rate_per_minute ?? rate.rate ?? 0) || 0,
-                        increment: (rate.increment || draft.increment || '60/60').trim() || draft.increment || '60/60',
-                    }))
-                    .filter((rate, index, arr) => rate && arr.findIndex((item) => item.prefix === rate.prefix && item.label === rate.label) === index);
-                if (!rates.length) {
-                    rates = [
-                        {
-                            prefix: '*',
-                            label: 'Global',
-                            connect_fee: 0,
-                            rate_per_minute: 0,
-                            increment: (draft.increment || '60/60') || '60/60',
-                        },
-                    ];
-                }
-                const payload = {
-                    id: this.billingTemplateFormMode === 'edit' ? (this.billingTemplateEditingId || this.generateId('tpl')) : this.generateId('tpl'),
-                    name,
-                    description: (draft.description || '').trim(),
-                    currency: (draft.currency || this.billing.default_currency || 'USD').trim() || (this.billing.default_currency || 'USD'),
-                    increment: (draft.increment || '60/60').trim() || '60/60',
-                    included_minutes: Number(draft.included_minutes ?? 0) || 0,
-                    rates,
-                };
-                const normalized = this.normalizeBillingTemplates([payload])[0];
-                if (this.billingTemplateFormMode === 'edit') {
-                    this.billing.templates = (this.billing.templates || []).map((tpl) => (tpl.id === normalized.id ? normalized : tpl));
-                    this.$dispatch('toast', {
-                        title: 'Template updated',
-                        message: `${normalized.name} saved in preview mode.`,
-                    });
-                } else {
-                    this.billing.templates = [...(this.billing.templates || []), normalized];
-                    this.$dispatch('toast', {
-                        title: 'Template created',
-                        message: `${normalized.name} added in preview mode.`,
-                    });
-                }
-                this.selectedBillingTemplateId = normalized.id;
-                this.billingTemplateFormVisible = false;
-                this.billingTemplateEditingId = '';
-                this.billingTemplateFormMode = 'create';
-                this.billingTemplateDraft = this.defaultBillingTemplateDraft();
-            },
-            deleteBillingTemplate(id) {
-                const tpl = (this.billing.templates || []).find((item) => item.id === String(id));
-                if (!tpl) {
-                    return;
-                }
-                if (typeof window !== 'undefined' && window.confirm && !window.confirm(`Remove ${tpl.name}? This only affects the preview data.`)) {
-                    return;
-                }
-                this.billing.templates = (this.billing.templates || []).filter((item) => item.id !== tpl.id);
-                if (this.selectedBillingTemplateId === tpl.id) {
-                    this.selectedBillingTemplateId = this.billing.templates?.[0]?.id || '';
-                    this.billingSimulation.result = null;
-                }
-                if (this.billingTemplateEditingId === tpl.id) {
-                    this.cancelBillingTemplateForm();
-                }
-                this.$dispatch('toast', {
-                    title: 'Template removed',
-                    message: `${tpl.name} deleted in preview mode.`,
-                });
-            },
-            templateToDraft(template) {
-                const base = template || {};
-                const draft = {
-                    name: base.name || '',
-                    description: base.description || '',
-                    currency: base.currency || this.billing.default_currency || 'USD',
-                    increment: base.increment || '60/60',
-                    included_minutes: Number(base.included_minutes ?? 0) || 0,
-                    rates: (base.rates || []).map((rate) => this.decorateRateForForm(rate)),
-                };
-                if (!draft.rates.length) {
-                    draft.rates = [this.defaultBillingRateRow('*', 'Global', 0, 0, draft.increment)];
-                }
-                return draft;
-            },
-            decorateRateForForm(rate) {
-                return {
-                    __key: this.generateId('rate'),
-                    prefix: (rate?.prefix || '*').toString(),
-                    label: rate?.label || 'Global',
-                    connect_fee: Number(rate?.connect_fee ?? 0) || 0,
-                    rate_per_minute: Number(rate?.rate_per_minute ?? rate?.rate ?? 0) || 0,
-                    increment: rate?.increment || '',
-                };
-            },
-            defaultBillingRateRow(prefix = '*', label = 'Global', connectFee = 0, rate = 0.02, increment = '60/60') {
-                return {
-                    __key: this.generateId('rate'),
-                    prefix,
-                    label,
-                    connect_fee: Number(connectFee) || 0,
-                    rate_per_minute: Number(rate) || 0,
-                    increment,
-                };
-            },
-            defaultBillingTemplateDraft() {
-                return {
-                    name: '',
-                    description: '',
-                    currency: this.billing.default_currency || 'USD',
-                    increment: '60/60',
-                    included_minutes: 0,
-                    rates: [this.defaultBillingRateRow('*', 'Global', 0, 0.0185, '60/60')],
-                };
             },
             departmentEndpoint() {
                 return `${this.basePath}/settings/departments`;
@@ -2610,72 +2087,94 @@
                 }
                 return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
             },
-            findMatchingRate(tpl, destination) {
-                const rates = Array.isArray(tpl?.rates) ? tpl.rates : [];
-                if (!rates.length) {
-                    return null;
-                }
-                if (!destination) {
-                    return rates.find((rate) => !rate.prefix || rate.prefix === '*') || rates[0];
-                }
-                const normalized = destination.replace(/[^+\d]/g, '');
-                let match = null;
-                let longest = -1;
-                rates.forEach((rate) => {
-                    const prefix = String(rate.prefix || '*');
-                    if (prefix === '*') {
-                        if (!match) {
-                            match = rate;
-                        }
-                        return;
-                    }
-                    if (normalized.startsWith(prefix) && prefix.length > longest) {
-                        longest = prefix.length;
-                        match = rate;
-                    }
-                });
-                if (!match) {
-                    match = rates.find((rate) => !rate.prefix || rate.prefix === '*') || null;
-                }
-                return match;
-            },
-            parseIncrement(value) {
-                const raw = String(value || '').trim();
-                const fallback = { first: 60, next: 60 };
-                if (!raw) {
-                    return fallback;
-                }
-                const parts = raw.split(/[\/]/).map((part) => Number(part));
-                if (parts.length >= 2 && parts.every((n) => !Number.isNaN(n) && n > 0)) {
-                    return { first: parts[0], next: parts[1] };
-                }
-                const single = Number(raw);
-                if (!Number.isNaN(single) && single > 0) {
-                    return { first: single, next: single };
-                }
-                return fallback;
-            },
-            applyIncrement(minutes, increment) {
-                const seconds = minutes * 60;
-                const billedFirst = increment.first || 60;
-                const billedNext = increment.next || billedFirst || 60;
-                if (seconds <= billedFirst) {
-                    return billedFirst / 60;
-                }
-                const remaining = seconds - billedFirst;
-                const steps = Math.ceil(remaining / billedNext);
-                return (billedFirst + steps * billedNext) / 60;
-            },
-            triggerOperation(action) {
+            async triggerOperation(action) {
                 if (!action) {
+                    return;
+                }
+                if (action.id === 'reload-acl') {
+                    await this.reloadAcl();
                     return;
                 }
                 const timestamp = new Date().toLocaleTimeString();
                 this.lastOperation = {
                     label: action.label,
                     timestamp,
-                    status: 'Request queued for next maintenance window (preview mode).',
+                    status: 'Operation acknowledged (no handler configured).',
                 };
+                this.$dispatch('toast', {
+                    title: 'Operation queued',
+                    message: `${action.label || 'Operation'} acknowledged.`,
+                });
+            },
+            async reloadAcl() {
+                if (!this.acl.reload_supported) {
+                    this.$dispatch('toast', {
+                        title: 'Not available',
+                        message: 'ACL reload is only available while the SIP proxy is running.',
+                    });
+                    return;
+                }
+                if (this.aclReloading) {
+                    return;
+                }
+                this.aclReloading = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/reload/acl`, {
+                        method: 'POST',
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to reload ACL rules');
+                    }
+                    if (Array.isArray(data?.active_rules)) {
+                        this.acl.active_rules = data.active_rules;
+                    }
+                    if (data?.metrics) {
+                        this.acl.metrics = data.metrics;
+                    }
+                    this.security.acl_rules = this.formatAclRules(this.acl.active_rules);
+                    const total = data?.metrics?.total ?? this.acl.active_rules.length;
+                    this.$dispatch('toast', {
+                        title: 'ACL reloaded',
+                        message: `Loaded ${total} rule${total === 1 ? '' : 's'}.`,
+                    });
+                    this.lastOperation = {
+                        label: 'Reload ACL rules',
+                        timestamp: new Date().toLocaleString(),
+                        status: `Loaded ${total} rule${total === 1 ? '' : 's'}.`,
+                    };
+                } catch (err) {
+                    this.$dispatch('toast', {
+                        title: 'Reload failed',
+                        message: err?.message || 'Unable to reload ACL rules.',
+                    });
+                } finally {
+                    this.aclReloading = false;
+                }
+            },
+            formatAclRules(rules) {
+                if (!Array.isArray(rules) || !rules.length) {
+                    return 'allow all';
+                }
+                return rules.join('\n');
+            },
+            keyConfigRows() {
+                const items = Array.isArray(this.configMeta?.key_items) ? this.configMeta.key_items : [];
+                return items.map((item) => {
+                    const label = item?.label || '—';
+                    const rawValue = item?.value;
+                    const value = rawValue === undefined || rawValue === null
+                        ? '—'
+                        : (typeof rawValue === 'string' ? rawValue : JSON.stringify(rawValue));
+                    const hint = item?.hint || null;
+                    return { label, value, hint };
+                });
+            },
+            displayMetric(value) {
+                return value === undefined || value === null ? '—' : value;
             },
             runAsrTest() {
                 this.asrProbe = {

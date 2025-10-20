@@ -1,3 +1,5 @@
+use crate::app::AppStateInner;
+use crate::config::{CallRecordConfig, ProxyConfig, ProxyDataSource, UserBackendConfig};
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
@@ -14,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -96,6 +98,7 @@ impl From<UserModel> for UserView {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/settings", get(page_settings))
+        .route("/settings/reload/acl", post(reload_acl_rules))
         .route(
             "/settings/departments",
             post(query_departments).put(create_department),
@@ -117,107 +120,290 @@ pub async fn page_settings(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
+    let settings = build_settings_payload(&state).await;
+
     state.render(
         "console/settings.html",
         json!({
             "nav_active": "settings",
-            "settings_data": {
-                "server": {
-                    "cluster_name": "RustPBX Prod",
-                    "external_fqdn": "voice.rustpbx.example",
-                    "bind_addresses": ["0.0.0.0:5060", "0.0.0.0:5061", "[::]:5060"],
-                    "media_bind": "10.0.12.0/24",
-                    "storage": {
-                        "mode": "hybrid",
-                        "local_path": "/var/lib/rustpbx/media",
-                        "s3": {
-                            "enabled": true,
-                            "bucket": "rustpbx-prod-recordings",
-                            "region": "us-west-2",
-                            "prefix": "voice/",
-                            "access_key": "AKIA••••",
-                            "endpoint": "https://s3.us-west-2.amazonaws.com"
-                        }
-                    },
-                    "storage_profiles": [
-                        {
-                            "id": "local",
-                            "label": "Local filesystem",
-                            "description": "Store recordings and diagnostics on the PBX host with nightly rsync to cold storage.",
-                            "config": {
-                                "path": "/var/lib/rustpbx/media",
-                                "filesystem": "ext4",
-                                "capacity_gb": 512
-                            }
-                        },
-                        {
-                            "id": "s3",
-                            "label": "Amazon S3 compatible",
-                            "description": "Offload assets to an S3 bucket with automatic lifecycle rules.",
-                            "config": {
-                                "bucket": "rustpbx-prod-recordings",
-                                "region": "us-west-2",
-                                "prefix": "voice/",
-                                "endpoint": "https://s3.us-west-2.amazonaws.com"
-                            }
-                        }
-                    ],
-                    "operations": [
-                        {"label": "Reload routing", "id": "reload-routing"},
-                        {"label": "Reload ACL", "id": "reload-acl"},
-                    ],
-                    "database": {
-                        "provider": "PostgreSQL",
-                        "dsn": "postgres://rustpbx:***@pg-cluster.internal:5432/pbx",
-                        "pool_size": 32,
-                        "replica": "pg-replica.internal:5432"
-                    },
-                    "last_reload": "2025-10-09T19:12:00Z",
-                    "release_channel": "stable"
-                },
-                "retention": {
-                    "call_records_days": 365,
-                    "recordings_days": 180,
-                    "cdr_export": {
-                        "enabled": true,
-                        "frequency": "daily",
-                        "target": "s3://rustpbx-analytics/cdr/"
-                    },
-                    "anonymise_after_days": 30
-                },
-                "security": {
-                    "trusted_ips": ["203.0.113.10", "198.51.100.42", "10.0.0.0/16"],
-                    "blocked_user_agents": ["friendly-scanner", "sundayddr", "sipcli"],
-                    "rate_limits": {
-                        "register_per_minute": 30,
-                        "options_per_minute": 120,
-                        "invite_per_minute": 60
-                    },
-                    "threat_feed": [
-                        {"source": "AbuseIPDB", "last_sync": "2025-10-09T23:00:00Z", "entries": 1243},
-                        {"source": "Spamhaus DROP", "last_sync": "2025-10-09T19:10:00Z", "entries": 842}
-                    ],
-                    "audit": {
-                        "last_failed_login": "2025-10-09T17:44:00Z",
-                        "policy_version": "2025.09"
-                    }
-                },
-                "asr": {
-                    "providers": [
-                        {"id": "openai-whisper", "name": "OpenAI Whisper", "token_hint": "sk-live-••••"},
-                        {"id": "google-speech", "name": "Google Speech-to-Text", "token_hint": "service-account.json"},
-                        {"id": "qcloud-asr", "name": "Tencent Cloud ASR", "token_hint": "secretId/secretKey"}
-                    ],
-                    "active_provider": "openai-whisper",
-                    "callback": {
-                        "url": "https://voice.rustpbx.example/hooks/asr",
-                        "auth_header": "Bearer ***"
-                    },
-                    "languages": ["en-US", "zh-CN", "ja-JP"],
-                }
-            }
+            "settings": settings,
+            "settings_data": settings,
         }),
     )
+}
+
+async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
+    let mut data = serde_json::Map::new();
+    let now = Utc::now();
+
+    let mut platform = json!({});
+    let mut proxy = json!({});
+    let mut useragent = json!({});
+    let mut config_meta = json!({ "key_items": [] });
+    let mut acl = json!({
+        "active_rules": [],
+        "embedded_count": 0usize,
+        "file_patterns": [],
+        "reload_supported": false,
+        "metrics": JsonValue::Null,
+    });
+    let mut operations: Vec<JsonValue> = Vec::new();
+
+    let mut proxy_stats_value = JsonValue::Null;
+    let mut useragent_stats_value = JsonValue::Null;
+
+    if let Some(app_state) = state.app_state() {
+        let config_arc = app_state.config.clone();
+        let config = config_arc.as_ref();
+
+        let uptime_duration = now - app_state.uptime;
+        let uptime_seconds = uptime_duration.num_seconds().max(0);
+        platform = json!({
+            "version": crate::version::get_short_version(),
+            "uptime_seconds": uptime_seconds,
+            "uptime_pretty": human_duration(uptime_duration),
+            "http_addr": config.http_addr.clone(),
+            "log_level": config.log_level.clone(),
+            "log_file": config.log_file.clone(),
+            "config_loaded_at": app_state.config_loaded_at.to_rfc3339(),
+            "config_path": app_state.config_path.clone(),
+            "generated_at": now.to_rfc3339(),
+        });
+
+        let mut key_items: Vec<JsonValue> = Vec::new();
+        key_items.push(json!({ "label": "HTTP address", "value": config.http_addr.clone() }));
+        if let Some(ext) = config.external_ip.as_ref() {
+            key_items.push(json!({ "label": "External IP", "value": ext }));
+        }
+        if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
+            key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
+        }
+        key_items.push(json!({ "label": "Recorder path", "value": config.recorder_path.clone() }));
+        key_items
+            .push(json!({ "label": "Media cache path", "value": config.media_cache_path.clone() }));
+        key_items
+            .push(json!({ "label": "Database", "value": mask_database_url(&config.database_url) }));
+        if let Some(ref token) = config.restsend_token {
+            key_items.push(json!({ "label": "RestSend token", "value": mask_basic(token) }));
+        }
+        if let Some(ref proxy_url) = config.llmproxy {
+            key_items.push(json!({ "label": "LLM proxy", "value": mask_basic(proxy_url) }));
+        }
+        if let Some(ref console_cfg) = config.console {
+            key_items.push(
+                json!({ "label": "Console base path", "value": console_cfg.base_path.clone() }),
+            );
+        }
+        if let Some(ref ami_cfg) = config.ami {
+            let allows = ami_cfg
+                .allows
+                .as_ref()
+                .map(|items| items.join(", "))
+                .unwrap_or_else(|| "127.0.0.1, ::1".to_string());
+            key_items.push(json!({ "label": "AMI allow list", "value": allows }));
+        }
+        if let Some(ref servers) = config.ice_servers {
+            key_items.push(
+                json!({ "label": "ICE servers", "value": format!("{} entries", servers.len()) }),
+            );
+        }
+        key_items.push(
+            json!({ "label": "Config loaded", "value": app_state.config_loaded_at.to_rfc3339() }),
+        );
+        if let Some(ref path) = app_state.config_path {
+            key_items.push(json!({ "label": "Config path", "value": path.clone() }));
+        }
+        if let Some(summary) = summarize_callrecord(config.callrecord.as_ref()) {
+            key_items.push(summary);
+        }
+        config_meta = json!({ "key_items": key_items });
+
+        if let Some(server) = app_state.sip_server.as_ref() {
+            let stats = server.inner.endpoint.inner.get_stats();
+            proxy_stats_value = json!({
+                "transactions": {
+                    "running": stats.running_transactions,
+                    "finished": stats.finished_transactions,
+                    "waiting_ack": stats.waiting_ack,
+                },
+                "dialogs": server.inner.dialog_layer.len(),
+            });
+        }
+
+        if let Some(ua) = app_state.useragent.as_ref() {
+            let stats = ua.endpoint.inner.get_stats();
+            useragent_stats_value = json!({
+                "transactions": {
+                    "running": stats.running_transactions,
+                    "finished": stats.finished_transactions,
+                    "waiting_ack": stats.waiting_ack,
+                },
+                "dialogs": ua.dialog_layer.len(),
+            });
+        }
+
+        if let Some(proxy_cfg) = config.proxy.as_ref() {
+            proxy = json!({
+                "enabled": app_state.sip_server.is_some(),
+                "addr": proxy_cfg.addr.clone(),
+                "ports": build_port_list(proxy_cfg),
+                "modules": proxy_cfg.modules.clone().unwrap_or_default(),
+                "max_concurrency": proxy_cfg.max_concurrency,
+                "registrar_expires": proxy_cfg.registrar_expires,
+                "callid_suffix": proxy_cfg.callid_suffix.clone(),
+                "useragent": proxy_cfg.useragent.clone(),
+                "ua_whitelist": proxy_cfg.ua_white_list.clone().unwrap_or_default(),
+                "ua_blacklist": proxy_cfg.ua_black_list.clone().unwrap_or_default(),
+                "data_sources": json!({
+                    "routes": format_proxy_data_source(proxy_cfg.routes_source),
+                    "trunks": format_proxy_data_source(proxy_cfg.trunks_source),
+                }),
+                "rtp": proxy_cfg.rtp_config.clone(),
+                "user_backends": proxy_cfg
+                    .user_backends
+                    .iter()
+                    .map(backend_kind)
+                    .collect::<Vec<_>>(),
+                "realms": proxy_cfg.realms.clone().unwrap_or_default(),
+                "stats": proxy_stats_value.clone(),
+            });
+        }
+
+        if let Some(ua_cfg) = config.ua.as_ref() {
+            let register_count = ua_cfg
+                .register_users
+                .as_ref()
+                .map(|list| list.len())
+                .unwrap_or(0);
+            useragent = json!({
+                "enabled": app_state.useragent.is_some(),
+                "addr": ua_cfg.addr.clone(),
+                "udp_port": ua_cfg.udp_port,
+                "useragent": ua_cfg.useragent.clone(),
+                "callid_suffix": ua_cfg.callid_suffix.clone(),
+                "register_users": register_count,
+                "accept_timeout": ua_cfg.accept_timeout.clone(),
+                "graceful_shutdown": ua_cfg.graceful_shutdown.unwrap_or(true),
+                "stats": useragent_stats_value.clone(),
+            });
+        }
+
+        let (active_rules, embedded_count) = resolve_acl_rules(app_state.clone()).await;
+        let acl_files = config
+            .proxy
+            .as_ref()
+            .map(|cfg| cfg.acl_files.clone())
+            .unwrap_or_default();
+        acl = json!({
+            "active_rules": active_rules,
+            "embedded_count": embedded_count,
+            "file_patterns": acl_files,
+            "reload_supported": app_state.sip_server.is_some(),
+            "metrics": JsonValue::Null,
+        });
+
+        operations.push(json!({
+            "id": "reload-acl",
+            "label": "Reload ACL rules",
+            "description": "Re-read ACL definitions from config files and embedded lists.",
+            "method": "POST",
+            "endpoint": format!("{}/settings/reload/acl", state.base_path()),
+        }));
+    }
+
+    let stats = json!({
+        "generated_at": now.to_rfc3339(),
+        "proxy": proxy_stats_value,
+        "useragent": useragent_stats_value,
+    });
+
+    data.insert("platform".to_string(), platform);
+    data.insert("proxy".to_string(), proxy);
+    data.insert("useragent".to_string(), useragent);
+    data.insert("config".to_string(), config_meta);
+    data.insert("acl".to_string(), acl);
+    data.insert("stats".to_string(), stats);
+    data.insert(
+        "operations".to_string(),
+        JsonValue::Array(operations.clone()),
+    );
+    data.insert(
+        "server".to_string(),
+        json!({
+            "operations": operations,
+            "storage": { "mode": "config" },
+            "storage_profiles": [],
+        }),
+    );
+
+    JsonValue::Object(data)
+}
+
+async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize) {
+    if let Some(server) = app_state.sip_server.as_ref() {
+        let (context, embedded) = {
+            let embedded = server
+                .inner
+                .proxy_config
+                .acl_rules
+                .as_ref()
+                .map(|rules| rules.len())
+                .unwrap_or(0);
+            (server.inner.data_context.clone(), embedded)
+        };
+        let snapshot = context.acl_rules_snapshot().await;
+        (snapshot, embedded)
+    } else if let Some(proxy_cfg) = app_state.config.proxy.as_ref() {
+        let rules = proxy_cfg.acl_rules.clone().unwrap_or_default();
+        let embedded = rules.len();
+        (rules, embedded)
+    } else {
+        (Vec::new(), 0)
+    }
+}
+
+async fn reload_acl_rules(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let Some(app_state) = state.app_state() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "Application state unavailable" })),
+        )
+            .into_response();
+    };
+
+    let Some(sip_server) = app_state.sip_server.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP proxy not running" })),
+        )
+            .into_response();
+    };
+
+    let inner = sip_server.inner.clone();
+    let context = inner.data_context.clone();
+
+    match context.reload_acl_rules().await {
+        Ok(metrics) => {
+            let active_rules = context.acl_rules_snapshot().await;
+            Json(json!({
+                "status": "ok",
+                "metrics": metrics,
+                "active_rules": active_rules,
+            }))
+            .into_response()
+        }
+        Err(err) => {
+            warn!("failed to reload acl rules: {}", err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("Failed to reload ACL rules: {}", err) })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn query_departments(
@@ -778,4 +964,121 @@ fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error>
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
+}
+
+fn human_duration(duration: Duration) -> String {
+    let total = duration.num_seconds().max(0);
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3_600;
+    let minutes = (total % 3_600) / 60;
+    let seconds = total % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 && parts.is_empty() {
+        parts.push(format!("{}s", seconds));
+    }
+
+    if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn mask_basic(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 4 {
+        return "****".to_string();
+    }
+    let mut masked = String::new();
+    masked.extend(&chars[..2]);
+    masked.push_str("****");
+    masked.extend(&chars[chars.len() - 2..]);
+    masked
+}
+
+fn mask_database_url(url: &str) -> String {
+    if let Some(scheme_pos) = url.find("://") {
+        let auth_start = scheme_pos + 3;
+        if let Some(auth_end_rel) = url[auth_start..].find('@') {
+            let auth_end = auth_start + auth_end_rel;
+            let auth = &url[auth_start..auth_end];
+            if let Some(colon_pos) = auth.find(':') {
+                let user = &auth[..colon_pos];
+                return format!(
+                    "{}{}{}",
+                    &url[..auth_start],
+                    format!("{}:****", user),
+                    &url[auth_end..]
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
+fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> {
+    match config? {
+        CallRecordConfig::Local { root } => Some(json!({
+            "label": "Call record storage",
+            "value": format!("Local ({})", root),
+        })),
+        CallRecordConfig::S3 {
+            bucket,
+            region,
+            endpoint,
+            ..
+        } => Some(json!({
+            "label": "Call record storage",
+            "value": format!("S3 bucket {} ({})", bucket, region),
+            "hint": endpoint,
+        })),
+        CallRecordConfig::Http { url, .. } => Some(json!({
+            "label": "Call record storage",
+            "value": format!("HTTP {}", url),
+        })),
+    }
+}
+
+fn build_port_list(proxy_cfg: &ProxyConfig) -> Vec<JsonValue> {
+    let mut ports = Vec::new();
+    if let Some(port) = proxy_cfg.udp_port {
+        ports.push(json!({ "label": "UDP", "value": port }));
+    }
+    if let Some(port) = proxy_cfg.tcp_port {
+        ports.push(json!({ "label": "TCP", "value": port }));
+    }
+    if let Some(port) = proxy_cfg.tls_port {
+        ports.push(json!({ "label": "TLS", "value": port }));
+    }
+    if let Some(port) = proxy_cfg.ws_port {
+        ports.push(json!({ "label": "WS", "value": port }));
+    }
+    ports
+}
+
+fn format_proxy_data_source(source: ProxyDataSource) -> &'static str {
+    match source {
+        ProxyDataSource::Config => "config",
+        ProxyDataSource::Database => "database",
+    }
+}
+
+fn backend_kind(backend: &UserBackendConfig) -> String {
+    match backend {
+        UserBackendConfig::Memory { .. } => "memory".to_string(),
+        UserBackendConfig::Http { .. } => "http".to_string(),
+        UserBackendConfig::Plain { .. } => "plain".to_string(),
+        UserBackendConfig::Database { .. } => "database".to_string(),
+        UserBackendConfig::Extension { .. } => "extension".to_string(),
+    }
 }

@@ -2,7 +2,7 @@ use super::{
     FnCreateProxyModule, ProxyAction, ProxyModule,
     data::ProxyDataContext,
     locator::{Locator, create_locator},
-    user::{UserBackend, create_user_backend},
+    user::{UserBackend, build_user_backend},
 };
 use crate::{
     call::TransactionCookie,
@@ -49,6 +49,7 @@ pub struct SipServerInner {
     pub rtp_config: RtpConfig,
     pub proxy_config: Arc<ProxyConfig>,
     pub data_context: Arc<ProxyDataContext>,
+    pub database: Option<DatabaseConnection>,
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Option<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
@@ -184,12 +185,12 @@ impl SipServerBuilder {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
         } else {
-            match create_user_backend(&self.config.user_backend).await {
+            match build_user_backend(self.config.as_ref()).await {
                 Ok(backend) => backend,
                 Err(e) => {
                     warn!(
                         "failed to create user backend: {} {:?}",
-                        e, self.config.user_backend
+                        e, &self.config.user_backends
                     );
                     return Err(e);
                 }
@@ -323,6 +324,7 @@ impl SipServerBuilder {
             proxy_config: self.config.clone(),
             cancel_token,
             data_context,
+            database: database.clone(),
             user_backend: user_backend,
             auth_backend: auth_backend,
             call_router: call_router,

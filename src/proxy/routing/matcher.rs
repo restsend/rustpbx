@@ -14,8 +14,23 @@ use tracing::{debug, info, warn};
 use crate::{
     call::{DialDirection, RoutingState},
     config::RouteResult,
-    proxy::routing::{ActionType, DefaultRoute, RouteRule, TrunkConfig},
+    proxy::routing::{ActionType, DefaultRoute, RouteRule, SourceTrunk, TrunkConfig},
 };
+
+#[derive(Debug, Default, Clone)]
+pub struct RouteTrace {
+    pub matched_rule: Option<String>,
+    pub selected_trunk: Option<String>,
+    pub used_default_route: bool,
+    pub rewrite_operations: Vec<String>,
+    pub abort: Option<RouteAbortTrace>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteAbortTrace {
+    pub code: u16,
+    pub reason: Option<String>,
+}
 
 /// Main routing function
 ///
@@ -28,11 +43,63 @@ pub async fn match_invite(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
     default: Option<&DefaultRoute>,
-    mut option: InviteOption,
+    option: InviteOption,
     origin: &rsip::Request,
+    source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
 ) -> Result<RouteResult> {
+    match_invite_impl(
+        trunks,
+        routes,
+        default,
+        option,
+        origin,
+        source_trunk,
+        routing_state,
+        direction,
+        None,
+    )
+    .await
+}
+
+pub async fn match_invite_with_trace(
+    trunks: Option<&HashMap<String, TrunkConfig>>,
+    routes: Option<&Vec<RouteRule>>,
+    default: Option<&DefaultRoute>,
+    option: InviteOption,
+    origin: &rsip::Request,
+    source_trunk: Option<&SourceTrunk>,
+    routing_state: Arc<RoutingState>,
+    direction: &DialDirection,
+    trace: &mut RouteTrace,
+) -> Result<RouteResult> {
+    match_invite_impl(
+        trunks,
+        routes,
+        default,
+        option,
+        origin,
+        source_trunk,
+        routing_state,
+        direction,
+        Some(trace),
+    )
+    .await
+}
+
+async fn match_invite_impl(
+    trunks: Option<&HashMap<String, TrunkConfig>>,
+    routes: Option<&Vec<RouteRule>>,
+    default: Option<&DefaultRoute>,
+    option: InviteOption,
+    origin: &rsip::Request,
+    source_trunk: Option<&SourceTrunk>,
+    routing_state: Arc<RoutingState>,
+    direction: &DialDirection,
+    mut trace: Option<&mut RouteTrace>,
+) -> Result<RouteResult> {
+    let mut option = option;
     let routes = match routes {
         Some(routes) => routes,
         None => return Ok(RouteResult::NotHandled(option)),
@@ -57,6 +124,29 @@ pub async fn match_invite(
             continue;
         }
 
+        if !rule.direction.matches(direction) {
+            continue;
+        }
+
+        if !rule.source_trunks.is_empty() {
+            match source_trunk {
+                Some(trunk)
+                    if rule
+                        .source_trunks
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&trunk.name)) => {}
+                Some(_) => continue,
+                None => continue,
+            }
+        }
+
+        if !rule.source_trunk_ids.is_empty() {
+            match source_trunk.and_then(|t| t.id) {
+                Some(id) if rule.source_trunk_ids.iter().any(|rule_id| *rule_id == id) => {}
+                _ => continue,
+            }
+        }
+
         // Check matching conditions
         let ctx = MatchContext {
             origin,
@@ -74,9 +164,17 @@ pub async fn match_invite(
         }
 
         info!("Matched rule: {}", rule.name);
+        if let Some(trace) = &mut trace {
+            trace.matched_rule = Some(rule.name.clone());
+        }
 
         // Apply rewrite rules
         if let Some(rewrite) = &rule.rewrite {
+            if let Some(trace) = &mut trace {
+                trace
+                    .rewrite_operations
+                    .extend(describe_rewrite_ops(rewrite));
+            }
             apply_rewrite_rules(&mut option, rewrite, origin)?;
         }
 
@@ -89,12 +187,30 @@ pub async fn match_invite(
                         "Rejecting call with code {} and reason: {:?}",
                         reject_config.code, reason
                     );
+                    if let Some(trace) = &mut trace {
+                        trace.abort = Some(RouteAbortTrace {
+                            code: reject_config.code,
+                            reason: reason.clone(),
+                        });
+                    }
                     return Ok(RouteResult::Abort(reject_config.code.into(), reason));
                 } else {
+                    if let Some(trace) = &mut trace {
+                        trace.abort = Some(RouteAbortTrace {
+                            code: rsip::StatusCode::Forbidden.into(),
+                            reason: None,
+                        });
+                    }
                     return Ok(RouteResult::Abort(rsip::StatusCode::Forbidden, None));
                 }
             }
             ActionType::Busy => {
+                if let Some(trace) = &mut trace {
+                    trace.abort = Some(RouteAbortTrace {
+                        code: rsip::StatusCode::BusyHere.into(),
+                        reason: None,
+                    });
+                }
                 return Ok(RouteResult::Abort(rsip::StatusCode::BusyHere, None));
             }
             ActionType::Forward => {
@@ -107,6 +223,10 @@ pub async fn match_invite(
                         &option,
                         routing_state.clone(),
                     )?;
+
+                    if let Some(trace) = &mut trace {
+                        trace.selected_trunk = Some(selected_trunk.clone());
+                    }
 
                     if let Some(trunk_config) = trunks
                         .as_ref()
@@ -126,6 +246,10 @@ pub async fn match_invite(
         }
     }
 
+    if matches!(direction, DialDirection::Inbound) {
+        return Ok(RouteResult::NotHandled(option));
+    }
+
     let default = match default {
         Some(default) => default,
         None => return Ok(RouteResult::NotHandled(option)),
@@ -138,6 +262,11 @@ pub async fn match_invite(
         &option,
         routing_state,
     )?;
+
+    if let Some(trace) = &mut trace {
+        trace.selected_trunk = Some(selected_trunk.clone());
+        trace.used_default_route = true;
+    }
 
     if let Some(trunk_config) = trunks
         .as_ref()
@@ -360,6 +489,35 @@ fn apply_rewrite_rules(
     }
 
     Ok(())
+}
+
+fn describe_rewrite_ops(rewrite: &crate::proxy::routing::RewriteRules) -> Vec<String> {
+    let mut ops = Vec::new();
+
+    let mut push = |label: &str, value: &Option<String>| {
+        if value.as_ref().map(|v| !v.is_empty()).unwrap_or(false) {
+            ops.push(label.to_string());
+        }
+    };
+
+    push("from.user", &rewrite.from_user);
+    push("from.host", &rewrite.from_host);
+    push("to.user", &rewrite.to_user);
+    push("to.host", &rewrite.to_host);
+    push("to.port", &rewrite.to_port);
+    push("request_uri.user", &rewrite.request_uri_user);
+    push("request_uri.host", &rewrite.request_uri_host);
+    push("request_uri.port", &rewrite.request_uri_port);
+    push("from", &rewrite.from);
+    push("to", &rewrite.to);
+    push("caller", &rewrite.caller);
+    push("callee", &rewrite.callee);
+
+    for header in rewrite.headers.keys() {
+        ops.push(header.to_string());
+    }
+
+    ops
 }
 
 /// Apply rewrite pattern (supports capture groups)

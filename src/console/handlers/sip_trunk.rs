@@ -422,8 +422,16 @@ fn apply_form_to_active_model(
     now: DateTime<Utc>,
     is_update: bool,
 ) -> Result<(), Response> {
-    let allowed_ips = parse_json_field(&form.allowed_ips, "allowed_ips")?;
-    let did_numbers = parse_json_field(&form.did_numbers, "did_numbers")?;
+    let allowed_ips = parse_list_field(
+        &form.allowed_ips,
+        "allowed_ips",
+        &["cidr", "ip", "host", "value"],
+    )?;
+    let did_numbers = parse_list_field(
+        &form.did_numbers,
+        "did_numbers",
+        &["number", "did", "value"],
+    )?;
     let billing_snapshot = parse_json_field(&form.billing_snapshot, "billing_snapshot")?;
     let analytics = parse_json_field(&form.analytics, "analytics")?;
     let tags = parse_json_field(&form.tags, "tags")?;
@@ -529,6 +537,110 @@ fn apply_form_to_active_model(
     active.updated_at = Set(now);
 
     Ok(())
+}
+
+fn parse_list_field(
+    value: &Option<String>,
+    field: &str,
+    preferred_keys: &[&str],
+) -> Result<Option<Value>, Response> {
+    let Some(raw) = value.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+
+    if let Ok(json_value) = serde_json::from_str::<Value>(raw) {
+        let normalized = normalize_list_json(json_value, field, preferred_keys)?;
+        return Ok(
+            normalized.map(|list| Value::Array(list.into_iter().map(Value::String).collect()))
+        );
+    }
+
+    let entries: Vec<Value> = raw
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| Value::String(line.to_string()))
+        .collect();
+
+    if entries.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Array(entries)))
+    }
+}
+
+fn normalize_list_json(
+    value: Value,
+    field: &str,
+    preferred_keys: &[&str],
+) -> Result<Option<Vec<String>>, Response> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Array(items) => {
+            let mut entries = Vec::new();
+            for item in items {
+                match extract_list_entry(item, preferred_keys) {
+                    Ok(Some(entry)) => entries.push(entry),
+                    Ok(None) => {}
+                    Err(_) => {
+                        return Err(bad_request(format!(
+                            "{field} entries must resolve to plain text values"
+                        )));
+                    }
+                }
+            }
+            if entries.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(entries))
+            }
+        }
+        other => match extract_list_entry(other, preferred_keys) {
+            Ok(Some(entry)) => Ok(Some(vec![entry])),
+            Ok(None) => Ok(None),
+            Err(_) => Err(bad_request(format!(
+                "{field} entries must resolve to plain text values"
+            ))),
+        },
+    }
+}
+
+fn extract_list_entry(value: Value, preferred_keys: &[&str]) -> Result<Option<String>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Value::Number(n) => Ok(Some(n.to_string())),
+        Value::Bool(b) => Ok(Some(b.to_string())),
+        Value::Object(mut map) => {
+            for key in preferred_keys {
+                if let Some(Value::String(s)) = map.remove(*key) {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        return Ok(None);
+                    }
+                    return Ok(Some(trimmed.to_string()));
+                }
+            }
+            for (_, candidate) in map.into_iter() {
+                if let Value::String(s) = candidate {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    return Ok(Some(trimmed.to_string()));
+                }
+            }
+            Err(())
+        }
+        _ => Err(()),
+    }
 }
 
 fn parse_json_field(value: &Option<String>, field: &str) -> Result<Option<Value>, Response> {

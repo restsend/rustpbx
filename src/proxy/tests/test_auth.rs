@@ -447,6 +447,7 @@ async fn test_guest_call_allowed_extension() {
         proxy_config: config,
         cancel_token: CancellationToken::new(),
         data_context,
+        database: None,
         user_backend: Box::new(user_backend),
         auth_backend: None,
         call_router: None,

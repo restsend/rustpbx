@@ -7,7 +7,7 @@ use crate::{
     config::{Config, ProxyConfig, UserBackendConfig},
     proxy::user_db::DbBackendConfig,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
@@ -39,10 +39,13 @@ type UserBackendFuture = Pin<Box<dyn Future<Output = Result<Box<dyn UserBackend>
 impl MemoryUserBackend {
     pub fn create(config: Arc<ProxyConfig>) -> UserBackendFuture {
         Box::pin(async move {
-            let builtin_users = match &config.user_backend {
-                UserBackendConfig::Memory { users } => users.clone(),
-                _ => None,
-            };
+            let builtin_users = config.user_backends.iter().find_map(|backend| {
+                if let UserBackendConfig::Memory { users } = backend {
+                    users.clone()
+                } else {
+                    None
+                }
+            });
             Ok(Box::new(MemoryUserBackend::new(builtin_users)) as Box<dyn UserBackend>)
         })
     }
@@ -215,4 +218,70 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             Ok(Box::new(backend))
         }
     }
+}
+
+pub struct ChainedUserBackend {
+    backends: Vec<Box<dyn UserBackend>>,
+}
+
+impl ChainedUserBackend {
+    pub fn new(backends: Vec<Box<dyn UserBackend>>) -> Self {
+        Self { backends }
+    }
+}
+
+#[async_trait]
+impl UserBackend for ChainedUserBackend {
+    async fn is_same_realm(&self, realm: &str) -> bool {
+        for backend in &self.backends {
+            if backend.is_same_realm(realm).await {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for backend in &self.backends {
+            match backend.get_user(username, realm).await {
+                Ok(Some(user)) => return Ok(Some(user)),
+                Ok(None) => {}
+                Err(err) => last_err = Some(err),
+            }
+        }
+        if let Some(err) = last_err {
+            Err(err)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn create_user(&self, user: SipUser) -> Result<()> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for backend in &self.backends {
+            match backend.create_user(user.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        if let Some(err) = last_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub async fn build_user_backend(config: &ProxyConfig) -> Result<Box<dyn UserBackend>> {
+    if config.user_backends.is_empty() {
+        return Err(anyhow!("proxy.user_backends must not be empty"));
+    }
+
+    let mut instances = Vec::with_capacity(config.user_backends.len());
+    for backend_config in &config.user_backends {
+        let backend = create_user_backend(backend_config).await?;
+        instances.push(backend);
+    }
+    Ok(Box::new(ChainedUserBackend::new(instances)))
 }

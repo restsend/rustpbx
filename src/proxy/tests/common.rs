@@ -59,6 +59,7 @@ pub async fn create_test_server_with_config(
         proxy_config: config.clone(),
         cancel_token: CancellationToken::new(),
         data_context,
+        database: None,
         user_backend: user_backend,
         auth_backend: None,
         call_router: None,

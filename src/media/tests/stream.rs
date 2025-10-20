@@ -91,7 +91,7 @@ impl Track for TestTrack {
             match sender.send(packet_clone) {
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to send packet: {}", e);
+                    warn!("Failed to send packet: {}", e);
                 }
             }
         }

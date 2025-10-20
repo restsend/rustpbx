@@ -2,7 +2,7 @@
 {% block title %}Testing · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl space-y-6" x-data="testingConsole({{ test_data | escape }})">
+    <div class="mx-auto max-w-7xl space-y-6" x-data='testingConsole({{ test_data | tojson }})'>
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Operational validation</p>
@@ -30,25 +30,21 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Trunk health probes</h2>
-                        <p class="text-xs text-slate-500">Send SIP OPTIONS or media loopback to validate reachability
-                            and performance.</p>
+                        <h2 class="text-base font-semibold text-slate-900">Trunk ingress validation</h2>
+                        <p class="text-xs text-slate-500">Confirm whether hostnames or IPs resolve into configured
+                            inbound definitions and permitted directions.</p>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">Simulated
-                            mode</label>
-                        <span
-                            class="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
-                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-                            Safe preview
-                        </span>
+                    <div
+                        class="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-600 ring-1 ring-emerald-200">
+                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                        Live evaluation
                     </div>
                 </div>
 
                 <div class="mt-5 divide-y divide-slate-100">
                     <template x-for="trunk in trunks" :key="trunk.id">
                         <article class="py-4"
-                            :class="testing.trunk === trunk.id ? 'md:pl-3 md:border-l-2 md:border-sky-200 md:bg-sky-50/40 rounded-lg' : ''">
+                            :class="trunkTests[trunk.id]?.loading ? 'md:pl-3 md:border-l-2 md:border-sky-200 md:bg-sky-50/40 rounded-lg' : ''">
                             <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                                 <div class="flex flex-col gap-2">
                                     <div class="flex flex-wrap items-center gap-2">
@@ -90,43 +86,94 @@
                                     </div>
                                     <p class="text-xs text-slate-500" x-text="trunk.notes"></p>
                                 </div>
-                                <div class="flex flex-col items-start gap-2 sm:flex-row sm:items-center">
-                                    <button type="button" @click="runTrunkTest(trunk.id, 'options')"
-                                        :disabled="testing.trunk === trunk.id && testing.state === 'running'"
+                                <div class="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
+                                    <input type="text" x-model="trunkTests[trunk.id].address"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="Hostname or IP to evaluate">
+                                    <button type="button" @click="runTrunkTest(trunk.id)"
+                                        :disabled="trunkTests[trunk.id].loading"
                                         class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
                                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                             stroke-width="1.8">
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                                         </svg>
-                                        OPTIONS ping
-                                    </button>
-                                    <button type="button" @click="runTrunkTest(trunk.id, 'loopback')"
-                                        :disabled="testing.trunk === trunk.id && testing.state === 'running'"
-                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.8">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M5 10h10M10 5l5 5-5 5" />
-                                        </svg>
-                                        Media loopback
+                                        <span
+                                            x-text="trunkTests[trunk.id].loading ? 'Evaluating…' : 'Run check'"></span>
                                     </button>
                                 </div>
                             </div>
-                            <div class="mt-3 text-xs" x-show="testing.trunk === trunk.id">
-                                <template x-if="testing.state === 'running'">
+                            <div class="mt-3 space-y-2 text-xs">
+                                <template x-if="trunkTests[trunk.id].loading">
                                     <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sky-700">
-                                        Running <span class="font-semibold" x-text="testing.mode"></span> probe…
+                                        Evaluating address…
                                     </div>
                                 </template>
-                                <template x-if="testing.state === 'complete'">
-                                    <div class="rounded-lg border px-4 py-3"
-                                        :class="testing.success ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'">
-                                        <div class="flex items-center justify-between">
-                                            <span class="font-semibold"
-                                                x-text="testing.success ? 'Probe successful' : 'Probe reported issues'"></span>
-                                            <span x-text="testing.completed_at"></span>
+                                <template x-if="trunkTests[trunk.id].error">
+                                    <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-rose-700"
+                                        x-text="trunkTests[trunk.id].error"></div>
+                                </template>
+                                <template x-if="trunkTests[trunk.id].result">
+                                    <div class="space-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3">
+                                        <div class="flex flex-wrap items-center justify-between gap-2">
+                                            <span class="font-semibold text-slate-700"
+                                                x-text="trunkTests[trunk.id].result.overall_match ? 'Address matches inbound definition' : 'No inbound definition matched'"></span>
+                                            <span
+                                                class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                :class="trunkTests[trunk.id].result.overall_match ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
+                                                <span class="h-1.5 w-1.5 rounded-full"
+                                                    :class="trunkTests[trunk.id].result.overall_match ? 'bg-emerald-500' : 'bg-rose-500'"></span>
+                                                <span
+                                                    x-text="trunkTests[trunk.id].result.overall_match ? 'Match' : 'No match'"></span>
+                                            </span>
                                         </div>
-                                        <p class="mt-1 text-xs" x-text="testing.message"></p>
+                                        <div class="grid gap-2 text-[11px] text-slate-600">
+                                            <div>
+                                                <span class="font-semibold text-slate-700">Checked address:</span>
+                                                <span x-text="trunkTests[trunk.id].result.address"></span>
+                                            </div>
+                                            <div>
+                                                <span class="font-semibold text-slate-700">Resolved IPs:</span>
+                                                <span
+                                                    x-text="formatList(trunkTests[trunk.id].result.resolved_ips)"></span>
+                                            </div>
+                                            <div class="grid gap-2">
+                                                <template x-for="item in trunkTests[trunk.id].result.ip_results"
+                                                    :key="item.ip">
+                                                    <div class="rounded border border-slate-200 bg-slate-50 p-2">
+                                                        <div
+                                                            class="flex items-center justify-between font-semibold text-slate-700">
+                                                            <span x-text="item.ip"></span>
+                                                            <span
+                                                                x-text="item.matched ? 'Matched' : 'Not matched'"></span>
+                                                        </div>
+                                                        <div class="text-slate-500"
+                                                            x-text="item.matched_sources.length ? 'Sources: ' + item.matched_sources.join(', ') : 'No matching sources'">
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                            <div class="flex flex-wrap gap-3">
+                                                <div><span class="font-semibold text-slate-700">Inbound allowed:</span>
+                                                    <span
+                                                        x-text="trunkTests[trunk.id].result.allows_inbound ? 'Yes' : 'No'"></span>
+                                                </div>
+                                                <div><span class="font-semibold text-slate-700">Outbound allowed:</span>
+                                                    <span
+                                                        x-text="trunkTests[trunk.id].result.allows_outbound ? 'Yes' : 'No'"></span>
+                                                </div>
+                                                <template x-if="trunkTests[trunk.id].result.direction">
+                                                    <div><span class="font-semibold text-slate-700">Direction:</span>
+                                                        <span
+                                                            x-text="formatDirection(trunkTests[trunk.id].result.direction)"></span>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                            <div class="text-[11px] text-slate-400">
+                                                Evaluated
+                                                <span
+                                                    x-text="formatDateTime(trunkTests[trunk.id].result.evaluated_at)"></span>
+                                            </div>
+                                        </div>
                                     </div>
                                 </template>
                             </div>
@@ -144,19 +191,35 @@
                         <p class="text-xs text-slate-500">Predict how dialled numbers are normalised and which trunk or
                             route they match.</p>
                     </div>
-                    <button type="button" @click="loadSampleRouting"
-                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                        Use sample
-                    </button>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button type="button" @click="loadSampleRouting" :disabled="!routingChecks.length"
+                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+                            Use sample
+                        </button>
+                        <button type="button" @click="routingAdvanced = !routingAdvanced"
+                            class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-amber-300 hover:text-amber-700">
+                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12M4 10h12" />
+                            </svg>
+                            <span x-text="routingAdvanced ? 'Hide advanced' : 'Advanced options'"></span>
+                        </button>
+                    </div>
                 </div>
 
-                <form class="mt-4 grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
-                    @submit.prevent="runRoutingCheck">
+                <form class="mt-4 grid gap-4 md:grid-cols-2" @submit.prevent="runRoutingCheck">
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Dialled number</span>
                         <input type="text" x-model.trim="routingInput"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="e.g. +14155550123">
+                    </label>
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Caller SIP URI
+                            (optional)</span>
+                        <input type="text" x-model.trim="routingCaller"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sip:caller@example.com">
                     </label>
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction</span>
@@ -167,32 +230,179 @@
                             <option value="internal">Internal</option>
                         </select>
                     </label>
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source IP
+                            (optional)</span>
+                        <input type="text" x-model.trim="routingSourceIp"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="203.0.113.10">
+                    </label>
+                    <template x-if="routingAdvanced">
+                        <div class="md:col-span-2 grid gap-3 sm:grid-cols-2" x-transition>
+                            <label class="flex flex-col gap-2">
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Request URI
+                                    (optional)</span>
+                                <input type="text" x-model.trim="routingRequestUri"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="sip:destination@example.com">
+                            </label>
+                            <label class="flex flex-col gap-2">
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
+                                    trunk</span>
+                                <select x-model="routingSourceTrunk"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Auto detect</option>
+                                    <template x-for="candidate in trunks" :key="candidate.id">
+                                        <option :value="candidate.id" x-text="candidate.label || candidate.id"></option>
+                                    </template>
+                                </select>
+                            </label>
+                        </div>
+                    </template>
                     <div class="md:col-span-2 flex flex-wrap items-center gap-3">
-                        <button type="submit"
-                            class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                            </svg>
-                            Evaluate
+                        <button type="submit" :disabled="routingLoading"
+                            class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                            <template x-if="!routingLoading">
+                                <span class="inline-flex items-center gap-2">
+                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                    </svg>
+                                    Evaluate
+                                </span>
+                            </template>
+                            <template x-if="routingLoading">
+                                <span class="inline-flex items-center gap-2">
+                                    <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
+                                        stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M4 10a6 6 0 0 1 6-6m0-2a8 8 0 1 0 8 8" />
+                                    </svg>
+                                    Evaluating…
+                                </span>
+                            </template>
                         </button>
-                        <template x-if="routingResult">
-                            <div
-                                class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600">
-                                Matched <span class="font-semibold" x-text="routingResult.matched_route"></span>
-                                → <span class="font-semibold" x-text="routingResult.selected_trunk"></span>
-                                · <span x-text="routingResult.rewrites.join(', ') || 'no rewrite'"></span>
+                    </div>
+                    <div class="md:col-span-2 space-y-3">
+                        <template x-if="routingLoading">
+                            <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
+                                Evaluating routing…
                             </div>
                         </template>
-                        <template x-if="routingResult && routingResult.result === 'warning'">
-                            <span
-                                class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
-                                <svg class="mr-1 inline h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                    stroke-width="1.8">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 4l6 12H4l6-12z" />
-                                </svg>
-                                Uses backup trunk
-                            </span>
+                        <template x-if="routingError && !routingLoading">
+                            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                                x-text="routingError"></div>
+                        </template>
+                        <template x-if="routingResultSummary && !routingLoading">
+                            <div
+                                class="space-y-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="font-semibold text-slate-700">Rule:</span>
+                                    <span x-text="routingResultSummary.rule || 'None'"></span>
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                        :class="routingResultSummary.badgeClass">
+                                        <span class="h-1.5 w-1.5 rounded-full"
+                                            :class="routingStatusDot(routingResultSummary.status)"></span>
+                                        <span x-text="routingResultSummary.statusLabel"></span>
+                                    </span>
+                                </div>
+                                <div class="grid gap-1 sm:grid-cols-2">
+                                    <div><span class="font-semibold text-slate-700">Direction:</span>
+                                        <span x-text="(routingResultSummary.direction || '—').toUpperCase()"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Dialled:</span>
+                                        <span x-text="routingResultSummary.input || '—'"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Trunk:</span>
+                                        <span x-text="routingResultSummary.trunk || '—'"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Destination:</span>
+                                        <span x-text="displayValue(routingResultSummary.destination)"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Caller:</span>
+                                        <span x-text="displayValue(routingResultSummary.caller)"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Request URI:</span>
+                                        <span x-text="displayValue(routingResultSummary.requestUri)"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Source IP:</span>
+                                        <span x-text="displayValue(routingResultSummary.sourceIp)"></span>
+                                    </div>
+                                    <template x-if="routingResultSummary.sourceTrunk">
+                                        <div><span class="font-semibold text-slate-700">Provided source trunk:</span>
+                                            <span x-text="routingResultSummary.sourceTrunk"></span>
+                                        </div>
+                                    </template>
+                                    <template x-if="routingResultSummary.detectedTrunk">
+                                        <div><span class="font-semibold text-slate-700">Detected source trunk:</span>
+                                            <span x-text="routingResultSummary.detectedTrunk"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                                <div class="text-[11px] text-slate-500">
+                                    <span class="font-semibold text-slate-700">Outcome:</span>
+                                    <span x-text="routingResultSummary.outcomeLabel"></span>
+                                    <template x-if="routingResultSummary.defaultRoute">
+                                        <span> · used default route</span>
+                                    </template>
+                                </div>
+                                <div class="text-[11px] text-slate-500">
+                                    <span class="font-semibold text-slate-700">Rewrites:</span>
+                                    <span x-text="routingResultSummary.rewritesText"></span>
+                                </div>
+                                <template x-if="routingResultSummary.headers?.length">
+                                    <div class="text-[11px] text-slate-500">
+                                        <span class="font-semibold text-slate-700">Headers:</span>
+                                        <span x-text="formatList(routingResultSummary.headers)"></span>
+                                    </div>
+                                </template>
+                                <template x-if="routingResultSummary.credential">
+                                    <div class="text-[11px] text-slate-500">
+                                        <span class="font-semibold text-slate-700">Credential:</span>
+                                        <span x-text="routingResultSummary.credential.username"></span>
+                                        <template x-if="routingResultSummary.credential.realm">
+                                            <span x-text="'@' + routingResultSummary.credential.realm"></span>
+                                        </template>
+                                    </div>
+                                </template>
+                                <template x-if="routingResultSummary.abort">
+                                    <div class="text-[11px] text-rose-600">
+                                        <span class="font-semibold">Rejected:</span>
+                                        <span x-text="routingResultSummary.abort.code"></span>
+                                        <template x-if="routingResultSummary.abort.reason">
+                                            <span x-text="' · ' + routingResultSummary.abort.reason"></span>
+                                        </template>
+                                    </div>
+                                </template>
+                                <div class="text-[11px] text-slate-400">
+                                    Evaluated <span x-text="formatDateTime(routingResultSummary.createdAt)"></span>
+                                </div>
+                                <template x-if="routingResultSummary.rewritesDiff?.length">
+                                    <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                            Field changes
+                                        </div>
+                                        <div class="mt-2 grid gap-2">
+                                            <template x-for="item in routingResultSummary.rewritesDiff"
+                                                :key="item.field + (item.after || '') + (item.before || '')">
+                                                <div class="rounded border border-slate-200 bg-white px-3 py-2">
+                                                    <div class="text-[11px] font-semibold text-slate-700"
+                                                        x-text="item.field"></div>
+                                                    <div class="text-[11px] text-slate-500"><span
+                                                            class="font-semibold">Before:</span>
+                                                        <span x-text="displayValue(item.before)"></span>
+                                                    </div>
+                                                    <div class="text-[11px] text-slate-500"><span
+                                                            class="font-semibold">After:</span>
+                                                        <span x-text="displayValue(item.after)"></span>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
                         </template>
                     </div>
                 </form>
@@ -213,10 +423,20 @@
                                     x-text="item.matched_route"></span></div>
                             <div class="text-xs text-slate-500">Trunk → <span class="font-semibold"
                                     x-text="item.selected_trunk"></span></div>
+                            <div class="text-xs text-slate-500">Caller → <span class="font-semibold"
+                                    x-text="item.caller || '—'"></span></div>
+                            <div class="text-xs text-slate-500">Source IP → <span class="font-semibold"
+                                    x-text="item.sourceIp || '—'"></span></div>
                             <div class="mt-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                 :class="item.result === 'ok' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'">
                                 <span x-text="item.result === 'ok' ? 'Pass' : 'Warning'"></span>
                             </div>
+                        </div>
+                    </template>
+                    <template x-if="!routingChecks.length">
+                        <div
+                            class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                            No routing checks recorded yet.
                         </div>
                     </template>
                 </div>
@@ -582,9 +802,48 @@
         <section x-show="activeTab === 'dialer'" x-cloak x-transition.opacity class="space-y-6">
             <div class="max-w-3xl rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <h2 class="text-base font-semibold text-slate-900">Dial a synthetic call</h2>
-                <p class="mt-1 text-xs text-slate-500">Place a controlled call to verify audio quality and queue
-                    behaviour. Real signalling is skipped in preview mode.</p>
+                <p class="mt-1 text-xs text-slate-500">Choose a trunk, set caller and callee details, and simulate a
+                    call flow. Signalling remains local to the console preview.</p>
                 <form class="mt-4 space-y-4" @submit.prevent="startDialTest">
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Caller SIP
+                                URI</span>
+                            <input type="text" x-model.trim="dial.caller"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="sip:1001@example.com">
+                        </label>
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Callee SIP
+                                URI</span>
+                            <div class="flex gap-2">
+                                <input type="text" x-model.trim="dial.destination"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="sip:1000@example.com">
+                                <div class="relative" x-data="{ open: false }" @click.outside="open = false">
+                                    <button type="button" @click="open = !open"
+                                        class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
+                                        </svg>
+                                    </button>
+                                    <div x-cloak x-show="open" x-transition.origin.top.right
+                                        class="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-xl">
+                                        <template x-for="sample in dialer.destination_samples" :key="sample.value">
+                                            <button type="button" @click="dial.destination = sample.value; open = false"
+                                                class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-slate-100">
+                                                <span class="text-xs font-semibold text-slate-600"
+                                                    x-text="sample.label"></span>
+                                                <span class="font-mono text-xs text-slate-500"
+                                                    x-text="sample.value"></span>
+                                            </button>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </label>
+                    </div>
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source</span>
                         <select x-model="dial.source"
@@ -593,34 +852,6 @@
                                 <option :value="item" x-text="item"></option>
                             </template>
                         </select>
-                    </label>
-                    <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Destination</span>
-                        <div class="flex gap-2">
-                            <input type="text" x-model.trim="dial.destination"
-                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Number or feature code">
-                            <div class="relative" x-data="{ open: false }" @click.outside="open = false">
-                                <button type="button" @click="open = !open"
-                                    class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
-                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                                    </svg>
-                                </button>
-                                <div x-cloak x-show="open" x-transition.origin.top.right
-                                    class="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-xl">
-                                    <template x-for="sample in dialer.destination_samples" :key="sample.value">
-                                        <button type="button" @click="dial.destination = sample.value; open = false"
-                                            class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-slate-100">
-                                            <span class="text-xs font-semibold text-slate-600"
-                                                x-text="sample.label"></span>
-                                            <span class="font-mono text-xs text-slate-500" x-text="sample.value"></span>
-                                        </button>
-                                    </template>
-                                </div>
-                            </div>
-                        </div>
                     </label>
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Preferred
@@ -632,6 +863,20 @@
                             </template>
                         </select>
                     </label>
+                    <label class="flex flex-col gap-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Preferred
+                            codec</span>
+                        <select x-model="dial.codec"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <template x-for="item in dialer.codec_options" :key="item">
+                                <option :value="item" x-text="item"></option>
+                            </template>
+                        </select>
+                    </label>
+                    <template x-if="dialError">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                            x-text="dialError"></div>
+                    </template>
                     <button type="submit" :disabled="dialing"
                         class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -650,518 +895,716 @@
                             <span x-text="dialResult ? dialResult.timestamp : ''"></span>
                         </div>
                         <p class="mt-1" x-text="dialResult ? dialResult.details : ''"></p>
+                        <template x-if="dialResult && dialResult.summary">
+                            <div class="mt-3 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+                                <div><span class="font-semibold text-slate-700">Caller:</span>
+                                    <span x-text="dialResult.summary.caller"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Callee:</span>
+                                    <span x-text="dialResult.summary.callee"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Trunk:</span>
+                                    <span x-text="dialResult.summary.trunk"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Codec:</span>
+                                    <span x-text="dialResult.summary.codec"></span>
+                                </div>
+                            </div>
+                        </template>
                     </div>
                 </div>
             </div>
         </section>
 
-        <section x-show="activeTab === 'history'" x-cloak x-transition.opacity class="space-y-6">
-            <div class="max-w-3xl rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-base font-semibold text-slate-900">Recent diagnostics</h2>
-                    <button type="button" @click="clearHistory"
-                        class="text-xs font-semibold text-slate-400 hover:text-rose-500">Clear</button>
-                </div>
-                <ul class="mt-4 space-y-3 text-xs text-slate-600">
-                    <template x-for="item in history" :key="item.timestamp + item.subject">
-                        <li class="rounded-lg border border-slate-200 px-3 py-2">
-                            <div class="flex items-center justify-between">
-                                <span
-                                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                    :class="historyPill(item.type)">
-                                    <span x-text="historyLabel(item.type)"></span>
-                                </span>
-                                <span class="text-[11px] text-slate-400" x-text="formatDateTime(item.timestamp)"></span>
-                            </div>
-                            <div class="mt-1 font-semibold text-slate-800" x-text="item.subject"></div>
-                            <p class="mt-1 text-[11px] text-slate-500" x-text="item.details"></p>
-                        </li>
-                    </template>
-                    <template x-if="!history.length">
-                        <li
-                            class="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-slate-400">
-                            No diagnostics recorded yet.
-                        </li>
-                    </template>
-                </ul>
-            </div>
-        </section>
     </div>
-</div>
 
-<script>
-    document.addEventListener('alpine:init', () => {
-        Alpine.data('testingConsole', (payload) => ({
-            init() {
-                const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
-                this.lastAudit = data.last_audit || null;
-                this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
-                this.routingChecks = Array.isArray(data.routing_checks) ? data.routing_checks : [];
-                this.history = Array.isArray(data.recent_tests) ? data.recent_tests : [];
-                this.dialer = data.dialer || { source_options: [], destination_samples: [], trunk_options: [] };
-                this.dial.source = this.dialer.default_source || (this.dialer.source_options[0] || '');
-                this.dial.trunk = this.dialer.trunk_options?.[0]?.id || '';
-                this.dial.destination = this.dialer.destination_samples?.[0]?.value || '';
-                this.routingInput = this.routingChecks?.[0]?.input || '';
-                this.routingDirection = this.routingChecks?.[0]?.direction || 'outbound';
-                this.basePath = "{{ base_path | default('/console')|safe }}"
-                this.$watch('activeTab', (value) => {
-                    if (value === 'sip') {
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('testingConsole', (payload) => ({
+                init() {
+                    const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                    this.lastAudit = data.last_audit || null;
+                    this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
+                    this.routingChecks = Array.isArray(data.routing_checks) ? data.routing_checks : [];
+                    this.initializeTrunkTests();
+                    this.dialer = data.dialer || { source_options: [], destination_samples: [], trunk_options: [] };
+                    if (!Array.isArray(this.dialer.codec_options) || !this.dialer.codec_options.length) {
+                        this.dialer.codec_options = [
+                            'Opus',
+                            'PCMU (G.711 μ-law)',
+                            'PCMA (G.711 A-law)',
+                            'G.722',
+                            'G.729',
+                        ];
+                    }
+                    this.dial.source = this.dialer.default_source || (this.dialer.source_options[0] || '');
+                    this.dial.trunk = this.dialer.trunk_options?.[0]?.id || '';
+                    this.dial.destination = this.dialer.destination_samples?.[0]?.value || '';
+                    this.dial.caller = this.dialer.default_caller || '';
+                    this.dial.codec = this.dialer.codec_options?.[0] || '';
+                    const firstCheck = this.routingChecks?.[0] || {};
+                    this.routingInput = firstCheck.input || '';
+                    this.routingDirection = firstCheck.direction || 'outbound';
+                    this.routingCaller = firstCheck.caller && firstCheck.caller !== '—' ? firstCheck.caller : '';
+                    this.routingRequestUri = '';
+                    this.routingSourceTrunk = '';
+                    this.routingSourceIp = firstCheck.sourceIp && firstCheck.sourceIp !== '—' ? firstCheck.sourceIp : '';
+                    this.routingResultSummary = null;
+                    this.routingError = null;
+                    this.basePath = "{{ base_path | default('/console')|safe }}"
+                    this.$watch('activeTab', (value) => {
+                        if (value === 'sip') {
+                            this.ensureDialogsLoaded();
+                        }
+                    });
+                    this.$watch('trunks', () => {
+                        this.initializeTrunkTests();
+                    });
+                },
+                basePath: '',
+                lastAudit: null,
+                trunks: [],
+                routingChecks: [],
+                trunkTests: {},
+                routingInput: '',
+                routingDirection: 'outbound',
+                routingAdvanced: false,
+                routingCaller: '',
+                routingRequestUri: '',
+                routingSourceTrunk: '',
+                routingSourceIp: '',
+                routingLoading: false,
+                routingError: null,
+                routingResultSummary: null,
+                dialogCallIdInput: '',
+                dialogCallId: '',
+                dialer: {},
+                dial: { source: '', destination: '', trunk: '', caller: '', codec: '' },
+                dialing: false,
+                dialResult: null,
+                dialError: null,
+                tabs: [
+                    { id: 'trunks', label: 'Trunks' },
+                    { id: 'routing', label: 'Routing' },
+                    { id: 'sip', label: 'SIP State' },
+                    { id: 'dialer', label: 'Dialer' },
+                ],
+                activeTab: 'trunks',
+                selectTab(id) {
+                    this.activeTab = id;
+                    if (id === 'sip') {
                         this.ensureDialogsLoaded();
                     }
-                });
-            },
-            basePath: '',
-            lastAudit: null,
-            trunks: [],
-            routingChecks: [],
-            routingInput: '',
-            routingDirection: 'outbound',
-            routingResult: null,
-            dialogCallIdInput: '',
-            dialogCallId: '',
-            testing: { trunk: null, state: 'idle', success: false, message: '', mode: 'OPTIONS', completed_at: '' },
-            history: [],
-            dialer: {},
-            dial: { source: '', destination: '', trunk: '' },
-            dialing: false,
-            dialResult: null,
-            tabs: [
-                { id: 'trunks', label: 'Trunks' },
-                { id: 'routing', label: 'Routing' },
-                { id: 'sip', label: 'SIP State' },
-                { id: 'dialer', label: 'Dialer' },
-                { id: 'history', label: 'History' },
-            ],
-            activeTab: 'trunks',
-            selectTab(id) {
-                this.activeTab = id;
-                if (id === 'sip') {
-                    this.ensureDialogsLoaded();
-                }
-            },
-            get healthyTrunks() {
-                return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
-            },
-            get warningTrunks() {
-                return this.trunks.filter((item) => this.statusLabel(item.status) !== 'Healthy').length;
-            },
-            get recentCall() {
-                return this.history.find((item) => item.type === 'call') || null;
-            },
-            get hasDialogFilter() {
-                return Boolean(this.dialogCallId);
-            },
-            get hasLocatorInput() {
-                return Boolean(
-                    (this.locatorUser && this.locatorUser.trim()) || (this.locatorUri && this.locatorUri.trim())
-                );
-            },
-            dialogs: [],
-            dialogsMeta: null,
-            dialogsLoading: false,
-            dialogsError: null,
-            dialogsFetchedAt: null,
-            locatorUser: '',
-            locatorUri: '',
-            locatorLoading: false,
-            locatorClearing: false,
-            locatorError: null,
-            locatorResult: null,
-            locatorClearFeedback: null,
-            statusLabel(value) {
-                switch ((value || '').toLowerCase()) {
-                    case 'healthy':
-                        return 'Healthy';
-                    case 'warning':
-                        return 'Warning';
-                    case 'lab':
-                        return 'Lab';
-                    default:
-                        return value || 'Unknown';
-                }
-            },
-            statusPill(value) {
-                const key = (value || '').toLowerCase();
-                if (key === 'healthy') {
-                    return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                }
-                if (key === 'warning') {
-                    return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                }
-                if (key === 'lab') {
-                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                }
-                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-            },
-            statusDot(value) {
-                switch ((value || '').toLowerCase()) {
-                    case 'healthy':
-                        return 'bg-emerald-500';
-                    case 'warning':
-                        return 'bg-amber-500';
-                    case 'lab':
-                        return 'bg-sky-500';
-                    default:
-                        return 'bg-slate-400';
-                }
-            },
-            runTrunkTest(trunkId, mode) {
-                this.testing = {
-                    trunk: trunkId,
-                    state: 'running',
-                    success: false,
-                    message: '',
-                    mode: mode.toUpperCase(),
-                    completed_at: ''
-                };
-                window.setTimeout(() => {
-                    const trunk = this.trunks.find((item) => item.id === trunkId) || {};
-                    const success = mode === 'options' ? trunk.status !== 'lab' : trunk.packet_loss_percent < 2;
-                    const message = success
-                        ? `Round-trip ${Math.max(8, Math.round(trunk.latency_ms * (mode === 'loopback' ? 1.4 : 1)))} ms · loss ${trunk.packet_loss_percent}%`
-                        : 'Probe reported elevated packet loss and jitter.';
-                    const entry = {
-                        timestamp: new Date().toISOString(),
-                        type: 'trunk',
-                        subject: `${trunk.label || trunkId} (${mode.toUpperCase()})`,
-                        status: success ? 'pass' : 'fail',
-                        details: message,
+                },
+                get healthyTrunks() {
+                    return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
+                },
+                get warningTrunks() {
+                    return this.trunks.filter((item) => this.statusLabel(item.status) !== 'Healthy').length;
+                },
+                get hasDialogFilter() {
+                    return Boolean(this.dialogCallId);
+                },
+                get hasLocatorInput() {
+                    return Boolean(
+                        (this.locatorUser && this.locatorUser.trim()) || (this.locatorUri && this.locatorUri.trim())
+                    );
+                },
+                dialogs: [],
+                dialogsMeta: null,
+                dialogsLoading: false,
+                dialogsError: null,
+                dialogsFetchedAt: null,
+                locatorUser: '',
+                locatorUri: '',
+                locatorLoading: false,
+                locatorClearing: false,
+                locatorError: null,
+                locatorResult: null,
+                locatorClearFeedback: null,
+                statusLabel(value) {
+                    switch ((value || '').toLowerCase()) {
+                        case 'healthy':
+                            return 'Healthy';
+                        case 'warning':
+                            return 'Warning';
+                        case 'lab':
+                            return 'Lab';
+                        default:
+                            return value || 'Unknown';
+                    }
+                },
+                statusPill(value) {
+                    const key = (value || '').toLowerCase();
+                    if (key === 'healthy') {
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    }
+                    if (key === 'warning') {
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    }
+                    if (key === 'lab') {
+                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    }
+                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                },
+                statusDot(value) {
+                    switch ((value || '').toLowerCase()) {
+                        case 'healthy':
+                            return 'bg-emerald-500';
+                        case 'warning':
+                            return 'bg-amber-500';
+                        case 'lab':
+                            return 'bg-sky-500';
+                        default:
+                            return 'bg-slate-400';
+                    }
+                },
+                initializeTrunkTests() {
+                    const state = {};
+                    if (Array.isArray(this.trunks)) {
+                        this.trunks.forEach((trunk) => {
+                            state[trunk.id] = {
+                                address: trunk.ingress_ips?.[0] || '',
+                                loading: false,
+                                error: null,
+                                result: null,
+                            };
+                        });
+                    }
+                    this.trunkTests = state;
+                },
+                ensureTrunkTestState(trunkId) {
+                    if (this.trunkTests[trunkId]) {
+                        return;
+                    }
+                    this.trunkTests = {
+                        ...this.trunkTests,
+                        [trunkId]: {
+                            address: '',
+                            loading: false,
+                            error: null,
+                            result: null,
+                        },
                     };
-                    this.history = [entry, ...this.history].slice(0, 12);
-                    this.testing = {
-                        trunk: trunkId,
-                        state: 'complete',
-                        success,
-                        message,
-                        mode: mode.toUpperCase(),
-                        completed_at: new Date().toLocaleTimeString(),
-                    };
-                }, 900);
-            },
-            loadSampleRouting() {
-                if (!this.routingChecks.length) {
-                    return;
-                }
-                const sample = this.routingChecks[0];
-                this.routingInput = sample.input;
-                this.routingDirection = sample.direction;
-                this.routingResult = sample;
-            },
-            runRoutingCheck() {
-                const lookup = this.routingChecks.find((item) => {
-                    return item.input === this.routingInput && item.direction === this.routingDirection;
-                });
-                if (lookup) {
-                    this.routingResult = lookup;
-                } else {
-                    const generated = {
-                        id: `dynamic-${Math.random().toString(36).slice(2, 7)}`,
-                        input: this.routingInput,
+                },
+                async runTrunkTest(trunkId) {
+                    this.ensureTrunkTestState(trunkId);
+                    const state = this.trunkTests[trunkId];
+                    if (!state) {
+                        return;
+                    }
+                    const address = (state.address || '').trim();
+                    if (!address) {
+                        state.error = 'Provide a hostname or IP to evaluate.';
+                        state.result = null;
+                        this.trunkTests = { ...this.trunkTests };
+                        return;
+                    }
+                    state.loading = true;
+                    state.error = null;
+                    state.result = null;
+                    this.trunkTests = { ...this.trunkTests };
+                    try {
+                        const response = await fetch(this.buildUrl('/diagnostics/trunks/test'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({ trunk: trunkId, address }),
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `Evaluation failed (${response.status})`;
+                            throw new Error(message);
+                        }
+                        state.result = data;
+                        state.error = null;
+                    } catch (err) {
+                        state.error = err?.message || 'Evaluation failed.';
+                        state.result = null;
+                    } finally {
+                        state.loading = false;
+                        this.trunkTests = { ...this.trunkTests };
+                    }
+                },
+                loadSampleRouting() {
+                    if (!this.routingChecks.length) {
+                        return;
+                    }
+                    const sample = this.routingChecks[0];
+                    this.routingInput = sample.input;
+                    this.routingDirection = sample.direction;
+                    this.routingCaller = sample.caller && sample.caller !== '—' ? sample.caller : '';
+                    this.routingRequestUri = '';
+                    this.routingSourceTrunk = '';
+                    this.routingSourceIp = sample.sourceIp && sample.sourceIp !== '—' ? sample.sourceIp : '';
+                    this.routingAdvanced = false;
+                    this.routingResultSummary = null;
+                    this.routingError = null;
+                },
+                async runRoutingCheck() {
+                    const callee = (this.routingInput || '').trim();
+                    if (!callee) {
+                        this.routingError = 'Provide a dialled number to continue.';
+                        return;
+                    }
+                    const payload = {
+                        callee,
                         direction: this.routingDirection,
-                        matched_route: 'Fallback-policy',
-                        selected_trunk: this.trunks[0]?.id || 'default',
-                        rewrites: ['no rewrite'],
-                        result: 'ok',
-                        latency_ms: 40,
                     };
-                    this.routingChecks = [generated, ...this.routingChecks].slice(0, 8);
-                    this.routingResult = generated;
-                }
-                const historyEntry = {
-                    timestamp: new Date().toISOString(),
-                    type: 'routing',
-                    subject: this.routingInput || 'unknown dialled number',
-                    status: 'pass',
-                    details: `Matched route ${this.routingResult.matched_route} → ${this.routingResult.selected_trunk}`,
-                };
-                this.history = [historyEntry, ...this.history].slice(0, 12);
-            },
-            startDialTest() {
-                if (!this.dial.destination) {
-                    return;
-                }
-                this.dialing = true;
-                this.dialResult = null;
-                window.setTimeout(() => {
-                    this.dialing = false;
-                    const success = Math.random() > 0.15;
-                    const detail = success
-                        ? `Simulated ${this.dial.destination} via ${this.dial.trunk} · MOS 4.${Math.floor(Math.random() * 2) + 2}`
-                        : 'Synthetic call reported 486 Busy Here (simulated).';
-                    const entry = {
-                        timestamp: new Date().toISOString(),
-                        type: 'call',
-                        subject: `${this.dial.source} → ${this.dial.destination}`,
-                        status: success ? 'pass' : 'fail',
-                        details: detail,
+                    const caller = (this.routingCaller || '').trim();
+                    if (caller) {
+                        payload.caller = caller;
+                    }
+                    const sourceIp = (this.routingSourceIp || '').trim();
+                    if (sourceIp) {
+                        payload.source_ip = sourceIp;
+                    }
+                    if (this.routingRequestUri && this.routingRequestUri.trim()) {
+                        payload.request_uri = this.routingRequestUri.trim();
+                    }
+                    if (this.routingSourceTrunk) {
+                        payload.source_trunk = this.routingSourceTrunk;
+                    }
+                    this.routingLoading = true;
+                    this.routingError = null;
+                    this.routingResultSummary = null;
+                    const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                    try {
+                        const response = await fetch(this.buildUrl('/diagnostics/routes/evaluate'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `Routing evaluation failed (${response.status})`;
+                            throw new Error(message);
+                        }
+                        const summary = this.transformRoutingResult(data, callee);
+                        this.routingResultSummary = summary;
+                        const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                        const latencyMs = Math.max(1, Math.round(ended - started));
+                        this.updateRoutingChecks(summary, latencyMs);
+                    } catch (err) {
+                        this.routingError = err?.message || 'Routing evaluation failed.';
+                    } finally {
+                        this.routingLoading = false;
+                    }
+                },
+                startDialTest() {
+                    const trunk = (this.dial.trunk || '').trim();
+                    const caller = (this.dial.caller || '').trim();
+                    const callee = (this.dial.destination || '').trim();
+                    const codec = (this.dial.codec || '').trim();
+
+                    if (!trunk) {
+                        this.dialError = 'Select a trunk before starting the simulation.';
+                        return;
+                    }
+                    if (!caller) {
+                        this.dialError = 'Provide a caller SIP URI to continue.';
+                        return;
+                    }
+                    if (!callee) {
+                        this.dialError = 'Provide a callee SIP URI or number to continue.';
+                        return;
+                    }
+
+                    this.dialError = null;
+                    this.dialing = true;
+                    this.dialResult = null;
+                    window.setTimeout(() => {
+                        this.dialing = false;
+                        const success = Math.random() > 0.15;
+                        const codecLabel = codec || 'Auto';
+                        const detail = success
+                            ? `Simulated ${callee} via ${trunk} using ${codecLabel} · MOS 4.${Math.floor(Math.random() * 2) + 2}`
+                            : 'Synthetic call reported 486 Busy Here (simulated).';
+                        this.dialResult = {
+                            status: success ? 'pass' : 'fail',
+                            details: detail,
+                            timestamp: new Date().toLocaleTimeString(),
+                            summary: {
+                                caller,
+                                callee,
+                                trunk,
+                                codec: codecLabel,
+                            },
+                        };
+                    }, 1100);
+                },
+                updateRoutingChecks(summary, latencyMs) {
+                    if (!summary) {
+                        return;
+                    }
+                    const rewrites = Array.isArray(summary.rewriteOperations) && summary.rewriteOperations.length
+                        ? summary.rewriteOperations
+                        : ['no rewrite'];
+                    const card = {
+                        id: `dynamic-${Date.now()}`,
+                        input: summary.input,
+                        direction: summary.direction,
+                        matched_route: summary.rule || 'None',
+                        selected_trunk: summary.trunk || '—',
+                        caller: summary.caller || null,
+                        sourceIp: summary.sourceIp || null,
+                        rewrites,
+                        result: summary.status === 'success' ? 'ok' : 'warning',
+                        latency_ms: latencyMs,
                     };
-                    this.history = [entry, ...this.history].slice(0, 12);
-                    this.dialResult = {
-                        status: success ? 'pass' : 'fail',
-                        details: detail,
-                        timestamp: new Date().toLocaleTimeString(),
+                    this.routingChecks = [card, ...this.routingChecks].slice(0, 8);
+                },
+                transformRoutingResult(data, input) {
+                    const outcome = data?.outcome || {};
+                    const type = (outcome.type || 'not_handled').toLowerCase();
+                    let status = 'warning';
+                    let statusLabel = 'Not handled';
+                    let badgeClass = 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    let outcomeLabel = 'No matching route';
+                    let historyDetails = 'No routing rule matched.';
+                    const defaultRoute = Boolean(data?.used_default_route);
+                    if (type === 'forward') {
+                        status = defaultRoute ? 'warning' : 'success';
+                        statusLabel = defaultRoute ? 'Forwarded (default)' : 'Forwarded';
+                        badgeClass = defaultRoute
+                            ? 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'
+                            : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                        const destination = outcome.destination || data?.selected_trunk || '—';
+                        outcomeLabel = defaultRoute
+                            ? `Forwarded via default route (${destination})`
+                            : `Forwarded to ${destination}`;
+                        historyDetails = `Forward via ${data?.selected_trunk || '—'} → ${destination}`;
+                    } else if (type === 'abort') {
+                        status = 'error';
+                        statusLabel = 'Rejected';
+                        badgeClass = 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                        const code = outcome.code || '';
+                        const reason = outcome.reason ? ` ${outcome.reason}` : '';
+                        outcomeLabel = `Rejected ${code}${reason}`.trim();
+                        historyDetails = outcomeLabel;
+                    }
+                    const rewriteOperations = Array.isArray(data?.rewrite_operations)
+                        ? data.rewrite_operations
+                        : [];
+                    const rewritesDiff = Array.isArray(data?.rewrites) ? data.rewrites : [];
+                    const summary = {
+                        rule: data?.matched_rule || (defaultRoute ? 'Default route' : null),
+                        status,
+                        statusLabel,
+                        badgeClass,
+                        direction: data?.direction || '',
+                        input,
+                        trunk: data?.selected_trunk || null,
+                        destination: outcome.destination || null,
+                        caller: data?.caller || null,
+                        requestUri: data?.request_uri || null,
+                        sourceIp: data?.source_ip || null,
+                        sourceTrunk: data?.source_trunk || null,
+                        detectedTrunk: data?.detected_trunk || null,
+                        defaultRoute,
+                        outcomeLabel,
+                        historyDetails,
+                        createdAt: data?.evaluated_at || null,
+                        rewriteOperations,
+                        rewritesDiff,
+                        rewritesText: rewriteOperations.length
+                            ? rewriteOperations.join(', ')
+                            : 'No rewrite changes',
+                        headers: Array.isArray(outcome.headers) ? outcome.headers : [],
+                        credential: outcome.credential || null,
+                        abort: type === 'abort'
+                            ? { code: outcome.code, reason: outcome.reason || null }
+                            : null,
                     };
-                }, 1100);
-            },
-            clearHistory() {
-                this.history = [];
-            },
-            applyDialogFilter() {
-                const trimmed = (this.dialogCallIdInput || '').trim();
-                this.dialogCallIdInput = trimmed;
-                if (!trimmed) {
+                    return summary;
+                },
+                routingStatusDot(status) {
+                    switch ((status || '').toLowerCase()) {
+                        case 'success':
+                            return 'bg-emerald-500';
+                        case 'error':
+                            return 'bg-rose-500';
+                        case 'warning':
+                            return 'bg-amber-500';
+                        default:
+                            return 'bg-slate-400';
+                    }
+                },
+                formatList(value) {
+                    if (!value || (Array.isArray(value) && !value.length)) {
+                        return '—';
+                    }
+                    if (Array.isArray(value)) {
+                        return value.filter((item) => item !== null && item !== undefined && item !== '')
+                            .map((item) => String(item))
+                            .join(', ');
+                    }
+                    return String(value);
+                },
+                displayValue(value) {
+                    if (!value && value !== 0) {
+                        return '—';
+                    }
+                    if (Array.isArray(value)) {
+                        return this.formatList(value);
+                    }
+                    if (typeof value === 'object') {
+                        return JSON.stringify(value);
+                    }
+                    return String(value);
+                },
+                formatDirection(value) {
+                    if (!value) {
+                        return '—';
+                    }
+                    if (Array.isArray(value)) {
+                        return value.map((item) => this.formatDirection(item)).join(' / ');
+                    }
+                    const key = String(value).toLowerCase();
+                    switch (key) {
+                        case 'inbound':
+                            return 'Inbound';
+                        case 'outbound':
+                            return 'Outbound';
+                        case 'internal':
+                            return 'Internal';
+                        case 'bidirectional':
+                            return 'Bidirectional';
+                        default:
+                            return String(value);
+                    }
+                },
+                applyDialogFilter() {
+                    const trimmed = (this.dialogCallIdInput || '').trim();
+                    this.dialogCallIdInput = trimmed;
+                    if (!trimmed) {
+                        if (this.dialogCallId) {
+                            this.dialogCallId = '';
+                            this.refreshDialogs();
+                        }
+                        return;
+                    }
+                    if (trimmed !== this.dialogCallId) {
+                        this.dialogCallId = trimmed;
+                    }
+                    this.refreshDialogs();
+                },
+                clearDialogFilter() {
+                    if (!this.dialogCallId && !(this.dialogCallIdInput && this.dialogCallIdInput.trim())) {
+                        return;
+                    }
+                    this.dialogCallIdInput = '';
                     if (this.dialogCallId) {
                         this.dialogCallId = '';
-                        this.refreshDialogs();
                     }
-                    return;
-                }
-                if (trimmed !== this.dialogCallId) {
-                    this.dialogCallId = trimmed;
-                }
-                this.refreshDialogs();
-            },
-            clearDialogFilter() {
-                if (!this.dialogCallId && !(this.dialogCallIdInput && this.dialogCallIdInput.trim())) {
-                    return;
-                }
-                this.dialogCallIdInput = '';
-                if (this.dialogCallId) {
-                    this.dialogCallId = '';
-                }
-                this.refreshDialogs();
-            },
-            ensureDialogsLoaded() {
-                if (this.dialogsFetchedAt || this.dialogsLoading) {
-                    return;
-                }
-                this.fetchDialogs();
-            },
-            buildUrl(path) {
-                const clean = path.startsWith('/') ? path : `/${path}`;
-                return `${this.basePath}${clean}`;
-            },
-            async fetchDialogs(force = false) {
-                if (this.dialogsLoading) {
-                    return;
-                }
-                if (!force && this.dialogsFetchedAt) {
-                    return;
-                }
-                this.dialogsLoading = true;
-                this.dialogsError = null;
-                try {
-                    const params = new URLSearchParams();
-                    if (this.dialogCallId) {
-                        params.set('call_id', this.dialogCallId);
+                    this.refreshDialogs();
+                },
+                ensureDialogsLoaded() {
+                    if (this.dialogsFetchedAt || this.dialogsLoading) {
+                        return;
                     }
-                    params.set('limit', '20');
-                    let url = this.buildUrl('/diagnostics/dialogs');
-                    const query = params.toString();
-                    if (query) {
-                        url = `${url}?${query}`;
+                    this.fetchDialogs();
+                },
+                buildUrl(path) {
+                    const clean = path.startsWith('/') ? path : `/${path}`;
+                    return `${this.basePath}${clean}`;
+                },
+                async fetchDialogs(force = false) {
+                    if (this.dialogsLoading) {
+                        return;
                     }
-                    const response = await fetch(url, {
-                        credentials: 'same-origin',
-                    });
-                    const data = await response.json().catch(() => null);
-                    if (!response.ok) {
-                        const message = data?.message || `Failed to load dialogs (${response.status})`;
-                        throw new Error(message);
+                    if (!force && this.dialogsFetchedAt) {
+                        return;
                     }
-                    this.dialogs = Array.isArray(data?.items) ? data.items : [];
-                    this.dialogsMeta = {
-                        total: data?.total || 0,
-                        generated_at: data?.generated_at || null,
-                        has_more: Boolean(data?.has_more),
-                    };
-                    this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
-                } catch (err) {
-                    this.dialogsError = err?.message || 'Failed to load dialogs.';
-                    this.dialogs = [];
-                    this.dialogsMeta = null;
+                    this.dialogsLoading = true;
+                    this.dialogsError = null;
+                    try {
+                        const params = new URLSearchParams();
+                        if (this.dialogCallId) {
+                            params.set('call_id', this.dialogCallId);
+                        }
+                        params.set('limit', '20');
+                        let url = this.buildUrl('/diagnostics/dialogs');
+                        const query = params.toString();
+                        if (query) {
+                            url = `${url}?${query}`;
+                        }
+                        const response = await fetch(url, {
+                            credentials: 'same-origin',
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `Failed to load dialogs (${response.status})`;
+                            throw new Error(message);
+                        }
+                        this.dialogs = Array.isArray(data?.items) ? data.items : [];
+                        this.dialogsMeta = {
+                            total: data?.total || 0,
+                            generated_at: data?.generated_at || null,
+                            has_more: Boolean(data?.has_more),
+                        };
+                        this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
+                    } catch (err) {
+                        this.dialogsError = err?.message || 'Failed to load dialogs.';
+                        this.dialogs = [];
+                        this.dialogsMeta = null;
+                        this.dialogsFetchedAt = null;
+                    } finally {
+                        this.dialogsLoading = false;
+                    }
+                },
+                refreshDialogs() {
                     this.dialogsFetchedAt = null;
-                } finally {
-                    this.dialogsLoading = false;
-                }
-            },
-            refreshDialogs() {
-                this.dialogsFetchedAt = null;
-                this.fetchDialogs(true);
-            },
-            dialogRolePill(role) {
-                const key = (role || '').toLowerCase();
-                if (key === 'server') {
+                    this.fetchDialogs(true);
+                },
+                dialogRolePill(role) {
+                    const key = (role || '').toLowerCase();
+                    if (key === 'server') {
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    }
+                    if (key === 'client') {
+                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    }
                     return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                }
-                if (key === 'client') {
-                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                }
-                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-            },
-            dialogStatePill(state) {
-                const key = (state || '').toLowerCase();
-                if (key === 'confirmed') {
-                    return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                }
-                if (['early', 'trying', 'calling'].includes(key)) {
-                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                }
-                if (['waitack', 'updated', 'notify', 'info', 'options'].includes(key)) {
-                    return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                }
-                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-            },
-            async performLocatorLookup(options = {}) {
-                const preserveClearFeedback = Boolean(options?.preserveClearFeedback);
-                if (!this.hasLocatorInput) {
-                    this.locatorError = 'Provide a user or SIP URI to continue.';
-                    return false;
-                }
-                this.locatorError = null;
-                if (!preserveClearFeedback) {
-                    this.locatorClearFeedback = null;
-                }
-                this.locatorLoading = true;
-                try {
-                    const response = await fetch(this.buildUrl('/diagnostics/locator/lookup'), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        credentials: 'same-origin',
-                        body: JSON.stringify({
-                            user: this.locatorUser || null,
-                            uri: this.locatorUri || null,
-                        }),
-                    });
-                    const data = await response.json().catch(() => null);
-                    if (!response.ok) {
-                        const message = data?.message || `Lookup failed (${response.status})`;
-                        throw new Error(message);
+                },
+                dialogStatePill(state) {
+                    const key = (state || '').toLowerCase();
+                    if (key === 'confirmed') {
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
                     }
-                    this.locatorResult = data;
-                    return true;
-                } catch (err) {
-                    this.locatorError = err?.message || 'Lookup failed.';
+                    if (['early', 'trying', 'calling'].includes(key)) {
+                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    }
+                    if (['waitack', 'updated', 'notify', 'info', 'options'].includes(key)) {
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                    }
+                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                },
+                async performLocatorLookup(options = {}) {
+                    const preserveClearFeedback = Boolean(options?.preserveClearFeedback);
+                    if (!this.hasLocatorInput) {
+                        this.locatorError = 'Provide a user or SIP URI to continue.';
+                        return false;
+                    }
+                    this.locatorError = null;
+                    if (!preserveClearFeedback) {
+                        this.locatorClearFeedback = null;
+                    }
+                    this.locatorLoading = true;
+                    try {
+                        const response = await fetch(this.buildUrl('/diagnostics/locator/lookup'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({
+                                user: this.locatorUser || null,
+                                uri: this.locatorUri || null,
+                            }),
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `Lookup failed (${response.status})`;
+                            throw new Error(message);
+                        }
+                        this.locatorResult = data;
+                        return true;
+                    } catch (err) {
+                        this.locatorError = err?.message || 'Lookup failed.';
+                        this.locatorResult = null;
+                        return false;
+                    } finally {
+                        this.locatorLoading = false;
+                    }
+                },
+                async clearLocator() {
+                    if (!this.hasLocatorInput) {
+                        this.locatorError = 'Provide a user or SIP URI before clearing.';
+                        return;
+                    }
+                    this.locatorError = null;
+                    this.locatorClearing = true;
+                    try {
+                        const response = await fetch(this.buildUrl('/diagnostics/locator/clear'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({
+                                user: this.locatorUser || null,
+                                uri: this.locatorUri || null,
+                            }),
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `Clear failed (${response.status})`;
+                            throw new Error(message);
+                        }
+                        const removed = Boolean(data?.removed);
+                        const remaining = typeof data?.remaining === 'number' ? data.remaining : null;
+                        this.locatorClearFeedback = {
+                            message: removed
+                                ? remaining
+                                    ? `Cleared registration; ${remaining} binding(s) remain.`
+                                    : 'Cleared registration.'
+                                : 'No registration matched the request.',
+                            variant: removed ? 'success' : 'warning',
+                        };
+                        await this.performLocatorLookup({ preserveClearFeedback: true });
+                    } catch (err) {
+                        this.locatorError = err?.message || 'Clear failed.';
+                    } finally {
+                        this.locatorClearing = false;
+                    }
+                },
+                resetLocator() {
+                    this.locatorUser = '';
+                    this.locatorUri = '';
                     this.locatorResult = null;
-                    return false;
-                } finally {
-                    this.locatorLoading = false;
-                }
-            },
-            async clearLocator() {
-                if (!this.hasLocatorInput) {
-                    this.locatorError = 'Provide a user or SIP URI before clearing.';
-                    return;
-                }
-                this.locatorError = null;
-                this.locatorClearing = true;
-                try {
-                    const response = await fetch(this.buildUrl('/diagnostics/locator/clear'), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        credentials: 'same-origin',
-                        body: JSON.stringify({
-                            user: this.locatorUser || null,
-                            uri: this.locatorUri || null,
-                        }),
-                    });
-                    const data = await response.json().catch(() => null);
-                    if (!response.ok) {
-                        const message = data?.message || `Clear failed (${response.status})`;
-                        throw new Error(message);
+                    this.locatorError = null;
+                    this.locatorClearFeedback = null;
+                },
+                formatDateTime(value) {
+                    if (!value) {
+                        return '—';
                     }
-                    const removed = Boolean(data?.removed);
-                    const remaining = typeof data?.remaining === 'number' ? data.remaining : null;
-                    this.locatorClearFeedback = {
-                        message: removed
-                            ? remaining
-                                ? `Cleared registration; ${remaining} binding(s) remain.`
-                                : 'Cleared registration.'
-                            : 'No registration matched the request.',
-                        variant: removed ? 'success' : 'warning',
-                    };
-                    await this.performLocatorLookup({ preserveClearFeedback: true });
-                } catch (err) {
-                    this.locatorError = err?.message || 'Clear failed.';
-                } finally {
-                    this.locatorClearing = false;
-                }
-            },
-            resetLocator() {
-                this.locatorUser = '';
-                this.locatorUri = '';
-                this.locatorResult = null;
-                this.locatorError = null;
-                this.locatorClearFeedback = null;
-            },
-            historyPill(kind) {
-                const key = (kind || '').toLowerCase();
-                if (key === 'trunk') {
-                    return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                }
-                if (key === 'routing') {
-                    return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                }
-                if (key === 'call') {
-                    return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                }
-                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-            },
-            historyLabel(kind) {
-                switch ((kind || '').toLowerCase()) {
-                    case 'trunk':
-                        return 'Trunk';
-                    case 'routing':
-                        return 'Routing';
-                    case 'call':
-                        return 'Call';
-                    default:
-                        return 'Log';
-                }
-            },
-            formatDateTime(value) {
-                if (!value) {
-                    return '—';
-                }
-                try {
-                    const date = new Date(value);
-                    if (Number.isNaN(date.getTime())) {
+                    try {
+                        const date = new Date(value);
+                        if (Number.isNaN(date.getTime())) {
+                            return value;
+                        }
+                        return date.toLocaleString();
+                    } catch (err) {
                         return value;
                     }
-                    return date.toLocaleString();
-                } catch (err) {
-                    return value;
-                }
-            },
-            formatDuration(value) {
-                if (value === null || value === undefined) {
-                    return '—';
-                }
-                const seconds = Number(value);
-                if (!Number.isFinite(seconds)) {
-                    return '—';
-                }
-                if (seconds >= 3600) {
-                    const hours = Math.floor(seconds / 3600);
-                    const minutes = Math.floor((seconds % 3600) / 60);
-                    return `${hours}h ${minutes}m`;
-                }
-                if (seconds >= 60) {
-                    const minutes = Math.floor(seconds / 60);
-                    const secs = Math.floor(seconds % 60);
-                    return `${minutes}m ${secs}s`;
-                }
-                return `${Math.floor(seconds)}s`;
-            },
-            formatContactParams(params) {
-                if (!params || typeof params !== 'object') {
-                    return '—';
-                }
-                const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
-                return entries.length ? entries.join(', ') : '—';
-            },
-        }));
-    });
-</script>
-{% endblock %}
+                },
+                formatDuration(value) {
+                    if (value === null || value === undefined) {
+                        return '—';
+                    }
+                    const seconds = Number(value);
+                    if (!Number.isFinite(seconds)) {
+                        return '—';
+                    }
+                    if (seconds >= 3600) {
+                        const hours = Math.floor(seconds / 3600);
+                        const minutes = Math.floor((seconds % 3600) / 60);
+                        return `${hours}h ${minutes}m`;
+                    }
+                    if (seconds >= 60) {
+                        const minutes = Math.floor(seconds / 60);
+                        const secs = Math.floor(seconds % 60);
+                        return `${minutes}m ${secs}s`;
+                    }
+                    return `${Math.floor(seconds)}s`;
+                },
+                formatContactParams(params) {
+                    if (!params || typeof params !== 'object') {
+                        return '—';
+                    }
+                    const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
+                    return entries.length ? entries.join(', ') : '—';
+                },
+            }));
+        });
+    </script>
+    {% endblock %}

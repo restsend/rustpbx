@@ -2,11 +2,12 @@ use crate::call::{DialDirection, RoutingState};
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::match_invite;
 use crate::proxy::routing::{
-    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteRule, TrunkConfig,
+    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteDirection,
+    RouteRule, SourceTrunk, TrunkConfig, TrunkDirection,
 };
 use rsipstack::dialog::invitation::InviteOption;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{collections::HashMap, net::IpAddr};
 
 // Configuration parsing tests removed - focus on core routing functionality
 
@@ -25,6 +26,7 @@ async fn test_match_invite_no_routes() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -38,6 +40,147 @@ async fn test_match_invite_no_routes() {
 }
 
 #[tokio::test]
+async fn test_trunk_matches_inbound_ip_with_cidr() {
+    let trunk = TrunkConfig {
+        dest: "sip:10.0.0.1:5060".to_string(),
+
+        inbound_hosts: vec!["192.168.10.0/24".to_string()],
+        ..Default::default()
+    };
+
+    let inside: IpAddr = "192.168.10.42".parse().unwrap();
+    let outside: IpAddr = "192.168.20.1".parse().unwrap();
+
+    assert!(trunk.matches_inbound_ip(&inside).await);
+    assert!(!trunk.matches_inbound_ip(&outside).await);
+}
+
+#[tokio::test]
+async fn test_trunk_matches_inbound_ip_with_hostname() {
+    let trunk = TrunkConfig {
+        dest: "sip:localhost:5060".to_string(),
+        inbound_hosts: vec!["localhost".to_string()],
+        ..Default::default()
+    };
+
+    let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+    assert!(trunk.matches_inbound_ip(&loopback).await);
+}
+
+#[tokio::test]
+async fn test_match_invite_inbound_respects_source_trunk() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "ingress".to_string(),
+        TrunkConfig {
+            dest: "sip:ingress.gateway.local:5060".to_string(),
+            direction: Some(TrunkDirection::Inbound),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "inbound-route".to_string(),
+        priority: 10,
+        direction: RouteDirection::Inbound,
+        source_trunks: vec!["ingress".to_string()],
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("ingress".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+    let source_trunk = SourceTrunk {
+        name: "ingress".to_string(),
+        id: None,
+        direction: Some(TrunkDirection::Inbound),
+    };
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        Some(&source_trunk),
+        routing_state,
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("invite should resolve");
+
+    match result {
+        RouteResult::Forward(_) => {}
+        RouteResult::NotHandled(_) | RouteResult::Abort(_, _) => {
+            panic!("expected inbound invite to forward")
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_inbound_without_source_trunk() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "ingress".to_string(),
+        TrunkConfig {
+            dest: "sip:ingress.gateway.local:5060".to_string(),
+            direction: Some(TrunkDirection::Inbound),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "inbound-route".to_string(),
+        priority: 10,
+        direction: RouteDirection::Inbound,
+        source_trunks: vec!["ingress".to_string()],
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("ingress".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("invite should resolve");
+
+    match result {
+        RouteResult::NotHandled(_) => {}
+        RouteResult::Forward(_) | RouteResult::Abort(_, _) => {
+            panic!("expected invite to be left unhandled when source trunk is missing")
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_match_invite_exact_match() {
     let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
@@ -46,15 +189,10 @@ async fn test_match_invite_exact_match() {
         "test_trunk".to_string(),
         TrunkConfig {
             dest: "sip:gateway.example.com:5060".to_string(),
-            backup_dest: None,
             username: Some("testuser".to_string()),
             password: Some("testpass".to_string()),
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
             transport: Some("udp".to_string()),
+            ..Default::default()
         },
     );
 
@@ -75,6 +213,7 @@ async fn test_match_invite_exact_match() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option = create_test_invite_option();
@@ -86,6 +225,7 @@ async fn test_match_invite_exact_match() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -119,15 +259,7 @@ async fn test_match_invite_regex_match() {
         "mobile_trunk".to_string(),
         TrunkConfig {
             dest: "sip:mobile.gateway.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -148,6 +280,7 @@ async fn test_match_invite_regex_match() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option = create_invite_option(
@@ -166,6 +299,7 @@ async fn test_match_invite_regex_match() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -207,6 +341,7 @@ async fn test_match_invite_reject_rule() {
             }),
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option = create_invite_option(
@@ -224,6 +359,7 @@ async fn test_match_invite_reject_rule() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -249,15 +385,7 @@ async fn test_match_invite_rewrite_rules() {
         "trunk1".to_string(),
         TrunkConfig {
             dest: "sip:gateway.example.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -281,6 +409,7 @@ async fn test_match_invite_rewrite_rules() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let mut option = create_test_invite_option();
@@ -293,6 +422,7 @@ async fn test_match_invite_rewrite_rules() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -319,15 +449,7 @@ async fn test_match_invite_load_balancing() {
         "trunk1".to_string(),
         TrunkConfig {
             dest: "sip:gateway1.example.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -335,15 +457,7 @@ async fn test_match_invite_load_balancing() {
         "trunk2".to_string(),
         TrunkConfig {
             dest: "sip:gateway2.example.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -351,15 +465,7 @@ async fn test_match_invite_load_balancing() {
         "trunk3".to_string(),
         TrunkConfig {
             dest: "sip:gateway3.example.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -384,6 +490,7 @@ async fn test_match_invite_load_balancing() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let _option = create_test_invite_option();
@@ -399,6 +506,7 @@ async fn test_match_invite_load_balancing() {
             None,
             test_option,
             &origin,
+            None,
             routing_state.clone(),
             &DialDirection::Outbound,
         )
@@ -430,15 +538,7 @@ async fn test_match_invite_header_matching() {
         "vip_trunk".to_string(),
         TrunkConfig {
             dest: "sip:vip.gateway.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -463,6 +563,7 @@ async fn test_match_invite_header_matching() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option = create_test_invite_option();
@@ -485,6 +586,7 @@ async fn test_match_invite_header_matching() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -509,15 +611,7 @@ async fn test_match_invite_default_route() {
         "default".to_string(),
         TrunkConfig {
             dest: "sip:default.gateway.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -538,6 +632,7 @@ async fn test_match_invite_default_route() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option = create_test_invite_option();
@@ -549,6 +644,7 @@ async fn test_match_invite_default_route() {
         None,
         option,
         &origin,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )
@@ -577,15 +673,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         "test_trunk".to_string(),
         TrunkConfig {
             dest: "sip:gateway.example.com:5060".to_string(),
-            backup_dest: None,
-            username: None,
-            password: None,
-            codec: vec![],
-            disabled: Some(false),
-            max_calls: None,
-            max_cps: None,
-            weight: Some(100),
-            transport: None,
+            ..Default::default()
         },
     );
 
@@ -610,6 +698,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option_us = create_invite_option(
@@ -627,6 +716,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         None,
         option_us,
         &origin_us,
+        None,
         routing_state.clone(),
         &DialDirection::Outbound,
     )
@@ -663,6 +753,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
             reject: None,
         },
         disabled: None,
+        ..Default::default()
     }];
 
     let option_digits = create_invite_option(
@@ -680,6 +771,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         None,
         option_digits,
         &origin_digits,
+        None,
         routing_state,
         &DialDirection::Outbound,
     )

@@ -1,6 +1,6 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::TransactionCookie;
-use crate::config::ProxyConfig;
+use crate::{config::ProxyConfig, proxy::routing::TrunkConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use rsip::prelude::{HeadersExt, UntypedHeader};
@@ -103,9 +103,10 @@ impl AclRule {
 
 struct AclModuleInner {
     config: Arc<ProxyConfig>,
-    rules: Vec<AclRule>,
+    server: Option<SipServerRef>,
     ua_white_list: HashSet<String>,
     ua_black_list: HashSet<String>,
+    fallback_rules: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -114,16 +115,13 @@ pub struct AclModule {
 }
 
 impl AclModule {
-    pub fn create(_server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = AclModule::new(config);
+    pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = AclModule::with_server(config, Some(server));
         Ok(Box::new(module))
     }
 
-    pub fn new(config: Arc<ProxyConfig>) -> Self {
-        let rules = config.acl_rules.as_ref().map_or_else(
-            || vec!["allow all".to_string(), "deny all".to_string()],
-            |rules| rules.clone(),
-        );
+    fn with_server(config: Arc<ProxyConfig>, server: Option<SipServerRef>) -> Self {
+        let fallback_rules = resolve_base_rules(&config);
 
         let ua_white_list = config
             .ua_white_list
@@ -135,32 +133,45 @@ impl AclModule {
             .as_ref()
             .map_or_else(HashSet::new, |list| list.iter().cloned().collect());
 
-        let acl_rules = rules.iter().filter_map(|rule| AclRule::new(rule)).collect();
         Self {
             inner: Arc::new(AclModuleInner {
                 config,
-                rules: acl_rules,
+                server,
                 ua_white_list,
                 ua_black_list,
+                fallback_rules,
             }),
         }
     }
 
-    pub fn is_from_trunk(&self, addr: &IpAddr) -> Option<&String> {
-        for (name, trunk) in &self.inner.config.trunks {
-            let dest_addr: rsip::Uri = match trunk.dest.as_str().try_into() {
-                Ok(uri) => uri,
-                Err(_) => continue,
-            };
-            if dest_addr.host_with_port.host.try_into().ok() == Some(*addr) {
+    pub fn new(config: Arc<ProxyConfig>) -> Self {
+        Self::with_server(config, None)
+    }
+
+    pub async fn is_from_trunk(&self, addr: &IpAddr) -> Option<String> {
+        if let Some(server) = &self.inner.server {
+            return server.data_context.find_trunk_by_ip(addr).await;
+        }
+
+        let trunks: Vec<(String, TrunkConfig)> = self
+            .inner
+            .config
+            .trunks
+            .iter()
+            .map(|(name, trunk)| (name.clone(), trunk.clone()))
+            .collect();
+
+        for (name, trunk) in trunks {
+            if trunk.matches_inbound_ip(addr).await {
                 return Some(name);
             }
         }
         None
     }
 
-    pub fn is_allowed(&self, addr: &IpAddr) -> bool {
-        for rule in &self.inner.rules {
+    pub(crate) async fn is_ip_allowed(&self, addr: &IpAddr) -> bool {
+        let rules = self.load_rules().await;
+        for rule in rules {
             match &rule.network {
                 Some(network) => {
                     if network.contains(addr) {
@@ -251,7 +262,8 @@ impl ProxyModule for AclModule {
     }
 
     async fn on_start(&mut self) -> Result<()> {
-        debug!("ACL module started with {} rules", self.inner.rules.len());
+        let rules = self.load_rules().await;
+        debug!("ACL module started with {} rules", rules.len());
         Ok(())
     }
 
@@ -297,17 +309,17 @@ impl ProxyModule for AclModule {
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let from_addr = target.host.try_into()?;
-        if let Some(trunk_name) = self.is_from_trunk(&from_addr) {
+        if let Some(trunk_name) = self.is_from_trunk(&from_addr).await {
             debug!(
                 method = tx.original.method().to_string(),
                 via = via.value(),
                 "IP is from trunk, bypassing acl check"
             );
-            cookie.set_source_trunk(trunk_name);
+            cookie.set_source_trunk(&trunk_name);
             return Ok(ProxyAction::Continue);
         }
 
-        if self.is_allowed(&from_addr) {
+        if self.is_ip_allowed(&from_addr).await {
             return Ok(ProxyAction::Continue);
         }
         info!(
@@ -318,6 +330,27 @@ impl ProxyModule for AclModule {
         cookie.mark_as_spam(crate::call::cookie::SpamResult::IpBlacklist);
         Ok(ProxyAction::Abort)
     }
+}
+
+impl AclModule {
+    async fn load_rules(&self) -> Vec<AclRule> {
+        if let Some(server) = &self.inner.server {
+            let snapshot = server.data_context.acl_rules_snapshot().await;
+            return parse_rules(snapshot);
+        }
+        parse_rules(self.inner.fallback_rules.clone())
+    }
+}
+
+fn resolve_base_rules(config: &ProxyConfig) -> Vec<String> {
+    config
+        .acl_rules
+        .clone()
+        .unwrap_or_else(|| vec!["allow all".to_string(), "deny all".to_string()])
+}
+
+fn parse_rules(rules: Vec<String>) -> Vec<AclRule> {
+    rules.iter().filter_map(|rule| AclRule::new(rule)).collect()
 }
 
 #[cfg(test)]
@@ -355,8 +388,8 @@ mod tests {
         assert_eq!(prefix, 128);
     }
 
-    #[test]
-    fn test_acl_rules() {
+    #[tokio::test]
+    async fn test_acl_rules() {
         let config = create_test_config(vec![
             "deny 192.168.1.100".to_string(),
             "allow 192.168.1.0/24".to_string(),
@@ -367,16 +400,16 @@ mod tests {
         let acl = AclModule::new(config);
 
         // Test allowed IPs
-        assert!(acl.is_allowed(&"192.168.1.1".parse().unwrap()));
-        assert!(acl.is_allowed(&"10.2.3.4".parse().unwrap()));
+        assert!(acl.is_ip_allowed(&"192.168.1.1".parse().unwrap()).await);
+        assert!(acl.is_ip_allowed(&"10.2.3.4".parse().unwrap()).await);
 
         // Test denied IPs
-        assert!(!acl.is_allowed(&"192.168.1.100".parse().unwrap())); // Explicitly denied
-        assert!(!acl.is_allowed(&"172.16.1.1".parse().unwrap())); // Denied by default
+        assert!(!acl.is_ip_allowed(&"192.168.1.100".parse().unwrap()).await); // Explicitly denied
+        assert!(!acl.is_ip_allowed(&"172.16.1.1".parse().unwrap()).await); // Denied by default
     }
 
-    #[test]
-    fn test_default_rules() {
+    #[tokio::test]
+    async fn test_default_rules() {
         // Test with None (no ACL rules configured)
         let config = Arc::new(ProxyConfig {
             acl_rules: None,
@@ -386,7 +419,7 @@ mod tests {
 
         // Test with default rules (allow all, deny all)
         // The first rule "allow all" matches all IPs, so they should be allowed
-        assert!(acl.is_allowed(&"192.168.1.1".parse().unwrap()));
-        assert!(acl.is_allowed(&"10.0.0.1".parse().unwrap()));
+        assert!(acl.is_ip_allowed(&"192.168.1.1".parse().unwrap()).await);
+        assert!(acl.is_ip_allowed(&"10.0.0.1".parse().unwrap()).await);
     }
 }

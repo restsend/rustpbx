@@ -19,6 +19,7 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/shutdown", post(shutdown_handler))
         .route("/reload/trunks", post(reload_trunks_handler))
         .route("/reload/routes", post(reload_routes_handler))
+        .route("/reload/acl", post(reload_acl_handler))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -157,10 +158,14 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
     };
 
     match sip_server.inner.data_context.reload_trunks().await {
-        Ok(trunks) => Json(serde_json::json!({
-            "status": "ok",
-            "trunks_reloaded": trunks,
-        }))
+        Ok(metrics) => {
+            let total = metrics.total;
+            Json(serde_json::json!({
+                "status": "ok",
+                "trunks_reloaded": total,
+                "metrics": metrics,
+            }))
+        }
         .into_response(),
         Err(error) => {
             warn!(%client_ip, error = %error, "Trunk reload failed");
@@ -192,13 +197,56 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
     };
 
     match sip_server.inner.data_context.reload_routes().await {
-        Ok(routes) => Json(serde_json::json!({
-            "status": "ok",
-            "routes_reloaded": routes,
-        }))
+        Ok(metrics) => {
+            let total = metrics.total;
+            Json(serde_json::json!({
+                "status": "ok",
+                "routes_reloaded": total,
+                "metrics": metrics,
+            }))
+        }
         .into_response(),
         Err(error) => {
             warn!(%client_ip, error = %error, "Route reload failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
+    info!(%client_ip, "Reload ACL rules via /reload/acl endpoint");
+
+    let Some(sip_server) = state.sip_server.as_ref() else {
+        warn!(%client_ip, "ACL reload ignored: SIP server not running");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "sip_server_not_running",
+            })),
+        )
+            .into_response();
+    };
+
+    match sip_server.inner.data_context.reload_acl_rules().await {
+        Ok(metrics) => {
+            let total = metrics.total;
+            Json(serde_json::json!({
+                "status": "ok",
+                "acl_rules_reloaded": total,
+                "metrics": metrics,
+            }))
+        }
+        .into_response(),
+        Err(error) => {
+            warn!(%client_ip, error = %error, "ACL reload failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({

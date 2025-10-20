@@ -19,6 +19,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 // A mock synthesis client that supports both streaming and non-streaming modes
 struct MockSynthesisClient {
@@ -159,7 +160,7 @@ async fn test_tts_track_basic_non_streaming() -> Result<()> {
     let frame = packet_rx.recv().await.unwrap();
     // Verify the frame properties
     assert_eq!(frame.track_id, track_id, "Track ID mismatch");
-    tracing::debug!("frame: {:?}", frame);
+    debug!("frame: {:?}", frame);
     // Check that we have PCM samples
     if let Samples::PCM { samples } = &frame.samples {
         assert!(samples.len() > 100, "Too few samples in the frame");

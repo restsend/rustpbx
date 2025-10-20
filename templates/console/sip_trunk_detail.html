@@ -285,16 +285,16 @@ default('RustPBX') }}{% endblock %}
                     <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Allowed IPs (JSON array)
+                            Allowed IPs (one per line)
                             <textarea rows="6" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder='[{"label": "POP", "cidr": "203.0.113.10/32"}]'></textarea>
+                                placeholder="203.0.113.10/32&#10;198.51.100.5/32"></textarea>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            DID numbers (JSON array)
+                            DID numbers (one per line)
                             <textarea rows="6" x-model="form.did_numbers"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder='[{"number": "+85258001234", "label": "Sales"}]'></textarea>
+                                placeholder="+85258001234&#10;+85258004567"></textarea>
                         </label>
                     </div>
                 </section>
@@ -451,8 +451,8 @@ default('RustPBX') }}{% endblock %}
                 this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
                 this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
                 this.form.max_call_duration = model.max_call_duration != null ? String(model.max_call_duration) : '';
-                this.form.allowed_ips = this.formatJson(model.allowed_ips);
-                this.form.did_numbers = this.formatJson(model.did_numbers);
+                this.form.allowed_ips = this.formatMultilineList(model.allowed_ips, ['cidr', 'ip', 'host', 'value']);
+                this.form.did_numbers = this.formatMultilineList(model.did_numbers, ['number', 'did', 'value']);
                 this.form.billing_snapshot = this.formatJson(model.billing_snapshot);
                 this.form.analytics = this.formatJson(model.analytics);
                 this.form.tags = this.formatJson(model.tags);
@@ -508,6 +508,65 @@ default('RustPBX') }}{% endblock %}
                 const date = new Date(value);
                 if (Number.isNaN(date.getTime())) return value;
                 return date.toLocaleString();
+            },
+            formatMultilineList(value, preferredKeys = []) {
+                const keys = Array.isArray(preferredKeys) ? preferredKeys : [];
+                const extractFromObject = (obj) => {
+                    if (!obj || typeof obj !== 'object') {
+                        return '';
+                    }
+                    for (const key of keys) {
+                        const candidate = obj[key];
+                        if (typeof candidate === 'string' && candidate.trim()) {
+                            return candidate.trim();
+                        }
+                    }
+                    for (const value of Object.values(obj)) {
+                        if (typeof value === 'string' && value.trim()) {
+                            return value.trim();
+                        }
+                    }
+                    return '';
+                };
+                const collect = (input) => {
+                    if (input === null || input === undefined) {
+                        return [];
+                    }
+                    if (Array.isArray(input)) {
+                        const results = [];
+                        input.forEach((item) => {
+                            collect(item).forEach((entry) => {
+                                if (entry) {
+                                    results.push(entry);
+                                }
+                            });
+                        });
+                        return results;
+                    }
+                    if (typeof input === 'string') {
+                        const trimmed = input.trim();
+                        if (!trimmed) {
+                            return [];
+                        }
+                        try {
+                            const parsed = JSON.parse(trimmed);
+                            return collect(parsed);
+                        } catch (err) {
+                            return trimmed
+                                .split(/\r?\n/)
+                                .map((line) => line.trim())
+                                .filter((line) => line.length > 0);
+                        }
+                    }
+                    if (typeof input === 'object') {
+                        const extracted = extractFromObject(input);
+                        return extracted ? [extracted] : [];
+                    }
+                    const asString = String(input).trim();
+                    return asString ? [asString] : [];
+                };
+                const entries = collect(value);
+                return entries.join('\n');
             },
             formatJson(value) {
                 if (!value || (typeof value === 'string' && !value.trim())) {

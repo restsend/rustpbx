@@ -1,7 +1,7 @@
 use crate::{
     call::ActiveCallRef,
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
-    config::{Config, ProxyDataSource, UserBackendConfig},
+    config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     media::engine::StreamEngine,
     proxy::{
@@ -46,6 +46,8 @@ pub struct AppStateInner {
     pub total_calls: AtomicU64,
     pub total_failed_calls: AtomicU64,
     pub uptime: DateTime<Utc>,
+    pub config_loaded_at: DateTime<Utc>,
+    pub config_path: Option<String>,
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
 }
@@ -60,6 +62,8 @@ pub struct AppStateBuilder {
     pub cancel_token: Option<CancellationToken>,
     pub proxy_builder: Option<SipServerBuilder>,
     pub create_invitation_handler: Option<FnCreateInvitationHandler>,
+    pub config_loaded_at: Option<DateTime<Utc>>,
+    pub config_path: Option<String>,
 }
 
 impl AppStateInner {
@@ -122,11 +126,16 @@ impl AppStateBuilder {
             cancel_token: None,
             proxy_builder: None,
             create_invitation_handler: None,
+            config_loaded_at: None,
+            config_path: None,
         }
     }
 
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = Some(config);
+        if self.config_loaded_at.is_none() {
+            self.config_loaded_at = Some(Utc::now());
+        }
         self
     }
 
@@ -155,12 +164,21 @@ impl AppStateBuilder {
         self
     }
 
+    pub fn with_config_metadata(mut self, path: Option<String>, loaded_at: DateTime<Utc>) -> Self {
+        self.config_path = path;
+        self.config_loaded_at = Some(loaded_at);
+        self
+    }
+
     pub async fn build(mut self) -> Result<AppState> {
         let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
         let token = self
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
+        let config_loaded_at = self.config_loaded_at.unwrap_or_else(|| Utc::now());
+        let config_path = self.config_path.clone();
         let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
+        let db_conn = crate::models::create_db(&config.database_url).await?;
 
         let useragent = if let Some(ua) = self.useragent {
             Some(ua)
@@ -197,19 +215,9 @@ impl AppStateBuilder {
 
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
-            Some(console_config) => {
-                let db = match crate::models::create_db(&config.database_url).await {
-                    Ok(db) => db,
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to initialize database {}: {}",
-                            config.database_url,
-                            e
-                        ));
-                    }
-                };
-                Some(crate::console::ConsoleState::initialize(db.clone(), console_config).await?)
-            }
+            Some(console_config) => Some(
+                crate::console::ConsoleState::initialize(db_conn.clone(), console_config).await?,
+            ),
             None => None,
         };
 
@@ -217,28 +225,23 @@ impl AppStateBuilder {
             Some(builder) => builder.build().await.ok(),
             None => {
                 if let Some(mut proxy_config) = config.proxy.clone() {
-                    if let UserBackendConfig::Extension { database_url } =
-                        &mut proxy_config.user_backend
-                    {
-                        if database_url.is_none() {
-                            *database_url = Some(config.database_url.clone());
+                    for backend in proxy_config.user_backends.iter_mut() {
+                        if let UserBackendConfig::Extension { database_url } = backend {
+                            if database_url.is_none() {
+                                *database_url = Some(config.database_url.clone());
+                            }
                         }
                     }
                     let proxy_config = Arc::new(proxy_config);
-                    let mut builder = SipServerBuilder::new(proxy_config.clone())
+                    let builder = SipServerBuilder::new(proxy_config.clone())
                         .with_cancel_token(token.child_token())
                         .with_callrecord_sender(callrecord_sender.clone())
                         .with_rtp_config(config.rtp_config())
+                        .with_database_connection(db_conn.clone())
                         .register_module("acl", AclModule::create)
                         .register_module("auth", AuthModule::create)
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
-                    let needs_proxy_db = proxy_config.trunks_source == ProxyDataSource::Database
-                        || proxy_config.routes_source == ProxyDataSource::Database;
-                    if needs_proxy_db {
-                        let db = crate::models::create_db(&config.database_url).await?;
-                        builder = builder.with_database_connection(db);
-                    }
                     match builder.build().await {
                         Ok(server) => Some(server),
                         Err(err) => {
@@ -253,13 +256,7 @@ impl AppStateBuilder {
         };
 
         #[cfg(feature = "console")]
-        {
-            if let Some(console_state) = &console_state {
-                if let Some(sip_server) = &sip_server {
-                    console_state.set_sip_server(Some(sip_server.get_inner()));
-                }
-            }
-        }
+        let console_state_clone = console_state.clone();
 
         let app_state = Arc::new(AppStateInner {
             config,
@@ -272,9 +269,21 @@ impl AppStateBuilder {
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),
             uptime: chrono::Utc::now(),
+            config_loaded_at,
+            config_path,
             #[cfg(feature = "console")]
             console: console_state,
         });
+
+        #[cfg(feature = "console")]
+        {
+            if let Some(console_state) = console_state_clone {
+                if let Some(ref sip_server) = app_state.sip_server {
+                    console_state.set_sip_server(Some(sip_server.get_inner()));
+                }
+                console_state.set_app_state(Some(Arc::downgrade(&app_state)));
+            }
+        }
 
         Ok(app_state)
     }

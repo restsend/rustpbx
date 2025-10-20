@@ -1,6 +1,9 @@
 use crate::{
     call::{DialStrategy, Dialplan, FailureAction, Location, TransactionCookie},
-    callrecord::{CallRecord, CallRecordHangupReason, CallRecordSender},
+    callrecord::{
+        CallRecord, CallRecordHangupReason, CallRecordPersistArgs, CallRecordSender,
+        extract_sip_username, persist_call_record,
+    },
     config::{MediaProxyMode, RouteResult},
     event::{EventReceiver, EventSender, create_event_sender},
     media::{
@@ -24,8 +27,9 @@ use rsipstack::{
     rsip_ext::RsipResponseExt,
     transaction::transaction::Transaction,
 };
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     str::FromStr,
     sync::Arc,
@@ -1304,64 +1308,164 @@ impl ProxyCall {
     }
 
     async fn record_call(&self, session: &CallSession) {
-        if let Some(ref sender) = self.call_record_sender {
-            let now = Utc::now();
-            let start_time = now - chrono::Duration::from_std(self.elapsed()).unwrap_or_default();
+        let now = Utc::now();
+        let start_time = now - chrono::Duration::from_std(self.elapsed()).unwrap_or_default();
 
-            let ring_time = session.ring_time.map(|rt| {
-                start_time
-                    + chrono::Duration::from_std(rt.duration_since(self.start_time))
-                        .unwrap_or_default()
-            });
+        let ring_time = session.ring_time.map(|rt| {
+            start_time
+                + chrono::Duration::from_std(rt.duration_since(self.start_time)).unwrap_or_default()
+        });
 
-            let answer_time = session.answer_time.map(|at| {
-                start_time
-                    + chrono::Duration::from_std(at.duration_since(self.start_time))
-                        .unwrap_or_default()
-            });
+        let answer_time = session.answer_time.map(|at| {
+            start_time
+                + chrono::Duration::from_std(at.duration_since(self.start_time)).unwrap_or_default()
+        });
 
-            let record = CallRecord {
-                call_type: crate::call::ActiveCallType::Sip,
-                option: None,
-                call_id: self.session_id.clone(),
-                start_time,
-                ring_time,
-                answer_time,
-                end_time: now,
-                caller: self
-                    .dialplan
-                    .caller
-                    .as_ref()
-                    .map(|c| c.to_string())
-                    .unwrap_or_default(),
-                callee: session
-                    .connected_callee
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                status_code: session
-                    .last_error
-                    .as_ref()
-                    .map(|(code, _)| u16::from(code.clone()))
-                    .unwrap_or(200),
-                offer: session.caller_offer.clone(),
-                answer: session.answer.clone(),
-                hangup_reason: session.hangup_reason.clone().or_else(|| {
-                    if session.last_error.is_some() {
-                        Some(CallRecordHangupReason::Failed)
-                    } else if session.answer_time.is_some() {
-                        Some(CallRecordHangupReason::BySystem)
-                    } else {
-                        Some(CallRecordHangupReason::Failed)
-                    }
-                }),
-                recorder: Vec::new(),
-                extras: None,
-                dump_event_file: None,
-                refer_callrecord: None,
+        let status_code = session
+            .last_error
+            .as_ref()
+            .map(|(code, _)| u16::from(code.clone()))
+            .unwrap_or(200);
+
+        let hangup_reason = session.hangup_reason.clone().or_else(|| {
+            if session.last_error.is_some() {
+                Some(CallRecordHangupReason::Failed)
+            } else if session.answer_time.is_some() {
+                Some(CallRecordHangupReason::BySystem)
+            } else {
+                Some(CallRecordHangupReason::Failed)
+            }
+        });
+
+        let caller = self
+            .dialplan
+            .caller
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let callee = session
+            .connected_callee
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut extras_map: HashMap<String, Value> = HashMap::new();
+        extras_map.insert(
+            "status_code".to_string(),
+            Value::Number(JsonNumber::from(status_code)),
+        );
+        if let Some(reason) = hangup_reason.as_ref() {
+            extras_map.insert(
+                "hangup_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
+        }
+        if let Some((code, reason)) = session.last_error.as_ref() {
+            extras_map.insert(
+                "last_error_code".to_string(),
+                Value::Number(JsonNumber::from(u16::from(code.clone()))),
+            );
+            if let Some(reason) = reason {
+                extras_map.insert(
+                    "last_error_reason".to_string(),
+                    Value::String(reason.clone()),
+                );
+            }
+        }
+
+        let extras = if extras_map.is_empty() {
+            None
+        } else {
+            Some(extras_map.clone())
+        };
+
+        let record = CallRecord {
+            call_type: crate::call::ActiveCallType::Sip,
+            option: None,
+            call_id: self.session_id.clone(),
+            start_time,
+            ring_time,
+            answer_time,
+            end_time: now,
+            caller: caller.clone(),
+            callee: callee.clone(),
+            status_code,
+            offer: session.caller_offer.clone(),
+            answer: session.answer.clone(),
+            hangup_reason: hangup_reason.clone(),
+            recorder: Vec::new(),
+            extras,
+            dump_event_file: None,
+            refer_callrecord: None,
+        };
+
+        if let Some(db) = self.server.database.as_ref() {
+            let direction = match self.dialplan.direction {
+                crate::call::DialDirection::Inbound => "inbound".to_string(),
+                crate::call::DialDirection::Outbound => "outbound".to_string(),
+                crate::call::DialDirection::Internal => "internal".to_string(),
+            };
+            let status = resolve_call_status(session);
+            let from_number = extract_sip_username(&caller);
+            let to_number = extract_sip_username(&callee);
+
+            let trunk_name = self.cookie.get_source_trunk();
+            let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
+                let trunks = self.server.data_context.trunks_snapshot().await;
+                let trunk_id = trunks.get(name).and_then(|config| config.id);
+                (Some(name.clone()), trunk_id)
+            } else {
+                (None, None)
             };
 
-            if let Err(e) = sender.send(record) {
+            let metadata_value = if extras_map.is_empty() {
+                None
+            } else {
+                let mut map = JsonMap::new();
+                for (key, value) in extras_map.iter() {
+                    map.insert(key.clone(), value.clone());
+                }
+                Some(Value::Object(map))
+            };
+
+            let persist_args = CallRecordPersistArgs {
+                direction,
+                status,
+                from_number,
+                to_number,
+                caller_name: None,
+                agent_name: None,
+                queue: None,
+                department_id: None,
+                extension_id: None,
+                sip_trunk_id,
+                route_id: None,
+                sip_gateway,
+                recording_url: None,
+                recording_duration_secs: None,
+                has_transcript: false,
+                transcript_status: "pending".to_string(),
+                transcript_language: None,
+                tags: None,
+                quality_mos: None,
+                quality_latency_ms: None,
+                quality_jitter_ms: None,
+                quality_packet_loss_percent: None,
+                analytics: None,
+                metadata: metadata_value,
+            };
+
+            if let Err(err) = persist_call_record(db, &record, persist_args).await {
+                warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    "Failed to persist call record"
+                );
+            }
+        }
+
+        if let Some(ref sender) = self.call_record_sender {
+            if let Err(e) = sender.send(record.clone()) {
                 warn!(session_id = %self.session_id, error = %e, "Failed to send call record");
             }
         }
@@ -1371,5 +1475,18 @@ impl ProxyCall {
 impl Drop for ProxyCall {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+    }
+}
+
+fn resolve_call_status(session: &CallSession) -> String {
+    if session.answer_time.is_some() {
+        return "completed".to_string();
+    }
+
+    match session.hangup_reason.as_ref() {
+        Some(CallRecordHangupReason::NoAnswer)
+        | Some(CallRecordHangupReason::Autohangup)
+        | Some(CallRecordHangupReason::Canceled) => "missed".to_string(),
+        _ => "failed".to_string(),
     }
 }

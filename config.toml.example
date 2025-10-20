@@ -26,6 +26,10 @@ udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
 media_proxy = "auto"
+trunks_source = "config" # or "database"
+routes_source = "config" # or "database"
+# routes_files = ["config/routes/*.toml"]
+# trunks_files = ["config/trunks/*.toml"]
 
 # ACL rules
 acl_rules = [
@@ -34,19 +38,49 @@ acl_rules = [
     "allow all",
     "deny all"
 ]
+# acl_files = ["config/acl/*.toml"]
 
 [ua.handler]
 type = "webhook"
 url = "http://localhost:8090/webhook"
 method = "POST"
 
-
-[proxy.user_backend]
+[[proxy.user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
+
+[[proxy.user_backends]]
+type = "extension"
+database_url = "sqlite://rustpbx.sqlite3"
+
+# To use in-memory credentials instead of database-backed extensions, replace the entry above:
+# [[proxy.user_backends]]
+# type = "memory"
+# users = [
+#     { username = "bob", password = "123456" },
+#     { username = "alice", password = "123456" },
+# ]
+
+# Configure multiple backends and they will be queried in order of appearance:
+# [[proxy.user_backends]]
+# type = "extension"
+# database_url = "sqlite://rustpbx.sqlite3"
+#
+# [[proxy.user_backends]]
+# type = "memory"
+# users = [{ username = "carol", password = "123456" }]
+
+# Example trunks/routes override when using database source
+# [proxy.trunks]
+# example_trunk.dest = "sip:127.0.0.1:5060"
+#
+# [[proxy.routes]]
+# name = "sample"
+# priority = 10
+#
 
 [callrecord]
 type = "local"
