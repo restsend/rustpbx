@@ -1,6 +1,16 @@
 use crate::{
-    call::Location,
-    console::{ConsoleState, handlers::bad_request, middleware::AuthRequired},
+    call::{DialDirection, Location, RoutingState},
+    config::RouteResult,
+    console::{
+        ConsoleState,
+        handlers::{bad_request, normalize_optional_string},
+        middleware::AuthRequired,
+    },
+    models::sip_trunk,
+    proxy::routing::{
+        self, SourceTrunk, TrunkDirection, build_source_trunk,
+        matcher::{RouteTrace, match_invite_with_trace},
+    },
 };
 use axum::{
     Router,
@@ -10,20 +20,32 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use rsip::Uri;
+use rand::random;
+use rsip::{Header as SipHeader, Method, Uri, Version};
 use rsipstack::dialog::{
     client_dialog::ClientInviteDialog,
     dialog::{Dialog, DialogState},
+    invitation::InviteOption,
     server_dialog::ServerInviteDialog,
 };
+use rsipstack::transport::SipAddr;
+use sea_orm::EntityTrait;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::{borrow::Cow, sync::Arc};
+use serde_json::{Value as JsonValue, json};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
+use tokio::net::lookup_host;
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/diagnostics", get(page_diagnostics))
         .route("/diagnostics/dialogs", get(list_dialogs))
+        .route("/diagnostics/trunks/test", post(test_trunk))
+        .route("/diagnostics/routes/evaluate", post(route_evaluate))
         .route("/diagnostics/locator/lookup", post(locator_lookup))
         .route("/diagnostics/locator/clear", post(locator_clear))
 }
@@ -32,125 +54,177 @@ pub async fn page_diagnostics(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
+    let bootstrap = diagnostics_bootstrap(&state).await;
+
     state.render(
         "console/diagnostics.html",
         json!({
             "nav_active": "diagnostics",
-            "test_data": {
-                "last_audit": "2025-10-10T02:40:00Z",
-                "trunks": [
-                    {
-                        "id": "macrovox-primary",
-                        "label": "Macrovox Primary",
-                        "status": "healthy",
-                        "latency_ms": 32,
-                        "packet_loss_percent": 0.2,
-                        "concurrency": { "current": 42, "limit": 80 },
-                        "last_test_at": "2025-10-09T23:55:00Z",
-                        "ingress_ips": ["203.0.113.14", "203.0.113.15"],
-                        "egress": "sip:macrovox.sip.rustpbx.net",
-                        "direction": ["outbound", "inbound"],
-                        "notes": "Primary carrier with elastic CPS"
-                    },
-                    {
-                        "id": "bluewave-backup",
-                        "label": "BlueWave Backup",
-                        "status": "warning",
-                        "latency_ms": 58,
-                        "packet_loss_percent": 1.4,
-                        "concurrency": { "current": 12, "limit": 60 },
-                        "last_test_at": "2025-10-10T00:12:00Z",
-                        "ingress_ips": ["198.51.100.22"],
-                        "egress": "sip:backup.bluewave.net",
-                        "direction": ["outbound"],
-                        "notes": "Burstable trunk used during peak hours"
-                    },
-                    {
-                        "id": "internal-webrtc",
-                        "label": "Internal WebRTC",
-                        "status": "lab",
-                        "latency_ms": 12,
-                        "packet_loss_percent": 0.0,
-                        "concurrency": { "current": 18, "limit": 120 },
-                        "last_test_at": "2025-10-08T17:34:00Z",
-                        "ingress_ips": ["10.10.10.0/24"],
-                        "egress": "webrtc:internal.cluster.local",
-                        "direction": ["internal"],
-                        "notes": "Lab trunk for browser endpoints"
-                    }
-                ],
-                "routing_checks": [
-                    {
-                        "id": "check-001",
-                        "input": "+14155550123",
-                        "direction": "outbound",
-                        "matched_route": "US-Long-Distance",
-                        "selected_trunk": "macrovox-primary",
-                        "rewrites": ["strip_prefix:+1"],
-                        "result": "ok",
-                        "latency_ms": 35
-                    },
-                    {
-                        "id": "check-002",
-                        "input": "4008",
-                        "direction": "internal",
-                        "matched_route": "Support-IVR",
-                        "selected_trunk": "internal-webrtc",
-                        "rewrites": ["append_context:support"],
-                        "result": "ok",
-                        "latency_ms": 8
-                    },
-                    {
-                        "id": "check-003",
-                        "input": "+442079460000",
-                        "direction": "outbound",
-                        "matched_route": "EMEA-Offnet",
-                        "selected_trunk": "bluewave-backup",
-                        "rewrites": ["prefix:0044"],
-                        "result": "warning",
-                        "latency_ms": 72
-                    }
-                ],
-                "recent_tests": [
-                    {
-                        "timestamp": "2025-10-10T02:10:00Z",
-                        "type": "trunk",
-                        "subject": "macrovox-primary",
-                        "status": "pass",
-                        "details": "OPTIONS ping ok · 34 ms round-trip"
-                    },
-                    {
-                        "timestamp": "2025-10-09T23:50:00Z",
-                        "type": "routing",
-                        "subject": "+61370101234",
-                        "status": "warning",
-                        "details": "Fallback to BlueWave due to Macrovox concurrency cap"
-                    },
-                    {
-                        "timestamp": "2025-10-09T21:15:00Z",
-                        "type": "call",
-                        "subject": "ext-201 → +14155559876",
-                        "status": "pass",
-                        "details": "31 s media loopback · MOS 4.3"
-                    }
-                ],
-                "dialer": {
-                    "default_source": "ext-101",
-                    "source_options": ["ext-101", "ext-201", "qa-bot"],
-                    "destination_samples": [
-                        { "label": "San Francisco DID", "value": "+14155551212" },
-                        { "label": "Support IVR", "value": "4008" },
-                        { "label": "Echo test", "value": "*43" }
-                    ],
-                    "trunk_options": [
-                        { "id": "macrovox-primary", "label": "Macrovox Primary" },
-                        { "id": "bluewave-backup", "label": "BlueWave Backup" },
-                        { "id": "internal-webrtc", "label": "Internal WebRTC" }
-                    ]
-                }
-            }
+            "test_data": bootstrap
         }),
     )
+}
+
+async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
+    let mut last_audit: Option<String> = None;
+    let mut trunks: Vec<JsonValue> = Vec::new();
+    let mut trunk_options: Vec<JsonValue> = Vec::new();
+
+    if let Some(server) = state.sip_server() {
+        let data_context = server.data_context.clone();
+        let config_trunks = data_context.trunks_snapshot().await;
+        let db_trunks = sip_trunk::Entity::find()
+            .all(state.db())
+            .await
+            .unwrap_or_default();
+
+        let mut db_by_name: HashMap<String, sip_trunk::Model> = HashMap::new();
+        for model in db_trunks {
+            db_by_name.insert(model.name.clone(), model);
+        }
+
+        for (name, config) in config_trunks.iter() {
+            let (label, status, last_test_at, direction, notes, limit, ingress_ips) =
+                build_trunk_overview(name, config, db_by_name.get(name));
+
+            trunks.push(json!({
+                "id": name,
+                "label": label,
+                "status": status,
+                "latency_ms": 0,
+                "packet_loss_percent": 0.0,
+                "concurrency": {
+                    "current": 0,
+                    "limit": limit,
+                },
+                "last_test_at": last_test_at,
+                "direction": direction,
+                "egress": config.dest,
+                "notes": notes,
+                "ingress_ips": ingress_ips,
+            }));
+
+            trunk_options.push(json!({
+                "id": name,
+                "label": label,
+            }));
+        }
+
+        last_audit = db_by_name
+            .values()
+            .filter_map(|model| model.last_health_check_at)
+            .max()
+            .map(|dt| dt.to_rfc3339());
+
+        return json!({
+            "last_audit": last_audit,
+            "trunks": trunks,
+            "routing_checks": [],
+            "dialer": {
+                "default_source": JsonValue::Null,
+                "source_options": JsonValue::Array(vec![]),
+                "destination_samples": JsonValue::Array(vec![]),
+                "trunk_options": trunk_options,
+            },
+        });
+    }
+
+    json!({
+        "last_audit": last_audit,
+        "trunks": trunks,
+        "routing_checks": [],
+        "dialer": {
+            "default_source": JsonValue::Null,
+            "source_options": JsonValue::Array(vec![]),
+            "destination_samples": JsonValue::Array(vec![]),
+            "trunk_options": trunk_options,
+        },
+    })
+}
+
+fn build_trunk_overview(
+    name: &str,
+    config: &routing::TrunkConfig,
+    model: Option<&sip_trunk::Model>,
+) -> (
+    String,
+    String,
+    Option<String>,
+    Vec<String>,
+    String,
+    u32,
+    Vec<String>,
+) {
+    if let Some(model) = model {
+        let label = model
+            .display_name
+            .clone()
+            .unwrap_or_else(|| name.to_string());
+        let status = model.status.as_str().to_string();
+        let last_test_at = model.last_health_check_at.map(|dt| dt.to_rfc3339());
+        let direction = match model.direction {
+            sip_trunk::SipTrunkDirection::Inbound => vec!["inbound".to_string()],
+            sip_trunk::SipTrunkDirection::Outbound => vec!["outbound".to_string()],
+            sip_trunk::SipTrunkDirection::Bidirectional => {
+                vec!["inbound".to_string(), "outbound".to_string()]
+            }
+        };
+        let notes = model.description.clone().unwrap_or_default();
+        let limit = model
+            .max_concurrent
+            .and_then(|v| (v > 0).then_some(v as u32))
+            .or_else(|| config.max_calls)
+            .unwrap_or(0);
+        let ingress_ips = if !config.inbound_hosts.is_empty() {
+            config.inbound_hosts.clone()
+        } else {
+            model
+                .allowed_ips
+                .as_ref()
+                .map(json_value_to_string_list)
+                .unwrap_or_default()
+        };
+
+        (
+            label,
+            status,
+            last_test_at,
+            direction,
+            notes,
+            limit,
+            ingress_ips,
+        )
+    } else {
+        let direction = match config.direction {
+            Some(TrunkDirection::Inbound) => vec!["inbound".to_string()],
+            Some(TrunkDirection::Outbound) => vec!["outbound".to_string()],
+            Some(TrunkDirection::Bidirectional) => {
+                vec!["inbound".to_string(), "outbound".to_string()]
+            }
+            None => Vec::new(),
+        };
+        let limit = config.max_calls.unwrap_or(0);
+        (
+            name.to_string(),
+            "unknown".to_string(),
+            None,
+            direction,
+            String::new(),
+            limit,
+            config.inbound_hosts.clone(),
+        )
+    }
+}
+
+fn json_value_to_string_list(value: &JsonValue) -> Vec<String> {
+    match value {
+        JsonValue::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect(),
+        JsonValue::String(item) => vec![item.clone()],
+        _ => Vec::new(),
+    }
 }
 
 pub async fn list_dialogs(
@@ -304,6 +378,320 @@ async fn locator_clear(
     .into_response()
 }
 
+async fn test_trunk(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<TrunkTestPayload>,
+) -> impl IntoResponse {
+    let trunk_name = payload.trunk.trim();
+    if trunk_name.is_empty() {
+        return bad_request("trunk is required");
+    }
+
+    let address = payload.address.trim();
+    if address.is_empty() {
+        return bad_request("address is required");
+    }
+
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+
+    let data_context = server.data_context.clone();
+    let trunks = data_context.trunks_snapshot().await;
+    let Some(trunk) = trunks.get(trunk_name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": format!("trunk '{}' not found", trunk_name) })),
+        )
+            .into_response();
+    };
+
+    let resolved_ips = match resolve_candidate_ips(address).await {
+        Ok(ips) if !ips.is_empty() => ips,
+        Ok(_) => return bad_request("address did not resolve to any IP addresses"),
+        Err(err) => return bad_request(err),
+    };
+
+    let mut evaluations = Vec::new();
+    let mut overall_match = false;
+
+    for ip in &resolved_ips {
+        let mut matched_sources = Vec::new();
+
+        for (idx, pattern) in trunk.inbound_hosts.iter().enumerate() {
+            if routing::candidate_matches_ip(pattern, ip).await {
+                matched_sources.push(format!("inbound_hosts[{}]", idx));
+            }
+        }
+
+        if routing::candidate_matches_ip(&trunk.dest, ip).await {
+            matched_sources.push("dest".to_string());
+        }
+
+        if let Some(backup) = &trunk.backup_dest {
+            if routing::candidate_matches_ip(backup, ip).await {
+                matched_sources.push("backup_dest".to_string());
+            }
+        }
+
+        let matched = !matched_sources.is_empty();
+        overall_match |= matched;
+        evaluations.push(TrunkIpEvaluation {
+            ip: ip.to_string(),
+            matched,
+            matched_sources,
+        });
+    }
+
+    let direction = trunk.direction;
+    let allows_inbound = direction
+        .map(|d| d.allows(&DialDirection::Inbound))
+        .unwrap_or(true);
+    let allows_outbound = direction
+        .map(|d| d.allows(&DialDirection::Outbound))
+        .unwrap_or(true);
+
+    Json(TrunkTestResponse {
+        trunk: trunk_name.to_string(),
+        address: address.to_string(),
+        evaluated_at: Utc::now().to_rfc3339(),
+        resolved_ips: resolved_ips.iter().map(ToString::to_string).collect(),
+        ip_results: evaluations,
+        overall_match,
+        direction: trunk.direction,
+        allows_inbound,
+        allows_outbound,
+    })
+    .into_response()
+}
+
+async fn route_evaluate(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<RouteEvaluationPayload>,
+) -> impl IntoResponse {
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+
+    let callee_input = payload.callee.trim();
+    if callee_input.is_empty() {
+        return bad_request("callee is required");
+    }
+
+    let direction_label = payload
+        .direction
+        .as_ref()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "outbound".to_string());
+
+    let direction = match direction_label.as_str() {
+        "inbound" => DialDirection::Inbound,
+        "internal" => DialDirection::Internal,
+        "outbound" => DialDirection::Outbound,
+        other => {
+            return bad_request(format!(
+                "unsupported direction '{}': use inbound/outbound/internal",
+                other
+            ));
+        }
+    };
+
+    let default_host = server
+        .proxy_config
+        .realms
+        .as_ref()
+        .and_then(|realms| realms.first())
+        .map(|s| s.as_str())
+        .unwrap_or("localhost");
+
+    let default_caller_value = default_caller_for(&direction, default_host);
+    let caller_input = normalize_optional_string(&payload.caller).unwrap_or(default_caller_value);
+    let request_uri_input = normalize_optional_string(&payload.request_uri);
+
+    let caller_uri_str = build_sip_uri(&caller_input, default_host);
+    let callee_uri_str = build_sip_uri(callee_input, default_host);
+    let request_uri_str = request_uri_input
+        .as_deref()
+        .map(|value| build_sip_uri(value, default_host))
+        .unwrap_or_else(|| callee_uri_str.clone());
+
+    let caller_uri: rsip::Uri = match caller_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => return bad_request(format!("invalid caller uri: {}", err)),
+    };
+    let callee_uri: rsip::Uri = match callee_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => return bad_request(format!("invalid callee uri: {}", err)),
+    };
+    let request_uri: rsip::Uri = match request_uri_str.try_into() {
+        Ok(uri) => uri,
+        Err(err) => return bad_request(format!("invalid request uri: {}", err)),
+    };
+
+    let mut invite_option = InviteOption::default();
+    invite_option.caller = caller_uri.clone();
+    invite_option.callee = callee_uri.clone();
+    invite_option.contact = caller_uri.clone();
+
+    let custom_headers = payload
+        .headers
+        .as_ref()
+        .map(|headers| headers_to_vec(headers))
+        .unwrap_or_default();
+    if !custom_headers.is_empty() {
+        invite_option.headers = Some(custom_headers.clone());
+    }
+
+    let request =
+        match build_diagnostics_request(&caller_uri, &callee_uri, &request_uri, custom_headers) {
+            Ok(req) => req,
+            Err(err) => return bad_request(err),
+        };
+
+    let data_context = server.data_context.clone();
+    let trunks_snapshot = data_context.trunks_snapshot().await;
+    let routes_snapshot = data_context.routes_snapshot().await;
+    let default_route = data_context.default_route();
+
+    let source_ip_input = normalize_optional_string(&payload.source_ip);
+
+    let mut detected_trunk_from_ip = None;
+    if let Some(ref source_ip) = source_ip_input {
+        match source_ip.parse::<IpAddr>() {
+            Ok(addr) => {
+                detected_trunk_from_ip = data_context.find_trunk_by_ip(&addr).await;
+            }
+            Err(_) => return bad_request("invalid source_ip"),
+        }
+    }
+
+    let mut source_trunk_name = normalize_optional_string(&payload.source_trunk);
+    if source_trunk_name.is_none() {
+        source_trunk_name = detected_trunk_from_ip.clone();
+    }
+
+    let mut source_trunk_value: Option<SourceTrunk> = None;
+    if let Some(name) = source_trunk_name.as_ref() {
+        let Some(config) = trunks_snapshot.get(name) else {
+            return bad_request(format!("source trunk '{}' not found", name));
+        };
+        source_trunk_value = build_source_trunk(name.clone(), config, &direction);
+        if source_trunk_value.is_none() {
+            return bad_request(format!(
+                "trunk '{}' does not allow {:?} calls",
+                name, direction
+            ));
+        }
+    }
+
+    let mut trace = RouteTrace::default();
+    let original_option = invite_option.clone();
+    let result = match match_invite_with_trace(
+        if trunks_snapshot.is_empty() {
+            None
+        } else {
+            Some(&trunks_snapshot)
+        },
+        if routes_snapshot.is_empty() {
+            None
+        } else {
+            Some(&routes_snapshot)
+        },
+        default_route.as_ref(),
+        invite_option,
+        &request,
+        source_trunk_value.as_ref(),
+        Arc::new(RoutingState::new()),
+        &direction,
+        &mut trace,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("routing evaluation failed: {}", err) })),
+            )
+                .into_response();
+        }
+    };
+
+    let (outcome, caller_render, callee_render, request_render, rewrites) = match result {
+        RouteResult::Forward(option) => {
+            let rewrites = collect_rewrite_diff(&original_option, &option);
+            (
+                RouteOutcomeView::Forward(RouteForwardOutcome {
+                    destination: option.destination.map(|d| d.addr.to_string()),
+                    headers: option
+                        .headers
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|h| h.to_string())
+                        .collect(),
+                    credential: option.credential.map(|cred| CredentialView {
+                        username: cred.username,
+                        realm: cred.realm.map(|r| r.to_string()),
+                    }),
+                }),
+                option.caller.to_string(),
+                option.callee.to_string(),
+                request.uri.to_string(),
+                rewrites,
+            )
+        }
+        RouteResult::NotHandled(option) => {
+            let rewrites = collect_rewrite_diff(&original_option, &option);
+            (
+                RouteOutcomeView::NotHandled,
+                option.caller.to_string(),
+                option.callee.to_string(),
+                request.uri.to_string(),
+                rewrites,
+            )
+        }
+        RouteResult::Abort(code, reason) => (
+            RouteOutcomeView::Abort(RouteAbortOutcome {
+                code: code.into(),
+                reason: reason.clone(),
+            }),
+            original_option.caller.to_string(),
+            original_option.callee.to_string(),
+            request.uri.to_string(),
+            Vec::new(),
+        ),
+    };
+
+    Json(RouteEvaluationResponse {
+        evaluated_at: Utc::now().to_rfc3339(),
+        direction: direction_label,
+        caller: caller_render,
+        callee: callee_render,
+        request_uri: request_render,
+        source_trunk: source_trunk_name,
+        detected_trunk: detected_trunk_from_ip,
+        source_ip: source_ip_input,
+        matched_rule: trace.matched_rule,
+        selected_trunk: trace.selected_trunk,
+        used_default_route: trace.used_default_route,
+        rewrite_operations: trace.rewrite_operations,
+        rewrites,
+        outcome,
+    })
+    .into_response()
+}
+
 #[derive(Debug, Deserialize)]
 struct LocatorPayload {
     user: Option<String>,
@@ -378,6 +766,330 @@ struct LocatorRecordView {
 struct LocatorClearResponse {
     removed: bool,
     remaining: usize,
+}
+
+#[derive(Deserialize)]
+struct TrunkTestPayload {
+    trunk: String,
+    address: String,
+}
+
+#[derive(Serialize)]
+struct TrunkTestResponse {
+    trunk: String,
+    address: String,
+    evaluated_at: String,
+    resolved_ips: Vec<String>,
+    ip_results: Vec<TrunkIpEvaluation>,
+    overall_match: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direction: Option<TrunkDirection>,
+    allows_inbound: bool,
+    allows_outbound: bool,
+}
+
+#[derive(Serialize)]
+struct TrunkIpEvaluation {
+    ip: String,
+    matched: bool,
+    matched_sources: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RouteEvaluationPayload {
+    callee: String,
+    caller: Option<String>,
+    direction: Option<String>,
+    source_trunk: Option<String>,
+    source_ip: Option<String>,
+    request_uri: Option<String>,
+    headers: Option<HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+struct RouteEvaluationResponse {
+    evaluated_at: String,
+    direction: String,
+    caller: String,
+    callee: String,
+    request_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_trunk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detected_trunk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_trunk: Option<String>,
+    used_default_route: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rewrite_operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rewrites: Vec<RewriteDiff>,
+    outcome: RouteOutcomeView,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RouteOutcomeView {
+    Forward(RouteForwardOutcome),
+    NotHandled,
+    Abort(RouteAbortOutcome),
+}
+
+#[derive(Serialize)]
+struct RouteForwardOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    headers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<CredentialView>,
+}
+
+#[derive(Serialize)]
+struct CredentialView {
+    username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realm: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RouteAbortOutcome {
+    code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RewriteDiff {
+    field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<String>,
+}
+
+fn headers_to_vec(headers: &HashMap<String, String>) -> Vec<SipHeader> {
+    let mut entries: Vec<_> = headers.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .into_iter()
+        .map(|(name, value)| SipHeader::Other(name.clone(), value.clone()))
+        .collect()
+}
+
+fn build_diagnostics_request(
+    caller: &rsip::Uri,
+    callee: &rsip::Uri,
+    request_uri: &rsip::Uri,
+    mut headers: Vec<SipHeader>,
+) -> Result<rsip::Request, String> {
+    let branch = format!("z9hG4bK{}", random_hex(10));
+    let from_tag = random_hex(8);
+    let call_id = format!("diag-{}", random_hex(12));
+
+    let via = format!(
+        "SIP/2.0/UDP diagnostics.console.local:5060;branch={}",
+        branch
+    );
+
+    let mut base_headers = vec![
+        SipHeader::Via(
+            via.try_into()
+                .map_err(|_| "invalid via header".to_string())?,
+        ),
+        SipHeader::From(
+            format!("Diagnostics <{}>;tag={}", caller, from_tag)
+                .try_into()
+                .map_err(|_| "invalid from header".to_string())?,
+        ),
+        SipHeader::To(
+            format!("<{}>", callee)
+                .try_into()
+                .map_err(|_| "invalid to header".to_string())?,
+        ),
+        SipHeader::CallId(call_id.into()),
+        SipHeader::CSeq(
+            format!("1 {}", Method::Invite)
+                .try_into()
+                .map_err(|_| "invalid cseq header".to_string())?,
+        ),
+        SipHeader::MaxForwards(70.into()),
+        SipHeader::ContentLength(0.into()),
+    ];
+
+    base_headers.append(&mut headers);
+
+    Ok(rsip::Request {
+        method: Method::Invite,
+        uri: request_uri.clone(),
+        version: Version::V2,
+        headers: base_headers.into(),
+        body: Vec::new(),
+    })
+}
+
+fn default_caller_for(direction: &DialDirection, default_host: &str) -> String {
+    match direction {
+        DialDirection::Inbound => format!("incoming@{}", default_host),
+        DialDirection::Internal => format!("diagnostics@{}", default_host),
+        DialDirection::Outbound => format!("diagnostics@{}", default_host),
+    }
+}
+
+fn build_sip_uri(value: &str, default_host: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return format!("sip:anonymous@{}", default_host);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("sip:") {
+        if rest.contains('@') {
+            format!("sip:{}", rest)
+        } else {
+            format!("sip:{}@{}", rest, default_host)
+        }
+    } else if trimmed.contains('@') {
+        format!("sip:{}", trimmed)
+    } else {
+        format!("sip:{}@{}", trimmed, default_host)
+    }
+}
+
+async fn resolve_candidate_ips(input: &str) -> Result<Vec<IpAddr>, String> {
+    if let Ok(ip) = input.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+
+    if let Ok(socket) = input.parse::<SocketAddr>() {
+        return Ok(vec![socket.ip()]);
+    }
+
+    let lookup_target = if input.contains(':') {
+        input.to_string()
+    } else {
+        format!("{}:0", input)
+    };
+
+    match lookup_host(lookup_target).await {
+        Ok(resolved) => {
+            let mut ips: Vec<IpAddr> = resolved.map(|addr| addr.ip()).collect();
+            ips.sort();
+            ips.dedup();
+            Ok(ips)
+        }
+        Err(err) => Err(format!("failed to resolve '{}': {}", input, err)),
+    }
+}
+
+fn collect_rewrite_diff(before: &InviteOption, after: &InviteOption) -> Vec<RewriteDiff> {
+    let mut diffs = Vec::new();
+
+    record_uri_diff("caller", &before.caller, &after.caller, &mut diffs);
+    record_uri_diff("callee", &before.callee, &after.callee, &mut diffs);
+    record_uri_diff("contact", &before.contact, &after.contact, &mut diffs);
+    record_option_string_diff(
+        "content_type",
+        &before.content_type,
+        &after.content_type,
+        &mut diffs,
+    );
+    record_destination_diff(
+        "destination",
+        before.destination.as_ref(),
+        after.destination.as_ref(),
+        &mut diffs,
+    );
+    record_headers_diff("headers", &before.headers, &after.headers, &mut diffs);
+
+    diffs
+}
+
+fn record_uri_diff(
+    field: &str,
+    before: &rsip::Uri,
+    after: &rsip::Uri,
+    diffs: &mut Vec<RewriteDiff>,
+) {
+    let before_str = before.to_string();
+    let after_str = after.to_string();
+    if before_str != after_str {
+        diffs.push(RewriteDiff {
+            field: field.to_string(),
+            before: Some(before_str),
+            after: Some(after_str),
+        });
+    }
+}
+
+fn record_option_string_diff(
+    field: &str,
+    before: &Option<String>,
+    after: &Option<String>,
+    diffs: &mut Vec<RewriteDiff>,
+) {
+    if before == after {
+        return;
+    }
+    diffs.push(RewriteDiff {
+        field: field.to_string(),
+        before: before.clone(),
+        after: after.clone(),
+    });
+}
+
+fn record_destination_diff(
+    field: &str,
+    before: Option<&SipAddr>,
+    after: Option<&SipAddr>,
+    diffs: &mut Vec<RewriteDiff>,
+) {
+    let before_str = before.map(|dest| dest.addr.to_string());
+    let after_str = after.map(|dest| dest.addr.to_string());
+    if before_str != after_str {
+        diffs.push(RewriteDiff {
+            field: field.to_string(),
+            before: before_str,
+            after: after_str,
+        });
+    }
+}
+
+fn record_headers_diff(
+    field: &str,
+    before: &Option<Vec<SipHeader>>,
+    after: &Option<Vec<SipHeader>>,
+    diffs: &mut Vec<RewriteDiff>,
+) {
+    let before_render = headers_to_string_list(before);
+    let after_render = headers_to_string_list(after);
+    if before_render != after_render {
+        diffs.push(RewriteDiff {
+            field: field.to_string(),
+            before: before_render,
+            after: after_render,
+        });
+    }
+}
+
+fn headers_to_string_list(headers: &Option<Vec<SipHeader>>) -> Option<String> {
+    headers.as_ref().map(|items| {
+        let mut values: Vec<String> = items.iter().map(|h| h.to_string()).collect();
+        values.sort();
+        values.join("\n")
+    })
+}
+
+fn random_hex(length: usize) -> String {
+    let mut output = String::with_capacity(length);
+    while output.len() < length {
+        output.push_str(&format!("{:x}", random::<u64>()));
+    }
+    output.truncate(length);
+    output
 }
 
 struct DialogStateSnapshot {

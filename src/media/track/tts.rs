@@ -29,7 +29,7 @@ use tokio::{
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 pub struct SynthesisHandle {
     pub play_id: Option<String>,
@@ -117,7 +117,7 @@ impl TtsTask {
                     cancel_received = true;
                     let graceful = self.graceful.load(Ordering::Relaxed);
                     let emitted_bytes = self.metadatas.get(&self.cur_seq).map(|entry| entry.emitted_bytes).unwrap_or(0);
-                    tracing::debug!(self.session_id, self.play_id, self.cur_seq, emitted_bytes, graceful, self.streaming, "tts task cancelled");
+                    debug!(self.session_id, self.play_id, self.cur_seq, emitted_bytes, graceful, self.streaming, "tts task cancelled");
                     self.handle_interrupt().await;
                     // quit if on streaming mode (graceful only work for non streaming mode)
                     //         or graceful not set, this is ordinary cancel
@@ -162,7 +162,7 @@ impl TtsTask {
                             // for non streaming mode, if entry finished or 2 sec timeout, continue to next seq
                             if streaming_finished || non_streaming_finished
                             {
-                                tracing::debug!(
+                                debug!(
                                     self.session_id,
                                     self.play_id,
                                     "tts track seq: {} completed, finished: {}, elapsed: {}ms",
@@ -235,7 +235,7 @@ impl TtsTask {
             }
         }
 
-        tracing::info!(
+        info!(
             self.session_id,
             self.play_id,
             self.cur_seq,
@@ -262,7 +262,7 @@ impl TtsTask {
         let session_id = self.session_id.clone();
         let play_id = self.play_id.clone();
         let streaming = self.streaming;
-        tracing::debug!(
+        debug!(
             session_id,
             play_id,
             self.track_id,
@@ -344,12 +344,9 @@ impl TtsTask {
         if cache::is_cached(&cache_key).await.unwrap_or_default() {
             match cache::retrieve_from_cache_with_buffer(&cache_key, &mut self.cache_buffer).await {
                 Ok(()) => {
-                    tracing::debug!(
+                    debug!(
                         self.session_id,
-                        self.play_id,
-                        cmd_seq,
-                        cmd.text,
-                        "using cached audio"
+                        self.play_id, cmd_seq, cmd.text, "using cached audio"
                     );
                     let bytes = self.cache_buffer.split().freeze();
                     let len = bytes.len();
@@ -415,7 +412,7 @@ impl TtsTask {
                 });
             }
             Ok(SynthesisEvent::Finished) => {
-                tracing::debug!(
+                debug!(
                     self.session_id,
                     self.track_id,
                     self.streaming,
@@ -475,10 +472,9 @@ impl TtsTask {
     fn get_emit_entry_mut(&mut self, cmd_seq: usize) -> Option<&mut EmitEntry> {
         // ignore if cmd_seq is less than cur_seq
         if cmd_seq < self.cur_seq {
-            tracing::warn!(
+            warn!(
                 "TTS result is ignored, cmd_seq {}, cur_seq: {}",
-                cmd_seq,
-                self.cur_seq
+                cmd_seq, self.cur_seq
             );
             return None;
         }
@@ -678,7 +674,7 @@ impl Track for TtsTrack {
             graceful: self.graceful.clone(),
             ssrc: self.ssrc,
         };
-        tracing::debug!(self.session_id, self.track_id, "tts task started");
+        debug!(self.session_id, self.track_id, "tts task started");
         tokio::spawn(async move { task.run().await });
         Ok(())
     }

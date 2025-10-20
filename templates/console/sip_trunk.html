@@ -55,6 +55,49 @@
             </div>
         </template>
 
+        <template x-if="lastReload">
+            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <span class="font-semibold text-slate-800">Latest reload</span>
+                        <span class="ml-2" x-text="buildReloadSummary(lastReload)"></span>
+                    </div>
+                    <div class="text-xs text-slate-500">
+                        <span>Finished </span>
+                        <span x-text="formatDate(lastReload.finished_at)"></span>
+                    </div>
+                </div>
+                <div class="mt-2 text-xs text-slate-500">
+                    Sources: config
+                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>,
+                    include files
+                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>,
+                    database
+                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.db_count) || 0"></span>.
+                </div>
+                <template x-if="lastReload.patterns && lastReload.patterns.length">
+                    <div class="mt-2 text-xs text-slate-500">
+                        <div class="font-semibold text-slate-600">Include patterns</div>
+                        <ul class="mt-1 list-disc space-y-0.5 pl-5">
+                            <template x-for="pattern in lastReload.patterns" :key="pattern">
+                                <li class="break-all" x-text="pattern"></li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
+                <template x-if="lastReload.files && lastReload.files.length">
+                    <div class="mt-2 text-xs text-slate-500">
+                        <div class="font-semibold text-slate-600">Include files</div>
+                        <ul class="mt-1 list-disc space-y-0.5 pl-5">
+                            <template x-for="file in lastReload.files" :key="file">
+                                <li class="break-all" x-text="file"></li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
+            </div>
+        </template>
+
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -288,6 +331,7 @@
             flash: null,
             processingDelete: null,
             reloading: false,
+            lastReload: null,
             page: 1,
             perPage: 20,
             init() {
@@ -461,6 +505,61 @@
                 }
                 return date.toLocaleString();
             },
+            formatDuration(milliseconds) {
+                const value = Number(milliseconds);
+                if (!Number.isFinite(value) || value < 0) {
+                    return null;
+                }
+                if (value >= 1000) {
+                    const seconds = value / 1000;
+                    if (seconds >= 10) {
+                        return `${Math.round(seconds)}s`;
+                    }
+                    return `${seconds.toFixed(1)}s`;
+                }
+                return `${Math.round(value)}ms`;
+            },
+            normalizeReloadMetrics(raw) {
+                if (!raw || typeof raw !== 'object') {
+                    return null;
+                }
+                const toCount = (input) => {
+                    const value = Number(input);
+                    return Number.isFinite(value) && value >= 0 ? value : 0;
+                };
+                const durationRaw = Number(raw.duration_ms);
+                return {
+                    total: toCount(raw.total),
+                    config_count: toCount(raw.config_count),
+                    file_count: toCount(raw.file_count),
+                    db_count: toCount(raw.db_count),
+                    duration_ms: Number.isFinite(durationRaw) ? durationRaw : null,
+                    started_at: raw.started_at || null,
+                    finished_at: raw.finished_at || null,
+                    files: Array.isArray(raw.files) ? raw.files.map((item) => String(item)) : [],
+                    patterns: Array.isArray(raw.patterns) ? raw.patterns.map((item) => String(item)) : [],
+                };
+            },
+            buildReloadSummary(details) {
+                if (!details || typeof details !== 'object') {
+                    return 'Reload complete.';
+                }
+                const total = Number(details.total);
+                const duration = this.formatDuration(details.duration_ms);
+                const totalText = Number.isFinite(total) && total >= 0
+                    ? `${total} trunk${total === 1 ? '' : 's'}`
+                    : null;
+                if (totalText && duration) {
+                    return `${totalText} in ${duration}`;
+                }
+                if (totalText) {
+                    return totalText;
+                }
+                if (duration) {
+                    return `Completed in ${duration}`;
+                }
+                return 'Reload complete.';
+            },
             directionLabel(value) {
                 const normalized = String(value || '').toLowerCase();
                 if (normalized === 'inbound') return 'Inbound';
@@ -587,7 +686,19 @@
                         throw new Error(data?.message || data?.error || 'Failed to reload SIP trunks');
                     }
                     const count = Number.isFinite(Number(data?.trunks_reloaded)) ? Number(data.trunks_reloaded) : null;
-                    successMessage = count !== null ? `Reloaded ${count} trunk${count === 1 ? '' : 's'}.` : 'SIP trunks reloaded.';
+                    const metrics = this.normalizeReloadMetrics(data?.metrics);
+                    this.lastReload = metrics;
+                    if (metrics && count !== null) {
+                        const durationText = this.formatDuration(metrics.duration_ms);
+                        if (durationText) {
+                            successMessage = `Reloaded ${count} trunk${count === 1 ? '' : 's'} in ${durationText}.`;
+                        }
+                    }
+                    if (!successMessage) {
+                        successMessage = count !== null
+                            ? `Reloaded ${count} trunk${count === 1 ? '' : 's'}.`
+                            : 'SIP trunks reloaded.';
+                    }
                     await this.fetchTrunks();
                     this.flash = successMessage;
                 } catch (err) {

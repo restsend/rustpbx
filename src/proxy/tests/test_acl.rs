@@ -205,11 +205,11 @@ async fn test_acl_ipv6() {
 
     // Test allowed IPv6 directly
     let ipv6_allowed: std::net::IpAddr = "2001:db8::1".parse().unwrap();
-    assert!(module.is_allowed(&ipv6_allowed));
+    assert!(module.is_ip_allowed(&ipv6_allowed).await);
 
     // Test denied IPv6 directly
     let ipv6_denied: std::net::IpAddr = "2001:db9::1".parse().unwrap();
-    assert!(!module.is_allowed(&ipv6_denied));
+    assert!(!module.is_ip_allowed(&ipv6_denied).await);
 }
 
 #[tokio::test]

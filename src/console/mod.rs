@@ -1,3 +1,4 @@
+use crate::app::AppStateInner;
 use crate::config::ConsoleConfig;
 use crate::console::middleware::RenderTemplate;
 use crate::proxy::server::SipServerRef;
@@ -6,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use minijinja::{Environment, path_loader};
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use tracing::debug;
 
 pub mod auth;
@@ -20,6 +21,7 @@ pub struct ConsoleState {
     session_key: Arc<Vec<u8>>,
     base_path: String,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
+    app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
 }
 
 impl ConsoleState {
@@ -38,6 +40,7 @@ impl ConsoleState {
             session_key,
             base_path,
             sip_server: Arc::new(RwLock::new(None)),
+            app_state: Arc::new(RwLock::new(None)),
         }))
     }
 
@@ -112,6 +115,19 @@ impl ConsoleState {
 
     pub fn sip_server(&self) -> Option<SipServerRef> {
         self.sip_server.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub fn set_app_state(&self, app_state: Option<Weak<AppStateInner>>) {
+        if let Ok(mut slot) = self.app_state.write() {
+            *slot = app_state;
+        }
+    }
+
+    pub fn app_state(&self) -> Option<Arc<AppStateInner>> {
+        self.app_state
+            .read()
+            .ok()
+            .and_then(|opt| opt.as_ref().and_then(|weak| weak.upgrade()))
     }
 
     pub fn url_for(&self, suffix: &str) -> String {

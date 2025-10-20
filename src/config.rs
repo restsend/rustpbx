@@ -62,6 +62,10 @@ fn default_callid_suffix() -> Option<String> {
     Some("rustpbx.com".to_string())
 }
 
+fn default_user_backends() -> Vec<UserBackendConfig> {
+    vec![UserBackendConfig::default()]
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -287,12 +291,14 @@ pub struct ProxyConfig {
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
     pub acl_rules: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acl_files: Vec<String>,
     pub ua_white_list: Option<Vec<String>>,
     pub ua_black_list: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
-    #[serde(default)]
-    pub user_backend: UserBackendConfig,
+    #[serde(default = "default_user_backends")]
+    pub user_backends: Vec<UserBackendConfig>,
     #[serde(default)]
     pub locator: LocatorConfig,
     #[serde(default)]
@@ -300,10 +306,14 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<RouteRule>>,
     #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trunks_files: Vec<String>,
     #[serde(default)]
     pub default: Option<DefaultRoute>,
     #[serde(default)]
@@ -373,13 +383,16 @@ impl Default for ProxyConfig {
             ws_port: None,
             max_concurrency: None,
             registrar_expires: Some(60),
-            user_backend: UserBackendConfig::default(),
+            user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyMode::default(),
             realms: Some(vec![]),
             ws_handler: None,
+            routes_files: Vec::new(),
+            acl_files: Vec::new(),
             routes: None,
             trunks: HashMap::new(),
+            trunks_files: Vec::new(),
             default: None,
             trunks_source: ProxyDataSource::default(),
             routes_source: ProxyDataSource::default(),
@@ -507,6 +520,7 @@ mod tests {
             }),
             action: crate::proxy::routing::RouteAction::default(),
             disabled: None,
+            ..Default::default()
         });
         routes.push(crate::proxy::routing::RouteRule {
             name: "default3".to_string(),
@@ -522,6 +536,7 @@ mod tests {
             }),
             action: crate::proxy::routing::RouteAction::default(),
             disabled: None,
+            ..Default::default()
         });
         prxconfig.routes = Some(routes);
         trunks.insert(

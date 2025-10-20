@@ -1,6 +1,7 @@
 use crate::{
     call::{ActiveCallType, CallOption},
     config::{CallRecordConfig, S3Vendor},
+    models::call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -9,11 +10,16 @@ use object_store::{
     gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
 };
 use reqwest;
+use rsip::Uri;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use serde_with::skip_serializing_none;
 use std::{
-    collections::HashMap, future::Future, path::Path, pin::Pin, str::FromStr, sync::Arc,
-    time::Instant,
+    collections::HashMap, convert::TryFrom, future::Future, path::Path, pin::Pin, str::FromStr,
+    sync::Arc, time::Instant,
 };
 use tokio::{fs::File, io::AsyncWriteExt, select};
 use tokio_util::sync::CancellationToken;
@@ -646,5 +652,258 @@ impl CallRecordManager {
             });
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CallRecordPersistArgs {
+    pub direction: String,
+    pub status: String,
+    pub from_number: Option<String>,
+    pub to_number: Option<String>,
+    pub caller_name: Option<String>,
+    pub agent_name: Option<String>,
+    pub queue: Option<String>,
+    pub department_id: Option<i64>,
+    pub extension_id: Option<i64>,
+    pub sip_trunk_id: Option<i64>,
+    pub route_id: Option<i64>,
+    pub sip_gateway: Option<String>,
+    pub recording_url: Option<String>,
+    pub recording_duration_secs: Option<i32>,
+    pub has_transcript: bool,
+    pub transcript_status: String,
+    pub transcript_language: Option<String>,
+    pub tags: Option<Value>,
+    pub quality_mos: Option<f64>,
+    pub quality_latency_ms: Option<f64>,
+    pub quality_jitter_ms: Option<f64>,
+    pub quality_packet_loss_percent: Option<f64>,
+    pub analytics: Option<Value>,
+    pub metadata: Option<Value>,
+}
+
+impl Default for CallRecordPersistArgs {
+    fn default() -> Self {
+        Self {
+            direction: "unknown".to_string(),
+            status: "failed".to_string(),
+            from_number: None,
+            to_number: None,
+            caller_name: None,
+            agent_name: None,
+            queue: None,
+            department_id: None,
+            extension_id: None,
+            sip_trunk_id: None,
+            route_id: None,
+            sip_gateway: None,
+            recording_url: None,
+            recording_duration_secs: None,
+            has_transcript: false,
+            transcript_status: "pending".to_string(),
+            transcript_language: None,
+            tags: None,
+            quality_mos: None,
+            quality_latency_ms: None,
+            quality_jitter_ms: None,
+            quality_packet_loss_percent: None,
+            analytics: None,
+            metadata: None,
+        }
+    }
+}
+
+pub async fn persist_call_record(
+    db: &DatabaseConnection,
+    record: &CallRecord,
+    args: CallRecordPersistArgs,
+) -> Result<()> {
+    let direction = args.direction.trim().to_ascii_lowercase();
+    let status = args.status.trim().to_ascii_lowercase();
+    let from_number = args.from_number.clone();
+    let to_number = args.to_number.clone();
+    let caller_name = args.caller_name.clone();
+    let agent_name = args.agent_name.clone();
+    let queue = args.queue.clone();
+    let department_id = args.department_id;
+    let extension_id = args.extension_id;
+    let sip_trunk_id = args.sip_trunk_id;
+    let route_id = args.route_id;
+    let sip_gateway = args.sip_gateway.clone();
+    let recording_url = args.recording_url.clone();
+    let recording_duration_secs = args.recording_duration_secs;
+    let tags = args.tags.clone();
+    let analytics = args.analytics.clone();
+    let metadata_value = merge_metadata(record, args.metadata.clone());
+    let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
+    let display_id = record
+        .option
+        .as_ref()
+        .and_then(|opt| opt.extra.as_ref())
+        .and_then(|extra| extra.get("display_id").cloned());
+    if let Some(model) = CallRecordEntity::find()
+        .filter(CallRecordColumn::CallId.eq(record.call_id.clone()))
+        .one(db)
+        .await?
+    {
+        let mut active: call_record::ActiveModel = model.into();
+        active.display_id = Set(display_id.clone());
+        active.direction = Set(direction.clone());
+        active.status = Set(status.clone());
+        active.started_at = Set(record.start_time);
+        active.ended_at = Set(Some(record.end_time));
+        active.duration_secs = Set(duration_secs);
+        active.from_number = Set(from_number.clone());
+        active.to_number = Set(to_number.clone());
+        active.caller_name = Set(caller_name.clone());
+        active.agent_name = Set(agent_name.clone());
+        active.queue = Set(queue.clone());
+        active.department_id = Set(department_id);
+        active.extension_id = Set(extension_id);
+        active.sip_trunk_id = Set(sip_trunk_id);
+        active.route_id = Set(route_id);
+        active.sip_gateway = Set(sip_gateway.clone());
+        active.recording_url = Set(recording_url.clone());
+        active.recording_duration_secs = Set(recording_duration_secs);
+        active.has_transcript = Set(args.has_transcript);
+        active.transcript_status = Set(args.transcript_status.clone());
+        active.transcript_language = Set(args.transcript_language.clone());
+        active.tags = Set(tags.clone());
+        active.quality_mos = Set(args.quality_mos);
+        active.quality_latency_ms = Set(args.quality_latency_ms);
+        active.quality_jitter_ms = Set(args.quality_jitter_ms);
+        active.quality_packet_loss_percent = Set(args.quality_packet_loss_percent);
+        active.analytics = Set(analytics.clone());
+        active.metadata = Set(metadata_value.clone());
+        active.updated_at = Set(record.end_time);
+        active.update(db).await?;
+        return Ok(());
+    }
+
+    let active = call_record::ActiveModel {
+        call_id: Set(record.call_id.clone()),
+        display_id: Set(display_id.clone()),
+        direction: Set(direction.clone()),
+        status: Set(status.clone()),
+        started_at: Set(record.start_time),
+        ended_at: Set(Some(record.end_time)),
+        duration_secs: Set(duration_secs),
+        from_number: Set(from_number.clone()),
+        to_number: Set(to_number.clone()),
+        caller_name: Set(caller_name.clone()),
+        agent_name: Set(agent_name.clone()),
+        queue: Set(queue.clone()),
+        department_id: Set(department_id),
+        extension_id: Set(extension_id),
+        sip_trunk_id: Set(sip_trunk_id),
+        route_id: Set(route_id),
+        sip_gateway: Set(sip_gateway.clone()),
+        recording_url: Set(recording_url.clone()),
+        recording_duration_secs: Set(recording_duration_secs),
+        has_transcript: Set(args.has_transcript),
+        transcript_status: Set(args.transcript_status.clone()),
+        transcript_language: Set(args.transcript_language.clone()),
+        tags: Set(tags.clone()),
+        quality_mos: Set(args.quality_mos),
+        quality_latency_ms: Set(args.quality_latency_ms),
+        quality_jitter_ms: Set(args.quality_jitter_ms),
+        quality_packet_loss_percent: Set(args.quality_packet_loss_percent),
+        analytics: Set(analytics.clone()),
+        metadata: Set(metadata_value.clone()),
+        created_at: Set(record.start_time),
+        updated_at: Set(record.end_time),
+        archived_at: Set(None),
+        ..Default::default()
+    };
+
+    active.insert(db).await?;
+    Ok(())
+}
+
+pub fn extract_sip_username(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(uri) = Uri::try_from(trimmed) {
+        if let Some(user) = uri.user() {
+            let value = user.to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+
+        if trimmed.starts_with("sip:") || trimmed.starts_with("sips:") {
+            let without_scheme = trimmed
+                .split_once(':')
+                .map(|(_, rest)| rest)
+                .unwrap_or(trimmed);
+            let candidate = without_scheme.split('@').next().unwrap_or_default().trim();
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    let mut candidate = trimmed.split('@').next().unwrap_or(trimmed).trim();
+    if let Some(stripped) = candidate.strip_prefix("tel:") {
+        candidate = stripped;
+    }
+    if let Some(stripped) = candidate.strip_prefix("sip:") {
+        candidate = stripped;
+    }
+    if let Some(stripped) = candidate.strip_prefix("sips:") {
+        candidate = stripped;
+    }
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
+fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<Value> {
+    let mut map = JsonMap::new();
+    map.insert(
+        "status_code".to_string(),
+        Value::Number(JsonNumber::from(record.status_code)),
+    );
+    if let Some(reason) = record
+        .hangup_reason
+        .as_ref()
+        .map(|reason| reason.to_string())
+    {
+        map.insert("hangup_reason".to_string(), Value::String(reason));
+    }
+
+    if let Some(option) = &record.option {
+        if let Some(extra) = &option.extra {
+            for (key, value) in extra {
+                map.entry(key.clone())
+                    .or_insert_with(|| Value::String(value.clone()));
+            }
+        }
+    }
+
+    if let Some(extras) = &record.extras {
+        for (key, value) in extras {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
+    if let Some(Value::Object(values)) = extra_metadata {
+        for (key, value) in values {
+            map.insert(key, value);
+        }
+    } else if let Some(value) = extra_metadata {
+        map.insert("extra_metadata".to_string(), value);
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(Value::Object(map))
     }
 }

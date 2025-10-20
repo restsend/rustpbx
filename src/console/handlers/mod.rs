@@ -49,6 +49,10 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))
+        .route(
+            &format!("{base_path}/dashboard/data"),
+            get(self::dashboard::dashboard_data),
+        )
         .nest(&base_path, routes)
         .with_state(state)
 }

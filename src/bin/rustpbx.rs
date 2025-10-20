@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use clap::Parser;
 use dotenv::dotenv;
 use rustpbx::{app::AppStateBuilder, config::Config, version};
@@ -58,10 +59,12 @@ async fn main() -> Result<()> {
     dotenv().ok();
     let cli = Cli::parse();
 
-    let config = cli
-        .conf
-        .map(|conf| Config::load(&conf).expect("Failed to load config"))
-        .unwrap_or_default();
+    let config_path = cli.conf.clone();
+    let config = if let Some(ref path) = config_path {
+        Config::load(path).expect("Failed to load config")
+    } else {
+        Config::default()
+    };
 
     println!("{}", version::get_version_info());
 
@@ -172,7 +175,9 @@ async fn main() -> Result<()> {
     }
 
     let _ = guard_holder; // keep the guard alive
-    let state_builder = AppStateBuilder::new().with_config(config);
+    let state_builder = AppStateBuilder::new()
+        .with_config(config)
+        .with_config_metadata(config_path, Utc::now());
     let state = state_builder.build().await.expect("Failed to build app");
 
     #[cfg(unix)]

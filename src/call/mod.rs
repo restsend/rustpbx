@@ -464,7 +464,6 @@ pub struct Dialplan {
     pub failure_action: FailureAction,
 
     pub route_invite: Option<Box<dyn RouteInvite>>,
-    pub extras: Option<HashMap<String, serde_json::Value>>,
     pub with_original_headers: bool,
 }
 
@@ -499,7 +498,6 @@ impl Dialplan {
             call_timeout: Duration::from_secs(60),              // 60 seconds
             failure_action: FailureAction::default(),
             route_invite: None,
-            extras: None,
             with_original_headers: true,
         }
     }

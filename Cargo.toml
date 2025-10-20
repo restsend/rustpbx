@@ -37,6 +37,7 @@ minijinja = { version = "2.0.1", features = [
     "json",
 ], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
+glob = "0.3.1"
 serde_json = "1.0.143"
 tokio = { version = "1.47.1", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.17", features = ["net", "sync"] }

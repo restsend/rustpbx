@@ -1,5 +1,11 @@
+use crate::call::DialDirection;
+use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+};
+use tokio::net::lookup_host;
 
 pub mod matcher;
 #[cfg(test)]
@@ -24,6 +30,90 @@ pub struct TrunkConfig {
     pub weight: Option<u32>,
     #[serde(default)]
     pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<TrunkDirection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inbound_hosts: Vec<String>,
+}
+
+impl TrunkConfig {
+    pub async fn matches_inbound_ip(&self, addr: &IpAddr) -> bool {
+        for host in &self.inbound_hosts {
+            if candidate_matches(host, addr).await {
+                return true;
+            }
+        }
+
+        if candidate_matches(&self.dest, addr).await {
+            return true;
+        }
+
+        if let Some(backup) = &self.backup_dest {
+            if candidate_matches(backup, addr).await {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Build a [`SourceTrunk`] instance when direction is allowed by trunk configuration.
+pub fn build_source_trunk(
+    name: String,
+    config: &TrunkConfig,
+    direction: &DialDirection,
+) -> Option<SourceTrunk> {
+    if let Some(trunk_direction) = config.direction {
+        if !trunk_direction.allows(direction) {
+            return None;
+        }
+    }
+
+    Some(SourceTrunk {
+        name,
+        id: config.id,
+        direction: config.direction,
+    })
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrunkDirection {
+    Inbound,
+    Outbound,
+    Bidirectional,
+}
+
+impl TrunkDirection {
+    pub fn allows(&self, direction: &DialDirection) -> bool {
+        match self {
+            TrunkDirection::Inbound => matches!(direction, DialDirection::Inbound),
+            TrunkDirection::Outbound => matches!(direction, DialDirection::Outbound),
+            TrunkDirection::Bidirectional => true,
+        }
+    }
+}
+
+impl From<crate::models::sip_trunk::SipTrunkDirection> for TrunkDirection {
+    fn from(value: crate::models::sip_trunk::SipTrunkDirection) -> Self {
+        match value {
+            crate::models::sip_trunk::SipTrunkDirection::Inbound => TrunkDirection::Inbound,
+            crate::models::sip_trunk::SipTrunkDirection::Outbound => TrunkDirection::Outbound,
+            crate::models::sip_trunk::SipTrunkDirection::Bidirectional => {
+                TrunkDirection::Bidirectional
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceTrunk {
+    pub name: String,
+    pub id: Option<i64>,
+    pub direction: Option<TrunkDirection>,
 }
 /// Default route strategy
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -51,6 +141,12 @@ pub struct RouteRule {
     pub description: Option<String>,
     #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
+    pub direction: RouteDirection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_trunks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_trunk_ids: Vec<i64>,
 
     /// Match conditions
     #[serde(rename = "match")]
@@ -66,6 +162,47 @@ pub struct RouteRule {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+}
+
+impl Default for RouteRule {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: None,
+            priority: 0,
+            direction: RouteDirection::Any,
+            source_trunks: Vec::new(),
+            source_trunk_ids: Vec::new(),
+            match_conditions: MatchConditions::default(),
+            rewrite: None,
+            action: RouteAction::default(),
+            disabled: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteDirection {
+    Any,
+    Inbound,
+    Outbound,
+}
+
+impl Default for RouteDirection {
+    fn default() -> Self {
+        RouteDirection::Any
+    }
+}
+
+impl RouteDirection {
+    pub fn matches(&self, direction: &DialDirection) -> bool {
+        match self {
+            RouteDirection::Any => true,
+            RouteDirection::Inbound => matches!(direction, DialDirection::Inbound),
+            RouteDirection::Outbound => matches!(direction, DialDirection::Outbound),
+        }
+    }
 }
 
 /// Match conditions
@@ -224,4 +361,89 @@ fn default_select() -> String {
 }
 fn default_action() -> String {
     "forward".to_string()
+}
+
+async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {
+    let trimmed = candidate.trim().trim_matches(|c| c == '<' || c == '>');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if let Ok(network) = trimmed.parse::<IpNetwork>() {
+        return network.contains(*addr);
+    }
+
+    if let Ok(socket) = trimmed.parse::<SocketAddr>() {
+        return socket.ip() == *addr;
+    }
+
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return ip == *addr;
+    }
+
+    if let Ok(uri) = rsip::Uri::try_from(trimmed) {
+        return host_matches(&uri.host_with_port.host.to_string(), addr).await;
+    }
+
+    if let Some((host, _)) = split_host_port(trimmed) {
+        return host_matches(host, addr).await;
+    }
+
+    host_matches(trimmed, addr).await
+}
+
+/// Public helper to validate whether a candidate host definition resolves to the provided IP.
+pub async fn candidate_matches_ip(candidate: &str, addr: &IpAddr) -> bool {
+    candidate_matches(candidate, addr).await
+}
+
+async fn host_matches(host: &str, addr: &IpAddr) -> bool {
+    let cleaned = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+
+    if cleaned.is_empty() {
+        return false;
+    }
+
+    if let Ok(network) = cleaned.parse::<IpNetwork>() {
+        return network.contains(*addr);
+    }
+
+    if let Ok(socket) = cleaned.parse::<SocketAddr>() {
+        return socket.ip() == *addr;
+    }
+
+    if let Ok(ip) = cleaned.parse::<IpAddr>() {
+        return ip == *addr;
+    }
+
+    let lookup_target = match split_host_port(cleaned) {
+        Some((host_part, _)) => host_part.to_string(),
+        None => cleaned.to_string(),
+    };
+
+    match lookup_host((lookup_target.as_str(), 0)).await {
+        Ok(addrs) => addrs.into_iter().any(|resolved| resolved.ip() == *addr),
+        Err(_) => false,
+    }
+}
+
+fn split_host_port(input: &str) -> Option<(&str, &str)> {
+    if let Some(end) = input.find(']') {
+        if input.starts_with('[') && input.len() > end + 1 && input[end + 1..].starts_with(':') {
+            return Some((&input[1..end], &input[end + 2..]));
+        }
+    }
+
+    if let Some(idx) = input.rfind(':') {
+        if input[..idx].contains(':') {
+            return None;
+        }
+        return Some((&input[..idx], &input[idx + 1..]));
+    }
+
+    None
 }

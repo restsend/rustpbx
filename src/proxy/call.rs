@@ -8,13 +8,16 @@ use crate::call::RouteInvite;
 use crate::call::RoutingState;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
-use crate::callrecord::CallRecord;
-use crate::callrecord::CallRecordHangupReason;
+use crate::callrecord::{
+    CallRecord, CallRecordHangupReason, CallRecordPersistArgs, extract_sip_username,
+    persist_call_record,
+};
 use crate::config::ProxyConfig;
 use crate::config::RouteResult;
+use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::ProxyCall;
 use crate::proxy::proxy_call::ProxyCallBuilder;
-use crate::proxy::routing::matcher::match_invite;
+use crate::proxy::routing::{SourceTrunk, TrunkConfig, build_source_trunk, matcher::match_invite};
 use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -24,7 +27,9 @@ use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::transaction::Transaction;
-use std::sync::Arc;
+use rsipstack::transport::SipConnection;
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -56,7 +61,8 @@ pub trait ProxyCallInspector: Send + Sync {
 
 pub struct DefaultRouteInvite {
     pub routing_state: Arc<RoutingState>,
-    pub config: Arc<ProxyConfig>,
+    pub data_context: Arc<ProxyDataContext>,
+    pub source_trunk_hint: Option<String>,
 }
 
 #[async_trait]
@@ -67,16 +73,58 @@ impl RouteInvite for DefaultRouteInvite {
         origin: &rsip::Request,
         direction: &DialDirection,
     ) -> Result<RouteResult> {
+        let trunks_snapshot = self.data_context.trunks_snapshot().await;
+        let routes_snapshot = self.data_context.routes_snapshot().await;
+        let default_route = self.data_context.default_route();
+        let source_trunk = self
+            .resolve_source_trunk(&trunks_snapshot, origin, direction)
+            .await;
+
         match_invite(
-            Some(&self.config.trunks),
-            self.config.routes.as_ref(),
-            self.config.default.as_ref(),
+            if trunks_snapshot.is_empty() {
+                None
+            } else {
+                Some(&trunks_snapshot)
+            },
+            if routes_snapshot.is_empty() {
+                None
+            } else {
+                Some(&routes_snapshot)
+            },
+            default_route.as_ref(),
             option,
             origin,
+            source_trunk.as_ref(),
             self.routing_state.clone(),
             direction,
         )
         .await
+    }
+}
+
+impl DefaultRouteInvite {
+    async fn resolve_source_trunk(
+        &self,
+        trunks: &HashMap<String, TrunkConfig>,
+        origin: &rsip::Request,
+        direction: &DialDirection,
+    ) -> Option<SourceTrunk> {
+        if !matches!(direction, DialDirection::Inbound) {
+            return None;
+        }
+
+        if let Some(name) = self.source_trunk_hint.as_ref() {
+            if let Some(config) = trunks.get(name) {
+                return build_source_trunk(name.clone(), config, direction);
+            }
+        }
+
+        let via = origin.via_header().ok()?;
+        let (_, target) = SipConnection::parse_target_from_via(via).ok()?;
+        let ip: IpAddr = target.host.try_into().ok()?;
+        let name = self.data_context.find_trunk_by_ip(&ip).await?;
+        let config = trunks.get(&name)?;
+        build_source_trunk(name, config, direction)
     }
 }
 
@@ -151,25 +199,18 @@ impl CallModule {
             }
         };
 
-        let locs = if callee_is_same_realm {
-            self.inner
-                .server
-                .locator
-                .lookup(&callee_uri)
-                .await
-                .unwrap_or_else(|_| {
-                    vec![Location {
-                        aor: callee_uri.clone(),
-                        ..Default::default()
-                    }]
-                })
-        } else {
-            vec![Location {
-                aor: callee_uri.clone(),
-                ..Default::default()
-            }]
+        let mut loc = Location {
+            aor: callee_uri.clone(),
+            ..Default::default()
         };
 
+        if callee_is_same_realm {
+            if let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
+                loc.supports_webrtc |= results.iter().any(|item| item.supports_webrtc);
+            }
+        }
+
+        let locs = vec![loc];
         let caller_uri = match caller.from.as_ref() {
             Some(uri) => uri.clone(),
             None => original
@@ -205,15 +246,18 @@ impl CallModule {
         cookie: TransactionCookie,
         caller: &SipUser,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
-        let route_invite = match self.inner.server.create_route_invite.as_ref() {
-            Some(f) => {
+        let source_trunk_hint = cookie.get_source_trunk();
+
+        let route_invite: Box<dyn RouteInvite> =
+            if let Some(f) = self.inner.server.create_route_invite.as_ref() {
                 f(self.inner.server.clone(), self.inner.config.clone()).map_err(|e| (e, None))?
-            }
-            None => Box::new(DefaultRouteInvite {
-                routing_state: self.inner.routing_state.clone(),
-                config: self.inner.config.clone(),
-            }) as Box<dyn RouteInvite>,
-        };
+            } else {
+                Box::new(DefaultRouteInvite {
+                    routing_state: self.inner.routing_state.clone(),
+                    data_context: self.inner.server.data_context.clone(),
+                    source_trunk_hint,
+                })
+            };
 
         let dialplan = if let Some(resolver) = self.inner.server.call_router.as_ref() {
             resolver.resolve(&tx.original, route_invite, &caller).await
@@ -248,7 +292,9 @@ impl CallModule {
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
                 warn!(%code, key = %tx.key,"failed to build dialplan: {}", reason_phrase);
-                self.record_failed_call(tx, code.clone()).await.ok();
+                self.record_failed_call(tx, &cookie, code.clone())
+                    .await
+                    .ok();
                 tx.reply_with(code, vec![reason_phrase], None)
                     .await
                     .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
@@ -257,7 +303,7 @@ impl CallModule {
         };
 
         // Create event sender for media stream events
-        let builder = ProxyCallBuilder::new(cookie, dialplan)
+        let builder = ProxyCallBuilder::new(cookie.clone(), dialplan)
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
             .with_cancel_token(cancel_token);
 
@@ -267,7 +313,9 @@ impl CallModule {
                 Ok(call) => call,
                 Err((code, reason_phrase)) => {
                     warn!(%code, key = %tx.key,"failed to proxy call {}", reason_phrase);
-                    self.record_failed_call(tx, code.clone()).await.ok();
+                    self.record_failed_call(tx, &cookie, code.clone())
+                        .await
+                        .ok();
                     let reason_phrase = rsip::Header::Other("Reason".into(), reason_phrase);
                     tx.reply_with(code, vec![reason_phrase], None)
                         .await
@@ -311,27 +359,103 @@ impl CallModule {
     async fn record_failed_call(
         &self,
         tx: &Transaction,
+        cookie: &TransactionCookie,
         status_code: rsip::StatusCode,
     ) -> Result<()> {
-        if let Some(sender) = self.inner.server.callrecord_sender.as_ref() {
-            let dialog_id = DialogId::try_from(&tx.original)?;
-            let now = Utc::now();
-            let caller = tx.original.from_header()?.uri()?.to_string();
-            let callee = tx.original.to_header()?.uri()?.to_string();
-            let offer = Some(String::from_utf8_lossy(&tx.original.body).to_string());
-            let record = CallRecord {
-                call_type: crate::call::ActiveCallType::Sip,
-                call_id: dialog_id.to_string(),
-                start_time: now.clone(),
-                end_time: now,
-                caller,
-                callee,
-                status_code: status_code.into(),
-                offer,
-                hangup_reason: Some(CallRecordHangupReason::BySystem),
-                ..Default::default()
+        let dialog_id = DialogId::try_from(&tx.original)?;
+        let now = Utc::now();
+        let caller = tx.original.from_header()?.uri()?.to_string();
+        let callee = tx.original.to_header()?.uri()?.to_string();
+        let offer = Some(String::from_utf8_lossy(&tx.original.body).to_string());
+
+        let mut extras_map: HashMap<String, Value> = HashMap::new();
+        extras_map.insert(
+            "status_code".to_string(),
+            Value::Number(JsonNumber::from(u16::from(status_code.clone()))),
+        );
+
+        let record = CallRecord {
+            call_type: crate::call::ActiveCallType::Sip,
+            option: None,
+            call_id: dialog_id.to_string(),
+            start_time: now.clone(),
+            ring_time: None,
+            answer_time: None,
+            end_time: now,
+            caller: caller.clone(),
+            callee: callee.clone(),
+            status_code: status_code.into(),
+            offer,
+            answer: None,
+            hangup_reason: Some(CallRecordHangupReason::BySystem),
+            recorder: Vec::new(),
+            extras: if extras_map.is_empty() {
+                None
+            } else {
+                Some(extras_map.clone())
+            },
+            dump_event_file: None,
+            refer_callrecord: None,
+        };
+
+        if let Some(db) = self.inner.server.database.as_ref() {
+            let direction = if cookie.is_from_trunk() {
+                "inbound".to_string()
+            } else {
+                "internal".to_string()
+            };
+            let trunk_name = cookie.get_source_trunk();
+            let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
+                let trunks = self.inner.server.data_context.trunks_snapshot().await;
+                let trunk_id = trunks.get(name).and_then(|config| config.id);
+                (Some(name.clone()), trunk_id)
+            } else {
+                (None, None)
             };
 
+            let metadata_value = if extras_map.is_empty() {
+                None
+            } else {
+                let mut map = JsonMap::new();
+                for (key, value) in extras_map.iter() {
+                    map.insert(key.clone(), value.clone());
+                }
+                Some(Value::Object(map))
+            };
+
+            let persist_args = CallRecordPersistArgs {
+                direction,
+                status: "failed".to_string(),
+                from_number: extract_sip_username(&caller),
+                to_number: extract_sip_username(&callee),
+                caller_name: None,
+                agent_name: None,
+                queue: None,
+                department_id: None,
+                extension_id: None,
+                sip_trunk_id,
+                route_id: None,
+                sip_gateway,
+                recording_url: None,
+                recording_duration_secs: None,
+                has_transcript: false,
+                transcript_status: "pending".to_string(),
+                transcript_language: None,
+                tags: None,
+                quality_mos: None,
+                quality_latency_ms: None,
+                quality_jitter_ms: None,
+                quality_packet_loss_percent: None,
+                analytics: None,
+                metadata: metadata_value,
+            };
+
+            if let Err(err) = persist_call_record(db, &record, persist_args).await {
+                warn!(dialog_id = %dialog_id, error = %err, "failed to persist failed call record");
+            }
+        }
+
+        if let Some(sender) = self.inner.server.callrecord_sender.as_ref() {
             if let Err(e) = sender.send(record) {
                 warn!(error=%e, "failed to send call record");
             }
