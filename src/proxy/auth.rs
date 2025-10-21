@@ -251,15 +251,15 @@ impl ProxyModule for AuthModule {
                 }
 
                 let from_uri = tx.original.from_header()?.uri()?;
-                let realm = tx.original.uri().host().to_string();
-                let realm = ProxyConfig::normalize_realm(&realm);
+                let request_host = tx.original.uri().host().to_string();
+                let realm = self.server.proxy_config.select_realm(request_host.as_str());
                 // Check which type of authentication was attempted or send both challenges
                 let has_proxy_auth_header =
                     rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
                         .is_some();
                 if has_proxy_auth_header {
                     // Send proxy challenge if proxy auth was attempted
-                    let proxy_auth = self.create_proxy_auth_challenge(realm)?;
+                    let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
                     info!(
                         from = from_uri.to_string(),
                         realm = realm,
@@ -272,7 +272,7 @@ impl ProxyModule for AuthModule {
                         .ok();
                 } else {
                     // Send WWW challenge if WWW auth was attempted
-                    let www_auth = self.create_www_auth_challenge(realm)?;
+                    let www_auth = self.create_www_auth_challenge(&realm)?;
                     info!(
                         from = from_uri.to_string(),
                         realm = realm,
