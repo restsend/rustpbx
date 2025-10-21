@@ -235,13 +235,17 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
             .into_response();
     };
 
-    match sip_server.inner.data_context.reload_acl_rules().await {
+    let context = sip_server.inner.data_context.clone();
+
+    match context.reload_acl_rules().await {
         Ok(metrics) => {
             let total = metrics.total;
+            let active_rules = context.acl_rules_snapshot().await;
             Json(serde_json::json!({
                 "status": "ok",
                 "acl_rules_reloaded": total,
                 "metrics": metrics,
+                "active_rules": active_rules,
             }))
         }
         .into_response(),

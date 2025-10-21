@@ -98,7 +98,6 @@ impl From<UserModel> for UserView {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/settings", get(page_settings))
-        .route("/settings/reload/acl", post(reload_acl_rules))
         .route(
             "/settings/departments",
             post(query_departments).put(create_department),
@@ -135,6 +134,7 @@ pub async fn page_settings(
 async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     let mut data = serde_json::Map::new();
     let now = Utc::now();
+    let ami_endpoint = "/ami/v1";
 
     let mut platform = json!({});
     let mut proxy = json!({});
@@ -307,8 +307,39 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "label": "Reload ACL rules",
             "description": "Re-read ACL definitions from config files and embedded lists.",
             "method": "POST",
-            "endpoint": format!("{}/settings/reload/acl", state.base_path()),
+            "endpoint": format!("{}/reload/acl", ami_endpoint.trim_end_matches('/')),
         }));
+
+        let (storage_meta, storage_profiles) = build_storage_profiles(config);
+
+        data.insert("storage".to_string(), storage_meta.clone());
+        data.insert(
+            "storage_profiles".to_string(),
+            JsonValue::Array(storage_profiles.clone()),
+        );
+
+        data.insert(
+            "server".to_string(),
+            json!({
+                "operations": operations.clone(),
+                "storage": storage_meta,
+                "storage_profiles": storage_profiles,
+            }),
+        );
+    } else {
+        data.insert("storage".to_string(), json!({ "mode": "unknown" }));
+        data.insert(
+            "storage_profiles".to_string(),
+            JsonValue::Array(Vec::<JsonValue>::new()),
+        );
+        data.insert(
+            "server".to_string(),
+            json!({
+                "operations": operations.clone(),
+                "storage": {"mode": "unknown"},
+                "storage_profiles": Vec::<JsonValue>::new(),
+            }),
+        );
     }
 
     let stats = json!({
@@ -323,17 +354,10 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     data.insert("config".to_string(), config_meta);
     data.insert("acl".to_string(), acl);
     data.insert("stats".to_string(), stats);
+    data.insert("ami_endpoint".to_string(), json!(ami_endpoint));
     data.insert(
         "operations".to_string(),
         JsonValue::Array(operations.clone()),
-    );
-    data.insert(
-        "server".to_string(),
-        json!({
-            "operations": operations,
-            "storage": { "mode": "config" },
-            "storage_profiles": [],
-        }),
     );
 
     JsonValue::Object(data)
@@ -362,48 +386,146 @@ async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize
     }
 }
 
-async fn reload_acl_rules(
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-) -> Response {
-    let Some(app_state) = state.app_state() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "message": "Application state unavailable" })),
-        )
-            .into_response();
-    };
+fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<JsonValue>) {
+    use serde_json::Map;
 
-    let Some(sip_server) = app_state.sip_server.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "message": "SIP proxy not running" })),
-        )
-            .into_response();
-    };
+    struct Profile {
+        id: String,
+        label: &'static str,
+        description: String,
+        config: Map<String, JsonValue>,
+    }
 
-    let inner = sip_server.inner.clone();
-    let context = inner.data_context.clone();
-
-    match context.reload_acl_rules().await {
-        Ok(metrics) => {
-            let active_rules = context.acl_rules_snapshot().await;
-            Json(json!({
-                "status": "ok",
-                "metrics": metrics,
-                "active_rules": active_rules,
-            }))
-            .into_response()
+    impl Profile {
+        fn new(id: impl Into<String>, label: &'static str, description: impl Into<String>) -> Self {
+            Self {
+                id: id.into(),
+                label,
+                description: description.into(),
+                config: Map::new(),
+            }
         }
-        Err(err) => {
-            warn!("failed to reload acl rules: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to reload ACL rules: {}", err) })),
-            )
-                .into_response()
+
+        fn insert(&mut self, key: &str, value: JsonValue) {
+            self.config.insert(key.to_string(), value);
+        }
+
+        fn into_json(self) -> JsonValue {
+            let mut object = Map::new();
+            object.insert("id".to_string(), json!(self.id));
+            object.insert("label".to_string(), json!(self.label));
+            object.insert("description".to_string(), json!(self.description));
+            object.insert("config".to_string(), JsonValue::Object(self.config));
+            JsonValue::Object(object)
         }
     }
+
+    let (mode, callrecord_profile) = match config.callrecord.as_ref() {
+        Some(CallRecordConfig::Local { root }) => {
+            let mut profile = Profile::new(
+                "callrecord-local",
+                "Call recordings",
+                format!("Storing call detail records on {}", root),
+            );
+            profile.insert("type", json!("local"));
+            profile.insert("root", json!(root));
+            ("local".to_string(), profile)
+        }
+        Some(CallRecordConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            root,
+            with_media,
+            keep_media_copy,
+        }) => {
+            let mut profile = Profile::new(
+                "callrecord-s3",
+                "Call recordings",
+                format!("Uploading call detail records to S3 bucket {}", bucket),
+            );
+            let vendor_value = serde_json::to_value(vendor)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| format!("{:?}", vendor).to_lowercase());
+            profile.insert("type", json!("s3"));
+            profile.insert("vendor", json!(vendor_value));
+            profile.insert("bucket", json!(bucket));
+            profile.insert("region", json!(region));
+            profile.insert("endpoint", json!(endpoint));
+            profile.insert("root", json!(root));
+            profile.insert("access_key", json!(mask_basic(access_key)));
+            profile.insert("secret_key", json!(mask_basic(secret_key)));
+            if let Some(flag) = with_media {
+                profile.insert("with_media", json!(flag));
+            }
+            if let Some(flag) = keep_media_copy {
+                profile.insert("keep_media_copy", json!(flag));
+            }
+            ("s3".to_string(), profile)
+        }
+        Some(CallRecordConfig::Http {
+            url,
+            headers,
+            with_media,
+            keep_media_copy,
+        }) => {
+            let mut profile = Profile::new(
+                "callrecord-http",
+                "Call recordings",
+                "Streaming call detail records to HTTP endpoint",
+            );
+            profile.insert("type", json!("http"));
+            profile.insert("url", json!(url));
+            if let Some(headers) = headers {
+                profile.insert("headers", json!(headers));
+            }
+            if let Some(flag) = with_media {
+                profile.insert("with_media", json!(flag));
+            }
+            if let Some(flag) = keep_media_copy {
+                profile.insert("keep_media_copy", json!(flag));
+            }
+            ("http".to_string(), profile)
+        }
+        None => {
+            let mut profile = Profile::new(
+                "callrecord-local",
+                "Call recordings",
+                format!("Storing call detail records on {}", config.recorder_path),
+            );
+            profile.insert("type", json!("local"));
+            profile.insert("root", json!(&config.recorder_path));
+            ("local".to_string(), profile)
+        }
+    };
+
+    let mut spool_profile = Profile::new(
+        "spool-paths",
+        "Spool directories",
+        "Server-side spool paths for recordings and media cache.",
+    );
+    spool_profile.insert("recorder_path", json!(&config.recorder_path));
+    spool_profile.insert("media_cache_path", json!(&config.media_cache_path));
+
+    let active_profile_id = callrecord_profile.id.clone();
+    let active_description = callrecord_profile.description.clone();
+    let storage_mode = mode.clone();
+
+    let storage_meta = json!({
+        "mode": storage_mode,
+        "active_profile": active_profile_id,
+        "description": active_description,
+        "recorder_path": &config.recorder_path,
+        "media_cache_path": &config.media_cache_path,
+    });
+
+    let profiles = vec![callrecord_profile.into_json(), spool_profile.into_json()];
+
+    (storage_meta, profiles)
 }
 
 async fn query_departments(
