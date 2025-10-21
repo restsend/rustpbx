@@ -6,6 +6,187 @@
         basePath: {{ (base_path | default("/console")) | tojson }},
         settings: {{ settings | default({}) | tojson }}
     })' x-init="init()">
+        <div x-show="appReloadModal.open" x-cloak
+            class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
+            @keydown.escape.window="closeReloadModal()" @click.self="closeReloadModal()">
+            <div class="w-full max-w-3xl rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
+                <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+                    <div>
+                        <h3 class="text-base font-semibold text-slate-900">Reload application</h3>
+                        <p class="text-xs text-slate-500">Validate configuration and restart services safely.</p>
+                    </div>
+                    <button type="button" class="rounded-md p-2 text-slate-400 transition hover:text-slate-600"
+                        @click="closeReloadModal()" :disabled="appReloading">
+                        <span class="sr-only">Close</span>
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="px-6 py-4">
+                    <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                        <p>This action restarts SIP proxy, user agent, and console services. Active calls will drop and
+                            new requests queue until the restart completes.</p>
+                    </div>
+                    <ul class="mt-4 space-y-3">
+                        <template x-for="check in appReloadModal.checks" :key="check.id">
+                            <li class="flex items-start gap-3">
+                                <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
+                                    :class="reloadCheckIndicatorClass(check.status)"></span>
+                                <div class="flex-1 text-sm">
+                                    <div class="flex items-center gap-2">
+                                        <div class="font-semibold text-slate-800" x-text="check.label"></div>
+                                        <span class="text-[10px] font-semibold uppercase tracking-wide"
+                                            :class="reloadCheckStatusClass(check.status)"
+                                            x-text="reloadCheckStatusLabel(check.status)"></span>
+                                    </div>
+                                    <div class="text-xs text-slate-500" x-text="check.detail || check.hint"></div>
+                                </div>
+                            </li>
+                        </template>
+                    </ul>
+
+                    <template x-if="appReloadModal.error">
+                        <div class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
+                            <div class="font-semibold"
+                                x-text="appReloadModal.mode === 'check' ? 'Validation failed' : 'Reload failed'"></div>
+                            <p class="mt-1" x-text="appReloadModal.error"></p>
+                        </div>
+                    </template>
+
+                    <template x-if="appReloadModal.message && !appReloadModal.error">
+                        <div
+                            class="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+                            <div class="font-semibold" x-text="appReloadModal.mode === 'check'
+                                    ? (appReloadModal.status === 'running' ? 'Validation in progress' : 'Validation result')
+                                    : 'Reload in progress'"></div>
+                            <p class="mt-1" x-text="appReloadModal.message"></p>
+                        </div>
+                    </template>
+                </div>
+                <div class="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
+                    <div class="text-xs text-slate-500">
+                        <span class="font-semibold" x-text="reloadStatusLabel"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button"
+                            class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            @click="closeReloadModal()" :disabled="appReloading && appReloadModal.status === 'running'">
+                            Cancel
+                        </button>
+                        <button type="button"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg border border-sky-200 bg-white px-5 py-2 text-sm font-semibold text-sky-600 shadow-sm transition hover:border-sky-300 hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                            @click="startReloadCheck()" :disabled="appReloading || appReloadModal.status === 'running'">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l3 3 7-7" />
+                            </svg>
+                            <span
+                                x-text="appReloadModal.mode === 'check' && appReloadModal.status === 'error' ? 'Retry check' : 'Validate configuration'"></span>
+                        </button>
+                        <template x-if="appReloadModal.mode === 'check' || appReloadModal.status !== 'success'">
+                            <button type="button"
+                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-rose-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap"
+                                @click="startReloadApplication()"
+                                :disabled="appReloading || appReloadModal.status === 'running'">
+                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                </svg>
+                                <span x-text="reloadConfirmLabel"></span>
+                            </button>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="aclReloadModal.open" x-cloak
+            class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
+            @keydown.escape.window="closeAclReloadModal()" @click.self="closeAclReloadModal()">
+            <div class="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
+                <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+                    <div>
+                        <h3 class="text-base font-semibold text-slate-900">Reload ACL rules</h3>
+                        <p class="text-xs text-slate-500">Apply updated allow/deny lists without restarting the proxy.
+                        </p>
+                    </div>
+                    <button type="button" class="rounded-md p-2 text-slate-400 transition hover:text-slate-600"
+                        @click="closeAclReloadModal()" :disabled="aclReloading">
+                        <span class="sr-only">Close</span>
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="px-6 py-4">
+                    <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                        <p>Live reload updates call admission immediately. Existing calls continue, but new sessions
+                            follow the refreshed rules.</p>
+                    </div>
+                    <ul class="mt-4 space-y-3 text-sm text-slate-600">
+                        <li class="flex items-start gap-3">
+                            <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
+                                :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
+                            <div>
+                                <div class="font-semibold text-slate-800">Refresh proxy filters</div>
+                                <div class="text-xs text-slate-500">Send reload command to the SIP proxy.</div>
+                            </div>
+                        </li>
+                        <li class="flex items-start gap-3">
+                            <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
+                                :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
+                            <div>
+                                <div class="font-semibold text-slate-800">Confirm rule summary</div>
+                                <div class="text-xs text-slate-500">Review new totals and metrics in the panel.</div>
+                            </div>
+                        </li>
+                    </ul>
+
+                    <template x-if="aclReloadModal.error">
+                        <div class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
+                            <div class="font-semibold">Reload failed</div>
+                            <p class="mt-1" x-text="aclReloadModal.error"></p>
+                        </div>
+                    </template>
+
+                    <template x-if="aclReloadModal.status === 'success' && aclReloadModal.message">
+                        <div
+                            class="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+                            <div class="font-semibold">Reload complete</div>
+                            <p class="mt-1" x-text="aclReloadModal.message"></p>
+                        </div>
+                    </template>
+                </div>
+                <div class="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
+                    <div class="text-xs text-slate-500">
+                        <span class="font-semibold" x-text="aclReloadStatusLabel"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button"
+                            class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            @click="closeAclReloadModal()"
+                            :disabled="aclReloading && aclReloadModal.status === 'running'">
+                            Cancel
+                        </button>
+                        <template x-if="aclReloadModal.status !== 'success'">
+                            <button type="button"
+                                class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                @click="startAclReload()"
+                                :disabled="aclReloading || aclReloadModal.status === 'running'">
+                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                                </svg>
+                                <span
+                                    x-text="aclReloadModal.status === 'error' ? 'Retry reload' : 'Confirm reload'"></span>
+                            </button>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
                 <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Control plane</p>
@@ -18,15 +199,9 @@
                         Last action · <span x-text="lastOperation.timestamp"></span>
                     </span>
                 </template>
-                <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                    @click="fetchDepartments(); fetchUsers();">
-                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                        <path stroke-linecap="round" stroke-linejoin="round"
-                            d="M4.5 10a5.5 5.5 0 119.548 3.548m1.202 3.202V13h-3.75" />
-                    </svg>
-                    Sync directory
-                </button>
+                <span class="rounded-full bg-slate-900/5 px-3 py-1.5 text-xs font-semibold text-slate-600">
+                    Uptime · <span class="font-mono text-slate-700" x-text="platform.uptime_pretty || '—'"></span>
+                </span>
             </div>
         </div>
 
@@ -51,7 +226,7 @@
 
         <section x-show="activeTab === 'platform'" x-cloak x-transition.opacity class="space-y-6"
             id="settings-tab-platform" role="tabpanel" tabindex="0">
-            <div class="space-y-6">
+            <div class="grid gap-6 lg:grid-cols-2">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
@@ -64,203 +239,149 @@
                                 x-text="platform.version || site_version || '—'"></span>
                         </div>
                     </div>
-                    <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Uptime</div>
-                            <div class="mt-1 text-sm font-semibold text-slate-800"
-                                x-text="platform.uptime_pretty || '—'"></div>
-                            <div class="text-xs text-slate-500"
-                                x-text="stats.generated_at ? ('Updated · ' + formatDateTime(stats.generated_at)) : 'Updated · —'">
+                    <div class="mt-4 space-y-3 text-sm text-slate-600">
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
+                            <span class="font-mono" x-text="proxyConfig.addr || '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Ports</span>
+                            <span class="font-mono"
+                                x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Modules</span>
+                            <span
+                                x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Data sources</span>
+                            <span
+                                x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
+                        </div>
+                    </div>
+                    <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
+                        </div>
+                        <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.proxy?.transactions?.running)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.proxy?.transactions?.finished)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.proxy?.transactions?.waiting_ack)"></div>
                             </div>
                         </div>
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">HTTP bind
-                            </div>
-                            <div class="mt-1 text-sm font-semibold text-slate-800" x-text="platform.http_addr || '—'">
-                            </div>
-                            <div class="text-xs text-slate-500"
-                                x-text="platform.log_level ? ('Log level · ' + platform.log_level) : 'Log level · default'">
-                            </div>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Proxy</div>
-                            <div class="mt-1 text-sm font-semibold"
-                                :class="proxyConfig.enabled ? 'text-emerald-600' : 'text-rose-600'"
-                                x-text="proxyConfig.enabled ? 'Online' : 'Offline'"></div>
-                            <div class="text-xs text-slate-500"
-                                x-text="proxyConfig.max_concurrency ? ('Concurrency · ' + proxyConfig.max_concurrency) : 'Concurrency · —'">
-                            </div>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">User agent
-                            </div>
-                            <div class="mt-1 text-sm font-semibold"
-                                :class="useragentConfig.enabled ? 'text-emerald-600' : 'text-slate-600'"
-                                x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></div>
-                            <div class="text-xs text-slate-500"
-                                x-text="useragentConfig.register_users ? ('Registrations · ' + useragentConfig.register_users) : 'Registrations · —'">
-                            </div>
+                        <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                            Active dialogs · <span class="font-semibold text-slate-700"
+                                x-text="displayMetric(stats.proxy?.dialogs)"></span>
                         </div>
                     </div>
                 </div>
-
-                <div class="grid gap-6 lg:grid-cols-2">
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <h2 class="text-base font-semibold text-slate-900">Proxy runtime</h2>
-                                <p class="text-xs text-slate-500">Listening sockets, modules, and transaction counters.
-                                </p>
-                            </div>
-                            <span class="rounded-full px-3 py-1 text-xs font-semibold"
-                                :class="proxyConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'">
-                                <span x-text="proxyConfig.enabled ? 'Online' : 'Offline'"></span>
-                            </span>
-                        </div>
-                        <div class="mt-4 space-y-3 text-sm text-slate-600">
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
-                                <span class="font-mono" x-text="proxyConfig.addr || '—'"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Ports</span>
-                                <span class="font-mono"
-                                    x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Modules</span>
-                                <span
-                                    x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Data sources</span>
-                                <span
-                                    x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
-                            </div>
-                        </div>
-                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
-                            </div>
-                            <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.proxy?.transactions?.running)"></div>
-                                </div>
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.proxy?.transactions?.finished)"></div>
-                                </div>
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.proxy?.transactions?.waiting_ack)"></div>
-                                </div>
-                            </div>
-                            <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                                Active dialogs · <span class="font-semibold text-slate-700"
-                                    x-text="displayMetric(stats.proxy?.dialogs)"></span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <h2 class="text-base font-semibold text-slate-900">User agent runtime</h2>
-                                <p class="text-xs text-slate-500">Registration service state and handshake metrics.</p>
-                            </div>
-                            <span class="rounded-full px-3 py-1 text-xs font-semibold"
-                                :class="useragentConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
-                                <span x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></span>
-                            </span>
-                        </div>
-                        <div class="mt-4 space-y-3 text-sm text-slate-600">
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
-                                <span class="font-mono" x-text="useragentConfig.addr || '—'"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">UDP port</span>
-                                <span class="font-mono" x-text="displayMetric(useragentConfig.udp_port)"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">User-Agent</span>
-                                <span x-text="useragentConfig.useragent || '—'"></span>
-                            </div>
-                            <div class="flex items-baseline justify-between">
-                                <span class="text-xs uppercase tracking-wide text-slate-400">Call-ID suffix</span>
-                                <span class="font-mono" x-text="useragentConfig.callid_suffix || '—'"></span>
-                            </div>
-                        </div>
-                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
-                            </div>
-                            <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.useragent?.transactions?.running)"></div>
-                                </div>
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.useragent?.transactions?.finished)"></div>
-                                </div>
-                                <div>
-                                    <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
-                                    <div class="mt-1 font-semibold text-slate-900"
-                                        x-text="displayMetric(stats.useragent?.transactions?.waiting_ack)"></div>
-                                </div>
-                            </div>
-                            <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                                Active dialogs · <span class="font-semibold text-slate-700"
-                                    x-text="displayMetric(stats.useragent?.dialogs)"></span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Key configuration</h2>
-                            <p class="text-xs text-slate-500">Selected settings from the active configuration file.</p>
+                            <h2 class="text-base font-semibold text-slate-900">User agent runtime</h2>
+                            <p class="text-xs text-slate-500">Registration service state and handshake metrics.</p>
+                        </div>
+                        <span class="rounded-full px-3 py-1 text-xs font-semibold"
+                            :class="useragentConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
+                            <span x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></span>
+                        </span>
+                    </div>
+                    <div class="mt-4 space-y-3 text-sm text-slate-600">
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
+                            <span class="font-mono" x-text="useragentConfig.addr || '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">UDP port</span>
+                            <span class="font-mono" x-text="displayMetric(useragentConfig.udp_port)"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">User-Agent</span>
+                            <span x-text="useragentConfig.useragent || '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Call-ID suffix</span>
+                            <span class="font-mono" x-text="useragentConfig.callid_suffix || '—'"></span>
                         </div>
                     </div>
-                    <div class="mt-4 overflow-x-auto">
-                        <table class="min-w-full divide-y divide-slate-200 text-sm">
-                            <thead
-                                class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                <tr>
-                                    <th class="px-4 py-2">Key</th>
-                                    <th class="px-4 py-2">Value</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-100">
-                                <template x-if="!keyConfigRows().length">
-                                    <tr>
-                                        <td class="px-4 py-3 text-xs text-slate-400" colspan="2">No configuration
-                                            metadata available.</td>
-                                    </tr>
-                                </template>
-                                <template x-for="item in keyConfigRows()" :key="item.label">
-                                    <tr>
-                                        <td class="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400"
-                                            x-text="item.label"></td>
-                                        <td class="px-4 py-3 text-sm text-slate-700">
-                                            <div class="font-mono whitespace-pre-line" x-text="item.value"></div>
-                                            <div class="text-xs text-slate-400" x-show="item.hint" x-text="item.hint">
-                                            </div>
-                                        </td>
-                                    </tr>
-                                </template>
-                            </tbody>
-                        </table>
+                    <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
+                        </div>
+                        <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.useragent?.transactions?.running)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.useragent?.transactions?.finished)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
+                                <div class="mt-1 font-semibold text-slate-900"
+                                    x-text="displayMetric(stats.useragent?.transactions?.waiting_ack)"></div>
+                            </div>
+                        </div>
+                        <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                            Active dialogs · <span class="font-semibold text-slate-700"
+                                x-text="displayMetric(stats.useragent?.dialogs)"></span>
+                        </div>
                     </div>
                 </div>
-
             </div>
+
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Key configuration</h2>
+                        <p class="text-xs text-slate-500">Selected settings from the active configuration file.</p>
+                    </div>
+                </div>
+                <div class="mt-4 overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead
+                            class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th class="px-4 py-2">Key</th>
+                                <th class="px-4 py-2">Value</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <template x-if="!keyConfigRows().length">
+                                <tr>
+                                    <td class="px-4 py-3 text-xs text-slate-400" colspan="2">No configuration
+                                        metadata available.</td>
+                                </tr>
+                            </template>
+                            <template x-for="item in keyConfigRows()" :key="item.label">
+                                <tr>
+                                    <td class="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400"
+                                        x-text="item.label"></td>
+                                    <td class="px-4 py-3 text-sm text-slate-700">
+                                        <div class="font-mono whitespace-pre-line" x-text="item.value"></div>
+                                        <div class="text-xs text-slate-400" x-show="item.hint" x-text="item.hint">
+                                        </div>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
         </section>
 
         <section x-show="activeTab === 'storage'" x-cloak x-transition.opacity class="space-y-6"
@@ -376,8 +497,54 @@
                             <div class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-3">
                                 <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Reload
                                     metrics</div>
-                                <pre class="mt-2 max-h-40 overflow-auto bg-slate-50 px-3 py-2 text-xs text-slate-600"
-                                    x-text="formatMetadata(acl.metrics)"></pre>
+                                <dl class="mt-3 grid gap-3 text-xs text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
+                                    <div>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400">Total rules</dt>
+                                        <dd class="mt-1 text-sm font-semibold text-slate-800"
+                                            x-text="acl.metrics?.total ?? '—'"></dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400">Embedded rules
+                                        </dt>
+                                        <dd class="mt-1 text-sm font-semibold text-slate-800"
+                                            x-text="acl.metrics?.config_count ?? 0"></dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400">File rules</dt>
+                                        <dd class="mt-1 text-sm font-semibold text-slate-800"
+                                            x-text="acl.metrics?.file_count ?? 0"></dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400">Reload duration
+                                        </dt>
+                                        <dd class="mt-1 text-sm font-semibold text-slate-800"
+                                            x-text="formatDuration(acl.metrics?.duration_ms) || '—'"></dd>
+                                    </div>
+                                </dl>
+                                <template x-if="acl.metrics?.files?.length">
+                                    <div class="mt-3 text-xs text-slate-600">
+                                        <div class="text-[11px] uppercase tracking-wide text-slate-400">Loaded files
+                                        </div>
+                                        <ul class="mt-1 space-y-1">
+                                            <template x-for="file in acl.metrics.files" :key="file">
+                                                <li class="rounded bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-700"
+                                                    x-text="file"></li>
+                                            </template>
+                                        </ul>
+                                    </div>
+                                </template>
+                                <template x-if="acl.metrics?.patterns?.length">
+                                    <div class="mt-3 text-xs text-slate-600">
+                                        <div class="text-[11px] uppercase tracking-wide text-slate-400">File patterns
+                                        </div>
+                                        <ul class="mt-1 space-y-1">
+                                            <template x-for="pattern in acl.metrics.patterns" :key="pattern">
+                                                <li class="rounded bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-700"
+                                                    x-text="pattern"></li>
+                                            </template>
+                                        </ul>
+                                    </div>
+                                </template>
                             </div>
                         </template>
                         <template x-if="operations.length">
@@ -394,22 +561,21 @@
                                                 class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                                 <div class="space-y-2">
                                                     <div class="text-sm font-semibold text-slate-700"
-                                                        x-text="action.label"></div>
+                                                        x-text="action.label">
+                                                    </div>
                                                     <p class="text-xs text-slate-600" x-show="action.description"
                                                         x-text="action.description"></p>
                                                 </div>
                                                 <button type="button"
                                                     class="inline-flex items-center justify-center gap-2 rounded-md border border-rose-500 bg-rose-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-500 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2"
-                                                    :disabled="action.id === 'reload-acl' ? (!acl.reload_supported || aclReloading) : false"
+                                                    :disabled="operationDisabled(action)"
                                                     @click="triggerOperation(action)">
                                                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
                                                         stroke="currentColor" stroke-width="1.6">
                                                         <path stroke-linecap="round" stroke-linejoin="round"
                                                             d="M7 5l6 5-6 5" />
                                                     </svg>
-                                                    <span x-text="action.id === 'reload-acl'
-                                                            ? (aclReloading ? 'Reloading...' : (acl.reload_supported ? 'Run action' : 'Proxy offline'))
-                                                            : 'Run action'"></span>
+                                                    <span x-text="operationButtonLabel(action)"></span>
                                                 </button>
                                             </div>
                                         </div>
@@ -487,7 +653,8 @@
                                 :key="index + '-' + (entry?.id || '')">
                                 <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                                     <div class="font-semibold text-slate-800"
-                                        x-text="entry.title || entry.id || 'Feed item'"></div>
+                                        x-text="entry.title || entry.id || 'Feed item'">
+                                    </div>
                                     <div class="mt-1 text-[11px] text-slate-500"
                                         x-text="entry.description || entry.note || 'No description provided.'"></div>
                                     <div class="mt-1 text-[11px] text-slate-400" x-text="entry.source || ''"></div>
@@ -540,12 +707,12 @@
                                     x-show="activeProvider">
                                     <div class="flex items-center justify-between">
                                         <div class="text-base font-semibold text-slate-800"
-                                            x-text="activeProvider.name"></div>
+                                            x-text="activeProvider ? activeProvider.name : '—'"></div>
                                         <span
                                             class="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">Connected</span>
                                     </div>
                                     <div class="mt-2 text-xs text-slate-500">Token hint: <span class="font-mono"
-                                            x-text="activeProvider.token_hint"></span></div>
+                                            x-text="activeProvider ? activeProvider.token_hint : '—'"></span></div>
                                     <div class="mt-3 text-xs text-slate-500">Supported languages</div>
                                     <div class="mt-1 flex flex-wrap gap-2 text-[11px]">
                                         <template x-for="lang in asr.languages || []" :key="lang">
@@ -1152,6 +1319,23 @@
             acl: { active_rules: [], embedded_count: 0, file_patterns: [], reload_supported: false, metrics: null },
             operations: [],
             aclReloading: false,
+            aclReloadModal: {
+                open: false,
+                status: 'idle',
+                error: null,
+                message: '',
+                action: null,
+            },
+            appReloading: false,
+            appReloadModal: {
+                open: false,
+                status: 'idle',
+                error: null,
+                message: '',
+                action: null,
+                mode: 'reload',
+                checks: [],
+            },
             server: {},
             retention: {},
             security: {},
@@ -1274,6 +1458,8 @@
                 this.selectedUserId = '';
                 this.fetchDepartments();
                 this.fetchUsers();
+                this.resetAclReloadModal();
+                this.resetReloadModal();
             },
             get storageProfiles() {
                 return Array.isArray(this.server.storage_profiles) ? this.server.storage_profiles : [];
@@ -2076,12 +2262,49 @@
                 }
                 return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
             },
+            operationDisabled(action) {
+                if (!action) {
+                    return true;
+                }
+                if (action.id === 'reload-acl') {
+                    return !this.acl.reload_supported || this.aclReloading || this.aclReloadModal.open;
+                }
+                if (action.id === 'reload-app') {
+                    return this.appReloading || this.appReloadModal.open;
+                }
+                return false;
+            },
+            operationButtonLabel(action) {
+                if (!action) {
+                    return 'Run action';
+                }
+                if (action.id === 'reload-acl') {
+                    if (!this.acl.reload_supported) {
+                        return 'Proxy offline';
+                    }
+                    if (this.aclReloading) {
+                        return 'Reloading...';
+                    }
+                    if (this.aclReloadModal.open) {
+                        return 'Confirming...';
+                    }
+                    return 'Run action';
+                }
+                if (action.id === 'reload-app') {
+                    return this.appReloading ? 'Reloading...' : 'Run action';
+                }
+                return 'Run action';
+            },
             async triggerOperation(action) {
                 if (!action) {
                     return;
                 }
                 if (action.id === 'reload-acl') {
-                    await this.reloadAcl();
+                    this.showAclReloadModal(action);
+                    return;
+                }
+                if (action.id === 'reload-app') {
+                    this.showReloadModal(action);
                     return;
                 }
                 const timestamp = new Date().toLocaleTimeString();
@@ -2095,12 +2318,57 @@
                     message: `${action.label || 'Operation'} acknowledged.`,
                 });
             },
+            showAclReloadModal(action) {
+                this.resetAclReloadModal();
+                this.aclReloadModal.open = true;
+                this.aclReloadModal.action = action;
+            },
+            closeAclReloadModal() {
+                if (this.aclReloading) {
+                    return;
+                }
+                this.aclReloadModal.open = false;
+            },
+            resetAclReloadModal() {
+                this.aclReloadModal = {
+                    open: false,
+                    status: 'idle',
+                    error: null,
+                    message: '',
+                    action: null,
+                };
+            },
+            get aclReloadStatusLabel() {
+                switch (this.aclReloadModal.status) {
+                    case 'running':
+                        return 'Reload in progress…';
+                    case 'success':
+                        return 'Rules refreshed successfully';
+                    case 'error':
+                        return 'Reload request failed';
+                    default:
+                        return 'Awaiting confirmation';
+                }
+            },
+            async startAclReload() {
+                if (this.aclReloading || this.aclReloadModal.status === 'running') {
+                    return;
+                }
+                this.aclReloadModal.status = 'running';
+                this.aclReloadModal.error = null;
+                this.aclReloadModal.message = '';
+                await this.reloadAcl();
+            },
             async reloadAcl() {
                 if (!this.acl.reload_supported) {
                     this.$dispatch('toast', {
                         title: 'Not available',
                         message: 'ACL reload is only available while the SIP proxy is running.',
                     });
+                    if (this.aclReloadModal.open) {
+                        this.aclReloadModal.status = 'error';
+                        this.aclReloadModal.error = 'SIP proxy is offline. Reload unavailable.';
+                    }
                     return;
                 }
                 if (this.aclReloading) {
@@ -2108,6 +2376,11 @@
                 }
                 this.aclReloading = true;
                 try {
+                    if (this.aclReloadModal.open && this.aclReloadModal.status !== 'running') {
+                        this.aclReloadModal.status = 'running';
+                        this.aclReloadModal.error = null;
+                        this.aclReloadModal.message = '';
+                    }
                     const endpoint = `${this.amiEndpoint.replace(/\/$/, '')}/reload/acl`;
                     const response = await fetch(endpoint, {
                         method: 'POST',
@@ -2138,12 +2411,22 @@
                         title: 'ACL reloaded',
                         message,
                     });
+                    if (this.aclReloadModal.open) {
+                        this.aclReloadModal.status = 'success';
+                        this.aclReloadModal.error = null;
+                        this.aclReloadModal.message = message;
+                    }
                     this.lastOperation = {
                         label: 'Reload ACL rules',
                         timestamp: new Date().toLocaleString(),
                         status: message,
                     };
                 } catch (err) {
+                    if (this.aclReloadModal.open) {
+                        this.aclReloadModal.status = 'error';
+                        this.aclReloadModal.error = err?.message || 'Unable to reload ACL rules.';
+                        this.aclReloadModal.message = '';
+                    }
                     this.$dispatch('toast', {
                         title: 'Reload failed',
                         message: err?.message || 'Unable to reload ACL rules.',
@@ -2152,11 +2435,291 @@
                     this.aclReloading = false;
                 }
             },
+            showReloadModal(action) {
+                this.resetReloadModal();
+                this.appReloadModal.open = true;
+                this.appReloadModal.action = action;
+                this.appReloadModal.mode = 'reload';
+                this.appReloadModal.checks = this.buildReloadChecklist();
+            },
+            closeReloadModal() {
+                if (this.appReloading) {
+                    return;
+                }
+                this.appReloadModal.open = false;
+            },
+            resetReloadModal() {
+                this.appReloadModal = {
+                    open: false,
+                    status: 'idle',
+                    error: null,
+                    message: '',
+                    action: null,
+                    mode: 'reload',
+                    checks: [],
+                };
+            },
+            buildReloadChecklist() {
+                return [
+                    {
+                        id: 'config-parse',
+                        label: 'Load configuration file',
+                        hint: 'Ensure the TOML file is parseable and present.',
+                        status: 'pending',
+                    },
+                    {
+                        id: 'console-enabled',
+                        label: 'Console availability',
+                        hint: 'Console must stay enabled to manage reloads.',
+                        status: 'pending',
+                    },
+                    {
+                        id: 'ports-available',
+                        label: 'Port availability',
+                        hint: 'New bindings must be free before restart.',
+                        status: 'pending',
+                    },
+                    {
+                        id: 'restart-services',
+                        label: 'Restart services',
+                        hint: 'Stop running services and relaunch with new config.',
+                        status: 'pending',
+                    },
+                ];
+            },
+            reloadCheckIndicatorClass(status) {
+                switch (status) {
+                    case 'success':
+                        return 'bg-emerald-500';
+                    case 'running':
+                        return 'bg-sky-400 animate-pulse';
+                    case 'error':
+                        return 'bg-rose-500';
+                    default:
+                        return 'bg-slate-300';
+                }
+            },
+            reloadCheckStatusClass(status) {
+                switch (status) {
+                    case 'success':
+                        return 'text-emerald-600';
+                    case 'running':
+                        return 'text-sky-600';
+                    case 'error':
+                        return 'text-rose-600';
+                    default:
+                        return 'text-slate-400';
+                }
+            },
+            reloadCheckStatusLabel(status) {
+                switch (status) {
+                    case 'success':
+                        return 'Done';
+                    case 'running':
+                        return 'Running';
+                    case 'error':
+                        return 'Failed';
+                    default:
+                        return 'Pending';
+                }
+            },
+            get reloadStatusLabel() {
+                const mode = this.appReloadModal.mode || 'reload';
+                switch (this.appReloadModal.status) {
+                    case 'running':
+                        return mode === 'check' ? 'Validating configuration…' : 'Running preflight checks…';
+                    case 'success':
+                        return mode === 'check'
+                            ? 'Configuration valid. Ready to reload.'
+                            : 'Reload succeeded. Services restarting…';
+                    case 'error':
+                        return mode === 'check'
+                            ? 'Validation failed. Review configuration.'
+                            : 'Reload request failed.';
+                    default:
+                        return 'Awaiting confirmation';
+                }
+            },
+            get reloadConfirmLabel() {
+                if (this.appReloadModal.mode === 'check') {
+                    if (this.appReloadModal.status === 'success') {
+                        return 'Reload now';
+                    }
+                    return 'Confirm reload';
+                }
+                return this.appReloadModal.status === 'error' ? 'Retry reload' : 'Confirm reload';
+            },
+            markCheck(id, status, detail = null) {
+                this.appReloadModal.checks = this.appReloadModal.checks.map((item) =>
+                    item.id === id ? { ...item, status, detail: detail || item.detail } : item
+                );
+            },
+            async startReloadApplication() {
+                if (this.appReloading || this.appReloadModal.status === 'running') {
+                    return;
+                }
+                await this.performReload({ checkOnly: false });
+            },
+            async startReloadCheck() {
+                if (this.appReloading || this.appReloadModal.status === 'running') {
+                    return;
+                }
+                await this.performReload({ checkOnly: true });
+            },
+            async performReload({ checkOnly = false } = {}) {
+                const action = this.appReloadModal.action || {};
+                const baseEndpoint = action.endpoint || `${this.amiEndpoint.replace(/\/$/, '')}/reload/app`;
+                const method = action.method || 'POST';
+                let endpoint = baseEndpoint;
+                if (checkOnly) {
+                    const separator = endpoint.includes('?') ? '&' : '?';
+                    endpoint = `${endpoint}${separator}mode=check`;
+                }
+
+                this.appReloading = true;
+                this.appReloadModal.mode = checkOnly ? 'check' : 'reload';
+                this.appReloadModal.status = 'running';
+                this.appReloadModal.error = null;
+                this.appReloadModal.message = checkOnly ? 'Validating configuration…' : '';
+                this.markCheck('config-parse', 'running');
+                this.markCheck('console-enabled', 'pending');
+                this.markCheck('ports-available', 'pending');
+                this.markCheck('restart-services', 'pending');
+
+                try {
+                    const response = await fetch(endpoint, {
+                        method,
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                        credentials: 'include',
+                    });
+                    const data = await response.json().catch(() => ({}));
+
+                    if (!response.ok) {
+                        const message = this.handleReloadErrors(data);
+                        throw new Error(message);
+                    }
+
+                    this.markCheck('config-parse', 'success');
+                    this.markCheck('console-enabled', 'success');
+                    this.markCheck('ports-available', 'success');
+
+                    if (checkOnly) {
+                        this.markCheck('restart-services', 'success', 'Ready to restart once you confirm reload.');
+                        const message = data?.message || 'Configuration validated. Services not restarted.';
+                        this.appReloadModal.status = 'success';
+                        this.appReloadModal.message = message;
+                        this.$dispatch('toast', {
+                            title: 'Configuration valid',
+                            message,
+                        });
+                        this.lastOperation = {
+                            label: 'Check',
+                            timestamp: new Date().toLocaleString(),
+                            status: message,
+                        };
+                        return;
+                    }
+
+                    this.markCheck('restart-services', 'running');
+                    this.markCheck('restart-services', 'success');
+                    const message = data?.message || 'Configuration validated. Services will restart automatically.';
+                    this.appReloadModal.status = 'success';
+                    this.appReloadModal.message = message;
+                    this.$dispatch('toast', {
+                        title: 'Reloading',
+                        message,
+                    });
+                    this.lastOperation = {
+                        label: action.label || 'Reload application',
+                        timestamp: new Date().toLocaleString(),
+                        status: 'Restart scheduled. Waiting for services to return…',
+                    };
+                    window.setTimeout(() => {
+                        window.location.reload();
+                    }, 2500);
+                } catch (err) {
+                    const fallback = checkOnly ? 'Unable to validate configuration.' : 'Unable to reload application.';
+                    const message = err?.message || fallback;
+                    this.appReloadModal.status = 'error';
+                    this.appReloadModal.error = message;
+                    this.appReloadModal.message = '';
+                    this.$dispatch('toast', {
+                        title: checkOnly ? 'Validation failed' : 'Reload failed',
+                        message,
+                    });
+                    this.lastOperation = {
+                        label: checkOnly ? 'Check' : (action.label || 'Reload'),
+                        timestamp: new Date().toLocaleString(),
+                        status: message,
+                    };
+                } finally {
+                    this.appReloading = false;
+                }
+            },
+            handleReloadErrors(payload) {
+                const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+                let message = this.formatOperationError(payload);
+                if (!errors.length) {
+                    this.markCheck('config-parse', 'error', message);
+                    return message;
+                }
+
+                const lowered = (value) => (value || '').toString().toLowerCase();
+                let consoleSet = false;
+                let portsSet = false;
+                let configSet = false;
+                for (const issue of errors) {
+                    const field = lowered(issue.field);
+                    const detail = issue.message || message;
+                    if (field.includes('console')) {
+                        this.markCheck('console-enabled', 'error', detail);
+                        consoleSet = true;
+                    } else if (field.includes('port') || field.includes('addr') || field.includes('http')) {
+                        this.markCheck('ports-available', 'error', detail);
+                        portsSet = true;
+                    } else if (field.includes('config')) {
+                        this.markCheck('config-parse', 'error', detail);
+                        configSet = true;
+                    }
+                }
+
+                if (!configSet) {
+                    this.markCheck('config-parse', 'success');
+                }
+                if (!consoleSet) {
+                    this.markCheck('console-enabled', 'success');
+                }
+                if (!portsSet) {
+                    this.markCheck('ports-available', 'success');
+                }
+
+                this.markCheck('restart-services', 'error', message);
+                return message;
+            },
             formatAclRules(rules) {
                 if (!Array.isArray(rules) || !rules.length) {
                     return 'allow all';
                 }
                 return rules.join('\n');
+            },
+            formatOperationError(payload) {
+                if (!payload || typeof payload !== 'object') {
+                    return 'Request failed.';
+                }
+                if (Array.isArray(payload.errors) && payload.errors.length) {
+                    return payload.errors
+                        .map((item) => {
+                            if (!item || typeof item !== 'object') {
+                                return String(item);
+                            }
+                            const field = item.field ? `${item.field}: ` : '';
+                            return `${field}${item.message || 'Invalid configuration'}`;
+                        })
+                        .join('; ');
+                }
+                return payload.message || payload.error || 'Request failed.';
             },
             keyConfigRows() {
                 const items = Array.isArray(this.configMeta?.key_items) ? this.configMeta.key_items : [];
