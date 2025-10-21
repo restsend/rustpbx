@@ -10,6 +10,7 @@ pub mod llm;
 pub mod media;
 pub mod models;
 pub mod net_tool;
+pub mod preflight;
 pub mod proxy;
 pub mod synthesis;
 pub mod transcription;

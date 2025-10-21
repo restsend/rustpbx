@@ -11,6 +11,7 @@ use crate::{
         self, SourceTrunk, TrunkDirection, build_source_trunk,
         matcher::{RouteTrace, match_invite_with_trace},
     },
+    proxy::server::SipServerRef,
 };
 use axum::{
     Router,
@@ -21,7 +22,7 @@ use axum::{
 };
 use chrono::Utc;
 use rand::random;
-use rsip::{Header as SipHeader, Method, Uri, Version};
+use rsip::{Header as SipHeader, Method, Scheme, Transport, Uri, Version};
 use rsipstack::dialog::{
     client_dialog::ClientInviteDialog,
     dialog::{Dialog, DialogState},
@@ -34,20 +35,78 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::{
     borrow::Cow,
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
+    time::{Duration, Instant},
 };
-use tokio::net::lookup_host;
+use tokio::{
+    net::{UdpSocket, lookup_host},
+    time::timeout,
+};
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/diagnostics", get(page_diagnostics))
         .route("/diagnostics/dialogs", get(list_dialogs))
         .route("/diagnostics/trunks/test", post(test_trunk))
+        .route("/diagnostics/trunks/options", post(probe_trunk_options))
         .route("/diagnostics/routes/evaluate", post(route_evaluate))
         .route("/diagnostics/locator/lookup", post(locator_lookup))
         .route("/diagnostics/locator/clear", post(locator_clear))
+}
+
+const DEFAULT_OPTIONS_TIMEOUT_MS: u64 = 1_500;
+const MIN_OPTIONS_TIMEOUT_MS: u64 = 100;
+const MAX_OPTIONS_TIMEOUT_MS: u64 = 20_000;
+const MAX_RESPONSE_PREVIEW_CHARS: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeTransport {
+    Udp,
+    Tcp,
+    Tls,
+    Ws,
+    Wss,
+}
+
+impl ProbeTransport {
+    fn from_label(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "udp" => Ok(Self::Udp),
+            "tcp" => Ok(Self::Tcp),
+            "tls" => Ok(Self::Tls),
+            "ws" => Ok(Self::Ws),
+            "wss" => Ok(Self::Wss),
+            other => Err(format!(
+                "unsupported transport '{}': only udp is currently supported",
+                other
+            )),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ProbeTransport::Udp => "udp",
+            ProbeTransport::Tcp => "tcp",
+            ProbeTransport::Tls => "tls",
+            ProbeTransport::Ws => "ws",
+            ProbeTransport::Wss => "wss",
+        }
+    }
+}
+
+impl From<Transport> for ProbeTransport {
+    fn from(value: Transport) -> Self {
+        match value {
+            Transport::Udp => ProbeTransport::Udp,
+            Transport::Tcp => ProbeTransport::Tcp,
+            Transport::Tls => ProbeTransport::Tls,
+            Transport::Ws => ProbeTransport::Ws,
+            Transport::Wss => ProbeTransport::Wss,
+            _ => ProbeTransport::Udp,
+        }
+    }
 }
 
 pub async fn page_diagnostics(
@@ -83,6 +142,8 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             db_by_name.insert(model.name.clone(), model);
         }
 
+        let mut seen: HashSet<String> = HashSet::new();
+
         for (name, config) in config_trunks.iter() {
             let (label, status, last_test_at, direction, notes, limit, ingress_ips) =
                 build_trunk_overview(name, config, db_by_name.get(name));
@@ -108,6 +169,41 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 "id": name,
                 "label": label,
             }));
+
+            seen.insert(name.clone());
+        }
+
+        for (name, model) in db_by_name.iter() {
+            if seen.contains(name) {
+                continue;
+            }
+
+            if let Some(config) = trunk_config_from_model(model) {
+                let (label, status, last_test_at, direction, notes, limit, ingress_ips) =
+                    build_trunk_overview(name, &config, Some(model));
+
+                trunks.push(json!({
+                    "id": name,
+                    "label": label,
+                    "status": status,
+                    "latency_ms": 0,
+                    "packet_loss_percent": 0.0,
+                    "concurrency": {
+                        "current": 0,
+                        "limit": limit,
+                    },
+                    "last_test_at": last_test_at,
+                    "direction": direction,
+                    "egress": config.dest,
+                    "notes": notes,
+                    "ingress_ips": ingress_ips,
+                }));
+
+                trunk_options.push(json!({
+                    "id": name,
+                    "label": label,
+                }));
+            }
         }
 
         last_audit = db_by_name
@@ -224,6 +320,72 @@ fn json_value_to_string_list(value: &JsonValue) -> Vec<String> {
             .collect(),
         JsonValue::String(item) => vec![item.clone()],
         _ => Vec::new(),
+    }
+}
+
+fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkConfig> {
+    let dest = model
+        .sip_server
+        .clone()
+        .and_then(|value| normalize_non_empty(&value))
+        .or_else(|| {
+            model
+                .outbound_proxy
+                .clone()
+                .and_then(|value| normalize_non_empty(&value))
+        })?;
+
+    let backup_dest = model
+        .outbound_proxy
+        .as_ref()
+        .and_then(|value| normalize_non_empty(value))
+        .filter(|value| value != &dest);
+
+    let mut inbound_hosts = model
+        .allowed_ips
+        .as_ref()
+        .map(json_value_to_string_list)
+        .unwrap_or_default();
+
+    if let Some(host) = extract_host_from_uri(&dest) {
+        push_unique_string(&mut inbound_hosts, host);
+    }
+
+    if let Some(backup) = backup_dest.as_ref() {
+        if let Some(host) = extract_host_from_uri(backup) {
+            push_unique_string(&mut inbound_hosts, host);
+        }
+    }
+
+    Some(routing::TrunkConfig {
+        dest,
+        backup_dest,
+        username: model.auth_username.clone(),
+        password: model.auth_password.clone(),
+        codec: Vec::new(),
+        disabled: Some(!model.is_active),
+        max_calls: model.max_concurrent.map(|value| value as u32),
+        max_cps: model.max_cps.map(|value| value as u32),
+        weight: None,
+        transport: Some(model.sip_transport.as_str().to_string()),
+        id: Some(model.id),
+        direction: Some(model.direction.into()),
+        inbound_hosts,
+    })
+}
+
+fn extract_host_from_uri(value: &str) -> Option<String> {
+    Uri::try_from(value)
+        .ok()
+        .map(|parsed| parsed.host_with_port.host.to_string())
+}
+
+fn push_unique_string(list: &mut Vec<String>, value: String) {
+    if value.is_empty() {
+        return;
+    }
+    if !list.iter().any(|existing| existing == &value) {
+        list.push(value);
     }
 }
 
@@ -468,6 +630,153 @@ async fn test_trunk(
         allows_outbound,
     })
     .into_response()
+}
+
+async fn probe_trunk_options(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<OptionsProbePayload>,
+) -> impl IntoResponse {
+    let trunk_name = payload.trunk.trim();
+    if trunk_name.is_empty() {
+        return bad_request("trunk is required");
+    }
+
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "message": "SIP server unavailable" })),
+        )
+            .into_response();
+    };
+
+    let data_context = server.data_context.clone();
+    let trunks = data_context.trunks_snapshot().await;
+    let Some(trunk) = trunks.get(trunk_name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": format!("trunk '{}' not found", trunk_name) })),
+        )
+            .into_response();
+    };
+
+    let target_raw = payload
+        .address
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| trunk.dest.clone());
+
+    if target_raw.trim().is_empty() {
+        return bad_request("trunk destination is empty");
+    }
+
+    let normalized_target = if target_raw.starts_with("sip:") || target_raw.starts_with("sips:") {
+        target_raw.clone()
+    } else {
+        format!("sip:{}", target_raw)
+    };
+
+    let target_uri: Uri = match Uri::try_from(normalized_target.as_str()) {
+        Ok(uri) => uri,
+        Err(err) => {
+            return bad_request(format!("invalid SIP URI '{}': {}", target_raw, err));
+        }
+    };
+
+    let transport = match determine_transport(payload.transport.as_deref(), &target_uri) {
+        Ok(value) => value,
+        Err(err) => return bad_request(err),
+    };
+
+    let timeout_ms = payload
+        .timeout_ms
+        .unwrap_or(DEFAULT_OPTIONS_TIMEOUT_MS)
+        .clamp(MIN_OPTIONS_TIMEOUT_MS, MAX_OPTIONS_TIMEOUT_MS);
+    let timeout_duration = Duration::from_millis(timeout_ms);
+
+    let host = target_uri.host_with_port.host.to_string();
+    if host.is_empty() {
+        return bad_request("target host is empty");
+    }
+
+    let port = target_uri
+        .host_with_port
+        .port
+        .map(|p| p.into())
+        .unwrap_or_else(|| default_port_for_transport(transport));
+
+    let lookup_target = format!("{}:{}", host, port);
+    let resolved = match lookup_host(lookup_target).await {
+        Ok(items) => items.collect::<Vec<_>>(),
+        Err(err) => {
+            return bad_request(format!("failed to resolve destination '{}': {}", host, err));
+        }
+    };
+
+    if resolved.is_empty() {
+        return bad_request("destination did not resolve to any IP addresses");
+    }
+
+    let mut destinations = resolved;
+    destinations.sort_unstable();
+    destinations.dedup();
+
+    let default_host = default_host_for_probe(&server, &target_uri);
+    let ua_label = server
+        .proxy_config
+        .useragent
+        .clone()
+        .unwrap_or_else(|| format!("RustPBX diagnostics/{}", env!("CARGO_PKG_VERSION")));
+
+    let mut attempts = Vec::new();
+    let mut success = false;
+
+    for destination in destinations {
+        let attempt = match transport {
+            ProbeTransport::Udp => {
+                let bind_ip = select_bind_ip(&server.proxy_config.addr, &destination);
+                send_options_udp(
+                    bind_ip,
+                    destination,
+                    &target_uri,
+                    &default_host,
+                    Some(ua_label.as_str()),
+                    timeout_duration,
+                )
+                .await
+            }
+            _ => OptionsProbeAttempt {
+                destination: destination.to_string(),
+                transport: transport.as_str().to_string(),
+                success: false,
+                latency_ms: None,
+                status_code: None,
+                reason: None,
+                server: None,
+                error: Some(format!(
+                    "transport '{}' is not supported for diagnostics probes yet",
+                    transport.as_str()
+                )),
+                raw_response: None,
+            },
+        };
+
+        success |= attempt.success;
+        attempts.push(attempt);
+    }
+
+    let response = OptionsProbeResponse {
+        trunk: trunk_name.to_string(),
+        target_uri: target_uri.to_string(),
+        evaluated_at: Utc::now().to_rfc3339(),
+        transport: transport.as_str().to_string(),
+        attempts,
+        success,
+    };
+
+    Json(response).into_response()
 }
 
 async fn route_evaluate(
@@ -769,6 +1078,47 @@ struct LocatorClearResponse {
 }
 
 #[derive(Deserialize)]
+struct OptionsProbePayload {
+    trunk: String,
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    transport: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OptionsProbeResponse {
+    trunk: String,
+    target_uri: String,
+    evaluated_at: String,
+    transport: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attempts: Vec<OptionsProbeAttempt>,
+    success: bool,
+}
+
+#[derive(Serialize)]
+struct OptionsProbeAttempt {
+    destination: String,
+    transport: String,
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_response: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct TrunkTestPayload {
     trunk: String,
     address: String,
@@ -960,21 +1310,44 @@ fn build_sip_uri(value: &str, default_host: &str) -> String {
 }
 
 async fn resolve_candidate_ips(input: &str) -> Result<Vec<IpAddr>, String> {
-    if let Ok(ip) = input.parse::<IpAddr>() {
+    let cleaned = input.trim().trim_matches(|c| c == '<' || c == '>');
+    if cleaned.is_empty() {
+        return Err("address is empty".to_string());
+    }
+
+    if let Ok(ip) = cleaned.parse::<IpAddr>() {
         return Ok(vec![ip]);
     }
 
-    if let Ok(socket) = input.parse::<SocketAddr>() {
+    if let Ok(socket) = cleaned.parse::<SocketAddr>() {
         return Ok(vec![socket.ip()]);
     }
 
-    let lookup_target = if input.contains(':') {
-        input.to_string()
+    if let Some((host, port)) = extract_sip_host(cleaned) {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(vec![ip]);
+        }
+
+        match lookup_host((host.as_str(), port)).await {
+            Ok(resolved) => {
+                let mut ips: Vec<IpAddr> = resolved.map(|addr| addr.ip()).collect();
+                ips.sort();
+                ips.dedup();
+                return Ok(ips);
+            }
+            Err(err) => {
+                return Err(format!("failed to resolve '{}': {}", input, err));
+            }
+        }
+    }
+
+    let lookup_target = if cleaned.contains(':') {
+        cleaned.to_string()
     } else {
-        format!("{}:0", input)
+        format!("{}:0", cleaned)
     };
 
-    match lookup_host(lookup_target).await {
+    match lookup_host(lookup_target.as_str()).await {
         Ok(resolved) => {
             let mut ips: Vec<IpAddr> = resolved.map(|addr| addr.ip()).collect();
             ips.sort();
@@ -983,6 +1356,267 @@ async fn resolve_candidate_ips(input: &str) -> Result<Vec<IpAddr>, String> {
         }
         Err(err) => Err(format!("failed to resolve '{}': {}", input, err)),
     }
+}
+
+fn extract_sip_host(candidate: &str) -> Option<(String, u16)> {
+    // Accept inputs that may be formatted as SIP URIs and surface the host/port for DNS resolution.
+    if let Ok(uri) = rsip::Uri::try_from(candidate) {
+        let host = uri.host_with_port.host.to_string();
+        if host.is_empty() {
+            return None;
+        }
+        let port = uri
+            .host_with_port
+            .port
+            .map(|value| value.into())
+            .unwrap_or(0);
+        return Some((host, port));
+    }
+
+    if let Some(rest) = candidate.strip_prefix("sip:") {
+        let host = rest
+            .split(|c| c == ';' || c == '?')
+            .next()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())?;
+
+        if let Ok(socket) = host.parse::<SocketAddr>() {
+            return Some((socket.ip().to_string(), socket.port()));
+        }
+
+        return Some((host.to_string(), 0));
+    }
+
+    None
+}
+
+fn determine_transport(override_label: Option<&str>, uri: &Uri) -> Result<ProbeTransport, String> {
+    if let Some(label) = override_label {
+        return ProbeTransport::from_label(label);
+    }
+
+    if let Some(param_transport) = uri.params.iter().find_map(|param| match param {
+        rsip::Param::Transport(t) => Some(ProbeTransport::from(*t)),
+        _ => None,
+    }) {
+        return Ok(param_transport);
+    }
+
+    if uri.scheme == Some(Scheme::Sips) {
+        return Ok(ProbeTransport::Tls);
+    }
+
+    Ok(ProbeTransport::Udp)
+}
+
+fn default_port_for_transport(transport: ProbeTransport) -> u16 {
+    match transport {
+        ProbeTransport::Udp | ProbeTransport::Tcp => 5060,
+        ProbeTransport::Tls => 5061,
+        ProbeTransport::Ws => 80,
+        ProbeTransport::Wss => 443,
+    }
+}
+
+fn default_host_for_probe(server: &SipServerRef, uri: &Uri) -> String {
+    server
+        .proxy_config
+        .realms
+        .as_ref()
+        .and_then(|realms| {
+            realms
+                .iter()
+                .find(|realm| !realm.trim().is_empty())
+                .map(|realm| realm.trim().to_string())
+        })
+        .filter(|realm| !realm.is_empty())
+        .unwrap_or_else(|| uri.host_with_port.host.to_string())
+}
+
+fn select_bind_ip(config_addr: &str, destination: &SocketAddr) -> IpAddr {
+    if let Ok(ip) = config_addr.parse::<IpAddr>() {
+        if !ip.is_unspecified() && ip.is_ipv4() == destination.is_ipv4() {
+            return ip;
+        }
+    }
+
+    if destination.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    }
+}
+
+async fn send_options_udp(
+    bind_ip: IpAddr,
+    destination: SocketAddr,
+    target_uri: &Uri,
+    default_host: &str,
+    user_agent: Option<&str>,
+    timeout_duration: Duration,
+) -> OptionsProbeAttempt {
+    let mut attempt = OptionsProbeAttempt {
+        destination: destination.to_string(),
+        transport: ProbeTransport::Udp.as_str().to_string(),
+        success: false,
+        latency_ms: None,
+        status_code: None,
+        reason: None,
+        server: None,
+        error: None,
+        raw_response: None,
+    };
+
+    let socket = match UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await {
+        Ok(socket) => socket,
+        Err(err) => {
+            attempt.error = Some(format!("failed to bind UDP socket: {}", err));
+            return attempt;
+        }
+    };
+
+    if let Err(err) = socket.connect(destination).await {
+        attempt.error = Some(format!("failed to connect to {}: {}", destination, err));
+        return attempt;
+    }
+
+    let local_addr = match socket.local_addr() {
+        Ok(addr) => addr,
+        Err(err) => {
+            attempt.error = Some(format!("failed to read local socket address: {}", err));
+            return attempt;
+        }
+    };
+
+    let request = build_options_request(local_addr, target_uri, default_host, user_agent);
+
+    if let Err(err) = socket.send(request.as_bytes()).await {
+        attempt.error = Some(format!("failed to send OPTIONS request: {}", err));
+        return attempt;
+    }
+
+    let started = Instant::now();
+    let mut buffer = vec![0u8; 4096];
+
+    match timeout(timeout_duration, socket.recv(&mut buffer)).await {
+        Ok(Ok(received)) => {
+            let elapsed = started.elapsed();
+            attempt.latency_ms = Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
+            let raw = String::from_utf8_lossy(&buffer[..received]).to_string();
+            let summary = summarize_sip_response(&raw);
+            attempt.status_code = summary.status_code;
+            attempt.reason = summary.reason;
+            attempt.server = summary.server;
+            attempt.raw_response = summary.preview;
+            attempt.success = summary
+                .status_code
+                .map(|code| (200..300).contains(&code))
+                .unwrap_or(false);
+        }
+        Ok(Err(err)) => {
+            attempt.error = Some(format!("failed to receive response: {}", err));
+        }
+        Err(_) => {
+            attempt.error = Some(format!(
+                "timed out waiting for response after {} ms",
+                timeout_duration.as_millis()
+            ));
+        }
+    }
+
+    attempt
+}
+
+fn build_options_request(
+    local_addr: SocketAddr,
+    target_uri: &Uri,
+    default_host: &str,
+    user_agent: Option<&str>,
+) -> String {
+    let branch = format!("z9hG4bK{}", random_hex(10));
+    let from_tag = random_hex(8);
+    let call_id = format!("diag-{}", random_hex(12));
+
+    let from_uri = format!("sip:diagnostics@{}", default_host);
+    let contact_uri = format!("sip:diagnostics@{}:{}", local_addr.ip(), local_addr.port());
+    let request_uri = target_uri.to_string();
+    let to_uri = target_uri.to_string();
+
+    let mut lines = vec![
+        format!("OPTIONS {} SIP/2.0", request_uri),
+        format!(
+            "Via: SIP/2.0/UDP {}:{};branch={};rport",
+            local_addr.ip(),
+            local_addr.port(),
+            branch
+        ),
+        "Max-Forwards: 70".to_string(),
+        format!("From: \"Diagnostics\" <{}>;tag={}", from_uri, from_tag),
+        format!("To: <{}>", to_uri),
+        format!("Call-ID: {}", call_id),
+        "CSeq: 1 OPTIONS".to_string(),
+        format!("Contact: <{}>", contact_uri),
+        "Accept: application/sdp".to_string(),
+        "Allow: INVITE, ACK, CANCEL, OPTIONS, BYE".to_string(),
+    ];
+
+    if let Some(agent) = user_agent {
+        lines.push(format!("User-Agent: {}", agent));
+    }
+
+    lines.push("Content-Length: 0".to_string());
+    lines.push(String::new());
+    lines.push(String::new());
+    lines.join("\r\n")
+}
+
+struct SipResponseSummary {
+    status_code: Option<u16>,
+    reason: Option<String>,
+    server: Option<String>,
+    preview: Option<String>,
+}
+
+fn summarize_sip_response(raw: &str) -> SipResponseSummary {
+    let mut summary = SipResponseSummary {
+        status_code: None,
+        reason: None,
+        server: None,
+        preview: None,
+    };
+
+    if let Some(first_line) = raw.lines().next() {
+        let mut parts = first_line.split_whitespace();
+        if matches!(parts.next(), Some(proto) if proto.eq_ignore_ascii_case("SIP/2.0")) {
+            if let Some(code_part) = parts.next() {
+                if let Ok(code) = code_part.parse::<u16>() {
+                    summary.status_code = Some(code);
+                }
+            }
+            let reason = parts.collect::<Vec<_>>().join(" ");
+            if !reason.is_empty() {
+                summary.reason = Some(reason);
+            }
+        }
+    }
+
+    for line in raw.lines() {
+        if line.to_ascii_lowercase().starts_with("server:") {
+            if let Some(rest) = line.splitn(2, ':').nth(1) {
+                let value = rest.trim();
+                if !value.is_empty() {
+                    summary.server = Some(value.to_string());
+                }
+            }
+            break;
+        }
+    }
+
+    if !raw.trim().is_empty() {
+        summary.preview = Some(truncate(raw.trim(), MAX_RESPONSE_PREVIEW_CHARS));
+    }
+
+    summary
 }
 
 fn collect_rewrite_diff(before: &InviteOption, after: &InviteOption) -> Vec<RewriteDiff> {
@@ -1327,5 +1961,60 @@ fn location_to_view(location: Location) -> LocatorRecordView {
             .last_modified
             .map(|instant| instant.elapsed().as_secs()),
         user_agent: location.user_agent,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{net::IpAddr, time::Duration};
+    use tokio::net::UdpSocket;
+
+    #[tokio::test]
+    async fn resolve_candidate_ips_accepts_sip_uri() {
+        let ips = resolve_candidate_ips("sip:127.0.0.1:5060").await.unwrap();
+        assert_eq!(ips, vec![IpAddr::from([127, 0, 0, 1])]);
+    }
+
+    #[tokio::test]
+    async fn resolve_candidate_ips_accepts_bracketed_uri() {
+        let ips = resolve_candidate_ips("<sip:127.0.0.1>").await.unwrap();
+        assert_eq!(ips, vec![IpAddr::from([127, 0, 0, 1])]);
+    }
+
+    #[tokio::test]
+    async fn send_options_udp_marks_success() {
+        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            if let Ok((_, peer)) = server_socket.recv_from(&mut buffer).await {
+                let response = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+                let _ = server_socket.send_to(response, peer).await;
+            }
+        });
+
+        let target_uri: Uri = Uri::try_from("sip:test@127.0.0.1").unwrap();
+        let attempt = send_options_udp(
+            IpAddr::from([127, 0, 0, 1]),
+            server_addr,
+            &target_uri,
+            "localhost",
+            Some("Test-UA"),
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert!(attempt.success);
+        assert_eq!(attempt.status_code, Some(200));
+        assert!(attempt.error.is_none());
+        assert!(
+            attempt
+                .raw_response
+                .as_ref()
+                .map(|raw| raw.starts_with("SIP/2.0 200"))
+                .unwrap_or(false)
+        );
     }
 }

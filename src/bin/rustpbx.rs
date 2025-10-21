@@ -1,10 +1,11 @@
 use anyhow::Result;
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dotenv::dotenv;
-use rustpbx::{app::AppStateBuilder, config::Config, version};
+use rustpbx::{app::AppStateBuilder, config::Config, preflight, version};
 use std::path::Path;
-use tokio::select;
+use std::sync::atomic::Ordering;
+use tokio::time::{Duration, sleep};
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{
     EnvFilter, fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt,
@@ -19,16 +20,22 @@ use tracing_subscriber::{
 )]
 struct Cli {
     /// Path to the configuration file
-    #[clap(long, help = "Path to the configuration file (TOML format)")]
+    #[clap(
+        long,
+        global = true,
+        help = "Path to the configuration file (TOML format)"
+    )]
     conf: Option<String>,
     #[clap(
         long,
+        global = true,
         help = "Tokio console server address, e.g. /tmp/tokio-console or 127.0.0.1:5556"
     )]
     tokio_console: Option<String>,
     #[cfg(feature = "console")]
     #[clap(
         long,
+        global = true,
         requires = "super_password",
         help = "Create or update a console super user before starting the server"
     )]
@@ -36,6 +43,7 @@ struct Cli {
     #[cfg(feature = "console")]
     #[clap(
         long,
+        global = true,
         requires = "super_username",
         help = "Password for the console super user"
     )]
@@ -43,10 +51,19 @@ struct Cli {
     #[cfg(feature = "console")]
     #[clap(
         long,
+        global = true,
         requires = "super_username",
         help = "Email for the console super user (defaults to username@localhost)"
     )]
     super_email: Option<String>,
+    #[clap(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Validate configuration and exit without starting the server
+    CheckConfig,
 }
 
 #[tokio::main]
@@ -67,6 +84,22 @@ async fn main() -> Result<()> {
     };
 
     println!("{}", version::get_version_info());
+
+    if matches!(cli.command, Some(Commands::CheckConfig)) {
+        match preflight::validate_start(&config).await {
+            Ok(_) => {
+                println!("Configuration is valid; all required sockets are available.");
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!("Configuration validation failed:");
+                for issue in err.issues {
+                    eprintln!("- {}: {}", issue.field, issue.message);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
 
     #[cfg(feature = "console")]
     if let Some(super_username) = cli.super_username.as_deref() {
@@ -175,32 +208,86 @@ async fn main() -> Result<()> {
     }
 
     let _ = guard_holder; // keep the guard alive
-    let state_builder = AppStateBuilder::new()
-        .with_config(config)
-        .with_config_metadata(config_path, Utc::now());
-    let state = state_builder.build().await.expect("Failed to build app");
 
-    #[cfg(unix)]
-    let sigterm = async {
-        use tokio::signal::unix::SignalKind;
-        tokio::signal::unix::signal(SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
+    let mut cached_config = Some(config);
+    let mut next_config_path = config_path.clone();
 
-    #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
+    loop {
+        let config = if let Some(cfg) = cached_config.take() {
+            cfg
+        } else if let Some(ref path) = next_config_path {
+            Config::load(path)
+                .map_err(|err| anyhow::anyhow!("Failed to load config from {}: {}", path, err))?
+        } else {
+            Config::default()
+        };
 
-    info!("starting rustpbx on {}", state.config.http_addr);
-    select! {
-        _ = rustpbx::app::run(state) => {}
-        _ = tokio::signal::ctrl_c() => {
-            info!("received CTRL+C, shutting down");
+        let state_builder = AppStateBuilder::new()
+            .with_config(config)
+            .with_config_metadata(next_config_path.clone(), Utc::now());
+        let state = state_builder.build().await.expect("Failed to build app");
+
+        info!("starting rustpbx on {}", state.config.http_addr);
+
+        let mut app_future = Box::pin(rustpbx::app::run(state.clone()));
+
+        #[cfg(unix)]
+        let mut sigterm_stream = {
+            use tokio::signal::unix::{SignalKind, signal};
+            signal(SignalKind::terminate()).expect("failed to install signal handler")
+        };
+
+        let mut reload_requested = false;
+
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                result = &mut app_future => {
+                    if let Err(err) = result {
+                        return Err(err);
+                    }
+                    reload_requested = state.reload_requested.load(Ordering::Relaxed);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("received CTRL+C, shutting down");
+                    state.token.cancel();
+                    let _ = app_future.await;
+                }
+                _ = sigterm_stream.recv() => {
+                    info!("received SIGTERM, shutting down");
+                    state.token.cancel();
+                    let _ = app_future.await;
+                }
+            }
         }
-        _ = sigterm => {
-            info!("received SIGTERM, shutting down");
+
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                result = &mut app_future => {
+                    if let Err(err) = result {
+                        return Err(err);
+                    }
+                    reload_requested = state.reload_requested.load(Ordering::Relaxed);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("received CTRL+C, shutting down");
+                    state.token.cancel();
+                    let _ = app_future.await;
+                }
+            }
         }
+
+        if reload_requested {
+            info!("Reload requested; restarting with updated configuration");
+            next_config_path = state.config_path.clone();
+            cached_config = None;
+            sleep(Duration::from_millis(300)).await;
+            continue;
+        }
+
+        break;
     }
+
     Ok(())
 }

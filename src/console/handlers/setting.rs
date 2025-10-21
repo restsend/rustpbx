@@ -310,6 +310,16 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "endpoint": format!("{}/reload/acl", ami_endpoint.trim_end_matches('/')),
         }));
 
+        if app_state.config_path.is_some() {
+            operations.push(json!({
+                "id": "reload-app",
+                "label": "Reload application",
+                "description": "Validate the configuration file and restart core services.",
+                "method": "POST",
+                "endpoint": format!("{}/reload/app", ami_endpoint.trim_end_matches('/')),
+            }));
+        }
+
         let (storage_meta, storage_profiles) = build_storage_profiles(config);
 
         data.insert("storage".to_string(), storage_meta.clone());

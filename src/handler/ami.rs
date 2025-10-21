@@ -1,14 +1,16 @@
-use crate::{app::AppState, handler::middleware::clientaddr::ClientAddr};
+use crate::{app::AppState, handler::middleware::clientaddr::ClientAddr, preflight};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::Utc;
+use serde::Deserialize;
 use std::sync::atomic::Ordering;
+use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 pub fn router(app_state: AppState) -> Router<AppState> {
@@ -20,6 +22,7 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/reload/trunks", post(reload_trunks_handler))
         .route("/reload/routes", post(reload_routes_handler))
         .route("/reload/acl", post(reload_acl_handler))
+        .route("/reload/app", post(reload_app_handler))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -261,4 +264,90 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
                 .into_response()
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReloadAppParams {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    check_only: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn reload_app_handler(
+    State(state): State<AppState>,
+    client_ip: ClientAddr,
+    Query(params): Query<ReloadAppParams>,
+) -> Response {
+    let requested_mode = params.mode.as_deref();
+    let check_only = params.check_only
+        || params.dry_run
+        || matches!(requested_mode, Some(mode) if mode.eq_ignore_ascii_case("check") || mode.eq_ignore_ascii_case("validate"));
+
+    info!(%client_ip, check_only, "Reload application via /reload/app endpoint");
+
+    let Some(config_path) = state.config_path.clone() else {
+        warn!(%client_ip, "Reload rejected: configuration path unknown");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": "Application was started without a configuration file path; reload is unavailable.",
+            })),
+        )
+            .into_response();
+    };
+
+    let proposed = match crate::config::Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            warn!(%client_ip, path = %config_path, error = %err, "Configuration reload failed during parsing");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "status": "invalid",
+                    "errors": [{
+                        "field": "config",
+                        "message": format!("Failed to load configuration: {}", err),
+                    }],
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(preflight_error) = preflight::validate_reload(&state, &proposed).await {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "status": "invalid",
+                "errors": preflight_error.issues,
+            })),
+        )
+            .into_response();
+    }
+
+    if check_only {
+        return Json(serde_json::json!({
+            "status": "ok",
+            "mode": "check",
+            "message": "Configuration validated. Services not restarted.",
+        }))
+        .into_response();
+    }
+
+    state.reload_requested.store(true, Ordering::Relaxed);
+    let cancel_token = state.token.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(200)).await;
+        cancel_token.cancel();
+    });
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "Configuration validated. Restarting services with updated configuration.",
+    }))
+    .into_response()
 }

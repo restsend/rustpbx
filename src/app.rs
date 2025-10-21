@@ -25,7 +25,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
-use std::{path::Path, sync::atomic::AtomicU64};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, AtomicU64},
+};
 use tokio::select;
 use tokio::{net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -48,6 +51,7 @@ pub struct AppStateInner {
     pub uptime: DateTime<Utc>,
     pub config_loaded_at: DateTime<Utc>,
     pub config_path: Option<String>,
+    pub reload_requested: AtomicBool,
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
 }
@@ -271,6 +275,7 @@ impl AppStateBuilder {
             uptime: chrono::Utc::now(),
             config_loaded_at,
             config_path,
+            reload_requested: AtomicBool::new(false),
             #[cfg(feature = "console")]
             console: console_state,
         });

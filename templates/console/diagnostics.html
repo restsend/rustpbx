@@ -100,6 +100,16 @@
                                         <span
                                             x-text="trunkTests[trunk.id].loading ? 'Evaluating…' : 'Run check'"></span>
                                     </button>
+                                    <button type="button" @click="runTrunkOptions(trunk.id)"
+                                        :disabled="trunkTests[trunk.id].options.loading"
+                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5v10" />
+                                        </svg>
+                                        <span
+                                            x-text="trunkTests[trunk.id].options.loading ? 'Probing…' : 'Send OPTIONS'"></span>
+                                    </button>
                                 </div>
                             </div>
                             <div class="mt-3 space-y-2 text-xs">
@@ -173,6 +183,80 @@
                                                 <span
                                                     x-text="formatDateTime(trunkTests[trunk.id].result.evaluated_at)"></span>
                                             </div>
+                                        </div>
+                                    </div>
+                                </template>
+                                <template x-if="trunkTests[trunk.id].options.loading">
+                                    <div
+                                        class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-700">
+                                        Sending SIP OPTIONS probe…
+                                    </div>
+                                </template>
+                                <template x-if="trunkTests[trunk.id].options.error">
+                                    <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-rose-700"
+                                        x-text="trunkTests[trunk.id].options.error"></div>
+                                </template>
+                                <template x-if="trunkTests[trunk.id].options.result">
+                                    <div class="space-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3">
+                                        <div class="flex flex-wrap items-center justify-between gap-2">
+                                            <span class="font-semibold text-slate-700">SIP OPTIONS probe</span>
+                                            <span
+                                                class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                :class="trunkTests[trunk.id].options.result.success ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
+                                                <span class="h-1.5 w-1.5 rounded-full"
+                                                    :class="trunkTests[trunk.id].options.result.success ? 'bg-emerald-500' : 'bg-rose-500'"></span>
+                                                <span
+                                                    x-text="trunkTests[trunk.id].options.result.success ? 'Reachable' : 'No response'"></span>
+                                            </span>
+                                        </div>
+                                        <div class="grid gap-2 text-[11px] text-slate-600">
+                                            <div><span class="font-semibold text-slate-700">Target:</span>
+                                                <span x-text="trunkTests[trunk.id].options.result.target_uri"></span>
+                                            </div>
+                                            <div><span class="font-semibold text-slate-700">Transport:</span>
+                                                <span x-text="trunkTests[trunk.id].options.result.transport"></span>
+                                            </div>
+                                            <div class="grid gap-2">
+                                                <template
+                                                    x-for="attempt in trunkTests[trunk.id].options.result.attempts"
+                                                    :key="attempt.destination">
+                                                    <div class="rounded border border-slate-200 bg-slate-50 p-2">
+                                                        <div
+                                                            class="flex items-center justify-between font-semibold text-slate-700">
+                                                            <span x-text="attempt.destination"></span>
+                                                            <span
+                                                                :class="attempt.success ? 'text-emerald-600' : 'text-rose-600'"
+                                                                x-text="renderOptionsStatus(attempt)"></span>
+                                                        </div>
+                                                        <div class="grid gap-1 text-slate-500">
+                                                            <div><span
+                                                                    class="font-semibold text-slate-600">Latency:</span>
+                                                                <span
+                                                                    x-text="attempt.latency_ms ? attempt.latency_ms + ' ms' : '—'"></span>
+                                                            </div>
+                                                            <template x-if="attempt.error">
+                                                                <div class="font-semibold text-rose-600"
+                                                                    x-text="attempt.error"></div>
+                                                            </template>
+                                                            <template x-if="attempt.server">
+                                                                <div><span
+                                                                        class="font-semibold text-slate-600">Server:</span>
+                                                                    <span x-text="attempt.server"></span>
+                                                                </div>
+                                                            </template>
+                                                            <template x-if="attempt.raw_response">
+                                                                <div class="text-slate-400"
+                                                                    x-text="attempt.raw_response"></div>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </div>
+                                        <div class="text-[11px] text-slate-400">
+                                            Probed
+                                            <span
+                                                x-text="formatDateTime(trunkTests[trunk.id].options.result.evaluated_at)"></span>
                                         </div>
                                     </div>
                                 </template>
@@ -1064,10 +1148,15 @@
                     if (Array.isArray(this.trunks)) {
                         this.trunks.forEach((trunk) => {
                             state[trunk.id] = {
-                                address: trunk.ingress_ips?.[0] || '',
+                                address: trunk.ingress_ips?.[0] || trunk.egress || '',
                                 loading: false,
                                 error: null,
                                 result: null,
+                                options: {
+                                    loading: false,
+                                    error: null,
+                                    result: null,
+                                },
                             };
                         });
                     }
@@ -1084,6 +1173,11 @@
                             loading: false,
                             error: null,
                             result: null,
+                            options: {
+                                loading: false,
+                                error: null,
+                                result: null,
+                            },
                         },
                     };
                 },
@@ -1123,6 +1217,43 @@
                         state.result = null;
                     } finally {
                         state.loading = false;
+                        this.trunkTests = { ...this.trunkTests };
+                    }
+                },
+                async runTrunkOptions(trunkId) {
+                    this.ensureTrunkTestState(trunkId);
+                    const state = this.trunkTests[trunkId];
+                    if (!state) {
+                        return;
+                    }
+                    const payload = { trunk: trunkId };
+                    const address = (state.address || '').trim();
+                    if (address) {
+                        payload.address = address;
+                    }
+                    state.options.loading = true;
+                    state.options.error = null;
+                    state.options.result = null;
+                    this.trunkTests = { ...this.trunkTests };
+                    try {
+                        const response = await fetch(this.buildUrl('/diagnostics/trunks/options'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok) {
+                            const message = data?.message || `OPTIONS probe failed (${response.status})`;
+                            throw new Error(message);
+                        }
+                        state.options.result = data;
+                        state.options.error = null;
+                    } catch (err) {
+                        state.options.error = err?.message || 'OPTIONS probe failed.';
+                        state.options.result = null;
+                    } finally {
+                        state.options.loading = false;
                         this.trunkTests = { ...this.trunkTests };
                     }
                 },
@@ -1341,6 +1472,18 @@
                             .join(', ');
                     }
                     return String(value);
+                },
+                renderOptionsStatus(attempt) {
+                    if (!attempt) {
+                        return '—';
+                    }
+                    const code = attempt.status_code ? String(attempt.status_code) : '';
+                    const reason = attempt.reason ? String(attempt.reason) : '';
+                    const base = code ? `${code}${reason ? ` ${reason}` : ''}` : '';
+                    if (attempt.success) {
+                        return base || 'Success';
+                    }
+                    return attempt.error || base || 'No response';
                 },
                 displayValue(value) {
                     if (!value && value !== 0) {
