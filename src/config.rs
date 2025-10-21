@@ -358,6 +358,30 @@ impl ProxyConfig {
             realm
         }
     }
+
+    pub fn select_realm(&self, request_host: &str) -> String {
+        let requested = request_host.trim();
+        let normalized = ProxyConfig::normalize_realm(requested);
+        if let Some(realms) = self.realms.as_ref() {
+            if let Some(existing) = realms
+                .iter()
+                .find(|realm| realm.as_str() == requested || realm.as_str() == normalized)
+            {
+                return existing.clone();
+            }
+            if let Some(first) = realms.first() {
+                if !first.is_empty() {
+                    return first.clone();
+                }
+            }
+        }
+
+        if requested.is_empty() {
+            normalized.to_string()
+        } else {
+            requested.to_string()
+        }
+    }
 }
 
 impl Default for ProxyConfig {

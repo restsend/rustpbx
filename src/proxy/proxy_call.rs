@@ -564,6 +564,49 @@ impl ProxyCall {
         }
     }
 
+    fn merge_invite_headers(
+        mut existing: Option<Vec<rsip::Header>>,
+        base: Option<&[rsip::Header]>,
+    ) -> Option<Vec<rsip::Header>> {
+        let mut headers = existing.take().unwrap_or_default();
+
+        let mut other_indexes: HashMap<String, usize> = headers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, header)| match header {
+                rsip::Header::Other(name, _) => Some((name.to_ascii_lowercase(), idx)),
+                _ => None,
+            })
+            .collect();
+
+        if let Some(base_headers) = base {
+            for header in base_headers {
+                match header {
+                    rsip::Header::Other(name, _) => {
+                        let key = name.to_ascii_lowercase();
+                        if let Some(idx) = other_indexes.get(&key).cloned() {
+                            headers[idx] = header.clone();
+                        } else {
+                            other_indexes.insert(key, headers.len());
+                            headers.push(header.clone());
+                        }
+                    }
+                    _ => {
+                        if !headers.iter().any(|h| h == header) {
+                            headers.push(header.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        }
+    }
+
     fn is_webrtc_sdp(sdp: &str) -> bool {
         sdp.contains("a=ice-ufrag")
             || sdp.contains("a=ice-pwd")
@@ -854,7 +897,8 @@ impl ProxyCall {
                 None
             };
 
-            let invite_option = InviteOption {
+            let base_headers = self.build_invite_headers(target);
+            let mut invite_option = InviteOption {
                 callee: target.aor.clone(),
                 caller: caller.clone(),
                 content_type,
@@ -862,9 +906,14 @@ impl ProxyCall {
                 destination: target.destination.clone(),
                 contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
                 credential: target.credential.clone(),
-                headers: self.build_invite_headers(target),
+                headers: base_headers.clone(),
                 ..Default::default()
             };
+
+            invite_option.headers = Self::merge_invite_headers(
+                invite_option.headers.take(),
+                base_headers.as_ref().map(Vec::as_slice),
+            );
 
             // Forward dialog state events to aggregator
             join_set.spawn({
@@ -1062,6 +1111,8 @@ impl ProxyCall {
 
         let local_contact = self.local_contact_uri();
 
+        let base_headers = self.build_invite_headers(target);
+
         let invite_option = InviteOption {
             caller_display_name: caller_display_name.cloned(),
             callee: target.aor.clone(),
@@ -1071,7 +1122,7 @@ impl ProxyCall {
             destination: target.destination.clone(),
             contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
-            headers: self.build_invite_headers(target),
+            headers: base_headers.clone(),
             ..Default::default()
         };
 
@@ -1106,6 +1157,11 @@ impl ProxyCall {
         } else {
             invite_option
         };
+
+        invite_option.headers = Self::merge_invite_headers(
+            invite_option.headers.take(),
+            base_headers.as_ref().map(Vec::as_slice),
+        );
 
         let callee_uri = &invite_option.callee;
         let callee_realm = callee_uri.host().to_string();
@@ -1517,5 +1573,45 @@ fn resolve_call_status(session: &CallSession) -> String {
         | Some(CallRecordHangupReason::Autohangup)
         | Some(CallRecordHangupReason::Canceled) => "missed".to_string(),
         _ => "failed".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyCall;
+    use rsip::Header;
+
+    #[test]
+    fn merge_invite_headers_prefers_base_custom_headers() {
+        let existing = Some(vec![Header::Other("X-Param".into(), "old".into())]);
+        let base = vec![Header::Other("X-Param".into(), "new".into())];
+
+        let merged = ProxyCall::merge_invite_headers(existing, Some(base.as_slice())).unwrap();
+
+        assert!(merged.iter().any(|header| match header {
+            Header::Other(name, value) => name == "X-Param" && value == "new",
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn merge_invite_headers_keeps_existing_headers() {
+        let existing = Some(vec![Header::Other(
+            "P-Asserted-Identity".into(),
+            "<sip:alice@example.com>".into(),
+        )]);
+        let base = vec![Header::Other("X-Param".into(), "custom".into())];
+
+        let merged = ProxyCall::merge_invite_headers(existing, Some(base.as_slice())).unwrap();
+
+        assert!(merged.iter().any(|header| match header {
+            Header::Other(name, value) =>
+                name == "P-Asserted-Identity" && value == "<sip:alice@example.com>",
+            _ => false,
+        }));
+        assert!(merged.iter().any(|header| match header {
+            Header::Other(name, value) => name == "X-Param" && value == "custom",
+            _ => false,
+        }));
     }
 }
