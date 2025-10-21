@@ -5,8 +5,7 @@ use crate::{
     call::{
         CommandReceiver, CommandSender,
         sip::{
-            DialogGuard, Invitation, client_dialog_event_loop, on_dialog_terminated,
-            server_dialog_event_loop,
+            Invitation, client_dialog_event_loop, on_dialog_terminated, server_dialog_event_loop,
         },
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
@@ -32,7 +31,7 @@ use crate::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsipstack::dialog::{
-    dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
+    DialogId, dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,7 +42,7 @@ use std::{
 };
 use tokio::{fs::File, select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,7 +73,7 @@ pub struct ActiveCallState {
     pub last_status_code: u16,
     pub option: Option<CallOption>,
     pub answer: Option<String>,
-    pub dialog: Option<DialogGuard>,
+    pub dialogs: Vec<DialogId>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
@@ -740,16 +739,44 @@ impl ActiveCall {
         self.media_stream
             .stop(Some(hangup_reason.to_string()), initiator);
 
-        match self.call_state.write().as_mut() {
-            Ok(call_state) => {
+        let dialog_ids = {
+            let mut drained = Vec::new();
+            if let Ok(mut call_state) = self.call_state.write() {
                 if call_state.hangup_reason.is_none() {
                     call_state.hangup_reason.replace(hangup_reason);
                 }
-                call_state.dialog.take()
+                drained.extend(call_state.take_dialogs());
+                if let Some(ref refer_state) = call_state.refer_callstate {
+                    if let Ok(mut state) = refer_state.write() {
+                        drained.extend(state.take_dialogs());
+                    }
+                }
             }
-            Err(_) => None,
+            drained
         };
+
+        if !dialog_ids.is_empty() {
+            self.cleanup_dialogs(dialog_ids).await;
+        }
         Ok(())
+    }
+
+    async fn cleanup_dialogs(&self, dialog_ids: Vec<DialogId>) {
+        let dialog_layer = self.invitation.dialog_layer.clone();
+        for dialog_id in dialog_ids {
+            let dialog_id_str = dialog_id.to_string();
+            if let Some(dialog) = dialog_layer.get_dialog(&dialog_id) {
+                if let Err(err) = dialog.hangup().await {
+                    warn!(
+                        session_id = self.session_id,
+                        dialog_id = %dialog_id_str,
+                        "failed to hangup dialog: {}",
+                        err
+                    );
+                }
+            }
+            dialog_layer.remove_dialog(&dialog_id);
+        }
     }
 
     async fn do_refer(
@@ -875,12 +902,22 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        self.call_state.write().as_mut().ok().map(|cs| {
-            cs.dialog.take();
-            cs.refer_callstate
-                .as_mut()
-                .map(|rcs| rcs.write().as_mut().ok().map(|rcs| rcs.dialog.take()))
-        });
+        let dialog_ids = {
+            let mut drained = Vec::new();
+            if let Ok(mut call_state) = self.call_state.write() {
+                drained.extend(call_state.take_dialogs());
+                if let Some(ref refer_state) = call_state.refer_callstate {
+                    if let Ok(mut state) = refer_state.write() {
+                        drained.extend(state.take_dialogs());
+                    }
+                }
+            }
+            drained
+        };
+
+        if !dialog_ids.is_empty() {
+            self.cleanup_dialogs(dialog_ids).await;
+        }
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
         self.cancel_token.cancel();
@@ -1374,7 +1411,6 @@ impl ActiveCall {
         let media_stream = self.media_stream.clone();
         let call_state = call_state_ref.clone();
         let track_id_clone = track_id.clone();
-        let dialog_layer = self.invitation.dialog_layer.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
@@ -1395,8 +1431,7 @@ impl ActiveCall {
                     event_sender.clone(),
                     dlg_state_receiver,
                     call_state.clone(),
-                    media_stream,
-                    dialog_layer) => {
+                    media_stream) => {
                         cancel_token.cancel();
                     }
             }
@@ -1536,7 +1571,6 @@ impl ActiveCall {
                 return Err(anyhow::anyhow!("error creating track: {}", e));
             }
         }
-        let dialog_layer = self.invitation.dialog_layer.clone();
         tokio::spawn(async move {
             let forward_dlg_state_loop = async {
                 tokio::select! {
@@ -1565,7 +1599,6 @@ impl ActiveCall {
                     event_sender,
                     dlg_state_receiver,
                     call_state,
-                    dialog_layer,
                 )
             )
         });
@@ -1574,6 +1607,16 @@ impl ActiveCall {
 }
 
 impl ActiveCallState {
+    pub fn track_dialog(&mut self, dialog_id: DialogId) {
+        if !self.dialogs.iter().any(|id| id == &dialog_id) {
+            self.dialogs.push(dialog_id);
+        }
+    }
+
+    pub fn take_dialogs(&mut self) -> Vec<DialogId> {
+        self.dialogs.drain(..).collect()
+    }
+
     pub fn build_hangup_event(
         &self,
         track_id: TrackId,
@@ -1634,11 +1677,7 @@ impl ActiveCallState {
         let refer_callrecord = self.refer_callstate.as_ref().and_then(|rc| {
             let rc = rc.read().unwrap();
             if rc.start_time != Utc::now() {
-                let call_id = rc
-                    .dialog
-                    .as_ref()
-                    .map(|d| d.id().to_string())
-                    .unwrap_or_default();
+                let call_id = rc.dialogs.last().map(|d| d.to_string()).unwrap_or_default();
                 Some(Box::new(rc.build_callrecord(
                     app_state.clone(),
                     call_id,

@@ -15,47 +15,9 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::rsip_ext::RsipResponseExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-
-#[derive(Clone)]
-pub struct DialogGuard {
-    dialog_layer: Arc<DialogLayer>,
-    dialog_id: DialogId,
-}
-impl DialogGuard {
-    pub fn new(dialog_layer: Arc<DialogLayer>, dialog_id: DialogId) -> Self {
-        Self {
-            dialog_layer,
-            dialog_id,
-        }
-    }
-    pub fn id(&self) -> &DialogId {
-        &self.dialog_id
-    }
-}
-impl Drop for DialogGuard {
-    fn drop(&mut self) {
-        let dialog_layer = self.dialog_layer.clone();
-        let mut trying_dialog_id = self.dialog_id.clone();
-        trying_dialog_id.to_tag = String::new();
-        for id in vec![&self.dialog_id, &trying_dialog_id] {
-            match dialog_layer.get_dialog(&id) {
-                Some(dialog) => {
-                    info!(%id, "dialog guard dropped");
-                    dialog_layer.remove_dialog(&id);
-                    tokio::spawn(async move {
-                        let _ = timeout(Duration::from_secs(4), dialog.hangup()).await;
-                    });
-                }
-                None => {}
-            }
-        }
-    }
-}
 #[derive(Clone)]
 pub struct Invitation {
     pub dialog_layer: Arc<DialogLayer>,
@@ -230,7 +192,6 @@ pub async fn client_dialog_event_loop(
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
     media_stream: Arc<MediaStream>,
-    dialog_layer: Arc<DialogLayer>,
 ) -> Result<DialogId> {
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
@@ -239,9 +200,7 @@ pub async fn client_dialog_event_loop(
                     .write()
                     .as_mut()
                     .map(|cs| {
-                        if cs.dialog.is_none() {
-                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
-                        }
+                        cs.track_dialog(dialog_id.clone());
                         cs.ring_time.replace(Utc::now())
                     })
                     .ok();
@@ -255,11 +214,7 @@ pub async fn client_dialog_event_loop(
                     .write()
                     .as_mut()
                     .map(|cs| {
-                        if cs.dialog.is_none() {
-                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
-                        } else {
-                            cs.dialog.as_mut().map(|d| d.dialog_id = dialog_id);
-                        }
+                        cs.track_dialog(dialog_id.clone());
                         cs.ring_time.replace(Utc::now())
                     })
                     .ok();
@@ -286,11 +241,7 @@ pub async fn client_dialog_event_loop(
                     .write()
                     .as_mut()
                     .and_then(|cs| {
-                        if cs.dialog.is_none() {
-                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
-                        } else {
-                            cs.dialog.as_mut().map(|d| d.dialog_id = dialog_id);
-                        }
+                        cs.track_dialog(dialog_id.clone());
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;
                         Ok(())
@@ -342,7 +293,6 @@ pub async fn server_dialog_event_loop(
     event_sender: EventSender,
     mut dlg_state_receiver: DialogStateReceiver,
     call_state: ActiveCallStateRef,
-    dialog_layer: Arc<DialogLayer>,
 ) -> Result<DialogId> {
     while let Some(event) = dlg_state_receiver.recv().await {
         match event {
@@ -371,9 +321,7 @@ pub async fn server_dialog_event_loop(
                     .write()
                     .as_mut()
                     .and_then(|cs| {
-                        if cs.dialog.is_none() {
-                            cs.dialog = Some(DialogGuard::new(dialog_layer.clone(), dialog_id));
-                        }
+                        cs.track_dialog(dialog_id.clone());
                         cs.answer_time.replace(Utc::now());
                         cs.last_status_code = 200;
                         Ok(())
