@@ -137,6 +137,7 @@ enum ParallelEvent {
         aor: String,
     },
     Failed {
+        dialog_id: Option<DialogId>,
         code: StatusCode,
         reason: Option<String>,
     },
@@ -725,8 +726,7 @@ impl ProxyCall {
                 other_state => {
                     debug!(
                         session_id = %self.session_id,
-                        "Received other state on server dialog: {:?}",
-                        std::mem::discriminant(&other_state)
+                        "Received other state on server dialog: {}", other_state
                     );
                 }
             }
@@ -914,12 +914,14 @@ impl ProxyCall {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
                                     let _ = ev_tx_c.send(ParallelEvent::Failed {
                                         code: resp.status_code,
+                                        dialog_id: Some(dlg.id()),
                                         reason,
                                     });
                                 }
                             } else {
                                 let _ = ev_tx_c.send(ParallelEvent::Failed {
                                     code: StatusCode::RequestTerminated,
+                                    dialog_id: Some(dlg.id()),
                                     reason: Some("Cancelled by callee".to_string()),
                                 });
                             }
@@ -934,7 +936,11 @@ impl ProxyCall {
                                     Some("Invite failed".to_string()),
                                 ),
                             };
-                            let _ = ev_tx_c.send(ParallelEvent::Failed { code, reason });
+                            let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                code,
+                                reason,
+                                dialog_id: None,
+                            });
                         }
                     }
                 }
@@ -977,8 +983,9 @@ impl ProxyCall {
                     answer,
                     aor,
                 } => {
+                    session.add_callee_dialog(dialog_id.clone());
                     if accepted_idx.is_none() {
-                        if let Err(e) = session.accept_call(dialog_id.clone(), aor, answer).await {
+                        if let Err(e) = session.accept_call(dialog_id, aor, answer).await {
                             warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
                             continue;
                         }
@@ -994,8 +1001,15 @@ impl ProxyCall {
                         }
                     }
                 }
-                ParallelEvent::Failed { code, reason } => {
+                ParallelEvent::Failed {
+                    code,
+                    reason,
+                    dialog_id,
+                } => {
                     failures += 1;
+                    if let Some(id) = dialog_id {
+                        session.add_callee_dialog(id);
+                    }
                     session.set_error(code, reason);
                     if failures >= targets.len() && accepted_idx.is_none() {
                         return Err(anyhow!("All parallel targets failed"));
@@ -1161,10 +1175,17 @@ impl ProxyCall {
             invite_result = dialog_layer.do_invite(invite_option, state_tx) => {
                 match invite_result {
                     Ok((dlg, resp)) => {
+                        session.add_callee_dialog(dlg.id());
                         if let Some(resp) = resp {
                             if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
                                 let reason = resp.reason_phrase().clone().map(Into::into);
                                 info!(session_id = %self.session_id, code = %resp.status_code, "Invite failed with non-successful response");
+                                match dlg.state() {
+                                    DialogState::Terminated(_, term_reason) => {
+                                        session.callee_terminated(term_reason).await;
+                                    }
+                                    _ => {}
+                                }
                                 return Err((resp.status_code, reason));
                             }
                             let answer = String::from_utf8_lossy(resp.body()).to_string();
@@ -1194,7 +1215,6 @@ impl ProxyCall {
         session: &mut CallSession,
         mut state_rx: mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
-        info!(session_id = %self.session_id, "Monitoring established call");
         while let Some(state) = state_rx.recv().await {
             match state {
                 DialogState::Terminated(dialog_id, reason) => {
@@ -1259,6 +1279,15 @@ impl ProxyCall {
                     );
                     session.callee_terminated(reason).await;
                     break;
+                }
+                DialogState::Info(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
+                }
+                DialogState::Updated(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
+                }
+                DialogState::Notify(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
                 }
                 _ => {
                     debug!(
