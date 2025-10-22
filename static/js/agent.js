@@ -830,11 +830,27 @@ function mainApp() {
                 }
 
                 // Build TTS configuration
+                let speaker;
+                switch (this.config.tts.provider) {
+                    case 'tencent':
+                        if (this.config.tts.speaker == 'male') {
+                            speaker = '601003';
+                        } else {
+                            speaker = '601004';
+                        }
+                        break;
+                    case 'aliyun':
+                        if (this.config.tts.speaker == 'male') {
+                            speaker = 'longanyun';
+                        } else {
+                            speaker = 'longyumi_v2';
+                        }
+                        break;
+                }
                 let ttsConfig = {
                     provider: this.config.tts.provider,
-                    speaker: this.config.tts.speaker || '601003'
+                    speaker
                 };
-
                 // Add provider-specific TTS configuration
                 if (this.config.tts.provider === 'tencent' || this.config.tts.provider === 'tencent_streaming') {
                     if (this.config.tts.appId) ttsConfig.appId = this.config.tts.appId;
