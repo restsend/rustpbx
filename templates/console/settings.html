@@ -255,6 +255,11 @@
                                 x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
+                            <span class="text-xs uppercase tracking-wide text-slate-400">Realms</span>
+                            <span
+                                x-text="(proxyConfig.realms || []).length ? proxyConfig.realms.join(', ') : '—'"></span>
+                        </div>
+                        <div class="flex items-baseline justify-between">
                             <span class="text-xs uppercase tracking-wide text-slate-400">Data sources</span>
                             <span
                                 x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
@@ -1387,6 +1392,13 @@
                 this.amiEndpoint = options?.amiEndpoint || data.ami_endpoint || '/ami/v1';
                 this.platform = data.platform || {};
                 this.proxyConfig = data.proxy || {};
+                if (!Array.isArray(this.proxyConfig.realms)) {
+                    if (typeof this.proxyConfig.realms === 'string' && this.proxyConfig.realms.length) {
+                        this.proxyConfig.realms = [this.proxyConfig.realms];
+                    } else {
+                        this.proxyConfig.realms = [];
+                    }
+                }
                 this.useragentConfig = data.useragent || {};
                 this.stats = data.stats || {};
                 this.configMeta = data.config || { key_items: [] };

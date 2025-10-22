@@ -13,7 +13,7 @@ use rsipstack::{
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -579,6 +579,83 @@ impl Dialplan {
     /// Check if recording is enabled
     pub fn is_recording_enabled(&self) -> bool {
         self.recording.enabled
+    }
+
+    pub fn should_forward_header(header: &rsip::Header) -> bool {
+        use rsip::Header;
+
+        match header {
+            Header::Via(_)
+            | Header::Contact(_)
+            | Header::From(_)
+            | Header::To(_)
+            | Header::CallId(_)
+            | Header::CSeq(_)
+            | Header::MaxForwards(_)
+            | Header::ContentLength(_)
+            | Header::ContentType(_)
+            | Header::Authorization(_)
+            | Header::ProxyAuthorization(_)
+            | Header::ProxyAuthenticate(_)
+            | Header::WwwAuthenticate(_)
+            | Header::Route(_)
+            | Header::RecordRoute(_) => false,
+            Header::Other(name, _) => {
+                let lower = name.to_ascii_lowercase();
+                !matches!(
+                    lower.as_str(),
+                    "via"
+                        | "from"
+                        | "to"
+                        | "contact"
+                        | "call-id"
+                        | "cseq"
+                        | "max-forwards"
+                        | "content-length"
+                        | "content-type"
+                        | "route"
+                        | "record-route"
+                        | "authorization"
+                        | "proxy-authorization"
+                        | "proxy-authenticate"
+                        | "www-authenticate"
+                )
+            }
+            _ => true,
+        }
+    }
+
+    pub fn build_invite_headers(&self, target: &Location) -> Option<Vec<rsip::Header>> {
+        let mut headers = target.headers.clone().unwrap_or_default();
+
+        let mut custom_names: HashSet<String> = headers
+            .iter()
+            .filter_map(|h| match h {
+                rsip::Header::Other(name, _) => Some(name.to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+
+        if self.with_original_headers {
+            for header in self.original.headers.iter() {
+                if !Self::should_forward_header(header) {
+                    continue;
+                }
+                if let rsip::Header::Other(name, _) = header {
+                    let key = name.to_ascii_lowercase();
+                    if !custom_names.insert(key) {
+                        continue;
+                    }
+                }
+                headers.push(header.clone());
+            }
+        }
+
+        if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        }
     }
 }
 

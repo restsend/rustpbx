@@ -258,7 +258,14 @@
                                 <td class="whitespace-nowrap px-4 py-2 text-slate-500"
                                     x-text="formatDate(extension.created_at)"></td>
                                 <td class="whitespace-nowrap px-4 py-2 text-slate-500">
-                                    <template x-if="extension.registered_at">
+                                    <template x-if="registrationError(extension)">
+                                        <div
+                                            class="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600">
+                                            <div class="font-semibold">Locator error</div>
+                                            <div x-text="registrationError(extension)"></div>
+                                        </div>
+                                    </template>
+                                    <template x-if="!registrationError(extension) && hasActiveRegistration(extension)">
                                         <div class="flex items-start gap-2">
                                             <span
                                                 class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-200">
@@ -270,23 +277,26 @@
                                             </span>
                                             <div class="leading-tight">
                                                 <div class="text-xs font-semibold text-slate-700"
-                                                    x-text="formatDefault(extension.registrar, 'Unknown device')"></div>
+                                                    x-text="registrationDevice(extension)"></div>
                                                 <div class="text-xs text-slate-400"
-                                                    x-text="formatDate(extension.registered_at)"></div>
+                                                    x-text="registrationStatus(extension)"></div>
                                             </div>
                                         </div>
                                     </template>
-                                    <template x-if="!extension.registered_at">
-                                        <div class="flex items-center gap-2 text-slate-400">
+                                    <template x-if="!registrationError(extension) && !hasActiveRegistration(extension)">
+                                        <div class="flex items-start gap-2 text-slate-400">
                                             <span
-                                                class="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500 ring-1 ring-slate-200">
+                                                class="mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500 ring-1 ring-slate-200">
                                                 <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
                                                     stroke="currentColor" stroke-width="2">
                                                     <path stroke-linecap="round" stroke-linejoin="round"
                                                         d="M6 6l8 8M6 14l8-8" />
                                                 </svg>
                                             </span>
-                                            <span class="text-xs">Not registered</span>
+                                            <div class="leading-tight">
+                                                <div class="text-xs font-semibold"
+                                                    x-text="registrationStatus(extension)"></div>
+                                            </div>
                                         </div>
                                     </template>
                                 </td>
@@ -382,334 +392,459 @@
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('extensionsPage', (options) => ({
-            basePath: options.basePath || '/console',
-            listEndpoint: `${options.basePath || '/console'}/extensions`,
-            createUrl: options.createUrl || `${options.basePath || '/console'}/extensions/new`,
-            filtersRaw: options.filters || {},
-            departments: [],
-            statuses: [],
-            extensions: [],
-            pagination: null,
-            loading: false,
-            error: null,
-            flash: null,
-            keyword: '',
-            selectedDepartments: [],
-            callForwardingFilter: 'any',
-            statusFilter: '',
-            loginFilter: 'any',
-            createdFrom: '',
-            createdTo: '',
-            registeredFrom: '',
-            registeredTo: '',
-            page: 1,
-            perPage: 20,
-            processing: {
-                toggle: null,
-                delete: null,
-            },
-            init() {
-                this.departments = (this.filtersRaw.departments || []).map((item) => ({
-                    id: item.id,
-                    name: item.name || item.display_name || item.label || `Department #${item.id}`,
-                }));
-                this.statuses = (this.filtersRaw.statuses || [])
-                    .map((value) => (typeof value === 'string' ? value : String(value || '')))
-                    .map((value) => value.trim())
-                    .filter((value, index, self) => value.length > 0 && self.indexOf(value) === index)
-                    .sort((a, b) => a.localeCompare(b));
-                this.fetchExtensions();
-            },
-            resetFilters() {
-                this.keyword = '';
-                this.selectedDepartments = [];
-                this.callForwardingFilter = 'any';
-                this.statusFilter = '';
-                this.loginFilter = 'any';
-                this.createdFrom = '';
-                this.createdTo = '';
-                this.registeredFrom = '';
-                this.registeredTo = '';
-                this.applyFilters();
-            },
-            buildParams() {
-                let department_ids = (this.selectedDepartments || [])
-                    .map((id) => parseInt(id, 10))
-                    .filter((id) => Number.isFinite(id));
-                const callForwarding = this.callForwardingFilter === 'enabled'
-                    ? true
-                    : this.callForwardingFilter === 'disabled'
-                        ? false
-                        : undefined;
-                const loginAllowed = this.loginFilter === 'allowed'
-                    ? true
-                    : this.loginFilter === 'disabled'
-                        ? false
-                        : undefined;
-                return {
-                    page: this.page,
-                    per_page: this.perPage,
-                    filters: {
-                        q: this.keyword.trim() || undefined,
-                        department_ids,
-                        call_forwarding_enabled: callForwarding,
-                        status: this.statusFilter || undefined,
-                        login_allowed: loginAllowed,
-                        created_at_from: this.createdFrom || undefined,
-                        created_at_to: this.createdTo || undefined,
-                        registered_at_from: this.registeredFrom || undefined,
-                        registered_at_to: this.registeredTo || undefined,
-                    },
-                }
-            },
-            async fetchExtensions() {
-                this.loading = true;
-                this.error = null;
-                try {
-                    const params = this.buildParams();
-                    const response = await fetch(`${this.listEndpoint}`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(params),
-                    });
-                    const data = await response.json();
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to load extensions');
-                    }
-
-                    const items = Array.isArray(data?.items) ? data.items : [];
-                    const normalizedExtensions = items.map((item) => {
-                        const base = (item && typeof item === 'object' ? item.extension : null) || {};
-                        const departments = Array.isArray(item?.departments) ? item.departments : [];
-                        return {
-                            ...base,
-                            departments,
-                        };
-                    });
-
-                    const perPageRaw = Number(data?.per_page);
-                    const currentPageRaw = Number(data?.page);
-                    const totalItemsRaw = Number(data?.total_items);
-                    const totalPagesRaw = Number(data?.total_pages);
-
-                    const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw : this.perPage;
-                    const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0 ? totalItemsRaw : normalizedExtensions.length;
-                    const inferredTotalPages = Math.max(Math.ceil(totalItems / perPage), 1);
-                    const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
-                        ? Math.max(Math.min(totalPagesRaw, inferredTotalPages || 1), 1)
-                        : inferredTotalPages;
-                    const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
-                        ? Math.min(currentPageRaw, totalPages)
-                        : Math.min(this.page || 1, totalPages);
-
-                    const resultsCount = normalizedExtensions.length;
-                    const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
-                    const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1, totalItems) : 0;
-
-                    this.extensions = normalizedExtensions;
-                    this.pagination = {
-                        current_page: currentPage,
-                        per_page: perPage,
-                        total_items: totalItems,
-                        total_pages: totalPages,
-                        has_prev: currentPage > 1,
-                        has_next: currentPage < totalPages,
-                        prev_page: currentPage > 1 ? currentPage - 1 : null,
-                        next_page: currentPage < totalPages ? currentPage + 1 : null,
-                        showing_from: showingFrom,
-                        showing_to: showingTo,
-                    };
-
-                    this.perPage = perPage;
-                    this.page = currentPage;
-                    this.flash = null;
-                } catch (err) {
-                    console.error(err);
-                    this.error = err.message || 'Unable to load extensions';
-                } finally {
-                    this.loading = false;
-                }
-            },
-            applyFilters() {
-                this.page = 1;
-                this.fetchExtensions();
-            },
-            goToPage(target) {
-                if (!this.pagination) {
-                    return;
-                }
-                const totalPages = this.pagination.total_pages || 1;
-                const page = Math.min(Math.max(target, 1), totalPages);
-                if (page === this.page) {
-                    return;
-                }
-                this.page = page;
-                this.fetchExtensions();
-            },
-            prevPage() {
-                if (this.pagination?.has_prev) {
-                    this.goToPage((this.pagination?.prev_page) || (this.page - 1));
-                }
-            },
-            nextPage() {
-                if (this.pagination?.has_next) {
-                    this.goToPage((this.pagination?.next_page) || (this.page + 1));
-                }
-            },
-            formatDefault(value, fallback = '—') {
-                if (value === undefined || value === null || value === '') {
-                    return fallback;
-                }
-                return value;
-            },
-            formatDate(value) {
-                if (!value) {
-                    return '—';
-                }
-                const date = new Date(value);
-                if (Number.isNaN(date.getTime())) {
-                    return value;
-                }
-                return date.toLocaleString();
-            },
-            loginAllowed(extension) {
-                return !(extension?.login_disabled);
-            },
-            publicCallsAllowed(extension) {
-                return !!(extension?.allow_guest_calls);
-            },
-            forwardingLabel(extension) {
-                const mode = (extension?.call_forwarding_mode || 'none').toLowerCase();
-                switch (mode) {
-                    case 'always':
-                        return 'Always';
-                    case 'when_busy':
-                        return 'When busy';
-                    case 'when_not_answered':
-                        return 'When not answered';
-                    default:
-                        return 'None';
-                }
-            },
-            forwardingDestination(extension) {
-                return extension?.call_forwarding_destination || '';
-            },
-            resolveDepartments(extension) {
-                const raw = extension?.departments || extension?.metadata?.departments || [];
-                if (!Array.isArray(raw)) {
-                    return [];
-                }
-                return raw
-                    .map((entry) => {
-                        if (typeof entry === 'string') {
-                            return entry;
-                        }
-                        if (entry && typeof entry === 'object') {
-                            return entry.name || entry.display_name || entry.label || entry.title || '';
-                        }
-                        return '';
-                    })
-                    .filter(Boolean);
-            },
-            statusMeta(status) {
-                const normalized = (status || '').toLowerCase();
-                if (normalized === 'online') {
+        Alpine.data('extensionsPage', (options) => {
+            const normalizeLocator = (raw) => {
+                if (!raw || typeof raw !== 'object') {
                     return {
-                        label: 'Online',
-                        badge: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100',
-                        dot: 'bg-emerald-400',
-                    };
-                }
-                if (normalized === 'ringing' || normalized === 'idle') {
-                    return {
-                        label: status || 'Idle',
-                        badge: 'bg-amber-50 text-amber-600 ring-1 ring-amber-100',
-                        dot: 'bg-amber-400',
+                        available: false,
+                        query_uri: null,
+                        realm: null,
+                        total: 0,
+                        records: [],
+                        error: null,
                     };
                 }
                 return {
-                    label: status || 'Unknown',
-                    badge: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200',
-                    dot: 'bg-slate-400',
+                    available: !!raw.available,
+                    query_uri: raw.query_uri || null,
+                    realm: raw.realm || null,
+                    total: Number(raw.total) || 0,
+                    records: Array.isArray(raw.records) ? raw.records : [],
+                    error: raw.error || null,
                 };
-            },
-            detailUrl(id) {
-                return `${this.basePath}/extensions/${id}`;
-            },
-            async toggleLogin(extension) {
-                if (!extension) {
-                    return;
-                }
-                this.processing.toggle = extension.id;
-                this.error = null;
-                try {
-                    const nextDisabled = this.loginAllowed(extension);
-                    const body = new URLSearchParams();
-                    body.set('login_disabled', nextDisabled ? 'true' : 'false');
-                    const response = await fetch(this.detailUrl(extension.id), {
-                        method: 'PATCH',
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                        },
-                        body: body.toString(),
-                    });
-                    const data = await response.json();
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to update extension');
-                    }
-                    extension.login_disabled = nextDisabled;
-                    this.flash = nextDisabled ? 'Login disabled for this extension.' : 'Login enabled for this extension.';
-                } catch (err) {
-                    console.error(err);
-                    this.error = err.message || 'Failed to toggle login state';
+            };
+
+            return {
+                basePath: options.basePath || '/console',
+                listEndpoint: `${options.basePath || '/console'}/extensions`,
+                createUrl: options.createUrl || `${options.basePath || '/console'}/extensions/new`,
+                filtersRaw: options.filters || {},
+                departments: [],
+                statuses: [],
+                extensions: [],
+                pagination: null,
+                loading: false,
+                error: null,
+                flash: null,
+                keyword: '',
+                selectedDepartments: [],
+                callForwardingFilter: 'any',
+                statusFilter: '',
+                loginFilter: 'any',
+                createdFrom: '',
+                createdTo: '',
+                registeredFrom: '',
+                registeredTo: '',
+                page: 1,
+                perPage: 20,
+                processing: {
+                    toggle: null,
+                    delete: null,
+                },
+                init() {
+                    this.departments = (this.filtersRaw.departments || []).map((item) => ({
+                        id: item.id,
+                        name: item.name || item.display_name || item.label || `Department #${item.id}`,
+                    }));
+                    this.statuses = (this.filtersRaw.statuses || [])
+                        .map((value) => (typeof value === 'string' ? value : String(value || '')))
+                        .map((value) => value.trim())
+                        .filter((value, index, self) => value.length > 0 && self.indexOf(value) === index)
+                        .sort((a, b) => a.localeCompare(b));
                     this.fetchExtensions();
-                } finally {
-                    this.processing.toggle = null;
-                }
-            },
-            confirmDelete(extension) {
-                if (!extension) {
-                    return;
-                }
-                window.dispatchEvent(new CustomEvent('console:confirm', {
-                    detail: {
-                        title: 'Delete extension',
-                        message: `Delete extension ${extension.extension}? This action cannot be undone.`,
-                        confirmLabel: 'Delete',
-                        cancelLabel: 'Cancel',
-                        destructive: true,
-                        onConfirm: () => this.deleteExtension(extension),
-                    },
-                }));
-            },
-            async deleteExtension(extension) {
-                this.processing.delete = extension.id;
-                this.error = null;
-                try {
-                    const response = await fetch(this.detailUrl(extension.id), {
-                        method: 'DELETE',
-                        headers: {
-                            'Accept': 'application/json',
+                },
+                resetFilters() {
+                    this.keyword = '';
+                    this.selectedDepartments = [];
+                    this.callForwardingFilter = 'any';
+                    this.statusFilter = '';
+                    this.loginFilter = 'any';
+                    this.createdFrom = '';
+                    this.createdTo = '';
+                    this.registeredFrom = '';
+                    this.registeredTo = '';
+                    this.applyFilters();
+                },
+                buildParams() {
+                    let department_ids = (this.selectedDepartments || [])
+                        .map((id) => parseInt(id, 10))
+                        .filter((id) => Number.isFinite(id));
+                    const callForwarding = this.callForwardingFilter === 'enabled'
+                        ? true
+                        : this.callForwardingFilter === 'disabled'
+                            ? false
+                            : undefined;
+                    const loginAllowed = this.loginFilter === 'allowed'
+                        ? true
+                        : this.loginFilter === 'disabled'
+                            ? false
+                            : undefined;
+                    return {
+                        page: this.page,
+                        per_page: this.perPage,
+                        filters: {
+                            q: this.keyword.trim() || undefined,
+                            department_ids,
+                            call_forwarding_enabled: callForwarding,
+                            status: this.statusFilter || undefined,
+                            login_allowed: loginAllowed,
+                            created_at_from: this.createdFrom || undefined,
+                            created_at_to: this.createdTo || undefined,
+                            registered_at_from: this.registeredFrom || undefined,
+                            registered_at_to: this.registeredTo || undefined,
                         },
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to delete extension');
                     }
-                    this.flash = 'Extension deleted successfully.';
-                    await this.fetchExtensions();
-                } catch (err) {
-                    console.error(err);
-                    this.error = err.message || 'Failed to delete extension';
-                } finally {
-                    this.processing.delete = null;
-                }
-            },
-        }));
+                },
+                async fetchExtensions() {
+                    this.loading = true;
+                    this.error = null;
+                    try {
+                        const params = this.buildParams();
+                        const response = await fetch(`${this.listEndpoint}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify(params),
+                        });
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(data?.message || 'Failed to load extensions');
+                        }
+
+                        const items = Array.isArray(data?.items) ? data.items : [];
+                        const normalizedExtensions = items.map((item) => {
+                            const base = (item && typeof item === 'object' ? item.extension : null) || {};
+                            const departments = Array.isArray(item?.departments) ? item.departments : [];
+                            const registrations = normalizeLocator(item?.registrations);
+                            return {
+                                ...base,
+                                departments,
+                                registrations,
+                            };
+                        });
+
+                        const perPageRaw = Number(data?.per_page);
+                        const currentPageRaw = Number(data?.page);
+                        const totalItemsRaw = Number(data?.total_items);
+                        const totalPagesRaw = Number(data?.total_pages);
+
+                        const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw : this.perPage;
+                        const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0 ? totalItemsRaw : normalizedExtensions.length;
+                        const inferredTotalPages = Math.max(Math.ceil(totalItems / perPage), 1);
+                        const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
+                            ? Math.max(Math.min(totalPagesRaw, inferredTotalPages || 1), 1)
+                            : inferredTotalPages;
+                        const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
+                            ? Math.min(currentPageRaw, totalPages)
+                            : Math.min(this.page || 1, totalPages);
+
+                        const resultsCount = normalizedExtensions.length;
+                        const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
+                        const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1, totalItems) : 0;
+
+                        this.extensions = normalizedExtensions;
+                        this.pagination = {
+                            current_page: currentPage,
+                            per_page: perPage,
+                            total_items: totalItems,
+                            total_pages: totalPages,
+                            has_prev: currentPage > 1,
+                            has_next: currentPage < totalPages,
+                            prev_page: currentPage > 1 ? currentPage - 1 : null,
+                            next_page: currentPage < totalPages ? currentPage + 1 : null,
+                            showing_from: showingFrom,
+                            showing_to: showingTo,
+                        };
+
+                        this.perPage = perPage;
+                        this.page = currentPage;
+                        this.flash = null;
+                    } catch (err) {
+                        console.error(err);
+                        this.error = err.message || 'Unable to load extensions';
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                applyFilters() {
+                    this.page = 1;
+                    this.fetchExtensions();
+                },
+                goToPage(target) {
+                    if (!this.pagination) {
+                        return;
+                    }
+                    const totalPages = this.pagination.total_pages || 1;
+                    const page = Math.min(Math.max(target, 1), totalPages);
+                    if (page === this.page) {
+                        return;
+                    }
+                    this.page = page;
+                    this.fetchExtensions();
+                },
+                prevPage() {
+                    if (this.pagination?.has_prev) {
+                        this.goToPage((this.pagination?.prev_page) || (this.page - 1));
+                    }
+                },
+                nextPage() {
+                    if (this.pagination?.has_next) {
+                        this.goToPage((this.pagination?.next_page) || (this.page + 1));
+                    }
+                },
+                formatDefault(value, fallback = '—') {
+                    if (value === undefined || value === null || value === '') {
+                        return fallback;
+                    }
+                    return value;
+                },
+                formatDate(value) {
+                    if (!value) {
+                        return '—';
+                    }
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) {
+                        return value;
+                    }
+                    return date.toLocaleString();
+                },
+                loginAllowed(extension) {
+                    return !(extension?.login_disabled);
+                },
+                publicCallsAllowed(extension) {
+                    return !!(extension?.allow_guest_calls);
+                },
+                forwardingLabel(extension) {
+                    const mode = (extension?.call_forwarding_mode || 'none').toLowerCase();
+                    switch (mode) {
+                        case 'always':
+                            return 'Always';
+                        case 'when_busy':
+                            return 'When busy';
+                        case 'when_not_answered':
+                            return 'When not answered';
+                        default:
+                            return 'None';
+                    }
+                },
+                forwardingDestination(extension) {
+                    return extension?.call_forwarding_destination || '';
+                },
+                resolveDepartments(extension) {
+                    const raw = extension?.departments || extension?.metadata?.departments || [];
+                    if (!Array.isArray(raw)) {
+                        return [];
+                    }
+                    return raw
+                        .map((entry) => {
+                            if (typeof entry === 'string') {
+                                return entry;
+                            }
+                            if (entry && typeof entry === 'object') {
+                                return entry.name || entry.display_name || entry.label || entry.title || '';
+                            }
+                            return '';
+                        })
+                        .filter(Boolean);
+                },
+                statusMeta(status) {
+                    const normalized = (status || '').toLowerCase();
+                    if (normalized === 'online') {
+                        return {
+                            label: 'Online',
+                            badge: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100',
+                            dot: 'bg-emerald-400',
+                        };
+                    }
+                    if (normalized === 'ringing' || normalized === 'idle') {
+                        return {
+                            label: status || 'Idle',
+                            badge: 'bg-amber-50 text-amber-600 ring-1 ring-amber-100',
+                            dot: 'bg-amber-400',
+                        };
+                    }
+                    return {
+                        label: status || 'Unknown',
+                        badge: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200',
+                        dot: 'bg-slate-400',
+                    };
+                },
+                detailUrl(id) {
+                    return `${this.basePath}/extensions/${id}`;
+                },
+                async toggleLogin(extension) {
+                    if (!extension) {
+                        return;
+                    }
+                    this.processing.toggle = extension.id;
+                    this.error = null;
+                    try {
+                        const nextDisabled = this.loginAllowed(extension);
+                        const body = new URLSearchParams();
+                        body.set('login_disabled', nextDisabled ? 'true' : 'false');
+                        const response = await fetch(this.detailUrl(extension.id), {
+                            method: 'PATCH',
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                            },
+                            body: body.toString(),
+                        });
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(data?.message || 'Failed to update extension');
+                        }
+                        extension.login_disabled = nextDisabled;
+                        this.flash = nextDisabled ? 'Login disabled for this extension.' : 'Login enabled for this extension.';
+                    } catch (err) {
+                        console.error(err);
+                        this.error = err.message || 'Failed to toggle login state';
+                        this.fetchExtensions();
+                    } finally {
+                        this.processing.toggle = null;
+                    }
+                },
+                confirmDelete(extension) {
+                    if (!extension) {
+                        return;
+                    }
+                    window.dispatchEvent(new CustomEvent('console:confirm', {
+                        detail: {
+                            title: 'Delete extension',
+                            message: `Delete extension ${extension.extension}? This action cannot be undone.`,
+                            confirmLabel: 'Delete',
+                            cancelLabel: 'Cancel',
+                            destructive: true,
+                            onConfirm: () => this.deleteExtension(extension),
+                        },
+                    }));
+                },
+                async deleteExtension(extension) {
+                    this.processing.delete = extension.id;
+                    this.error = null;
+                    try {
+                        const response = await fetch(this.detailUrl(extension.id), {
+                            method: 'DELETE',
+                            headers: {
+                                'Accept': 'application/json',
+                            },
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(data?.message || 'Failed to delete extension');
+                        }
+                        this.flash = 'Extension deleted successfully.';
+                        await this.fetchExtensions();
+                    } catch (err) {
+                        console.error(err);
+                        this.error = err.message || 'Failed to delete extension';
+                    } finally {
+                        this.processing.delete = null;
+                    }
+                },
+                remainingTtl(record) {
+                    if (!record || typeof record !== 'object') {
+                        return 0;
+                    }
+                    const expires = Number(record.expires) || 0;
+                    const age = Number(record.age_seconds) || 0;
+                    return Math.max(expires - age, 0);
+                },
+                formatDuration(value) {
+                    const seconds = Math.max(Number(value) || 0, 0);
+                    if (seconds < 1) {
+                        return '0s';
+                    }
+                    if (seconds < 60) {
+                        return `${Math.round(seconds)}s`;
+                    }
+                    const minutes = Math.floor(seconds / 60);
+                    const remSeconds = Math.round(seconds % 60);
+                    if (minutes < 60) {
+                        return remSeconds ? `${minutes}m ${remSeconds}s` : `${minutes}m`;
+                    }
+                    const hours = Math.floor(minutes / 60);
+                    const remMinutes = minutes % 60;
+                    if (hours < 24) {
+                        return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`;
+                    }
+                    const days = Math.floor(hours / 24);
+                    const remHours = hours % 24;
+                    return remHours ? `${days}d ${remHours}h` : `${days}d`;
+                },
+                formatRelativeSeconds(value) {
+                    const seconds = Number(value);
+                    if (!Number.isFinite(seconds) || seconds <= 0) {
+                        return 'moments ago';
+                    }
+                    if (seconds < 60) {
+                        return `${Math.round(seconds)}s ago`;
+                    }
+                    if (seconds < 3600) {
+                        const minutes = Math.floor(seconds / 60);
+                        const rem = Math.round(seconds % 60);
+                        return rem ? `${minutes}m ${rem}s ago` : `${minutes}m ago`;
+                    }
+                    if (seconds < 86400) {
+                        const hours = Math.floor(seconds / 3600);
+                        const remMinutes = Math.floor((seconds % 3600) / 60);
+                        return remMinutes ? `${hours}h ${remMinutes}m ago` : `${hours}h ago`;
+                    }
+                    const days = Math.floor(seconds / 86400);
+                    const remHours = Math.floor((seconds % 86400) / 3600);
+                    return remHours ? `${days}d ${remHours}h ago` : `${days}d ago`;
+                },
+                primaryRegistration(extension) {
+                    const info = extension?.registrations;
+                    if (!info || !info.available) {
+                        return null;
+                    }
+                    if (!Array.isArray(info.records) || !info.records.length) {
+                        return null;
+                    }
+                    return info.records[0];
+                },
+                hasActiveRegistration(extension) {
+                    return !!this.primaryRegistration(extension);
+                },
+                registrationDevice(extension) {
+                    const record = this.primaryRegistration(extension);
+                    if (!record) {
+                        return 'Unknown device';
+                    }
+                    if (record.user_agent) {
+                        return record.user_agent;
+                    }
+                    if (record.contact) {
+                        return record.contact;
+                    }
+                    if (record.destination) {
+                        return record.destination;
+                    }
+                    if (record.registered_aor) {
+                        return record.registered_aor;
+                    }
+                    return record.aor || 'Unknown device';
+                },
+                registrationStatus(extension) {
+                    const record = this.primaryRegistration(extension);
+                    if (!record) {
+                        if (extension?.registered_at) {
+                            return `Last seen ${this.formatDate(extension.registered_at)}`;
+                        }
+                        return 'Awaiting registration';
+                    }
+                    const ttl = this.formatDuration(this.remainingTtl(record));
+                    const seen = this.formatRelativeSeconds(record.age_seconds);
+                    return `${seen} • TTL ${ttl}`;
+                },
+                registrationError(extension) {
+                    const info = extension?.registrations;
+                    return info?.error || null;
+                },
+            };
+        });
     });
 </script>
 

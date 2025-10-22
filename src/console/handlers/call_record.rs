@@ -159,13 +159,13 @@ async fn query_call_records(
 }
 
 async fn page_call_record_detail(
-    AxumPath(call_id): AxumPath<String>,
+    AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
     let model = match CallRecordEntity::find()
-        .filter(CallRecordColumn::CallId.eq(call_id.clone()))
+        .filter(CallRecordColumn::Id.eq(pk))
         .one(db)
         .await
     {
@@ -178,7 +178,7 @@ async fn page_call_record_detail(
                 .into_response();
         }
         Err(err) => {
-            warn!("failed to load call record '{}': {}", call_id, err);
+            warn!("failed to load call record '{}': {}", pk, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "message": err.to_string() })),
@@ -192,7 +192,7 @@ async fn page_call_record_detail(
         Err(err) => {
             warn!(
                 "failed to load related data for call record '{}': {}",
-                call_id, err
+                pk, err
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -208,8 +208,8 @@ async fn page_call_record_detail(
         "console/call_record_detail.html",
         json!({
             "nav_active": "call-records",
-            "page_title": format!("Call record · {}", call_id),
-            "call_id": call_id,
+            "page_title": format!("Call record · {}", pk),
+            "call_id": model.call_id,
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
         }),
     )
@@ -506,7 +506,8 @@ fn build_record_payload(
     });
 
     json!({
-        "id": record.call_id,
+        "id": record.id,
+        "call_id": record.call_id,
         "display_id": record.display_id,
         "direction": record.direction,
         "status": record.status,
@@ -528,7 +529,7 @@ fn build_record_payload(
         "quality": quality,
         "started_at": record.started_at.to_rfc3339(),
         "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
-        "detail_url": state.url_for(&format!("/call-records/{}", record.call_id)),
+        "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
     })
 }
 

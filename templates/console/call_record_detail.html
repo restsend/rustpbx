@@ -16,7 +16,29 @@
                     <span>/</span>
                     <span x-text="record.display_id || record.id"></span>
                 </div>
-                <h1 class="text-3xl font-semibold text-slate-900" x-text="record.display_id || record.id"></h1>
+                <h1 class="text-3xl font-semibold text-slate-900">
+                    <span>#</span>
+                    <span x-text="record.display_id || record.id"></span>
+                </h1>
+                <div class="flex items-center gap-2 text-xs text-slate-500">
+                    <span>Call-Id</span>
+                    <span class="font-mono" :title="record.call_id" x-text="record.call_id || '—'"></span>
+                    <template x-if="record.call_id">
+                        <div class="flex items-center gap-1">
+                            <button type="button"
+                                class="inline-flex h-5 w-5 items-center justify-center rounded border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:text-slate-600"
+                                title="Copy call ID" aria-label="Copy call ID" @click="copyCallId(record.call_id)">
+                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6h8v8H6z" />
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h8" />
+                                </svg>
+                            </button>
+                            <span class="text-[10px] font-semibold text-emerald-600"
+                                x-show="copiedCallId === record.call_id" x-transition.opacity>Copied</span>
+                        </div>
+                    </template>
+                </div>
                 <p class="text-sm text-slate-500" x-text="formatDateTime(record.started_at)"></p>
                 <div class="flex flex-wrap items-center gap-2 text-xs font-semibold">
                     <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
@@ -501,6 +523,8 @@
             detailTab: 'overview',
             insightTab: 'transcription',
             expandedSip: [],
+            copiedCallId: null,
+            copyTimer: null,
             addTag() {
                 const value = (this.tagInput || '').trim();
                 if (!value) {
@@ -558,6 +582,59 @@
             },
             isSipExpanded(index) {
                 return this.expandedSip.includes(index);
+            },
+            async copyCallId(callId) {
+                if (!callId) {
+                    return;
+                }
+                const text = String(callId);
+                let ok = await this.tryClipboardWrite(text);
+                if (!ok) {
+                    ok = this.copyCallIdFallback(text);
+                }
+                if (ok) {
+                    this.showCopyConfirmation(text);
+                }
+            },
+            async tryClipboardWrite(text) {
+                if (typeof navigator === 'undefined' || !navigator.clipboard || !navigator.clipboard.writeText) {
+                    return false;
+                }
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                } catch (err) {
+                    console.error('Clipboard API failed', err);
+                    return false;
+                }
+            },
+            copyCallIdFallback(text) {
+                try {
+                    const temp = document.createElement('textarea');
+                    temp.value = text;
+                    temp.setAttribute('readonly', '');
+                    temp.style.position = 'fixed';
+                    temp.style.opacity = '0';
+                    document.body.appendChild(temp);
+                    temp.select();
+                    temp.setSelectionRange(0, temp.value.length);
+                    const success = document.execCommand('copy');
+                    document.body.removeChild(temp);
+                    return success;
+                } catch (err) {
+                    console.error('Copy fallback failed', err);
+                    return false;
+                }
+            },
+            showCopyConfirmation(value) {
+                this.copiedCallId = value;
+                if (this.copyTimer) {
+                    clearTimeout(this.copyTimer);
+                }
+                this.copyTimer = setTimeout(() => {
+                    this.copiedCallId = null;
+                    this.copyTimer = null;
+                }, 1500);
             },
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
