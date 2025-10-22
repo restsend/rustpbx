@@ -60,7 +60,7 @@ hound = "3.5.1"
 ort = { version = "2.0.0-rc.10", features = ["ndarray"], optional = true }
 ort-sys = { version = "2.0.0-rc.10", optional = true }
 chrono = { version = "0.4.41", features = ["serde"] }
-rsipstack = "0.2.78"
+rsipstack = "0.2.79"
 #rsipstack = { path = "../rsipstack" }
 g729-sys = { version = "0.1.0", optional = true }
 rsip = "0.4.0"
@@ -75,7 +75,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4.3"
 dotenv = "0.15"
-async-openai = "0.29.6"
+async-openai = "0.30.0"
 md-5 = "0.10.6"
 once_cell = "1.21.3"
 cpal = "0.16.0"
@@ -106,7 +106,7 @@ argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
 humantime = "2"
 ndarray = "0.16.1"
-serde_with = "3.15.0"
+serde_with = "3"
 console-subscriber = "0.4.1"
 
 [dev-dependencies]
