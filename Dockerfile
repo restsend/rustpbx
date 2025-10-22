@@ -16,6 +16,7 @@ ENV LANG=C.UTF-8
 
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
+COPY --from=rust-builder /build/templates /app/templates
 
 EXPOSE 25010/UDP
 EXPOSE 5060/UDP
