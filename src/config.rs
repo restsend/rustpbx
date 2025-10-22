@@ -35,7 +35,6 @@ fn default_config_http_addr() -> String {
 
 fn default_database_url() -> String {
     "sqlite://rustpbx.sqlite3".to_string()
-    //"sqlite::memory:?cache=shared".to_string()
 }
 
 fn default_console_session_secret() -> String {

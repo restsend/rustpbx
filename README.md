@@ -83,10 +83,15 @@ http_addr = "0.0.0.0:8080"
 log_level = "info"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
+database_url = "sqlite://./db/rustpbx.sqlite3"
 
 [ua]
 addr="0.0.0.0"
 udp_port=13050
+
+[console]
+#session_secret = "please_change_me_to_a_random_secret"
+base_path = "/console"
 
 [proxy]
 modules = ["acl", "auth", "registrar", "call"]
@@ -94,7 +99,9 @@ addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
-media_prxoy = "auto"
+media_proxy = "auto"
+trunks_source = "config" # or "database"
+routes_source = "config" # or "database"
 
 # ACL rules
 acl_rules = [
@@ -102,12 +109,15 @@ acl_rules = [
     "allow all",
 ]
 
-[proxy.user_backend]
+[[proxy.user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
+
+[[proxy.user_backends]]
+type = "extension"
 
 [callrecord]
 type = "local"
@@ -124,26 +134,23 @@ docker run -d \
   -p 13050:13050/udp \
   -p 20000-30000:20000-30000/udp \
   --env-file .env \
+  -v $(pwd)/db:/app/db \
   -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/recordings:/tmp/recorders \
   ghcr.io/restsend/rustpbx:latest \
   --conf /app/config.toml
 ```
+ - Create super user via cli(**optional**)
+```bash
+docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-user=YOUR --super-password=PASS
+```
 
-5. **Access the service:**
-- Web Interface: http://localhost:8080
+1. **Access the service:**
+- Web Interface: http://localhost:8080/console/
+  - Login via `YOUR` + `PASS`
 - SIP Proxy: localhost:15060
 - User Agent: localhost:13050
 
-### Environment Variables
-
-The following environment variables are required for Tencent Cloud ASR/TTS services:
-
-| Variable             | Description                   | Required |
-| -------------------- | ----------------------------- | -------- |
-| `TENCENT_APPID`      | Your Tencent Cloud App ID     | Yes      |
-| `TENCENT_SECRET_ID`  | Your Tencent Cloud Secret ID  | Yes      |
-| `TENCENT_SECRET_KEY` | Your Tencent Cloud Secret Key | Yes      |
 
 ## 🧪 Go Client Integration
 

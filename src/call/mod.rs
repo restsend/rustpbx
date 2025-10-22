@@ -599,6 +599,9 @@ impl Dialplan {
             | Header::ProxyAuthenticate(_)
             | Header::WwwAuthenticate(_)
             | Header::Route(_)
+            | Header::UserAgent(_)
+            | Header::Allow(_)
+            | Header::Supported(_)
             | Header::RecordRoute(_) => false,
             Header::Other(name, _) => {
                 let lower = name.to_ascii_lowercase();
@@ -619,6 +622,9 @@ impl Dialplan {
                         | "proxy-authorization"
                         | "proxy-authenticate"
                         | "www-authenticate"
+                        | "user-agent"
+                        | "allow"
+                        | "supported"
                 )
             }
             _ => true,
@@ -638,16 +644,14 @@ impl Dialplan {
 
         if self.with_original_headers {
             for header in self.original.headers.iter() {
-                if !Self::should_forward_header(header) {
-                    continue;
-                }
-                if let rsip::Header::Other(name, _) = header {
-                    let key = name.to_ascii_lowercase();
-                    if !custom_names.insert(key) {
-                        continue;
+                if Self::should_forward_header(header) {
+                    if let rsip::Header::Other(name, _) = header {
+                        let key = name.to_ascii_lowercase();
+                        if !custom_names.insert(key) {
+                            headers.push(header.clone());
+                        }
                     }
                 }
-                headers.push(header.clone());
             }
         }
 

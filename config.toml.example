@@ -7,6 +7,7 @@ log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
+database_url = "sqlite://rustpbx.sqlite3"
 
 # external IP address for SIP signaling and media
 # external_ip = "1.2.3.4"
@@ -23,7 +24,6 @@ media_cache_path = "/tmp/mediacache"
 # credential = "pass"
 
 [console]
-database_url = "sqlite://rustpbx.sqlite3"
 #session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"
 

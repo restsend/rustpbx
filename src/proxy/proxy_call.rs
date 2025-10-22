@@ -1075,8 +1075,6 @@ impl ProxyCall {
 
         debug!(
             session_id = %self.session_id, %caller, %target, destination,
-            ?target.headers,
-            ?invite_option.headers,
             "Sending INVITE to callee"
         );
 
@@ -1446,11 +1444,19 @@ fn resolve_call_status(session: &CallSession) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use crate::call::Dialplan;
     use rsip::Headers;
+    use rsipstack::{
+        EndpointBuilder,
+        dialog::{dialog_layer::DialogLayer, invitation::InviteOption},
+        transport::{TransportLayer, udp::UdpConnection},
+    };
+    use tokio_util::sync::CancellationToken;
 
-    #[test]
-    fn test_build_target_headers() {
+    #[tokio::test]
+    async fn test_build_target_headers() -> Result<(), anyhow::Error> {
         let req = rsip::Request {
             method: rsip::Method::Invite,
             uri: "sip:bob@localhost".try_into().expect("uri"),
@@ -1479,5 +1485,40 @@ mod tests {
             }
             _ => false,
         }));
+        let transport_layer = TransportLayer::new(CancellationToken::new());
+        let local_addr = format!("127.0.0.1:0").parse::<SocketAddr>()?;
+
+        // Setup transport
+        let connection = UdpConnection::create_connection(local_addr, None, None)
+            .await
+            .expect("create udp connection");
+        transport_layer.add_transport(connection.into());
+
+        let endpoint = EndpointBuilder::new()
+            .with_transport_layer(transport_layer)
+            .build();
+        let dialog_layer = DialogLayer::new(endpoint.inner.clone());
+        let invite_option = InviteOption {
+            caller: "sip:hello@test".try_into().expect("uri"),
+            callee: loc.aor.clone(),
+            headers: plan.build_invite_headers(&loc),
+            ..Default::default()
+        };
+        let req = dialog_layer
+            .make_invite_request(&invite_option)
+            .expect("build invite request");
+        assert!(req.headers.iter().any(|h| match h {
+            rsip::Header::Other(name, value) => {
+                name == "X-Custom-Header" && value == "CustomValue-1"
+            }
+            _ => false,
+        }));
+        assert!(req.headers.iter().any(|h| match h {
+            rsip::Header::Other(name, value) => {
+                name == "X-Custom-Header" && value == "CustomValue-2"
+            }
+            _ => false,
+        }));
+        Ok(())
     }
 }
