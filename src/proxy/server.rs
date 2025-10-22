@@ -593,7 +593,7 @@ impl SipServerInner {
                 params.push(Param::Transport(transport));
             }
         }
-        Some(rsip::Uri {
+        let mut uri = rsip::Uri {
             scheme: addr.r#type.map(|t| t.sip_scheme()),
             auth: Some(Auth {
                 user: "rustpbx".to_string(),
@@ -602,7 +602,11 @@ impl SipServerInner {
             host_with_port: addr.addr,
             params,
             ..Default::default()
-        })
+        };
+        if let Some(ref external_ip) = self.rtp_config.external_ip {
+            uri.host_with_port.host = external_ip.as_str().into();
+        }
+        Some(uri)
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {

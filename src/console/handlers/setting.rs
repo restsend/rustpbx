@@ -258,7 +258,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                     "routes": format_proxy_data_source(proxy_cfg.routes_source),
                     "trunks": format_proxy_data_source(proxy_cfg.trunks_source),
                 }),
-                "rtp": proxy_cfg.rtp_config.clone(),
+                "rtp": config.rtp_config(),
                 "user_backends": proxy_cfg
                     .user_backends
                     .iter()
