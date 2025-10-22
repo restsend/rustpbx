@@ -14,10 +14,13 @@ media_cache_path = "/tmp/mediacache"
 # rtp_end_port = 30000
 
 # setup your STUN/TURN servers here, for webrtc web clients
-#ice_servers = [
-#   {"urls":["stun:stun.l.google.com:19302"]},
-#   {"urls":["turn:1.2.3.4:3478"],"username":"YOUR","credential":"SECRET"}
-#]
+# [[ice_servers]]
+# urls = ["stun:stun.l.google.com:19302"]
+
+# [[ice_servers]]
+# urls = ["turn:restsend.com:3478"]
+# username = "user"
+# credential = "pass"
 
 [console]
 database_url = "sqlite://rustpbx.sqlite3"
