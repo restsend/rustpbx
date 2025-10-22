@@ -7,11 +7,21 @@ log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 recorder_path = "/tmp/recorders"
 media_cache_path = "/tmp/mediacache"
+
+# external IP address for SIP signaling and media
 # external_ip = "1.2.3.4"
+# rtp_start_port = 20000
+# rtp_end_port = 30000
+
+# setup your STUN/TURN servers here, for webrtc web clients
+#ice_servers = [
+#   {"urls":["stun:stun.l.google.com:19302"]},
+#   {"urls":["turn:1.2.3.4:3478"],"username":"YOUR","credential":"SECRET"}
+#]
 
 [console]
 database_url = "sqlite://rustpbx.sqlite3"
-session_secret = "please-change-this-session-secret"
+#session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"
 
 [ua]
@@ -33,8 +43,8 @@ routes_source = "config" # or "database"
 
 # ACL rules
 acl_rules = [
-    "allow 10.0.0.0/8",
-    "deny 0.123.4.0/16",
+    # "allow 10.0.0.0/8",
+    # "deny 0.123.4.0/16",
     "allow all",
     "deny all"
 ]

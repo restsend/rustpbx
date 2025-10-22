@@ -258,7 +258,29 @@
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="font-semibold text-slate-900" x-text="record.display_id || record.id">
                                     </div>
-                                    <div class="mt-0.5 text-[11px] text-slate-500" x-text="record.id"></div>
+                                    <div class="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
+                                        <span class="max-w-[180px] truncate font-mono" :title="record.call_id"
+                                            x-text="record.call_id || '—'"></span>
+                                        <template x-if="record.call_id">
+                                            <div class="flex items-center gap-1">
+                                                <button type="button"
+                                                    class="inline-flex h-5 w-5 items-center justify-center rounded border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:text-slate-600"
+                                                    title="Copy call ID" aria-label="Copy call ID"
+                                                    @click.stop="copyCallId(record.call_id)">
+                                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                        stroke="currentColor" stroke-width="1.6">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M6 6h8v8H6z" />
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            d="M4 4h8" />
+                                                    </svg>
+                                                </button>
+                                                <span class="text-[10px] font-semibold text-emerald-600"
+                                                    x-show="copiedCallId === record.call_id"
+                                                    x-transition.opacity>Copied</span>
+                                            </div>
+                                        </template>
+                                    </div>
                                 </td>
                                 <td class="px-4 py-2">
                                     <div class="text-sm text-slate-700" x-text="formatDateTime(record.started_at)">
@@ -341,7 +363,7 @@
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-2 text-right text-xs font-semibold">
                                     <div class="flex items-center justify-end gap-2">
-                                        <a :href="record.detail_url" title="View detail"
+                                        <a :href="recordDetailUrl(record)" title="View detail"
                                             class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
@@ -446,6 +468,9 @@
             totalPages: 1,
             totalItems: 0,
             debounceTimer: null,
+            copiedCallId: null,
+            copyTimer: null,
+            detailBase: '',
             _sync: {
                 filters: false,
                 pageSize: false,
@@ -471,6 +496,8 @@
                 if (!this.listEndpoint.startsWith('/')) {
                     this.listEndpoint = `/${this.listEndpoint}`;
                 }
+
+                this.detailBase = this.normalizeBasePath(this.basePath);
 
                 const options = (data.filter_options && typeof data.filter_options === 'object')
                     ? data.filter_options
@@ -572,6 +599,12 @@
                 if (!Array.isArray(data.records) || !data.records.length) {
                     this.fetchRecords({ page: this.currentPage });
                 }
+            },
+            normalizeBasePath(value) {
+                if (!value || value === '/') {
+                    return '';
+                }
+                return value.endsWith('/') ? value.slice(0, -1) : value;
             },
             normalizeSummary(summary) {
                 const defaults = {
@@ -807,6 +840,72 @@
                     this._sync.filters = false;
                     this.applyFilters();
                 });
+            },
+            async copyCallId(callId) {
+                if (!callId) {
+                    return;
+                }
+                const text = String(callId);
+                let ok = await this.tryClipboardWrite(text);
+                if (!ok) {
+                    ok = this.copyCallIdFallback(text);
+                }
+                if (ok) {
+                    this.showCopyConfirmation(text);
+                }
+            },
+            async tryClipboardWrite(text) {
+                if (typeof navigator === 'undefined' || !navigator.clipboard || !navigator.clipboard.writeText) {
+                    return false;
+                }
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                } catch (err) {
+                    console.error('Clipboard API failed', err);
+                    return false;
+                }
+            },
+            showCopyConfirmation(value) {
+                this.copiedCallId = value;
+                if (this.copyTimer) {
+                    clearTimeout(this.copyTimer);
+                }
+                this.copyTimer = setTimeout(() => {
+                    this.copiedCallId = null;
+                    this.copyTimer = null;
+                }, 1500);
+            },
+            // Provide a best-effort fallback for legacy clipboard implementations.
+            copyCallIdFallback(text) {
+                try {
+                    const temp = document.createElement('textarea');
+                    temp.value = text;
+                    temp.setAttribute('readonly', '');
+                    temp.style.position = 'fixed';
+                    temp.style.opacity = '0';
+                    document.body.appendChild(temp);
+                    temp.select();
+                    temp.setSelectionRange(0, temp.value.length);
+                    const success = document.execCommand('copy');
+                    document.body.removeChild(temp);
+                    return success;
+                } catch (err) {
+                    console.error('Copy fallback failed', err);
+                    return false;
+                }
+            },
+            recordDetailUrl(record) {
+                if (record && record.detail_url) {
+                    return record.detail_url;
+                }
+                const identifier = (record && (record.id || record.call_id)) || null;
+                if (!identifier) {
+                    return '#';
+                }
+                const base = this.detailBase ? this.detailBase : '';
+                const path = `${base}/call-records/${encodeURIComponent(identifier)}`;
+                return path.startsWith('/') ? path : `/${path}`;
             },
             async exportCsv() {
                 try {

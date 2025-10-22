@@ -1,3 +1,4 @@
+use crate::call::Location;
 use crate::console::handlers::forms::{self, ExtensionPayload, ListQuery};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
@@ -9,6 +10,7 @@ use crate::models::{
         Column as ExtensionDepartmentColumn, Entity as ExtensionDepartmentEntity,
     },
 };
+use crate::proxy::server::SipServerRef;
 use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
@@ -17,14 +19,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
+use rsip::Uri;
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -50,6 +54,36 @@ struct QueryExtensionsFilters {
     registered_at_to: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+struct ExtensionLocatorRecord {
+    binding_key: String,
+    aor: String,
+    destination: Option<String>,
+    expires: u32,
+    supports_webrtc: bool,
+    contact: Option<String>,
+    registered_aor: Option<String>,
+    gruu: Option<String>,
+    temp_gruu: Option<String>,
+    instance_id: Option<String>,
+    transport: Option<String>,
+    path: Vec<String>,
+    service_route: Vec<String>,
+    contact_params: Option<HashMap<String, String>>,
+    age_seconds: Option<u64>,
+    user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct ExtensionLocatorSummary {
+    available: bool,
+    query_uri: Option<String>,
+    realm: Option<String>,
+    total: usize,
+    records: Vec<ExtensionLocatorRecord>,
+    error: Option<String>,
+}
+
 fn parse_datetime_filter(value: &str) -> Option<DateTime<Utc>> {
     if value.trim().is_empty() {
         return None;
@@ -64,6 +98,127 @@ fn parse_datetime_filter(value: &str) -> Option<DateTime<Utc>> {
         return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
     }
     None
+}
+
+fn resolve_default_realm(state: &ConsoleState) -> String {
+    if let Some(app) = state.app_state() {
+        if let Some(proxy) = app.config.proxy.as_ref() {
+            return proxy.select_realm("");
+        }
+    }
+    "localhost".to_string()
+}
+
+async fn fetch_extension_locator_summary(
+    server: Option<SipServerRef>,
+    realm: &str,
+    extension: &str,
+) -> ExtensionLocatorSummary {
+    let mut summary = ExtensionLocatorSummary {
+        realm: Some(realm.to_string()),
+        ..Default::default()
+    };
+
+    let trimmed_ext = extension.trim();
+    if trimmed_ext.is_empty() {
+        summary.error = Some("Extension identifier missing".to_string());
+        return summary;
+    }
+
+    let query_uri = if trimmed_ext.starts_with("sip:") {
+        trimmed_ext.to_string()
+    } else if trimmed_ext.contains('@') {
+        format!("sip:{}", trimmed_ext)
+    } else {
+        format!("sip:{}@{}", trimmed_ext, realm)
+    };
+    summary.query_uri = Some(query_uri.clone());
+
+    let uri = match Uri::try_from(query_uri.as_str()) {
+        Ok(uri) => uri,
+        Err(err) => {
+            summary.error = Some(format!("Invalid SIP URI: {}", err));
+            return summary;
+        }
+    };
+
+    let Some(server) = server else {
+        summary.error = Some("SIP server unavailable".to_string());
+        return summary;
+    };
+
+    match server.locator.lookup(&uri).await {
+        Ok(locations) => {
+            let records = locations
+                .into_iter()
+                .map(location_to_record)
+                .collect::<Vec<_>>();
+            summary.total = records.len();
+            summary.records = records;
+            summary.available = true;
+        }
+        Err(err) => {
+            warn!(
+                "locator lookup failed for extension {} ({}): {}",
+                trimmed_ext, query_uri, err
+            );
+            summary.error = Some(format!("Locator lookup failed: {}", err));
+        }
+    }
+
+    summary
+}
+
+fn location_to_record(location: Location) -> ExtensionLocatorRecord {
+    let binding_key = location.binding_key();
+    let aor = location.aor.to_string();
+    let destination = location.destination.as_ref().map(|dest| dest.to_string());
+    let registered_aor = location.registered_aor.as_ref().map(|uri| uri.to_string());
+    let transport = location.transport.as_ref().map(|t| t.to_string());
+    let path = location
+        .path
+        .as_ref()
+        .into_iter()
+        .flat_map(|vec| vec.iter())
+        .map(|uri| uri.to_string())
+        .collect::<Vec<_>>();
+    let service_route = location
+        .service_route
+        .as_ref()
+        .into_iter()
+        .flat_map(|vec| vec.iter())
+        .map(|uri| uri.to_string())
+        .collect::<Vec<_>>();
+    let contact_params = location.contact_params.clone();
+    let contact = location.contact_raw.clone();
+    let gruu = location.gruu.clone();
+    let temp_gruu = location.temp_gruu.clone();
+    let instance_id = location.instance_id.clone();
+    let user_agent = location.user_agent.clone();
+    let supports_webrtc = location.supports_webrtc;
+    let expires = location.expires;
+    let age_seconds = location
+        .last_modified
+        .map(|instant| instant.elapsed().as_secs());
+
+    ExtensionLocatorRecord {
+        binding_key,
+        aor,
+        destination,
+        expires,
+        supports_webrtc,
+        contact,
+        registered_aor,
+        gruu,
+        temp_gruu,
+        instance_id,
+        transport,
+        path,
+        service_route,
+        contact_params,
+        age_seconds,
+        user_agent,
+    }
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -162,6 +317,10 @@ async fn page_extension_detail(
         }
     };
 
+    let realm = resolve_default_realm(state.as_ref());
+    let locator_info =
+        fetch_extension_locator_summary(state.sip_server(), &realm, &model.extension).await;
+
     state.render(
         "console/extension_detail.html",
         json!({
@@ -170,6 +329,7 @@ async fn page_extension_detail(
             "departments": departments,
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
+            "registration_info": locator_info,
         }),
     )
 }
@@ -184,6 +344,7 @@ async fn page_extension_create(
             "nav_active": "extensions",
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
+            "registration_info": ExtensionLocatorSummary::default(),
         }),
     )
 }
@@ -358,6 +519,8 @@ async fn query_extensions(
     };
 
     let mut items = vec![];
+    let realm = resolve_default_realm(state.as_ref());
+    let server = state.sip_server();
 
     for ext in &pagination.items {
         let departments = ext
@@ -365,9 +528,12 @@ async fn query_extensions(
             .all(db)
             .await
             .ok();
+        let registrations =
+            fetch_extension_locator_summary(server.clone(), &realm, &ext.extension).await;
         items.push(json!({
             "extension": ext,
             "departments": departments,
+            "registrations": registrations,
         }));
     }
     let result = json!({
