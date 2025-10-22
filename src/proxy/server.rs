@@ -27,7 +27,8 @@ use rsipstack::{
         transaction::Transaction,
     },
     transport::{
-        TcpListenerConnection, TransportLayer, WebSocketListenerConnection, udp::UdpConnection,
+        TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
+        WebSocketListenerConnection, udp::UdpConnection,
     },
 };
 use sea_orm::DatabaseConnection;
@@ -208,6 +209,7 @@ impl SipServerBuilder {
                 }
             }
         };
+
         let locator = Arc::new(locator);
         let rtp_config = self.rtp_config.unwrap_or_default();
         let cancel_token = self.cancel_token.unwrap_or_default();
@@ -219,10 +221,10 @@ impl SipServerBuilder {
             .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
         let external_ip = match rtp_config.external_ip {
-            Some(ref s) => s
-                .parse::<SocketAddr>()
-                .map_err(|e| anyhow!("failed to parse external ip address: {}", e))
-                .ok(),
+            Some(ref s) => Some(
+                s.parse::<IpAddr>()
+                    .map_err(|e| anyhow!("failed to parse external ip address {}: {}", s, e))?,
+            ),
             None => None,
         };
 
@@ -238,33 +240,94 @@ impl SipServerBuilder {
 
         if let Some(udp_port) = config.udp_port {
             let local_addr = SocketAddr::new(local_addr, udp_port);
+            let external_addr = external_ip
+                .as_ref()
+                .map(|ip| SocketAddr::new(ip.clone(), udp_port));
             let udp_conn = UdpConnection::create_connection(
                 local_addr,
-                external_ip,
+                external_addr,
                 Some(cancel_token.child_token()),
             )
             .await
             .map_err(|e| anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e))?;
+            info!("start proxy, udp port: {}", udp_conn.get_addr());
             transport_layer.add_transport(udp_conn.into());
-            info!("start proxy, udp port: {}", local_addr);
         }
 
         if let Some(tcp_port) = config.tcp_port {
             let local_addr = SocketAddr::new(local_addr, tcp_port);
-            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_ip)
+            let external_addr = external_ip
+                .as_ref()
+                .map(|ip| SocketAddr::new(ip.clone(), tcp_port));
+            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_addr)
                 .await
                 .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
+            info!("start proxy, tcp port: {}", tcp_conn.get_addr());
             transport_layer.add_transport(tcp_conn.into());
-            info!("start proxy, tcp port: {}", local_addr);
+        }
+
+        if let Some(tls_port) = config.tls_port {
+            let local_addr = SocketAddr::new(local_addr, tls_port);
+            let external_addr = external_ip
+                .as_ref()
+                .map(|ip| SocketAddr::new(ip.clone(), tls_port));
+
+            let cert_path = config
+                .ssl_certificate
+                .as_ref()
+                .ok_or_else(|| anyhow!("ssl_certificate is required for tls transport"))?;
+
+            let key_path = config
+                .ssl_private_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("ssl_private_key is required for tls transport"))?;
+
+            let mut well_done = true;
+            if !std::path::Path::new(cert_path).exists() {
+                well_done = false;
+                warn!("ssl_certificate file does not exist: {}", cert_path);
+            }
+
+            if !std::path::Path::new(key_path).exists() {
+                well_done = false;
+                warn!("ssl_private_key file does not exist: {}", key_path);
+            }
+
+            if well_done {
+                let tls_config = TlsConfig {
+                    cert: Some(cert_path.clone().into_bytes()),
+                    key: Some(key_path.clone().into_bytes()),
+                    client_cert: None,
+                    client_key: None,
+                    ca_certs: None,
+                };
+                let tls_conn =
+                    TlsListenerConnection::new(local_addr.into(), external_addr, tls_config)
+                        .await
+                        .map_err(|e| anyhow!("Failed to create TLS connection: {}", e))?;
+
+                info!(
+                    "start proxy, tls port: {} cert: {}, key: {}",
+                    tls_conn.get_addr(),
+                    cert_path,
+                    key_path
+                );
+                transport_layer.add_transport(tls_conn.into());
+            } else {
+                warn!("skip starting TLS transport due to missing certificate or key");
+            }
         }
 
         if let Some(ws_port) = config.ws_port {
             let local_addr = SocketAddr::new(local_addr, ws_port);
-            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_ip, false)
+            let external_addr = external_ip
+                .as_ref()
+                .map(|ip| SocketAddr::new(ip.clone(), ws_port));
+            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_addr, false)
                 .await
                 .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
+            info!("start proxy, ws port: {}", ws_conn.get_addr());
             transport_layer.add_transport(ws_conn.into());
-            info!("start proxy, ws port: {}", local_addr);
         }
 
         let mut endpoint_builder = EndpointBuilder::new();
@@ -593,7 +656,7 @@ impl SipServerInner {
                 params.push(Param::Transport(transport));
             }
         }
-        let mut uri = rsip::Uri {
+        Some(rsip::Uri {
             scheme: addr.r#type.map(|t| t.sip_scheme()),
             auth: Some(Auth {
                 user: "rustpbx".to_string(),
@@ -602,11 +665,7 @@ impl SipServerInner {
             host_with_port: addr.addr,
             params,
             ..Default::default()
-        };
-        if let Some(ref external_ip) = self.rtp_config.external_ip {
-            uri.host_with_port.host = external_ip.as_str().into();
-        }
-        Some(uri)
+        })
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
