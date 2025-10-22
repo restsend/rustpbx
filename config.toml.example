@@ -10,7 +10,9 @@ media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 
 # external IP address for SIP signaling and media
+# if server is behind NAT, set your public IP here (without port)
 # external_ip = "1.2.3.4"
+
 # rtp_start_port = 20000
 # rtp_end_port = 30000
 

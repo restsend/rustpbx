@@ -319,7 +319,6 @@ pub struct ProxyConfig {
     pub trunks_source: ProxyDataSource,
     #[serde(default)]
     pub routes_source: ProxyDataSource,
-    pub rtp_config: Option<RtpConfig>,
 }
 
 pub enum RouteResult {
@@ -419,7 +418,6 @@ impl Default for ProxyConfig {
             default: None,
             trunks_source: ProxyDataSource::default(),
             routes_source: ProxyDataSource::default(),
-            rtp_config: None,
         }
     }
 }

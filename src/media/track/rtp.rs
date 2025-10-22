@@ -64,6 +64,7 @@ const DTMF_EVENT_VOLUME: u8 = 10; // Default volume for DTMF events (0-63)
 
 // STUN constants for ICE connectivity check
 const STUN_BINDING_REQUEST: u16 = 0x0001;
+const STUN_BINDING_RESPONSE: u16 = 0x0101;
 const STUN_MAGIC_COOKIE: u32 = 0x2112A442;
 const STUN_TRANSACTION_ID_SIZE: usize = 12;
 
@@ -195,6 +196,13 @@ pub struct RtpTrack {
     sendrecv: AtomicBool,
     ice_connectivity_check: bool,
     inner: Arc<Mutex<RtpTrackInner>>,
+}
+
+enum PacketKind {
+    Rtp,
+    Rtcp,
+    Stun(u16),
+    Ignore,
 }
 impl RtpTrackBuilder {
     pub fn new(track_id: TrackId, config: TrackConfig) -> Self {
@@ -781,72 +789,63 @@ impl RtpTrack {
         Ok(())
     }
 
-    async fn is_rtcp_or_stun(
+    async fn classify_packet(
         track_id: &TrackId,
         buf: &[u8],
         n: usize,
         stats: &Arc<RtpTrackStats>,
         ssrc: u32,
-    ) -> bool {
-        // RTCP packet detection and filtering for rtcp-mux scenarios
-        let version = (buf[0] >> 6) & 0x03;
-
-        // Check if this is a STUN packet first
-        // STUN packets have specific message types and magic cookie
-        if n >= 8 {
+    ) -> PacketKind {
+        // Detect STUN packets first
+        if n >= 20 {
             let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
             let msg_length = u16::from_be_bytes([buf[2], buf[3]]);
             let magic_cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
 
-            // STUN magic cookie is 0x2112A442
-            // STUN message types are in specific ranges (0x0001, 0x0101, etc.)
             if magic_cookie == STUN_MAGIC_COOKIE
-                || (msg_type & 0xC000) == 0x0000 && msg_length <= (n - 20) as u16
+                || ((msg_type & 0xC000) == 0x0000 && (msg_length as usize + 20) <= n)
             {
                 debug!(
-                    track_id,
-                    "Received STUN packet with message type: 0x{:04X}, length: {}, skipping RTP processing",
-                    msg_type,
-                    n
+                    track_id = track_id.as_str(),
+                    "Received STUN packet with message type: 0x{:04X}, length: {}", msg_type, n
                 );
-                return true;
+                return PacketKind::Stun(msg_type);
             }
         }
 
-        // Check if this is an RTCP packet
-        // RTCP packet structure: V(2) + P(1) + RC(5) + PT(8) + Length(16) + ...
-        // For RTCP: PT is the full second byte (200-207)
-        let rtcp_pt = buf[1]; // Full second byte for RTCP
+        // Detect RTCP packets
+        let version = (buf[0] >> 6) & 0x03;
+        let rtcp_pt = buf[1];
         if version == 2 && rtcp_pt >= 200 && rtcp_pt <= 207 {
-            if let Err(e) = Self::handle_rtcp_packet(&track_id, &buf, n, &stats, ssrc).await {
-                warn!(track_id, "Failed to handle RTCP packet: {:?}", e);
+            if let Err(e) = Self::handle_rtcp_packet(track_id, buf, n, stats, ssrc).await {
+                warn!(
+                    track_id = track_id.as_str(),
+                    "Failed to handle RTCP packet: {:?}", e
+                );
             }
-            return true;
+            return PacketKind::Rtcp;
         }
 
-        // For RTP packets: V(2) + P(1) + X(1) + CC(4) + M(1) + PT(7) + ...
-        // PT is only 7 bits for RTP
-        let rtp_pt = buf[1] & 0x7F; // Extract payload type (7 bits) for RTP
-
-        // Additional validation for RTP packets
+        // Validate RTP packets
+        let rtp_pt = buf[1] & 0x7F;
         if version != 2 {
             info!(
-                track_id,
+                track_id = track_id.as_str(),
                 "Received packet with invalid RTP version: {}, skipping", version
             );
-            return true;
+            return PacketKind::Ignore;
         }
 
-        // RTP payload types should be < 128 (7 bits)
         if rtp_pt >= 128 {
             debug!(
-                track_id,
+                track_id = track_id.as_str(),
                 "Received packet with invalid RTP payload type: {}, might be unrecognized protocol",
                 rtp_pt
             );
-            return true;
+            return PacketKind::Ignore;
         }
-        false
+
+        PacketKind::Rtp
     }
 
     async fn recv_rtp_packets(
@@ -866,12 +865,29 @@ impl RtpTrack {
 
         loop {
             select! {
-                Ok((n, _)) = rtp_socket.recv_raw(&mut buf) => {
+                Ok((n, src_addr)) = rtp_socket.recv_raw(&mut buf) => {
                     if n == 0 {
                         continue;
                     }
-                    if Self::is_rtcp_or_stun(&track_id, &buf, n, &stats, ssrc).await {
-                        continue;
+
+
+                    let packet_kind = Self::classify_packet(&track_id, &buf, n, &stats, ssrc).await;
+                    match packet_kind {
+                        PacketKind::Stun(msg_type) => {
+                            let force = msg_type == STUN_BINDING_RESPONSE;
+                            Self::maybe_update_remote_addr(&inner, &src_addr, force, &track_id, "stun");
+                            continue;
+                        }
+                        PacketKind::Rtcp => {
+                            Self::maybe_update_remote_addr(&inner, &src_addr, false, &track_id, "rtcp");
+                            continue;
+                        }
+                        PacketKind::Ignore => {
+                            continue;
+                        }
+                        PacketKind::Rtp => {
+                            Self::maybe_update_remote_addr(&inner, &src_addr, false, &track_id, "rtp-private");
+                        }
                     }
                     let packet = match Packet::unmarshal(&mut &buf[0..n]) {
                         Ok(packet) => packet,
@@ -927,6 +943,71 @@ impl RtpTrack {
             }
         }
         Ok(())
+    }
+
+    fn maybe_update_remote_addr(
+        inner: &Arc<Mutex<RtpTrackInner>>,
+        src_addr: &SipAddr,
+        force: bool,
+        track_id: &TrackId,
+        reason: &'static str,
+    ) -> bool {
+        let mut guard = inner.lock().unwrap();
+        let src_ip = Self::sip_addr_ip(src_addr);
+
+        let should_update = if force {
+            true
+        } else {
+            match (guard.remote_addr.as_ref(), src_ip) {
+                (Some(remote), Some(src_ip)) => match Self::sip_addr_ip(remote) {
+                    Some(remote_ip) => remote_ip != src_ip && Self::is_private_ip(&remote_ip),
+                    None => false,
+                },
+                (None, _) => true,
+                _ => false,
+            }
+        };
+
+        if should_update {
+            let old = guard.remote_addr.replace(src_addr.clone());
+            if guard.rtcp_mux {
+                guard.remote_rtcp_addr = Some(src_addr.clone());
+            } else if let Some(rtcp_addr) = guard.remote_rtcp_addr.as_mut() {
+                rtcp_addr.addr.host = src_addr.addr.host.clone();
+            }
+            info!(
+                track_id = track_id.as_str(),
+                ?old,
+                ?src_addr,
+                reason = reason,
+                "Updating remote RTP address"
+            );
+            return true;
+        }
+        false
+    }
+
+    fn sip_addr_ip(addr: &SipAddr) -> Option<IpAddr> {
+        addr.addr.host.to_string().parse().ok()
+    }
+
+    fn is_private_ip(ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_unique_local()
+                    || v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unicast_link_local()
+            }
+        }
     }
 
     // Send RTCP sender reports periodically
@@ -1644,6 +1725,69 @@ t=0 0"#;
             .expect("Failed to build track");
 
         assert!(!track.ice_connectivity_check);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_update_remote_addr_private_peer() {
+        let track = RtpTrackBuilder::new("test".to_string(), TrackConfig::default())
+            .build()
+            .await
+            .expect("Failed to build track");
+        let inner = track.inner.clone();
+
+        let private_addr = SipAddr {
+            addr: HostWithPort {
+                host: "192.168.0.10".parse().expect("host"),
+                port: Some(4000.into()),
+            },
+            r#type: Some(rsip::transport::Transport::Udp),
+        };
+
+        let public_addr = SipAddr {
+            addr: HostWithPort {
+                host: "203.0.113.5".parse().expect("host"),
+                port: Some(5004.into()),
+            },
+            r#type: Some(rsip::transport::Transport::Udp),
+        };
+
+        {
+            let mut guard = inner.lock().expect("lock");
+            guard.remote_addr = Some(private_addr.clone());
+            guard.remote_rtcp_addr = Some(private_addr.clone());
+            guard.rtcp_mux = true;
+        }
+
+        let updated = RtpTrack::maybe_update_remote_addr(
+            &inner,
+            &public_addr,
+            false,
+            &track.track_id,
+            "test",
+        );
+
+        assert!(updated);
+        let guard = inner.lock().expect("lock");
+        assert_eq!(
+            guard
+                .remote_addr
+                .as_ref()
+                .expect("remote")
+                .addr
+                .host
+                .to_string(),
+            "203.0.113.5"
+        );
+        assert_eq!(
+            guard
+                .remote_rtcp_addr
+                .as_ref()
+                .expect("rtcp")
+                .addr
+                .host
+                .to_string(),
+            "203.0.113.5"
+        );
     }
 
     #[test]
