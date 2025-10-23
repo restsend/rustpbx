@@ -296,18 +296,8 @@ impl UserAgent {
                     });
                 }
                 rsip::Method::Options => {
-                    if tx.endpoint_inner.option.ignore_out_of_dialog_option {
-                        let to_tag = tx
-                            .original
-                            .to_header()
-                            .and_then(|to| to.tag())
-                            .ok()
-                            .flatten();
-                        if to_tag.is_none() {
-                            info!(?key, "ignoring out-of-dialog OPTIONS request");
-                            continue;
-                        }
-                    }
+                    info!(?key, "ignoring out-of-dialog OPTIONS request");
+                    continue;
                 }
                 _ => {
                     info!(?key, "received request: {:?}", tx.original.method);

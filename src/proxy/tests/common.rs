@@ -70,6 +70,7 @@ pub async fn create_test_server_with_config(
         dialplan_inspector: None,
         create_route_invite: None,
         proxycall_inspector: None,
+        ignore_out_of_dialog_option: true,
     });
 
     // Add test users

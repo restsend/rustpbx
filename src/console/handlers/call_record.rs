@@ -498,6 +498,9 @@ fn build_record_payload(
         None
     };
 
+    let caller_uri = record.caller_uri.clone();
+    let callee_uri = record.callee_uri.clone();
+
     let recording = record.recording_url.as_ref().map(|url| {
         json!({
             "url": url,
@@ -518,6 +521,8 @@ fn build_record_payload(
         "agent_extension": extension_number,
         "department": department_name,
         "queue": record.queue,
+    "caller_uri": caller_uri,
+    "callee_uri": callee_uri,
         "sip_gateway": sip_gateway,
         "sip_trunk": sip_trunk_name,
         "tags": tags,
@@ -558,6 +563,8 @@ fn build_detail_payload(
         "rtcp_observations": Value::Array(vec![]),
     });
 
+    let signaling = record.signaling.clone().unwrap_or(Value::Null);
+
     json!({
         "back_url": state.url_for("/call-records"),
         "record": record_payload,
@@ -567,6 +574,7 @@ fn build_detail_payload(
         "transcript_preview": Value::Null,
         "notes": Value::Null,
         "participants": participants,
+        "signaling": signaling,
         "actions": json!({
             "download_recording": record.recording_url,
             "download_metadata": Value::Null,
@@ -581,22 +589,57 @@ fn build_participants(record: &CallRecordModel, related: &RelatedContext) -> Val
         .and_then(|id| related.extensions.get(&id))
         .map(|ext| ext.extension.clone());
 
-    Value::Array(vec![
-        json!({
-            "role": "caller",
-            "label": "Caller",
-            "name": record.caller_name,
-            "number": record.from_number,
-            "network": record.sip_gateway.clone(),
-        }),
-        json!({
+    let gateway_label = record
+        .sip_gateway
+        .clone()
+        .unwrap_or_else(|| "External".to_string());
+
+    let mut participants = Vec::new();
+
+    participants.push(json!({
+        "role": "caller",
+        "label": "Caller",
+        "name": record
+            .caller_name
+            .clone()
+            .or_else(|| record.caller_uri.clone()),
+        "number": record.from_number.clone(),
+        "uri": record.caller_uri.clone(),
+        "network": gateway_label.clone(),
+    }));
+
+    if record.callee_uri.is_some() || record.to_number.is_some() || record.agent_name.is_some() {
+        let callee_name = record
+            .callee_uri
+            .clone()
+            .or_else(|| record.to_number.clone())
+            .or_else(|| record.agent_name.clone());
+        let remote_network = record
+            .sip_gateway
+            .clone()
+            .unwrap_or_else(|| "Remote".to_string());
+        participants.push(json!({
+            "role": "callee",
+            "label": "Callee",
+            "name": callee_name,
+            "number": record.to_number.clone(),
+            "uri": record.callee_uri.clone(),
+            "network": remote_network,
+        }));
+    }
+
+    if record.agent_name.is_some() || extension_number.is_some() {
+        participants.push(json!({
             "role": "agent",
             "label": "Agent",
-            "name": record.agent_name,
-            "number": extension_number,
+            "name": record.agent_name.clone(),
+            "number": extension_number.clone(),
+            "uri": extension_number.clone(),
             "network": "PBX",
-        }),
-    ])
+        }));
+    }
+
+    Value::Array(participants)
 }
 
 fn extract_tags(tags: &Option<Value>) -> Vec<String> {
@@ -767,6 +810,6 @@ mod tests {
             .await
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state);
-        assert_eq!(payload["id"], "call-1");
+        assert_eq!(payload["id"], 1);
     }
 }

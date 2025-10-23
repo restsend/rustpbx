@@ -2,7 +2,7 @@ use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     boolean, double_null, integer, integer_null, json_null, pk_auto, string, string_null,
-    timestamp, timestamp_null,
+    text_null, timestamp, timestamp_null,
 };
 use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
@@ -30,6 +30,8 @@ pub struct Model {
     pub sip_trunk_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
+    pub caller_uri: Option<String>,
+    pub callee_uri: Option<String>,
     pub recording_url: Option<String>,
     pub recording_duration_secs: Option<i32>,
     pub has_transcript: bool,
@@ -42,6 +44,7 @@ pub struct Model {
     pub quality_packet_loss_percent: Option<f64>,
     pub analytics: Option<Json>,
     pub metadata: Option<Json>,
+    pub signaling: Option<Json>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub archived_at: Option<DateTimeUtc>,
@@ -114,6 +117,8 @@ impl MigrationTrait for Migration {
                     .col(integer_null(Column::SipTrunkId))
                     .col(integer_null(Column::RouteId))
                     .col(string_null(Column::SipGateway).char_len(160))
+                    .col(text_null(Column::CallerUri))
+                    .col(text_null(Column::CalleeUri))
                     .col(string_null(Column::RecordingUrl).char_len(255))
                     .col(integer_null(Column::RecordingDurationSecs))
                     .col(boolean(Column::HasTranscript).default(false))
@@ -130,6 +135,7 @@ impl MigrationTrait for Migration {
                     .col(double_null(Column::QualityPacketLossPercent))
                     .col(json_null(Column::Analytics))
                     .col(json_null(Column::Metadata))
+                    .col(json_null(Column::Signaling))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::ArchivedAt))

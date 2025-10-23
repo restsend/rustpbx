@@ -15,7 +15,6 @@
                 <span class="font-semibold text-slate-700" x-text="formatDateTime(lastAudit)"></span>
             </div>
         </header>
-
         <nav
             class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600">
             <template x-for="tab in tabs" :key="tab.id">
@@ -25,6 +24,118 @@
                 </button>
             </template>
         </nav>
+
+        <section x-show="activeTab === 'connection'" x-cloak x-transition.opacity>
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Connect endpoints quickly</h2>
+                        <p class="text-xs text-slate-500">Copy realm, transports, and working credentials to register
+                            softphones or WebRTC clients.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
+                            Realm
+                            <span class="font-mono text-slate-700" x-text="connection.realm || '—'"></span>
+                        </span>
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
+                            Expires
+                            <span x-text="connection.expires ? connection.expires + ' s' : 'Default 60 s'"></span>
+                        </span>
+                    </div>
+                </div>
+                <div class="mt-4 grid gap-4 md:grid-cols-3">
+                    <div class="space-y-3">
+                        <h3 class="text-sm font-semibold text-slate-800">Server identity</h3>
+                        <dl class="space-y-2 text-xs text-slate-600">
+                            <div class="flex items-center justify-between gap-2">
+                                <dt class="text-slate-500">Realm</dt>
+                                <dd class="font-mono text-slate-700" x-text="connection.realm || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between gap-2">
+                                <dt class="text-slate-500">Host</dt>
+                                <dd class="font-mono text-slate-700" x-text="connection.host || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between gap-2" x-show="connectionAccounts.length">
+                                <dt class="text-slate-500">Sample URI</dt>
+                                <dd class="font-mono text-slate-700" x-text="connectionAccounts[0]?.uri || '—'"></dd>
+                            </div>
+                        </dl>
+                    </div>
+                    <div class="space-y-3">
+                        <h3 class="text-sm font-semibold text-slate-800">Transports</h3>
+                        <template x-if="connectionTransports.length">
+                            <ul class="space-y-2 text-xs text-slate-600">
+                                <template x-for="item in connectionTransports"
+                                    :key="item.protocol + (item.address || '')">
+                                    <li class="rounded border border-slate-200 bg-slate-50 p-2">
+                                        <div class="flex items-center justify-between text-slate-700">
+                                            <span class="font-semibold"
+                                                x-text="item.label || item.protocol?.toUpperCase()"></span>
+                                            <span
+                                                class="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500"
+                                                x-text="(item.protocol || '').toUpperCase()"></span>
+                                        </div>
+                                        <div class="mt-1 font-mono text-[11px]" x-text="item.address || '—'"></div>
+                                        <div class="text-[11px] text-slate-500" x-show="item.example_uri"
+                                            x-text="'Example ' + item.example_uri"></div>
+                                        <div class="text-[11px] text-slate-500" x-show="item.path"
+                                            x-text="'Path ' + item.path"></div>
+                                    </li>
+                                </template>
+                            </ul>
+                        </template>
+                        <template x-if="!connectionTransports.length">
+                            <div
+                                class="rounded border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                                Configure UDP/TCP/WebSocket listeners to expose SIP services.
+                            </div>
+                        </template>
+                    </div>
+                    <div class="space-y-3">
+                        <h3 class="text-sm font-semibold text-slate-800">Sample accounts</h3>
+                        <template x-if="connectionAccounts.length">
+                            <ul class="space-y-2 text-xs text-slate-600">
+                                <template x-for="account in connectionAccounts"
+                                    :key="account.username + (account.realm || '')">
+                                    <li class="rounded border border-slate-200 bg-slate-50 p-2">
+                                        <div class="flex items-center justify-between text-slate-700">
+                                            <span class="font-semibold" x-text="account.username"></span>
+                                            <span
+                                                class="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500"
+                                                x-text="account.source_label || 'Account'"></span>
+                                        </div>
+                                        <div class="mt-1 font-mono text-[11px]" x-text="account.uri"></div>
+                                        <div class="text-[11px] text-slate-500">
+                                            Password
+                                            <span class="font-mono text-slate-700"
+                                                x-text="account.password || '—'"></span>
+                                        </div>
+                                    </li>
+                                </template>
+                            </ul>
+                        </template>
+                        <template x-if="!connectionAccounts.length">
+                            <div
+                                class="rounded border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                                Add memory users or extensions to surface ready credentials.
+                            </div>
+                        </template>
+                    </div>
+                </div>
+                <template x-if="connectionNotes.length">
+                    <div class="mt-4 rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+                        <ul class="list-disc space-y-1 pl-4">
+                            <template x-for="(note, index) in connectionNotes" :key="index">
+                                <li x-text="note"></li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
+            </div>
+        </section>
 
         <section x-show="activeTab === 'trunks'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
@@ -67,7 +178,7 @@
                                         </div>
                                         <div>
                                             <span class="font-semibold text-slate-700">Loss:</span>
-                                            <span x-text="trunk.packet_loss_percent + '%' "></span>
+                                            <span x-text="trunk.packet_loss_percent + '%'"></span>
                                         </div>
                                         <div>
                                             <span class="font-semibold text-slate-700">Concurrency:</span>
@@ -472,7 +583,8 @@
                                                 :key="item.field + (item.after || '') + (item.before || '')">
                                                 <div class="rounded border border-slate-200 bg-white px-3 py-2">
                                                     <div class="text-[11px] font-semibold text-slate-700"
-                                                        x-text="item.field"></div>
+                                                        x-text="item.field">
+                                                    </div>
                                                     <div class="text-[11px] text-slate-500"><span
                                                             class="font-semibold">Before:</span>
                                                         <span x-text="displayValue(item.before)"></span>
@@ -1010,6 +1122,14 @@
                     this.lastAudit = data.last_audit || null;
                     this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
                     this.routingChecks = Array.isArray(data.routing_checks) ? data.routing_checks : [];
+                    this.connection = data.connection || {};
+                    this.connectionTransports = Array.isArray(this.connection.transports)
+                        ? this.connection.transports
+                        : [];
+                    this.connectionAccounts = Array.isArray(this.connection.accounts)
+                        ? this.connection.accounts
+                        : [];
+                    this.connectionNotes = Array.isArray(this.connection.notes) ? this.connection.notes : [];
                     this.initializeTrunkTests();
                     this.dialer = data.dialer || { source_options: [], destination_samples: [], trunk_options: [] };
                     if (!Array.isArray(this.dialer.codec_options) || !this.dialer.codec_options.length) {
@@ -1049,6 +1169,10 @@
                 lastAudit: null,
                 trunks: [],
                 routingChecks: [],
+                connection: {},
+                connectionTransports: [],
+                connectionAccounts: [],
+                connectionNotes: [],
                 trunkTests: {},
                 routingInput: '',
                 routingDirection: 'outbound',
@@ -1068,12 +1192,13 @@
                 dialResult: null,
                 dialError: null,
                 tabs: [
+                    { id: 'connection', label: 'Connection' },
                     { id: 'trunks', label: 'Trunks' },
                     { id: 'routing', label: 'Routing' },
                     { id: 'sip', label: 'SIP State' },
                     { id: 'dialer', label: 'Dialer' },
                 ],
-                activeTab: 'trunks',
+                activeTab: 'connection',
                 selectTab(id) {
                     this.activeTab = id;
                     if (id === 'sip') {

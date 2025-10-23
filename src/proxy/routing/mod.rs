@@ -1,4 +1,4 @@
-use crate::call::DialDirection;
+use crate::{call::DialDirection, config::RecordingPolicy};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +36,8 @@ pub struct TrunkConfig {
     pub direction: Option<TrunkDirection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inbound_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingPolicy>,
 }
 
 impl TrunkConfig {

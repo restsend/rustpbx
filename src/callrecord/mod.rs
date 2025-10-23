@@ -15,7 +15,7 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value, json};
 use serde_with::skip_serializing_none;
 use std::{
     collections::HashMap, convert::TryFrom, future::Future, path::Path, pin::Pin, str::FromStr,
@@ -736,12 +736,15 @@ pub async fn persist_call_record(
     let tags = args.tags.clone();
     let analytics = args.analytics.clone();
     let metadata_value = merge_metadata(record, args.metadata.clone());
+    let signaling_value = build_signaling_payload(record);
     let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
     let display_id = record
         .option
         .as_ref()
         .and_then(|opt| opt.extra.as_ref())
         .and_then(|extra| extra.get("display_id").cloned());
+    let caller_uri = normalize_endpoint_uri(&record.caller);
+    let callee_uri = normalize_endpoint_uri(&record.callee);
     if let Some(model) = CallRecordEntity::find()
         .filter(CallRecordColumn::CallId.eq(record.call_id.clone()))
         .one(db)
@@ -764,6 +767,8 @@ pub async fn persist_call_record(
         active.sip_trunk_id = Set(sip_trunk_id);
         active.route_id = Set(route_id);
         active.sip_gateway = Set(sip_gateway.clone());
+        active.caller_uri = Set(caller_uri.clone());
+        active.callee_uri = Set(callee_uri.clone());
         active.recording_url = Set(recording_url.clone());
         active.recording_duration_secs = Set(recording_duration_secs);
         active.has_transcript = Set(args.has_transcript);
@@ -776,6 +781,7 @@ pub async fn persist_call_record(
         active.quality_packet_loss_percent = Set(args.quality_packet_loss_percent);
         active.analytics = Set(analytics.clone());
         active.metadata = Set(metadata_value.clone());
+        active.signaling = Set(signaling_value.clone());
         active.updated_at = Set(record.end_time);
         active.update(db).await?;
         return Ok(());
@@ -799,6 +805,8 @@ pub async fn persist_call_record(
         sip_trunk_id: Set(sip_trunk_id),
         route_id: Set(route_id),
         sip_gateway: Set(sip_gateway.clone()),
+        caller_uri: Set(caller_uri.clone()),
+        callee_uri: Set(callee_uri.clone()),
         recording_url: Set(recording_url.clone()),
         recording_duration_secs: Set(recording_duration_secs),
         has_transcript: Set(args.has_transcript),
@@ -811,6 +819,7 @@ pub async fn persist_call_record(
         quality_packet_loss_percent: Set(args.quality_packet_loss_percent),
         analytics: Set(analytics.clone()),
         metadata: Set(metadata_value.clone()),
+        signaling: Set(signaling_value.clone()),
         created_at: Set(record.start_time),
         updated_at: Set(record.end_time),
         archived_at: Set(None),
@@ -862,6 +871,50 @@ pub fn extract_sip_username(input: &str) -> Option<String> {
     } else {
         Some(candidate.to_string())
     }
+}
+
+fn normalize_endpoint_uri(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_signaling_payload(record: &CallRecord) -> Option<Value> {
+    let mut legs = Vec::new();
+    legs.push(call_leg_payload("primary", record));
+
+    if let Some(refer) = record.refer_callrecord.as_ref() {
+        legs.push(call_leg_payload("b2bua", refer));
+    }
+
+    Some(json!({
+        "is_b2bua": record.refer_callrecord.is_some(),
+        "legs": legs,
+    }))
+}
+
+fn call_leg_payload(role: &str, record: &CallRecord) -> Value {
+    json!({
+        "role": role,
+        "call_type": record.call_type.clone(),
+        "call_id": record.call_id.clone(),
+        "caller": record.caller.clone(),
+        "callee": record.callee.clone(),
+        "status_code": record.status_code,
+        "hangup_reason": record
+            .hangup_reason
+            .as_ref()
+            .map(|reason| reason.to_string()),
+    "start_time": record.start_time.clone(),
+    "ring_time": record.ring_time.clone(),
+    "answer_time": record.answer_time.clone(),
+    "end_time": record.end_time.clone(),
+        "offer": record.offer.clone(),
+        "answer": record.answer.clone(),
+    })
 }
 
 fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<Value> {

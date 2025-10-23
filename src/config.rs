@@ -1,5 +1,5 @@
 use crate::{
-    call::user::SipUser,
+    call::{DialDirection, user::SipUser},
     proxy::routing::{DefaultRoute, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
@@ -17,7 +17,7 @@ pub(crate) struct Cli {
     pub conf: Option<String>,
 }
 
-fn default_config_recorder_path() -> String {
+pub(crate) fn default_config_recorder_path() -> String {
     #[cfg(target_os = "windows")]
     return "./recorder".to_string();
     #[cfg(not(target_os = "windows"))]
@@ -65,6 +65,50 @@ fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordingDirection {
+    Inbound,
+    Outbound,
+    Internal,
+}
+
+impl RecordingDirection {
+    pub fn matches(&self, direction: &DialDirection) -> bool {
+        match (self, direction) {
+            (RecordingDirection::Inbound, DialDirection::Inbound) => true,
+            (RecordingDirection::Outbound, DialDirection::Outbound) => true,
+            (RecordingDirection::Internal, DialDirection::Internal) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct RecordingPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directions: Vec<RecordingDirection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_deny: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callee_allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callee_deny: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_start: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename_pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samplerate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ptime: Option<u32>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -93,6 +137,8 @@ pub struct Config {
     pub console: Option<ConsoleConfig>,
     #[serde(default = "default_database_url")]
     pub database_url: String,
+    #[serde(default)]
+    pub recording: Option<RecordingPolicy>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -319,6 +365,10 @@ pub struct ProxyConfig {
     pub trunks_source: ProxyDataSource,
     #[serde(default)]
     pub routes_source: ProxyDataSource,
+    #[serde(default)]
+    pub recording: Option<RecordingPolicy>,
+    #[serde(skip)]
+    pub recorder_root: Option<String>,
 }
 
 pub enum RouteResult {
@@ -418,6 +468,8 @@ impl Default for ProxyConfig {
             default: None,
             trunks_source: ProxyDataSource::default(),
             routes_source: ProxyDataSource::default(),
+            recording: None,
+            recorder_root: None,
         }
     }
 }
@@ -481,6 +533,7 @@ impl Default for Config {
             #[cfg(feature = "console")]
             console: None,
             database_url: default_database_url(),
+            recording: None,
         }
     }
 }

@@ -61,6 +61,7 @@ pub struct SipServerInner {
     pub endpoint: Endpoint,
     pub dialog_layer: Arc<DialogLayer>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
+    pub ignore_out_of_dialog_option: bool,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -87,6 +88,7 @@ pub struct SipServerBuilder {
     create_route_invite: Option<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
+    ignore_out_of_dialog_option: bool,
 }
 
 impl SipServerBuilder {
@@ -107,11 +109,17 @@ impl SipServerBuilder {
             create_route_invite: None,
             database: None,
             data_context: None,
+            ignore_out_of_dialog_option: true,
         }
     }
 
     pub fn with_user_backend(mut self, user_backend: Box<dyn UserBackend>) -> Self {
         self.user_backend = Some(user_backend);
+        self
+    }
+
+    pub fn with_ignore_out_of_dialog_option(mut self, ignore: bool) -> Self {
+        self.ignore_out_of_dialog_option = ignore;
         self
     }
 
@@ -398,6 +406,7 @@ impl SipServerBuilder {
             dialog_layer,
             dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
+            ignore_out_of_dialog_option: self.ignore_out_of_dialog_option,
         });
 
         let mut allow_methods = Vec::new();
@@ -550,7 +559,7 @@ impl SipServer {
                     | rsip::method::Method::Info
                     | rsip::method::Method::Refer
                     | rsip::method::Method::Update
-            ) && tx.endpoint_inner.option.ignore_out_of_dialog_option
+            ) && self.inner.ignore_out_of_dialog_option
             {
                 let to_tag = tx
                     .original

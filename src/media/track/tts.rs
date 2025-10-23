@@ -396,6 +396,16 @@ impl TtsTask {
                 }
 
                 entry.total_bytes += chunk.len();
+
+                debug!(
+                    session_id = self.session_id,
+                    play_id = self.play_id,
+                    cmd_seq = assume_seq,
+                    chunk_size = chunk.len(),
+                    total_bytes = entry.total_bytes,
+                    "received audio chunk"
+                );
+
                 // if cache is enabled, save complete chunks for caching
                 if self.cache_enabled {
                     entry.chunks.push(chunk.clone());

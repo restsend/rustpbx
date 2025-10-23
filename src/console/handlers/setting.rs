@@ -336,6 +336,13 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "storage_profiles": storage_profiles,
             }),
         );
+
+        let recording_meta = config
+            .recording
+            .as_ref()
+            .and_then(|policy| serde_json::to_value(policy).ok())
+            .unwrap_or(JsonValue::Null);
+        data.insert("recording".to_string(), recording_meta);
     } else {
         data.insert("storage".to_string(), json!({ "mode": "unknown" }));
         data.insert(
@@ -350,6 +357,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "storage_profiles": Vec::<JsonValue>::new(),
             }),
         );
+        data.insert("recording".to_string(), JsonValue::Null);
     }
 
     let stats = json!({

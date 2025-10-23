@@ -199,6 +199,10 @@
                         Last action · <span x-text="lastOperation.timestamp"></span>
                     </span>
                 </template>
+                <div class="text-xs font-semibold text-slate-500">
+                    Version · <span class="font-mono text-slate-700"
+                        x-text="platform.version || site_version || '—'"></span>
+                </div>
                 <span class="rounded-full bg-slate-900/5 px-3 py-1.5 text-xs font-semibold text-slate-600">
                     Uptime · <span class="font-mono text-slate-700" x-text="platform.uptime_pretty || '—'"></span>
                 </span>
@@ -233,10 +237,6 @@
                             <h2 class="text-base font-semibold text-slate-900">Runtime overview</h2>
                             <p class="text-xs text-slate-500">Snapshot of core services and configuration provenance.
                             </p>
-                        </div>
-                        <div class="text-xs font-semibold text-slate-500">
-                            Version · <span class="font-mono text-slate-700"
-                                x-text="platform.version || site_version || '—'"></span>
                         </div>
                     </div>
                     <div class="mt-4 space-y-3 text-sm text-slate-600">
