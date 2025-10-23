@@ -13,7 +13,7 @@ use rsipstack::{
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
