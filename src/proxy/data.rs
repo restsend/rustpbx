@@ -10,7 +10,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOr
 use tracing::info;
 
 use crate::{
-    config::{ProxyConfig, ProxyDataSource},
+    config::{ProxyConfig, ProxyDataSource, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::{
         DefaultRoute, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
@@ -74,6 +74,10 @@ impl ProxyDataContext {
 
     pub async fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
         self.trunks.read().await.clone()
+    }
+
+    pub async fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
+        self.trunks.read().await.get(name).cloned()
     }
 
     pub async fn routes_snapshot(&self) -> Vec<RouteRule> {
@@ -439,6 +443,11 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         }
     }
 
+    let recording = model
+        .metadata
+        .as_ref()
+        .and_then(recording_policy_from_metadata);
+
     let trunk = TrunkConfig {
         dest,
         backup_dest,
@@ -453,6 +462,7 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         id: Some(model.id),
         direction: Some(model.direction.into()),
         inbound_hosts,
+        recording,
     };
 
     Some((model.name, trunk))
@@ -475,6 +485,12 @@ async fn load_routes_from_db(
         }
     }
     Ok(routes)
+}
+
+fn recording_policy_from_metadata(value: &serde_json::Value) -> Option<RecordingPolicy> {
+    value
+        .get("recording")
+        .and_then(|entry| serde_json::from_value::<RecordingPolicy>(entry.clone()).ok())
 }
 
 fn convert_route(

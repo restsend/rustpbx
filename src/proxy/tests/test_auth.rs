@@ -458,6 +458,7 @@ async fn test_guest_call_allowed_extension() {
         dialplan_inspector: None,
         create_route_invite: None,
         proxycall_inspector: None,
+        ignore_out_of_dialog_option: true,
     });
 
     let module = AuthModule::new(server_inner);

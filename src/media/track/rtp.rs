@@ -1024,6 +1024,9 @@ impl RtpTrack {
             Duration::from_millis(RTCP_SR_INTERVAL_MS),
         );
         let stats = inner.lock().unwrap().stats.clone();
+        let mut last_sent_octets = stats.octet_count.load(Ordering::Relaxed);
+        let mut last_recv_octets = stats.received_octets.load(Ordering::Relaxed);
+        let mut last_rate_instant = Instant::now();
         loop {
             select! {
                 _ = token.cancelled() => {
@@ -1035,6 +1038,37 @@ impl RtpTrack {
                     let packet_count = stats.packet_count.load(Ordering::Relaxed);
                     let octet_count = stats.octet_count.load(Ordering::Relaxed);
                     let rtp_timestamp = stats.timestamp.load(Ordering::Relaxed);
+
+                    let sent_octets = octet_count;
+                    let recv_octets = stats.received_octets.load(Ordering::Relaxed);
+                    let now = Instant::now();
+                    let elapsed = now.saturating_duration_since(last_rate_instant).as_secs_f64();
+                    if elapsed > 0.0 {
+                        let delta_sent = if sent_octets >= last_sent_octets {
+                            (sent_octets - last_sent_octets) as u64
+                        } else {
+                            (u32::MAX as u64 - last_sent_octets as u64) + sent_octets as u64 + 1
+                        };
+                        let delta_recv = if recv_octets >= last_recv_octets {
+                            (recv_octets - last_recv_octets) as u64
+                        } else {
+                            (u32::MAX as u64 - last_recv_octets as u64) + recv_octets as u64 + 1
+                        };
+
+                        let send_bps = (delta_sent as f64 * 8.0) / elapsed;
+                        let recv_bps = (delta_recv as f64 * 8.0) / elapsed;
+
+                        info!(
+                            track_id = track_id.as_str(),
+                            send_kbps = send_bps / 1000.0,
+                            recv_kbps = recv_bps / 1000.0,
+                            "RTP throughput"
+                        );
+
+                        last_rate_instant = now;
+                        last_sent_octets = sent_octets;
+                        last_recv_octets = recv_octets;
+                    }
 
                     let mut pkts = vec![Box::new(SenderReport {
                         ssrc,

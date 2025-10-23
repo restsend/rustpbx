@@ -1,6 +1,6 @@
 use crate::{
     call::{DialDirection, Location, RoutingState},
-    config::RouteResult,
+    config::{Config, ProxyConfig, RecordingPolicy, RouteResult, UserBackendConfig},
     console::{
         ConsoleState,
         handlers::{bad_request, normalize_optional_string},
@@ -128,6 +128,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
     let mut last_audit: Option<String> = None;
     let mut trunks: Vec<JsonValue> = Vec::new();
     let mut trunk_options: Vec<JsonValue> = Vec::new();
+    let connection = diagnostics_connection_profile(state);
 
     if let Some(server) = state.sip_server() {
         let data_context = server.data_context.clone();
@@ -148,6 +149,12 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             let (label, status, last_test_at, direction, notes, limit, ingress_ips) =
                 build_trunk_overview(name, config, db_by_name.get(name));
 
+            let recording_value = config
+                .recording
+                .as_ref()
+                .and_then(|policy| serde_json::to_value(policy).ok())
+                .unwrap_or(JsonValue::Null);
+
             trunks.push(json!({
                 "id": name,
                 "label": label,
@@ -163,6 +170,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 "egress": config.dest,
                 "notes": notes,
                 "ingress_ips": ingress_ips,
+                "recording": recording_value,
             }));
 
             trunk_options.push(json!({
@@ -182,6 +190,12 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 let (label, status, last_test_at, direction, notes, limit, ingress_ips) =
                     build_trunk_overview(name, &config, Some(model));
 
+                let recording_value = config
+                    .recording
+                    .as_ref()
+                    .and_then(|policy| serde_json::to_value(policy).ok())
+                    .unwrap_or(JsonValue::Null);
+
                 trunks.push(json!({
                     "id": name,
                     "label": label,
@@ -197,6 +211,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                     "egress": config.dest,
                     "notes": notes,
                     "ingress_ips": ingress_ips,
+                    "recording": recording_value,
                 }));
 
                 trunk_options.push(json!({
@@ -222,6 +237,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
                 "destination_samples": JsonValue::Array(vec![]),
                 "trunk_options": trunk_options,
             },
+            "connection": connection,
         });
     }
 
@@ -235,7 +251,228 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             "destination_samples": JsonValue::Array(vec![]),
             "trunk_options": trunk_options,
         },
+        "connection": connection,
     })
+}
+
+fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
+    let mut realm = "localhost".to_string();
+    let mut host = realm.clone();
+    let mut transports: Vec<JsonValue> = Vec::new();
+    let mut accounts: Vec<JsonValue> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut expires: Option<u32> = None;
+
+    if let Some(app) = state.app_state() {
+        let config = app.config.clone();
+        if let Some(proxy_cfg) = config.proxy.as_ref() {
+            realm = resolve_default_realm(proxy_cfg);
+            host = resolve_preferred_host(Some(config.as_ref()), proxy_cfg, &realm);
+            expires = proxy_cfg.registrar_expires;
+            transports = build_transport_entries(&host, &realm, proxy_cfg);
+            let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
+            accounts = account_entries;
+            notes.extend(backend_notes);
+        }
+    } else if let Some(server) = state.sip_server() {
+        let proxy_cfg = &server.proxy_config;
+        realm = resolve_default_realm(proxy_cfg);
+        host = resolve_preferred_host(None, proxy_cfg, &realm);
+        expires = proxy_cfg.registrar_expires;
+        transports = build_transport_entries(&host, &realm, proxy_cfg);
+        let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
+        accounts = account_entries;
+        notes.extend(backend_notes);
+        notes.push("Rendered from live proxy configuration.".to_string());
+    } else {
+        notes.push("SIP server is not currently running; showing defaults.".to_string());
+    }
+
+    if accounts.is_empty() {
+        notes.push("No plaintext credentials available; create an extension or memory backend user for quick testing.".to_string());
+    }
+
+    notes.sort();
+    notes.dedup();
+
+    json!({
+        "host": host,
+        "realm": realm,
+        "transports": transports,
+        "accounts": accounts,
+        "notes": notes,
+        "expires": expires,
+    })
+}
+
+fn resolve_default_realm(proxy_cfg: &ProxyConfig) -> String {
+    if let Some(realms) = proxy_cfg.realms.as_ref() {
+        for realm in realms {
+            let candidate = realm.trim();
+            if !candidate.is_empty() && candidate != "*" {
+                return candidate.to_string();
+            }
+        }
+    }
+    ProxyConfig::normalize_realm("").to_string()
+}
+
+fn resolve_preferred_host(config: Option<&Config>, proxy_cfg: &ProxyConfig, realm: &str) -> String {
+    if let Some(cfg) = config {
+        if let Some(external) = cfg
+            .external_ip
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return external.to_string();
+        }
+    }
+
+    let addr = proxy_cfg.addr.trim();
+    if addr.is_empty() || addr == "0.0.0.0" || addr == "::" || addr == "[::]" || addr == "*" {
+        realm.to_string()
+    } else {
+        addr.to_string()
+    }
+}
+
+fn format_host_for_uri(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        "localhost".to_string()
+    } else if trimmed.contains(':') && !trimmed.starts_with('[') {
+        format!("[{}]", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_ws_path(path: Option<&str>) -> String {
+    let raw = path.unwrap_or("/ws").trim();
+    if raw.is_empty() {
+        "/ws".to_string()
+    } else if raw.starts_with('/') {
+        raw.to_string()
+    } else {
+        format!("/{}", raw)
+    }
+}
+
+fn build_sip_example(scheme: &str, host: &str, port: u16, default_port: u16) -> String {
+    if port == default_port {
+        format!("{}:{}", scheme, host)
+    } else {
+        format!("{}:{}:{}", scheme, host, port)
+    }
+}
+
+fn build_transport_entries(host: &str, realm: &str, proxy_cfg: &ProxyConfig) -> Vec<JsonValue> {
+    let mut transports = Vec::new();
+    let host_uri = format_host_for_uri(host);
+    let realm_uri = format_host_for_uri(realm);
+
+    if let Some(port) = proxy_cfg.udp_port {
+        transports.push(json!({
+            "protocol": "udp",
+            "label": "SIP UDP",
+            "address": format!("{}:{}", host_uri, port),
+            "port": port,
+            "example_uri": build_sip_example("sip", &realm_uri, port, 5060),
+        }));
+    }
+
+    if let Some(port) = proxy_cfg.tcp_port {
+        transports.push(json!({
+            "protocol": "tcp",
+            "label": "SIP TCP",
+            "address": format!("{}:{}", host_uri, port),
+            "port": port,
+            "example_uri": build_sip_example("sip", &realm_uri, port, 5060),
+        }));
+    }
+
+    if let Some(port) = proxy_cfg.tls_port {
+        transports.push(json!({
+            "protocol": "tls",
+            "label": "SIP TLS",
+            "address": format!("{}:{}", host_uri, port),
+            "port": port,
+            "example_uri": build_sip_example("sips", &realm_uri, port, 5061),
+        }));
+    }
+
+    if let Some(port) = proxy_cfg.ws_port {
+        let path = normalize_ws_path(proxy_cfg.ws_handler.as_deref());
+        transports.push(json!({
+            "protocol": "ws",
+            "label": "WebSocket (RFC 7118)",
+            "address": format!("ws://{}:{}{}", host_uri, port, path),
+            "port": port,
+            "path": path,
+            "example_uri": format!("ws://{}:{}{}", realm, port, path),
+        }));
+    }
+
+    transports
+}
+
+fn collect_account_entries(
+    default_realm: &str,
+    proxy_cfg: &ProxyConfig,
+) -> (Vec<JsonValue>, Vec<String>) {
+    let mut accounts = Vec::new();
+    let mut notes = Vec::new();
+
+    for backend in proxy_cfg.user_backends.iter() {
+        match backend {
+            UserBackendConfig::Memory { users } => {
+                if let Some(users) = users {
+                    for user in users.iter().filter(|u| u.enabled).take(1) {
+                        let realm = user
+                            .realm
+                            .as_ref()
+                            .map(|value| value.trim())
+                            .filter(|value| !value.is_empty())
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| default_realm.to_string());
+                        accounts.push(json!({
+                            "username": user.username,
+                            "password": user.password,
+                            "realm": realm,
+                            "uri": format!("sip:{}@{}", user.username, realm),
+                            "source": "memory",
+                            "source_label": "Memory backend",
+                        }));
+                    }
+
+                    if users.len() > 1 {
+                        notes.push(format!(
+                            "Memory backend defines {} users; showing first 1.",
+                            users.len()
+                        ));
+                    }
+                }
+            }
+            UserBackendConfig::Extension { .. } => notes.push(
+                "Extension backend enabled — manage credentials under Console → Extensions."
+                    .to_string(),
+            ),
+            UserBackendConfig::Http { url, .. } => notes.push(format!(
+                "HTTP backend at {} supplies authentication credentials.",
+                url
+            )),
+            UserBackendConfig::Plain { path } => {
+                notes.push(format!("Plaintext backend uses credential file: {}.", path))
+            }
+            UserBackendConfig::Database { url, .. } => notes.push(format!(
+                "Database backend {} is configured for authentication.",
+                url
+            )),
+        }
+    }
+
+    (accounts, notes)
 }
 
 fn build_trunk_overview(
@@ -357,6 +594,11 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         }
     }
 
+    let recording = model
+        .metadata
+        .as_ref()
+        .and_then(recording_policy_from_metadata);
+
     Some(routing::TrunkConfig {
         dest,
         backup_dest,
@@ -371,6 +613,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         id: Some(model.id),
         direction: Some(model.direction.into()),
         inbound_hosts,
+        recording,
     })
 }
 
@@ -387,6 +630,12 @@ fn push_unique_string(list: &mut Vec<String>, value: String) {
     if !list.iter().any(|existing| existing == &value) {
         list.push(value);
     }
+}
+
+fn recording_policy_from_metadata(value: &JsonValue) -> Option<RecordingPolicy> {
+    value
+        .get("recording")
+        .and_then(|entry| serde_json::from_value::<RecordingPolicy>(entry.clone()).ok())
 }
 
 pub async fn list_dialogs(
