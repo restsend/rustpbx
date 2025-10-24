@@ -54,18 +54,12 @@ impl Decoder for OpusDecoder {
 
         match self.decoder.decode(data, &mut output, false) {
             Ok(len) => {
-                output.truncate(len);
+                let total_samples = len * self.channels as usize;
+                output.truncate(total_samples);
                 if self.channels == 2 {
-                    // stero to mono
                     output = output
-                        .chunks(2)
-                        .map(|chunk| {
-                            if chunk.len() == 2 {
-                                ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16
-                            } else {
-                                chunk[0]
-                            }
-                        })
+                        .chunks_exact(2)
+                        .map(|chunk| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
                         .collect();
                 }
                 output
