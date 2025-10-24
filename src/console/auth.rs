@@ -2,7 +2,7 @@ use crate::console::ConsoleState;
 use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -12,7 +12,10 @@ use base64::engine::{Engine, general_purpose::STANDARD_NO_PAD};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sea_orm::sea_query::Condition;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    TransactionTrait,
+};
 use sha2::Sha256;
 use std::time::Duration;
 use tracing::warn;
@@ -22,6 +25,12 @@ const SESSION_TTL_HOURS: u64 = 12;
 const RESET_TOKEN_VALID_MINUTES: u64 = 30;
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegistrationPolicy {
+    pub allowed: bool,
+    pub first_user: bool,
+}
 
 impl ConsoleState {
     fn sign(&self, payload: &str) -> Option<String> {
@@ -99,6 +108,25 @@ impl ConsoleState {
         "/"
     }
 
+    pub async fn registration_policy(&self) -> Result<RegistrationPolicy> {
+        let total_users = UserEntity::find()
+            .count(&self.db)
+            .await
+            .context("failed to count existing console users")?;
+
+        if total_users == 0 {
+            Ok(RegistrationPolicy {
+                allowed: true,
+                first_user: true,
+            })
+        } else {
+            Ok(RegistrationPolicy {
+                allowed: self.registration_allowed_by_config(),
+                first_user: false,
+            })
+        }
+    }
+
     pub async fn authenticate(
         &self,
         identifier: &str,
@@ -169,6 +197,22 @@ impl ConsoleState {
         username: &str,
         password: &str,
     ) -> Result<UserModel> {
+        let tx = self
+            .db
+            .begin()
+            .await
+            .context("failed to start user creation transaction")?;
+
+        let existing_users = UserEntity::find()
+            .count(&tx)
+            .await
+            .context("failed to count existing console users")?;
+
+        if existing_users > 0 && !self.registration_allowed_by_config() {
+            tx.rollback().await.ok();
+            bail!("self-service registration is disabled");
+        }
+
         let salt = SaltString::generate(&mut OsRng);
         let hashed = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
@@ -183,13 +227,22 @@ impl ConsoleState {
         model.created_at = Set(now);
         model.updated_at = Set(now);
         model.is_active = Set(true);
+        let is_first_user = existing_users == 0;
+        model.is_staff = Set(is_first_user);
+        model.is_superuser = Set(is_first_user);
         model.reset_token = Set(None);
         model.reset_token_expires = Set(None);
 
-        model
-            .insert(&self.db)
+        let created = model
+            .insert(&tx)
             .await
-            .context("failed to insert new user")
+            .context("failed to insert new user")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit user creation transaction")?;
+
+        Ok(created)
     }
 
     pub async fn upsert_reset_token(&self, user: &UserModel) -> Result<(String, DateTime<Utc>)> {
@@ -256,5 +309,84 @@ impl ConsoleState {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::ConsoleConfig, models::migration::Migrator};
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+
+    async fn setup_state(allow_registration: bool) -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        Migrator::up(&db, None).await.expect("apply migrations");
+        ConsoleState::initialize(
+            db,
+            ConsoleConfig {
+                session_secret: "secret".into(),
+                base_path: "/console".into(),
+                allow_registration,
+            },
+        )
+        .await
+        .expect("init console state")
+    }
+
+    #[tokio::test]
+    async fn registration_policy_allows_initial_user() {
+        let state = setup_state(false).await;
+        let policy = state.registration_policy().await.expect("policy");
+        assert!(policy.allowed);
+        assert!(policy.first_user);
+    }
+
+    #[tokio::test]
+    async fn first_user_becomes_superuser_and_blocks_when_disabled() {
+        let state = setup_state(false).await;
+        let first = state
+            .create_user("owner@example.com", "owner", "password123")
+            .await
+            .expect("create first user");
+        assert!(first.is_superuser);
+        assert!(first.is_staff);
+
+        let policy_after = state.registration_policy().await.expect("policy");
+        assert!(!policy_after.allowed);
+        assert!(!policy_after.first_user);
+
+        let err = state
+            .create_user("second@example.com", "second", "password123")
+            .await
+            .expect_err("second user should be blocked");
+        assert!(
+            err.to_string()
+                .contains("self-service registration is disabled")
+        );
+    }
+
+    #[tokio::test]
+    async fn additional_users_allowed_when_enabled() {
+        let state = setup_state(true).await;
+        let first = state
+            .create_user("root@example.com", "root", "password123")
+            .await
+            .expect("create first user");
+        assert!(first.is_superuser);
+
+        let policy_after = state.registration_policy().await.expect("policy");
+        assert!(policy_after.allowed);
+        assert!(!policy_after.first_user);
+
+        let second = state
+            .create_user("member@example.com", "member", "password123")
+            .await
+            .expect("create second user");
+        assert!(!second.is_superuser);
+        assert!(!second.is_staff);
     }
 }

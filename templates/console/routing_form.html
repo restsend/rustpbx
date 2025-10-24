@@ -76,8 +76,17 @@
                         :aria-selected="activeTab === 'matching'" aria-controls="routing-tab-matching"
                         @click="activeTab = 'matching'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Match & rewrite</span>
-                            <span class="text-[11px] font-normal text-slate-400">Patterns and header rewrites</span>
+                            <span class="text-sm">Match</span>
+                            <span class="text-[11px] font-normal text-slate-400">Patterns applied before routing</span>
+                        </div>
+                    </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'rewrite' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'rewrite'" aria-controls="routing-tab-rewrite"
+                        @click="activeTab = 'rewrite'">
+                        <div class="flex flex-col">
+                            <span class="text-sm">Rewrite</span>
+                            <span class="text-[11px] font-normal text-slate-400">Transforms and header updates</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -87,15 +96,6 @@
                         <div class="flex flex-col">
                             <span class="text-sm">Trunks & delivery</span>
                             <span class="text-[11px] font-normal text-slate-400">Selection strategy & weights</span>
-                        </div>
-                    </button>
-                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
-                        :class="activeTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        :aria-selected="activeTab === 'notes'" aria-controls="routing-tab-notes"
-                        @click="activeTab = 'notes'">
-                        <div class="flex flex-col">
-                            <span class="text-sm">Notes & payload</span>
-                            <span class="text-[11px] font-normal text-slate-400">Operational log & JSON preview</span>
                         </div>
                     </button>
                 </nav>
@@ -163,7 +163,7 @@
                             <textarea name="description" x-model="route.description"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 rows="3"
-                                placeholder="Explain what this route handles and any rollout notes."></textarea>
+                                placeholder="Explain what this route handles and key rollout context."></textarea>
                         </div>
                     </div>
                 </section>
@@ -184,9 +184,118 @@
                             <div class="space-y-2">
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
                                     x-text="field.label"></label>
-                                <input type="text" :name="'match[' + field.key + ']'" x-model="route.match[field.key]"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    :placeholder="field.placeholder">
+                                <div class="relative">
+                                    <input type="text" :name="'match[' + field.key + ']"
+                                        x-model="route.match[field.key]"
+                                        class="w-full rounded-lg border border-slate-200 pl-3 pr-16 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        :placeholder="field.placeholder">
+
+                                    <button type="button" @click.prevent="openRegexPanel(field.key)"
+                                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                                        Regex
+                                    </button>
+
+                                    <!-- Regex helper panel -->
+                                    <div x-show="regexPanel.open && regexPanel.field === field.key" x-cloak
+                                        @click.outside="closeRegexPanel()"
+                                        class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                                        <div class="flex items-center justify-between gap-2">
+                                            <div class="text-sm font-semibold text-slate-700">Regex helper</div>
+                                            <div class="text-xs text-slate-400">Presets & tester</div>
+                                        </div>
+                                        <div class="mt-2 space-y-2">
+                                            <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
+                                                Use parentheses <code>()</code> to create capture groups so rewrite
+                                                rules can reference them with <code>{1}</code>, <code>{2}</code>, and so
+                                                on.
+                                            </div>
+                                            <div class="flex flex-col gap-2">
+                                                <input type="text" x-model="regexPanel.builder"
+                                                    placeholder="Literal text"
+                                                    class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                                <div class="flex flex-wrap gap-2">
+                                                    <button type="button" @click="buildPreset('starts_with')"
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Start
+                                                        With</button>
+                                                    <button type="button" @click="buildPreset('ends_with')"
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">End
+                                                        With</button>
+                                                    <button type="button" @click="buildPreset('equals')"
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Equals</button>
+                                                </div>
+                                            </div>
+
+                                            <div>
+                                                <div class="text-xs text-slate-500">Pattern</div>
+                                                <input type="text" x-model="regexPanel.pattern"
+                                                    class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                            </div>
+
+                                            <div class="grid grid-cols-3 gap-2">
+                                                <input type="text" x-model="regexPanel.testInput"
+                                                    placeholder="Test input"
+                                                    class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                                <button type="button" @click="testRegex()"
+                                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">Test</button>
+                                            </div>
+
+                                            <div class="mt-2 space-y-2 text-xs">
+                                                <template x-if="regexPanel.error">
+                                                    <div class="rounded-md bg-rose-50 px-2 py-1 text-rose-700"
+                                                        x-text="regexPanel.error"></div>
+                                                </template>
+                                                <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
+                                                    <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
+                                                        Use Test to see whether the pattern matches and which capture
+                                                        groups are extracted.
+                                                    </div>
+                                                </template>
+                                                <template x-if="regexPanel.lastMatch !== null">
+                                                    <div class="rounded-md border border-slate-200 px-2 py-2 text-sm">
+                                                        <div
+                                                            class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                                            Test result
+                                                        </div>
+                                                        <div class="mt-1 text-sm"
+                                                            :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
+                                                            x-text="regexPanel.lastMatch ? 'Matched' : 'No match'">
+                                                        </div>
+                                                        <template x-if="regexPanel.groups && regexPanel.groups.length">
+                                                            <div class="mt-2">
+                                                                <div class="text-xs text-slate-500">Capture groups</div>
+                                                                <ul class="mt-1 list-disc pl-5 text-xs text-slate-700">
+                                                                    <template x-for="(g, i) in regexPanel.groups"
+                                                                        :key="i">
+                                                                        <li>
+                                                                            <span class="font-mono"
+                                                                                x-text="'{' + (i + 1) + '}'"></span>
+                                                                            <span class="mx-1">→</span>
+                                                                            <span x-text="g"></span>
+                                                                        </li>
+                                                                    </template>
+                                                                </ul>
+                                                            </div>
+                                                        </template>
+                                                        <template
+                                                            x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
+                                                            <div class="mt-2 text-xs text-slate-400">
+                                                                No capture groups detected. Wrap parts of your pattern
+                                                                in parentheses to populate {1}, {2}, and so on.
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </div>
+
+                                            <div class="mt-3 flex justify-end gap-2">
+                                                <button type="button" @click="closeRegexPanel()"
+                                                    class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">Cancel</button>
+                                                <button type="button" @click="applyRegexPanel()"
+                                                    class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">Apply</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </template>
                     </div>
@@ -211,10 +320,117 @@
                                         x-model="header.name"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="X-Account-Code">
-                                    <input type="text" :name="'match_headers[' + index + '][value]'"
-                                        x-model="header.value"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="^sales-.*$">
+                                    <div class="relative">
+                                        <input type="text" :name="'match_headers[' + index + '][value]'"
+                                            x-model="header.value"
+                                            class="w-full rounded-lg border border-slate-200 pl-3 pr-16 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="^sales-.*$">
+                                        <button type="button" @click.prevent="openRegexPanel('header', index)"
+                                            class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                                            Regex
+                                        </button>
+                                        <div x-show="regexPanel.open && regexPanel.field === 'header' && regexPanel.headerIndex === index"
+                                            x-cloak @click.outside="closeRegexPanel()"
+                                            class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                                            <div class="flex items-center justify-between gap-2">
+                                                <div class="text-sm font-semibold text-slate-700">Regex helper</div>
+                                                <div class="text-xs text-slate-400">Presets & tester</div>
+                                            </div>
+                                            <div class="mt-2 space-y-2">
+                                                <div
+                                                    class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
+                                                    Use parentheses <code>()</code> to create capture groups so rewrite
+                                                    rules can reference them with <code>{1}</code>, <code>{2}</code>,
+                                                    and so on.
+                                                </div>
+                                                <div class="flex flex-col gap-2">
+                                                    <input type="text" x-model="regexPanel.builder"
+                                                        placeholder="Literal text"
+                                                        class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                                    <div class="flex flex-wrap gap-2">
+                                                        <button type="button" @click="buildPreset('starts_with')"
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Start
+                                                            With</button>
+                                                        <button type="button" @click="buildPreset('ends_with')"
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">End
+                                                            With</button>
+                                                        <button type="button" @click="buildPreset('equals')"
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Equals</button>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div class="text-xs text-slate-500">Pattern</div>
+                                                    <input type="text" x-model="regexPanel.pattern"
+                                                        class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                                </div>
+                                                <div class="grid grid-cols-3 gap-2">
+                                                    <input type="text" x-model="regexPanel.testInput"
+                                                        placeholder="Test input"
+                                                        class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                                    <button type="button" @click="testRegex()"
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">Test</button>
+                                                </div>
+                                                <div class="mt-2 space-y-2 text-xs">
+                                                    <template x-if="regexPanel.error">
+                                                        <div class="rounded-md bg-rose-50 px-2 py-1 text-rose-700"
+                                                            x-text="regexPanel.error"></div>
+                                                    </template>
+                                                    <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
+                                                        <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
+                                                            Use Test to see whether the pattern matches and which
+                                                            capture groups are extracted.
+                                                        </div>
+                                                    </template>
+                                                    <template x-if="regexPanel.lastMatch !== null">
+                                                        <div
+                                                            class="rounded-md border border-slate-200 px-2 py-2 text-sm">
+                                                            <div
+                                                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                                                Test result
+                                                            </div>
+                                                            <div class="mt-1 text-sm"
+                                                                :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
+                                                                x-text="regexPanel.lastMatch ? 'Matched' : 'No match'">
+                                                            </div>
+                                                            <template
+                                                                x-if="regexPanel.groups && regexPanel.groups.length">
+                                                                <div class="mt-2">
+                                                                    <div class="text-xs text-slate-500">Capture groups
+                                                                    </div>
+                                                                    <ul
+                                                                        class="mt-1 list-disc pl-5 text-xs text-slate-700">
+                                                                        <template x-for="(g, i) in regexPanel.groups"
+                                                                            :key="i">
+                                                                            <li>
+                                                                                <span class="font-mono"
+                                                                                    x-text="'{' + (i + 1) + '}'"></span>
+                                                                                <span class="mx-1">→</span>
+                                                                                <span x-text="g"></span>
+                                                                            </li>
+                                                                        </template>
+                                                                    </ul>
+                                                                </div>
+                                                            </template>
+                                                            <template
+                                                                x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
+                                                                <div class="mt-2 text-xs text-slate-400">
+                                                                    No capture groups detected. Wrap parts of your
+                                                                    pattern in parentheses to populate {1}, {2}, and so
+                                                                    on.
+                                                                </div>
+                                                            </template>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <div class="mt-3 flex justify-end gap-2">
+                                                    <button type="button" @click="closeRegexPanel()"
+                                                        class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">Cancel</button>
+                                                    <button type="button" @click="applyRegexPanel()"
+                                                        class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">Apply</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <button type="button" @click="removeMatchHeader(index)"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
                                         Remove
@@ -225,6 +441,10 @@
                     </div>
                 </section>
 
+            </div>
+
+            <div x-show="activeTab === 'rewrite'" x-transition.opacity x-cloak class="space-y-6"
+                id="routing-tab-rewrite" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
                         <h2 class="text-base font-semibold text-slate-900">Rewrite rules</h2>
@@ -237,6 +457,11 @@
                             <div class="space-y-2">
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
                                     x-text="field.label"></label>
+                                <div class="text-[11px] text-slate-400">
+                                    Matching regex:
+                                    <code class="font-mono text-[11px]"
+                                        x-text="trimString(route.match[field.key] || '') || '—'"></code>
+                                </div>
                                 <input type="text" :name="'rewrite[' + field.key + ']'"
                                     x-model="route.rewrite[field.key]"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -402,56 +627,6 @@
                     </div>
                 </section>
             </div>
-
-            <div x-show="activeTab === 'notes'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-notes"
-                role="tabpanel" tabindex="0">
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">Operational notes</h2>
-                        <p class="text-xs text-slate-500">Document change log, rollout guardrails, or diagnostics.</p>
-                    </div>
-
-                    <div class="mt-4 space-y-3">
-                        <button type="button" @click="addNote()"
-                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                            Add note
-                        </button>
-                        <template x-if="!notes.length">
-                            <p class="text-xs text-slate-400">No notes recorded yet.</p>
-                        </template>
-                        <div class="space-y-3">
-                            <template x-for="(note, index) in notes" :key="index">
-                                <div class="flex gap-2">
-                                    <textarea x-model="notes[index]"
-                                        class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        rows="2"></textarea>
-                                    <button type="button" @click="removeNote(index)"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                        Remove
-                                    </button>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="rounded-xl bg-slate-900/95 p-6 text-slate-200 shadow-sm ring-1 ring-black/40">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <h2 class="text-base font-semibold text-white">Generated route payload</h2>
-                            <p class="text-xs text-slate-400">Review the JSON that will be submitted with this change.
-                            </p>
-                        </div>
-                        <button type="button" @click="copyJson"
-                            class="inline-flex items-center gap-2 rounded-lg border border-white/20 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10">
-                            Copy JSON
-                        </button>
-                    </div>
-                    <pre class="mt-4 max-h-80 overflow-auto rounded-lg bg-black/30 p-4 text-xs text-emerald-100">
-<span x-text="jsonPreview"></span>
-                </pre>
-                </section>
-            </div>
         </form>
     </div>
 </div>
@@ -483,7 +658,18 @@
             },
             matchHeaders: [],
             rewriteHeaders: [],
-            notes: [],
+            // Regex helper panel state
+            regexPanel: {
+                open: false,
+                field: null,
+                headerIndex: null,
+                builder: '',
+                pattern: '',
+                testInput: '',
+                groups: [],
+                lastMatch: null,
+                error: null,
+            },
             saving: false,
             error: null,
             success: null,
@@ -501,7 +687,94 @@
                 this.route = normalised.route;
                 this.matchHeaders = normalised.matchHeaders;
                 this.rewriteHeaders = normalised.rewriteHeaders;
-                this.notes = normalised.notes;
+            },
+            // Regex helper methods
+            openRegexPanel(field, headerIndex = null) {
+                this.regexPanel.open = true;
+                this.regexPanel.field = field;
+                this.regexPanel.headerIndex = headerIndex;
+                this.regexPanel.builder = '';
+                this.regexPanel.testInput = '';
+                this.regexPanel.groups = [];
+                this.regexPanel.lastMatch = null;
+                this.regexPanel.error = null;
+
+                // Load stored value into the helper state
+                let stored = '';
+                if (headerIndex === null) {
+                    stored = this.trimString(this.route.match[field] || '');
+                } else {
+                    stored = this.trimString((this.matchHeaders[headerIndex] && this.matchHeaders[headerIndex].value) || '');
+                }
+                this.regexPanel.pattern = stored;
+            },
+            closeRegexPanel() {
+                this.regexPanel.open = false;
+                this.regexPanel.field = null;
+                this.regexPanel.headerIndex = null;
+                this.regexPanel.builder = '';
+                this.regexPanel.pattern = '';
+                this.regexPanel.testInput = '';
+                this.regexPanel.groups = [];
+                this.regexPanel.lastMatch = null;
+                this.regexPanel.error = null;
+            },
+            buildPreset(type) {
+                const raw = this.trimString(this.regexPanel.builder || '');
+                const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const lit = escapeRegExp(raw);
+                if (!raw.length) return;
+                switch (type) {
+                    case 'starts_with':
+                        this.regexPanel.pattern = `^${lit}(.*)$`;
+                        break;
+                    case 'ends_with':
+                        this.regexPanel.pattern = `^(.*)${lit}$`;
+                        break;
+                    case 'equals':
+                        this.regexPanel.pattern = `^(${lit})$`;
+                        break;
+                }
+            },
+            testRegex() {
+                this.regexPanel.error = null;
+                this.regexPanel.groups = [];
+                this.regexPanel.lastMatch = null;
+                const rawPattern = this.regexPanel.pattern || '';
+                if (!rawPattern.length) {
+                    this.regexPanel.error = 'Empty pattern';
+                    return;
+                }
+                const input = String(this.regexPanel.testInput ?? '');
+                if (!input.length) {
+                    this.regexPanel.error = 'Enter test input before running the test.';
+                    return;
+                }
+                try {
+                    const re = new RegExp(rawPattern);
+                    const m = re.exec(input);
+                    if (m) {
+                        this.regexPanel.groups = m.slice(1).map((g) => g == null ? '' : g);
+                        this.regexPanel.lastMatch = true;
+                    } else {
+                        this.regexPanel.groups = [];
+                        this.regexPanel.lastMatch = false;
+                    }
+                } catch (err) {
+                    this.regexPanel.error = 'Invalid regex: ' + (err && err.message ? err.message : err);
+                }
+            },
+            applyRegexPanel() {
+                const raw = this.regexPanel.pattern || '';
+                if (this.regexPanel.headerIndex === null) {
+                    this.route.match[this.regexPanel.field] = raw;
+                } else {
+                    const idx = this.regexPanel.headerIndex;
+                    if (this.matchHeaders[idx]) {
+                        this.matchHeaders[idx].value = raw;
+                    }
+                }
+                this.closeRegexPanel();
             },
             normaliseRoute(raw) {
                 const toBoolean = (value) => {
@@ -586,9 +859,7 @@
                     }
                 });
 
-                const notes = Array.isArray(raw?.notes) ? raw.notes.slice() : [];
-
-                return { route, matchHeaders, rewriteHeaders, notes };
+                return { route, matchHeaders, rewriteHeaders };
             },
             trimString(value) {
                 if (value == null) return '';
@@ -610,9 +881,9 @@
                     { key: 'from_host', label: 'From host regex', placeholder: '^sip\\.example\\.com$' },
                     { key: 'to_user', label: 'To user regex', placeholder: '^(852|853)\\d{7,8}$' },
                     { key: 'to_host', label: 'To host regex', placeholder: '^carrier\\.provider\\.net$' },
-                    { key: 'request_uri_user', label: 'R-URI user regex', placeholder: '^(400|800)\\d{6}$' },
-                    { key: 'request_uri_host', label: 'R-URI host regex', placeholder: '.*' },
-                    { key: 'request_uri_port', label: 'R-URI port', placeholder: '5061' },
+                    { key: 'request_uri_user', label: 'Request-URI user regex', placeholder: '^(400|800)\\d{6}$' },
+                    { key: 'request_uri_host', label: 'Request-URI host regex', placeholder: '.*' },
+                    { key: 'request_uri_port', label: 'Request-URI port', placeholder: '5061' },
                 ];
             },
             get rewriteFields() {
@@ -621,8 +892,8 @@
                     { key: 'from_host', label: 'Rewrite From host', placeholder: 'sip.internal' },
                     { key: 'to_user', label: 'Rewrite To user', placeholder: '00{1}' },
                     { key: 'to_host', label: 'Rewrite To host', placeholder: 'carrier.provider.net' },
-                    { key: 'request_uri_user', label: 'Rewrite R-URI user', placeholder: 'ivr-{1}' },
-                    { key: 'request_uri_host', label: 'Rewrite R-URI host', placeholder: 'rtp.provider.net' },
+                    { key: 'request_uri_user', label: 'Rewrite Request-URI user', placeholder: 'ivr-{1}' },
+                    { key: 'request_uri_host', label: 'Rewrite Request-URI host', placeholder: 'rtp.provider.net' },
                 ];
             },
             addMatchHeader() {
@@ -667,12 +938,6 @@
                     current.add(candidate);
                 }
                 this.route.target_trunks = Array.from(current);
-            },
-            addNote() {
-                this.notes.push('');
-            },
-            removeNote(index) {
-                this.notes.splice(index, 1);
             },
             get totalWeight() {
                 return this.route.action.trunks.reduce((sum, trunk) => sum + (Number(trunk.weight) || 0), 0);
@@ -770,13 +1035,7 @@
                     },
                     source_trunk: this.trimString(this.route.source_trunk) || null,
                     target_trunks: targetTrunks,
-                    notes: this.notes
-                        .map((note) => this.trimString(note))
-                        .filter((note) => note.length > 0),
                 };
-            },
-            get jsonPreview() {
-                return JSON.stringify(this.buildPayload(), null, 2);
             },
             async submit() {
                 try {
@@ -815,20 +1074,6 @@
                 } finally {
                     this.saving = false;
                 }
-            },
-            copyJson() {
-                const json = this.jsonPreview;
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(json).then(() => {
-                        this.showToast('JSON copied to clipboard');
-                    }).catch(() => this.showToast('Copy failed, press ⌘+C'));
-                } else {
-                    this.showToast('Copy failed, press ⌘+C');
-                }
-            },
-            showToast(message) {
-                const event = new CustomEvent('notify', { detail: { message } });
-                window.dispatchEvent(event);
             },
         }));
     });

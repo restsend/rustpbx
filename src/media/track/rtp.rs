@@ -493,6 +493,7 @@ impl RtpTrack {
         inner.rtcp_mux = peer_media.rtcp_mux;
 
         let payloader = match codec_type {
+            #[cfg(feature = "opus")]
             CodecType::Opus => Box::<OpusPayloader>::default()
                 as Box<dyn webrtc::rtp::packetizer::Payloader + Send + Sync>,
             _ => Box::<G7xxPayloader>::default()

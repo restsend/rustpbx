@@ -28,6 +28,8 @@ database_url = "sqlite://rustpbx.sqlite3"
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"
+# allow self-service administrator signup after the first account
+allow_registration = false
 
 [ua]
 addr="0.0.0.0"
