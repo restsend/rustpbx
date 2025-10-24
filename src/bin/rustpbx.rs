@@ -3,7 +3,9 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 use rustpbx::{app::AppStateBuilder, config::Config, preflight, version};
-use std::path::Path;
+use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
 use tracing::{info, level_filters::LevelFilter};
@@ -150,13 +152,38 @@ async fn main() -> Result<()> {
         let mut builder = console_subscriber::ConsoleLayer::builder()
             .retention(std::time::Duration::from_secs(60));
         if let Some(addr) = &cli.tokio_console {
-            if let Ok(sock) = addr.parse() {
-                builder = builder.server_addr(ServerAddr::Tcp(sock));
-            } else {
-                builder = builder.server_addr(Path::new(addr));
-            }
+            builder = match addr.parse::<SocketAddr>() {
+                Ok(sock) => builder.server_addr(ServerAddr::Tcp(sock)),
+                Err(_) => {
+                    #[cfg(unix)]
+                    {
+                        builder.server_addr(ServerAddr::Unix(PathBuf::from(addr)))
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tracing::warn!(
+                            "tokio-console unix socket path '{}' is not supported on this target, falling back to 127.0.0.1:6669",
+                            addr
+                        );
+                        builder.server_addr(ServerAddr::Tcp(
+                            "127.0.0.1:6669".parse().expect("valid socket addr"),
+                        ))
+                    }
+                }
+            };
         } else {
-            builder = builder.server_addr(Path::new("/tmp/tokio-console"));
+            builder = {
+                #[cfg(unix)]
+                {
+                    builder.server_addr(ServerAddr::Unix(PathBuf::from("/tmp/tokio-console")))
+                }
+                #[cfg(not(unix))]
+                {
+                    builder.server_addr(ServerAddr::Tcp(
+                        "127.0.0.1:6669".parse().expect("valid socket addr"),
+                    ))
+                }
+            };
         }
         console_layer = Some(builder.spawn());
     }
