@@ -38,7 +38,7 @@ use webrtc::{
         },
     },
     rtp::{
-        codecs::g7xx::G7xxPayloader,
+        codecs::{g7xx::G7xxPayloader, opus::OpusPayloader},
         packet::Packet,
         packetizer::{Packetizer, new_packetizer},
         sequence::{Sequencer, new_random_sequencer},
@@ -492,7 +492,13 @@ impl RtpTrack {
         inner.remote_rtcp_addr.replace(remote_rtcp_addr);
         inner.rtcp_mux = peer_media.rtcp_mux;
 
-        let payloader = Box::<G7xxPayloader>::default();
+        let payloader = match codec_type {
+            CodecType::Opus => Box::<OpusPayloader>::default()
+                as Box<dyn webrtc::rtp::packetizer::Payloader + Send + Sync>,
+            _ => Box::<G7xxPayloader>::default()
+                as Box<dyn webrtc::rtp::packetizer::Payloader + Send + Sync>,
+        };
+
         inner
             .packetizer
             .lock()
@@ -595,6 +601,10 @@ impl RtpTrack {
                 value: None,
             });
         }
+        media.attributes.push(Attribute {
+            key: "ptime".to_string(),
+            value: Some(format!("{}", self.config.ptime.as_millis())),
+        });
         sdp.media_descriptions.push(media);
         Ok(sdp.marshal())
     }
