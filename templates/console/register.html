@@ -38,11 +38,29 @@
                             class="font-medium text-sky-600 hover:text-sky-500">Sign in instead</a>
                     </p>
                 </div>
+                {% set registration_closed = registration_closed | default(false) %}
                 {% if error_message %}
                 <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
                     {{ error_message | default("") }}
                 </div>
                 {% endif %}
+                {% if superuser_notice %}
+                <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+                    {{ superuser_notice | default("") }}
+                </div>
+                {% endif %}
+                {% if registration_closed %}
+                <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                    Registration is currently disabled. Please contact your administrator for assistance.
+                    <p>
+                        Change the configuration <b>console.allow_registration</b> to
+                        <b>true</b> to enable self-service registration.
+                    </p>
+                </div>
+                <div class="text-sm text-slate-500">
+                    <a href="{{ login_url }}" class="font-medium text-sky-600 hover:text-sky-500">Return to sign in</a>
+                </div>
+                {% else %}
                 <form action="{{ register_action }}" method="post" class="space-y-5">
                     <div class="space-y-2">
                         <label class="block text-sm font-medium text-slate-700">Email</label>
@@ -84,6 +102,7 @@
                         class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Create
                         account</button>
                 </form>
+                {% endif %}
             </div>
         </div>
     </div>

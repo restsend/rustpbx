@@ -33,7 +33,12 @@
             </div>
             <div class="flex items-center justify-between text-sm">
                 <a href="{{ forgot_url }}" class="font-medium text-sky-600 hover:text-sky-500">Forgot password?</a>
+                {% if register_url %}
                 <a href="{{ register_url }}" class="text-slate-500 hover:text-slate-700">Create account</a>
+                {% else %}
+                <span class="text-slate-400" title="Registration is disabled by the administrator">Registration
+                    disabled</span>
+                {% endif %}
             </div>
             <button type="submit"
                 class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Sign

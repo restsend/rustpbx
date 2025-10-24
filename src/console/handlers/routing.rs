@@ -1034,9 +1034,6 @@ pub async fn update_routing(
                 .into_response();
         }
     };
-    if trunks.is_empty() {
-        return bad_request("Add at least one SIP trunk before editing routes");
-    }
 
     let trunk_lookup = build_trunk_name_lookup(&trunks);
 

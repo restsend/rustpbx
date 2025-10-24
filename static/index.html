@@ -14,6 +14,13 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css"
         integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA=="
         crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <style>
+        input::placeholder,
+        textarea::placeholder {
+            color: rgba(148, 163, 184, 0.7);
+            opacity: 1;
+        }
+    </style>
 </head>
 
 <body class="bg-gray-100 min-h-screen pb-20" x-data="mainApp()" x-init="init()">
@@ -76,10 +83,17 @@
                             <input type="text" id="sipUsername" x-model="config.sip.username" placeholder="SIP username"
                                 class="border p-2 rounded w-full">
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" x-data="{ showSipPassword: true }">
                             <label for="sipPassword" class="block text-sm font-medium mb-1">Password</label>
-                            <input type="password" id="sipPassword" x-model="config.sip.password"
-                                placeholder="SIP password" class="border p-2 rounded w-full">
+                            <div class="relative">
+                                <input :type="showSipPassword ? 'text' : 'password'" id="sipPassword"
+                                    x-model="config.sip.password" placeholder="SIP password"
+                                    class="border p-2 rounded w-full pr-10">
+                                <button type="button" @click="showSipPassword = !showSipPassword"
+                                    class="absolute inset-y-0 right-0 px-3 text-xs font-semibold text-slate-500 hover:text-slate-700">
+                                    <span x-text="showSipPassword ? 'Hide' : 'Show'"></span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

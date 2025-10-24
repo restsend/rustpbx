@@ -577,17 +577,6 @@
                                 </div>
                             </div>
 
-                            <div class="rounded-lg border border-dashed border-slate-200 p-4">
-                                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Notes</div>
-                                <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-slate-500">
-                                    <template x-for="note in (route.notes || [])" :key="note">
-                                        <li x-text="note"></li>
-                                    </template>
-                                    <template x-if="!(route.notes || []).length">
-                                        <li>No operator notes recorded.</li>
-                                    </template>
-                                </ul>
-                            </div>
             </div>
             </article>
             </template>
@@ -940,9 +929,9 @@
                     'to_user': 'To user regex',
                     'to_host': 'To host regex',
                     'to_port': 'To port',
-                    'request_uri_user': 'R-URI user regex',
-                    'request_uri_host': 'R-URI host regex',
-                    'request_uri_port': 'R-URI port',
+                    'request_uri_user': 'Request-URI user regex',
+                    'request_uri_host': 'Request-URI host regex',
+                    'request_uri_port': 'Request-URI port',
                     'from': 'From',
                     'to': 'To',
                     'caller': 'Caller',
@@ -979,9 +968,9 @@
                     'to_user': 'Rewrite To user',
                     'to_host': 'Rewrite To host',
                     'to_port': 'Rewrite To port',
-                    'request_uri_user': 'Rewrite R-URI user',
-                    'request_uri_host': 'Rewrite R-URI host',
-                    'request_uri_port': 'Rewrite R-URI port',
+                    'request_uri_user': 'Rewrite Request-URI user',
+                    'request_uri_host': 'Rewrite Request-URI host',
+                    'request_uri_port': 'Rewrite Request-URI port',
                     'from': 'Rewrite From',
                     'to': 'Rewrite To',
                     'caller': 'Rewrite Caller',

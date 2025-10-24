@@ -771,6 +771,7 @@ mod tests {
             ConsoleConfig {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),
+                allow_registration: false,
             },
         )
         .await

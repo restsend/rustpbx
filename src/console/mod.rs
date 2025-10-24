@@ -20,6 +20,7 @@ pub struct ConsoleState {
     db: DatabaseConnection,
     session_key: Arc<Vec<u8>>,
     base_path: String,
+    allow_registration: bool,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
 }
@@ -29,6 +30,7 @@ impl ConsoleState {
         let ConsoleConfig {
             session_secret,
             base_path,
+            allow_registration,
         } = config;
 
         let key_material: [u8; 32] = Sha256::digest(session_secret.as_bytes()).into();
@@ -39,6 +41,7 @@ impl ConsoleState {
             db,
             session_key,
             base_path,
+            allow_registration,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
         }))
@@ -85,6 +88,8 @@ impl ConsoleState {
                 map.entry("favicon_url").or_insert_with(|| {
                     serde_json::Value::String("/static/images/favicon.png".to_string())
                 });
+                map.entry("registration_enabled")
+                    .or_insert_with(|| serde_json::Value::Bool(self.allow_registration));
             }
         }
 
@@ -150,6 +155,10 @@ impl ConsoleState {
 
     pub fn base_path(&self) -> &str {
         &self.base_path
+    }
+
+    pub fn registration_allowed_by_config(&self) -> bool {
+        self.allow_registration
     }
 
     pub fn login_url(&self, next: Option<String>) -> String {

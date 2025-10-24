@@ -1,6 +1,7 @@
 use crate::{
     console::{
         ConsoleState,
+        auth::RegistrationPolicy,
         handlers::forms::{ForgotForm, LoginForm, LoginQuery, RegisterForm, ResetForm},
     },
     handler::middleware::clientaddr::ClientAddr,
@@ -25,15 +26,34 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/reset/{token}", get(reset_page).post(reset_post))
 }
 
+const SUPERUSER_NOTICE: &str =
+    "You are creating the first administrator account. Please store this password securely.";
+
 pub async fn login_page(
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
+    let policy = match state.registration_policy().await {
+        Ok(policy) => policy,
+        Err(err) => {
+            warn!("failed to load registration policy: {}", err);
+            RegistrationPolicy::default()
+        }
+    };
+
+    let login_action = state.login_url(query.next.clone());
+    let register_url = if policy.allowed {
+        Some(state.register_url(query.next.clone()))
+    } else {
+        None
+    };
+
     state.render(
         "console/login.html",
         json!({
-            "login_action": state.login_url(query.next.clone()),
-            "register_url": state.register_url(query.next),
+            "login_action": login_action,
+            "register_url": register_url,
+            "registration_allowed": policy.allowed,
             "error_message": null,
             "identifier": "",
         }),
@@ -48,12 +68,25 @@ pub async fn login_post(
     let identifier = form.identifier.trim();
     let password = form.password.trim();
     let next = form.next.clone();
+    let policy = match state.registration_policy().await {
+        Ok(policy) => policy,
+        Err(err) => {
+            warn!("failed to load registration policy: {}", err);
+            RegistrationPolicy::default()
+        }
+    };
+    let register_url = if policy.allowed {
+        Some(state.register_url(next.clone()))
+    } else {
+        None
+    };
     if identifier.is_empty() || password.is_empty() {
         return state.render(
             "console/login.html",
             json!({
                 "login_action": state.login_url(next.clone()),
-                "register_url": state.register_url(next),
+                "register_url": register_url.clone(),
+                "registration_allowed": policy.allowed,
                 "error_message": "Please provide both username/email and password",
                 "identifier": identifier,
             }),
@@ -75,7 +108,8 @@ pub async fn login_post(
             "console/login.html",
             json!({
                 "login_action": state.login_url(next.clone()),
-                "register_url": state.register_url(next),
+                "register_url": register_url,
+                "registration_allowed": policy.allowed,
                 "error_message": "Invalid credentials",
                 "identifier": identifier,
             }),
@@ -100,7 +134,25 @@ pub async fn logout(
 }
 
 pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
-    state.render(
+    let policy = match state.registration_policy().await {
+        Ok(policy) => policy,
+        Err(err) => {
+            warn!("failed to load registration policy: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to load registration page",
+            )
+                .into_response();
+        }
+    };
+
+    let superuser_notice = if policy.first_user {
+        Some(SUPERUSER_NOTICE.to_string())
+    } else {
+        None
+    };
+
+    let mut response = state.render(
         "console/register.html",
         json!({
             "register_action": state.url_for("/register"),
@@ -108,14 +160,47 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
             "error_message": null,
             "email": "",
             "username": "",
+            "registration_closed": !policy.allowed,
+            "superuser_notice": superuser_notice,
         }),
-    )
+    );
+
+    if !policy.allowed {
+        *response.status_mut() = StatusCode::FORBIDDEN;
+    }
+
+    response
 }
 
 pub async fn register_post(
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<RegisterForm>,
 ) -> Response {
+    let policy = match state.registration_policy().await {
+        Ok(policy) => policy,
+        Err(err) => {
+            warn!("failed to load registration policy: {}", err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Registration failed").into_response();
+        }
+    };
+
+    if !policy.allowed {
+        let mut response = state.render(
+            "console/register.html",
+            json!({
+                "register_action": state.url_for("/register"),
+                "login_url": state.url_for("/login"),
+                "error_message": "User self-registration is disabled",
+                "email": form.email.trim().to_lowercase(),
+                "username": form.username.trim().to_string(),
+                "registration_closed": true,
+                "superuser_notice": None::<String>,
+            }),
+        );
+        *response.status_mut() = StatusCode::FORBIDDEN;
+        return response;
+    }
+
     let email = form.email.trim().to_lowercase();
     let username = form.username.trim().to_string();
     let password = form.password.trim().to_string();
@@ -163,12 +248,21 @@ pub async fn register_post(
                 "error_message": error,
                 "email": email,
                 "username": username,
+                "registration_closed": false,
+                "superuser_notice": if policy.first_user {
+                    Some(SUPERUSER_NOTICE.to_string())
+                } else {
+                    None
+                },
             }),
         );
     }
 
     match state.create_user(&email, &username, &password).await {
         Ok(user) => {
+            if policy.first_user {
+                info!("created initial superuser account: {}", user.username);
+            }
             let mut response = Redirect::to(&state.url_for("/")).into_response();
             if let Some(header) = state.session_cookie_header(user.id) {
                 response.headers_mut().append(SET_COOKIE, header);

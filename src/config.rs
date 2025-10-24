@@ -147,6 +147,8 @@ pub struct ConsoleConfig {
     pub session_secret: String,
     #[serde(default = "default_console_base_path")]
     pub base_path: String,
+    #[serde(default)]
+    pub allow_registration: bool,
 }
 
 impl Default for ConsoleConfig {
@@ -154,6 +156,7 @@ impl Default for ConsoleConfig {
         Self {
             session_secret: default_console_session_secret(),
             base_path: default_console_base_path(),
+            allow_registration: false,
         }
     }
 }

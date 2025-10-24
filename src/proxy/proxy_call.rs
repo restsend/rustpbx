@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use rsip::{StatusCode, Uri};
+use rsip::{StatusCode, Uri, prelude::HeadersExt};
 use rsipstack::{
     dialog::{
         DialogId,
@@ -1298,6 +1298,19 @@ impl ProxyCall {
             .connected_callee
             .as_ref()
             .cloned()
+            .or_else(|| {
+                self.dialplan
+                    .get_all_targets()
+                    .first()
+                    .map(|location| location.aor.to_string())
+            })
+            .or_else(|| {
+                self.dialplan
+                    .original
+                    .to_header()
+                    .ok()
+                    .and_then(|to_header| to_header.uri().ok().map(|uri| uri.to_string()))
+            })
             .unwrap_or_else(|| "unknown".to_string());
 
         let mut extras_map: HashMap<String, Value> = HashMap::new();
