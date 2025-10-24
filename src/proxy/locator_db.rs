@@ -1,12 +1,12 @@
-use super::locator::Locator;
+use super::locator::{Locator, is_local_realm, sort_locations_by_recency};
 use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sea_orm::{ActiveModelTrait, Database, Set, entity::prelude::*};
+use sea_orm::{ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{boolean, integer, pk_auto, string, string_null, timestamp};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -271,6 +271,7 @@ impl Locator for DbLocator {
         let target_aor = uri.to_string();
         let mut models = Entity::find()
             .filter(Column::Aor.eq(&target_aor))
+            .order_by_desc(Column::LastModified)
             .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
@@ -286,13 +287,15 @@ impl Locator for DbLocator {
                 models = Entity::find()
                     .filter(Column::Username.eq(&username_key))
                     .filter(Column::Realm.eq(&realm_key))
+                    .order_by_desc(Column::LastModified)
                     .all(&self.db)
                     .await
                     .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
-                if models.is_empty() && realm_key.is_empty() {
+                if models.is_empty() && (realm_key.is_empty() || is_local_realm(&realm_key)) {
                     models = Entity::find()
                         .filter(Column::Username.eq(&username_key))
+                        .order_by_desc(Column::LastModified)
                         .all(&self.db)
                         .await
                         .map_err(|e| anyhow::anyhow!("Database error on username lookup: {}", e))?;
@@ -305,6 +308,7 @@ impl Locator for DbLocator {
         }
 
         let mut locations = Vec::new();
+        let now_instant = Instant::now();
         for model in models {
             if model.expires > 0 {
                 let elapsed = now_epoch - model.last_modified;
@@ -334,11 +338,20 @@ impl Locator for DbLocator {
                 addr,
             };
 
+            let age_secs = if model.last_modified >= now_epoch {
+                0
+            } else {
+                (now_epoch - model.last_modified) as u64
+            };
+            let age_duration = Duration::from_secs(age_secs);
+            let last_modified_instant =
+                now_instant.checked_sub(age_duration).unwrap_or(now_instant);
+
             locations.push(Location {
                 aor,
                 expires: model.expires as u32,
                 destination: Some(destination),
-                last_modified: None,
+                last_modified: Some(last_modified_instant),
                 supports_webrtc: model.supports_webrtc,
                 transport: Some(transport),
                 registered_aor: Some(registered_aor),
@@ -347,6 +360,6 @@ impl Locator for DbLocator {
             });
         }
 
-        Ok(locations)
+        Ok(sort_locations_by_recency(locations))
     }
 }

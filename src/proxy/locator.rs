@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::{transaction::endpoint::TargetLocator, transport::SipAddr};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
@@ -106,6 +107,7 @@ impl Locator for MemoryLocator {
             debug!("skip registering location with empty identifier");
             return Ok(());
         }
+        let mut location = location;
         let key = location.binding_key();
         debug!(identifier, binding = %key, %location, "Registering");
         let mut locations = self.locations.lock().await;
@@ -118,6 +120,9 @@ impl Locator for MemoryLocator {
                 locations.remove(&identifier);
             }
         } else {
+            if location.last_modified.is_none() {
+                location.last_modified = Some(Instant::now());
+            }
             entry.insert(key, location);
         }
         Ok(())
@@ -164,12 +169,7 @@ impl Locator for MemoryLocator {
         }
 
         if !direct_hits.is_empty() {
-            let mut seen = HashSet::new();
-            let unique = direct_hits
-                .into_iter()
-                .filter(|loc| seen.insert(loc.binding_key()))
-                .collect();
-            return Ok(unique);
+            return Ok(sort_locations_by_recency(direct_hits));
         }
 
         // Fall back to classic AoR lookup by username/realm
@@ -178,8 +178,6 @@ impl Locator for MemoryLocator {
         let username_lower = username.to_ascii_lowercase();
         let realm_raw = uri.host().to_string();
         let realm_trimmed = realm_raw.trim();
-        let has_realm = !realm_trimmed.is_empty();
-        let realm_lower = realm_trimmed.to_ascii_lowercase();
 
         let mut identifiers = Vec::new();
         if !username.is_empty() {
@@ -193,7 +191,8 @@ impl Locator for MemoryLocator {
         for id in identifiers {
             if let Some(map) = locations.get(&id) {
                 if !map.is_empty() {
-                    return Ok(map.values().cloned().collect());
+                    let results: Vec<_> = map.values().cloned().collect();
+                    return Ok(sort_locations_by_recency(results));
                 }
             }
         }
@@ -210,12 +209,8 @@ impl Locator for MemoryLocator {
                             .user()
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
-                        let realm_match = if has_realm {
-                            let host = registered.host().to_string();
-                            host.trim().eq_ignore_ascii_case(&realm_lower)
-                        } else {
-                            true
-                        };
+                        let realm_string = registered.host().to_string();
+                        let realm_match = realm_matches(realm_trimmed, realm_string.trim());
 
                         if user_match && realm_match {
                             matched = true;
@@ -228,12 +223,8 @@ impl Locator for MemoryLocator {
                             .user()
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
-                        let realm_match = if has_realm {
-                            let host = loc.aor.host().to_string();
-                            host.trim().eq_ignore_ascii_case(&realm_lower)
-                        } else {
-                            true
-                        };
+                        let realm_string = loc.aor.host().to_string();
+                        let realm_match = realm_matches(realm_trimmed, realm_string.trim());
 
                         if user_match && realm_match {
                             matched = true;
@@ -247,17 +238,66 @@ impl Locator for MemoryLocator {
             }
 
             if !fallback_hits.is_empty() {
-                let mut seen = HashSet::new();
-                let unique = fallback_hits
-                    .into_iter()
-                    .filter(|loc| seen.insert(loc.binding_key()))
-                    .collect();
-                return Ok(unique);
+                return Ok(sort_locations_by_recency(fallback_hits));
             }
         }
 
         Ok(vec![])
     }
+}
+
+fn compare_location_recency(a: &Location, b: &Location) -> Ordering {
+    match (a.last_modified, b.last_modified) {
+        (Some(a_ts), Some(b_ts)) => b_ts.cmp(&a_ts),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn host_without_port(value: &str) -> &str {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            &rest[..end]
+        } else {
+            rest
+        }
+    } else {
+        trimmed.split(':').next().unwrap_or(trimmed)
+    }
+}
+
+pub(crate) fn is_local_realm(realm: &str) -> bool {
+    if realm.trim().is_empty() {
+        return false;
+    }
+    let host = host_without_port(realm);
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
+    )
+}
+
+fn realm_matches(requested_realm: &str, candidate_realm: &str) -> bool {
+    let requested = requested_realm.trim();
+    if requested.is_empty() {
+        return true;
+    }
+    if is_local_realm(requested) {
+        return true;
+    }
+
+    let requested_host = host_without_port(requested).to_ascii_lowercase();
+    let candidate_host = host_without_port(candidate_realm).to_ascii_lowercase();
+    requested_host == candidate_host
+}
+
+pub(crate) fn sort_locations_by_recency(mut locations: Vec<Location>) -> Vec<Location> {
+    locations.sort_by(compare_location_recency);
+    let mut seen: HashSet<String> = HashSet::new();
+    locations.retain(|loc| seen.insert(loc.binding_key()));
+    locations
 }
 
 pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> {
@@ -269,5 +309,102 @@ pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> 
             let db_locator = DbLocator::new(url.clone()).await?;
             Ok(Box::new(db_locator) as Box<dyn Locator>)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsip::HostWithPort;
+    use rsip::transport::Transport;
+    use rsipstack::transport::SipAddr;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn memory_locator_orders_by_last_modified() {
+        let locator = MemoryLocator::new();
+        let uri: rsip::Uri = "sip:alice@example.com".try_into().unwrap();
+
+        let now = Instant::now();
+        let older = now - Duration::from_secs(120);
+
+        let destination_primary = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("127.0.0.1:5060").unwrap(),
+        };
+
+        let destination_secondary = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("127.0.0.1:5070").unwrap(),
+        };
+
+        locator
+            .register(
+                "alice",
+                Some("example.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination_secondary),
+                    last_modified: Some(older),
+                    instance_id: Some("secondary".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        locator
+            .register(
+                "alice",
+                Some("example.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination_primary),
+                    last_modified: Some(now),
+                    instance_id: Some("primary".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let locations = locator.lookup(&uri).await.unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].instance_id.as_deref(), Some("primary"));
+        assert_eq!(locations[1].instance_id.as_deref(), Some("secondary"));
+    }
+
+    #[tokio::test]
+    async fn memory_locator_matches_localhost_alias() {
+        let locator = MemoryLocator::new();
+        let registered_uri: rsip::Uri = "sip:alice@192.168.3.181".try_into().unwrap();
+        let lookup_uri: rsip::Uri = "sip:alice@localhost".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.3.181:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "alice",
+                Some("192.168.3.181"),
+                Location {
+                    aor: registered_uri.clone(),
+                    registered_aor: Some(registered_uri.clone()),
+                    expires: 3600,
+                    destination: Some(destination),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let locations = locator.lookup(&lookup_uri).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].aor.to_string(), registered_uri.to_string());
     }
 }

@@ -288,3 +288,47 @@ async fn test_db_locator_multiple_lookups() {
     assert_eq!(locations2.len(), 1);
     assert_eq!(locations2[0].aor.to_string(), aor2.to_string());
 }
+
+#[tokio::test]
+async fn test_db_locator_localhost_alias() {
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
+
+    let aor = rsip::Uri {
+        scheme: Some(Scheme::Sip),
+        auth: Some(rsip::Auth {
+            user: "dave".to_string(),
+            password: None,
+        }),
+        host_with_port: HostWithPort::try_from("192.168.3.181").unwrap(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let destination = SipAddr {
+        r#type: Some(rsip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("192.168.3.181:5060").unwrap(),
+    };
+
+    locator
+        .register(
+            "dave",
+            Some("192.168.3.181"),
+            Location {
+                aor: aor.clone(),
+                expires: 3600,
+                destination: Some(destination),
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let locations = locator
+        .lookup(&"sip:dave@localhost".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
+
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].aor.to_string(), aor.to_string());
+}
