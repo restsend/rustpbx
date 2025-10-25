@@ -7,7 +7,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, Order};
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -100,9 +100,24 @@ async fn query_call_records(
     let filters = payload.filters.clone();
     let condition = build_condition(&filters);
 
-    let selector = CallRecordEntity::find()
-        .filter(condition.clone())
-        .order_by_desc(CallRecordColumn::StartedAt);
+    let mut selector = CallRecordEntity::find().filter(condition.clone());
+
+    let sort_key = payload.sort.as_deref().unwrap_or("started_at_desc");
+    match sort_key {
+        "started_at_asc" => {
+            selector = selector.order_by(CallRecordColumn::StartedAt, Order::Asc);
+        }
+        "duration_desc" => {
+            selector = selector.order_by(CallRecordColumn::DurationSecs, Order::Desc);
+        }
+        "duration_asc" => {
+            selector = selector.order_by(CallRecordColumn::DurationSecs, Order::Asc);
+        }
+        _ => {
+            selector = selector.order_by(CallRecordColumn::StartedAt, Order::Desc);
+        }
+    }
+    selector = selector.order_by(CallRecordColumn::Id, Order::Desc);
 
     let paginator = selector.paginate(db, payload.normalize().1);
     let pagination = match forms::paginate(paginator, &payload).await {

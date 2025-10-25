@@ -112,6 +112,8 @@ pub struct ListQuery<T> {
     #[serde(default = "default_per_page_max")]
     pub per_page_max: u32,
     pub filters: Option<T>,
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 impl<T: Default> Default for ListQuery<T> {
@@ -122,6 +124,7 @@ impl<T: Default> Default for ListQuery<T> {
             per_page_min: default_per_page_min(),
             per_page_max: default_per_page_max(),
             filters: None,
+            sort: None,
         }
     }
 }

@@ -21,7 +21,7 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rsip::Uri;
 use sea_orm::ActiveValue::Set;
-use sea_orm::sea_query::{Expr, Query as SeaQuery};
+use sea_orm::sea_query::{Expr, Order, Query as SeaQuery};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, ModelTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect,
@@ -419,7 +419,7 @@ async fn query_extensions(
     let db = state.db();
     let (_, per_page) = payload.normalize();
 
-    let mut selector = ExtensionEntity::find().order_by_asc(ExtensionColumn::CreatedAt);
+    let mut selector = ExtensionEntity::find();
     if let Some(filters) = &payload.filters {
         if let Some(ref q_raw) = filters.q {
             let trimmed = q_raw.trim();
@@ -505,6 +505,44 @@ async fn query_extensions(
             }
         }
     }
+    let sort_key = payload.sort.as_deref().unwrap_or("created_at_desc");
+    match sort_key {
+        "created_at_asc" => {
+            selector = selector.order_by(ExtensionColumn::CreatedAt, Order::Asc);
+        }
+        "extension_asc" => {
+            selector = selector.order_by(ExtensionColumn::Extension, Order::Asc);
+        }
+        "extension_desc" => {
+            selector = selector.order_by(ExtensionColumn::Extension, Order::Desc);
+        }
+        "display_name_asc" => {
+            selector = selector.order_by(ExtensionColumn::DisplayName, Order::Asc);
+        }
+        "display_name_desc" => {
+            selector = selector.order_by(ExtensionColumn::DisplayName, Order::Desc);
+        }
+        "status_asc" => {
+            selector = selector.order_by(ExtensionColumn::Status, Order::Asc);
+        }
+        "status_desc" => {
+            selector = selector.order_by(ExtensionColumn::Status, Order::Desc);
+        }
+        "registered_at_asc" => {
+            selector = selector.order_by(ExtensionColumn::RegisteredAt, Order::Asc);
+        }
+        "registered_at_desc" => {
+            selector = selector.order_by(ExtensionColumn::RegisteredAt, Order::Desc);
+        }
+        "created_at_desc" => {
+            selector = selector.order_by(ExtensionColumn::CreatedAt, Order::Desc);
+        }
+        _ => {
+            selector = selector.order_by(ExtensionColumn::CreatedAt, Order::Desc);
+        }
+    }
+    selector = selector.order_by(ExtensionColumn::Id, Order::Desc);
+
     let paginator = selector.paginate(db, per_page);
     let pagination = match forms::paginate(paginator, &payload).await {
         Ok(pagination) => pagination,
