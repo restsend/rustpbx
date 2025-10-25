@@ -14,6 +14,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Order;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder,
@@ -264,7 +265,38 @@ async fn query_bill_templates(
         selector = selector.filter(BillTemplateColumn::BillingInterval.eq(interval));
     }
 
-    selector = selector.order_by_desc(BillTemplateColumn::UpdatedAt);
+    let sort_key = payload.sort.as_deref().unwrap_or("updated_at_desc");
+    match sort_key {
+        "updated_at_asc" => {
+            selector = selector.order_by(BillTemplateColumn::UpdatedAt, Order::Asc);
+        }
+        "name_asc" => {
+            selector = selector
+                .order_by(BillTemplateColumn::DisplayName, Order::Asc)
+                .order_by(BillTemplateColumn::Name, Order::Asc);
+        }
+        "name_desc" => {
+            selector = selector
+                .order_by(BillTemplateColumn::DisplayName, Order::Desc)
+                .order_by(BillTemplateColumn::Name, Order::Desc);
+        }
+        "currency_asc" => {
+            selector = selector.order_by(BillTemplateColumn::Currency, Order::Asc);
+        }
+        "currency_desc" => {
+            selector = selector.order_by(BillTemplateColumn::Currency, Order::Desc);
+        }
+        "interval_asc" => {
+            selector = selector.order_by(BillTemplateColumn::BillingInterval, Order::Asc);
+        }
+        "interval_desc" => {
+            selector = selector.order_by(BillTemplateColumn::BillingInterval, Order::Desc);
+        }
+        _ => {
+            selector = selector.order_by(BillTemplateColumn::UpdatedAt, Order::Desc);
+        }
+    }
+    selector = selector.order_by(BillTemplateColumn::Id, Order::Desc);
 
     let paginator = selector.paginate(db, per_page);
     let pagination = match forms::paginate(paginator, &payload).await {

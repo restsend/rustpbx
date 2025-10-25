@@ -20,6 +20,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Order;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     Iterable, PaginatorTrait, QueryFilter, QueryOrder,
@@ -305,7 +306,38 @@ async fn query_sip_trunks(
         selector = selector.filter(SipTrunkColumn::IsActive.eq(true));
     }
 
-    selector = selector.order_by_desc(SipTrunkColumn::UpdatedAt);
+    let sort_key = payload.sort.as_deref().unwrap_or("updated_at_desc");
+    match sort_key {
+        "updated_at_asc" => {
+            selector = selector.order_by(SipTrunkColumn::UpdatedAt, Order::Asc);
+        }
+        "name_asc" => {
+            selector = selector
+                .order_by(SipTrunkColumn::DisplayName, Order::Asc)
+                .order_by(SipTrunkColumn::Name, Order::Asc);
+        }
+        "name_desc" => {
+            selector = selector
+                .order_by(SipTrunkColumn::DisplayName, Order::Desc)
+                .order_by(SipTrunkColumn::Name, Order::Desc);
+        }
+        "carrier_asc" => {
+            selector = selector.order_by(SipTrunkColumn::Carrier, Order::Asc);
+        }
+        "carrier_desc" => {
+            selector = selector.order_by(SipTrunkColumn::Carrier, Order::Desc);
+        }
+        "status_asc" => {
+            selector = selector.order_by(SipTrunkColumn::Status, Order::Asc);
+        }
+        "status_desc" => {
+            selector = selector.order_by(SipTrunkColumn::Status, Order::Desc);
+        }
+        _ => {
+            selector = selector.order_by(SipTrunkColumn::UpdatedAt, Order::Desc);
+        }
+    }
+    selector = selector.order_by(SipTrunkColumn::Id, Order::Desc);
 
     let paginator = selector.paginate(db, per_page);
     let pagination = match forms::paginate(paginator, &payload).await {

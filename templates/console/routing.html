@@ -122,11 +122,6 @@
 
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                    <h2 class="text-base font-semibold text-slate-900">Routes</h2>
-                    <p class="text-xs text-slate-500">Filter by direction, status, selection method, or search by
-                        regex, trunk, or owner.</p>
-                </div>
                 <div class="flex flex-wrap items-center gap-3">
                     <div class="relative">
                         <input type="search" x-model.debounce.300ms="search" @input.debounce.400ms="applyFilters()"
@@ -539,41 +534,18 @@
                                     </div>
                                 </div>
                                 <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source &
-                                        target trunks</div>
-                                    <div class="mt-3 grid gap-3 text-sm">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Trunk
+                                        mapping</div>
+                                    <dl class="mt-3 space-y-3 text-sm text-slate-700">
                                         <div>
-                                            <div class="text-xs font-semibold text-slate-500">Source trunk</div>
-                                            <div
-                                                class="mt-1 inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
-                                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
-                                                    stroke="currentColor" stroke-width="1.6">
-                                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                                        d="M4 4h12v2H4zM4 9h12v2H4zM4 14h12v2H4z" />
-                                                </svg>
-                                                <span x-text="route.source_trunk || '—'"></span>
-                                            </div>
+                                            <dt class="text-xs font-semibold text-slate-500">Source trunk</dt>
+                                            <dd class="mt-1 font-medium" x-text="sourceTrunkLabel(route)"></dd>
                                         </div>
                                         <div>
-                                            <div class="text-xs font-semibold text-slate-500">Target trunks</div>
-                                            <div class="mt-1 flex flex-wrap gap-2">
-                                                <template x-for="target in (route.target_trunks || [])" :key="target">
-                                                    <span
-                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
-                                                            stroke="currentColor" stroke-width="1.6">
-                                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                                d="M5 10h10M12 5l5 5-5 5" />
-                                                        </svg>
-                                                        <span x-text="target"></span>
-                                                    </span>
-                                                </template>
-                                                <template x-if="!(route.target_trunks || []).length">
-                                                    <span class="text-xs text-slate-400">Default destination</span>
-                                                </template>
-                                            </div>
+                                            <dt class="text-xs font-semibold text-slate-500">Destination trunks</dt>
+                                            <dd class="mt-1 text-sm" x-text="targetTrunksLabel(route)"></dd>
                                         </div>
-                                    </div>
+                                    </dl>
                                 </div>
                             </div>
 
@@ -1044,6 +1016,25 @@
                     .map((part) => part[0]?.toUpperCase())
                     .join('')
                     .slice(0, 2);
+            },
+            sourceTrunkLabel(route) {
+                const value = route?.source_trunk;
+                if (typeof value === 'string') {
+                    const trimmed = value.trim();
+                    if (trimmed.length) {
+                        return trimmed;
+                    }
+                }
+                return 'Default (any)';
+            },
+            targetTrunksLabel(route) {
+                const targets = Array.isArray(route?.target_trunks)
+                    ? route.target_trunks.filter((item) => typeof item === 'string' && item.trim().length)
+                    : [];
+                if (!targets.length) {
+                    return 'Default destination';
+                }
+                return targets.join(', ');
             },
             confirmReload() {
                 if (this.reloading) {

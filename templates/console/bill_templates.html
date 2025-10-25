@@ -34,54 +34,106 @@
         </template>
 
         <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
-            <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                    <h2 class="text-sm font-semibold text-slate-900">Filters</h2>
-                    <p class="text-xs text-slate-500">Search templates or narrow down by currency and billing interval.
-                    </p>
-                </div>
-                <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                    @click="resetFilters()">
-                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
-                    </svg>
-                    Clear all
-                </button>
-            </div>
-
-            <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Search
-                    <div class="relative">
-                        <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
-                            viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="m17.5 17.5-3.65-3.65m0 0a5.5 5.5 0 1 0-7.778-7.778 5.5 5.5 0 0 0 7.778 7.778Z" />
-                        </svg>
-                        <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
-                            class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Name or display label">
+            <div class="flex flex-col gap-4">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button type="button"
+                            class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                            :class="intervalFilter === 'all' ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
+                            @click="selectStatusTab('all')">
+                            All intervals
+                        </button>
+                        <template x-for="tab in statusTabs()" :key="tab.value">
+                            <button type="button"
+                                class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                                :class="intervalFilter === tab.value ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
+                                @click="selectStatusTab(tab.value)">
+                                <span x-text="tab.label"></span>
+                            </button>
+                        </template>
                     </div>
-                </label>
-                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Currency
-                    <select x-model="currencyFilter" @change="applyFilters()"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <template x-for="option in currencyOptions" :key="option.value">
-                            <option :value="option.value" x-text="option.label"></option>
-                        </template>
-                    </select>
-                </label>
-                <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                    Billing interval
-                    <select x-model="intervalFilter" @change="applyFilters()"
-                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <template x-for="option in intervalOptions" :key="option.value">
-                            <option :value="option.value" x-text="option.label"></option>
-                        </template>
-                    </select>
-                </label>
+                    <div
+                        class="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center lg:justify-end lg:gap-3">
+                        <label class="relative flex-1 lg:min-w-[18rem]" aria-label="Search billing templates">
+                            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                                viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="m17.5 17.5-3.65-3.65m0 0a5.5 5.5 0 1 0-7.778-7.778 5.5 5.5 0 0 0 7.778 7.778Z" />
+                            </svg>
+                            <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="Name or display label">
+                        </label>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <select aria-label="Add filter"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                @change="addFilter($event)">
+                                <option value="">+ Add filter</option>
+                                <template x-for="option in filterOptions" :key="option.key">
+                                    <option :value="option.key" :disabled="activeFilters.includes(option.key)"
+                                        x-text="option.label"></option>
+                                </template>
+                            </select>
+                            <select aria-label="Sort billing templates" x-model="sortOrder" @change="applySorting()"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in sortOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                            <button type="button"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                @click="resetFilters()">
+                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 3v14m-7-7h14" />
+                                </svg>
+                                Clear all
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap gap-3" x-show="activeFilters.length" x-cloak>
+                    <template x-for="filter in activeFilters" :key="filter">
+                        <div
+                            class="w-full rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 sm:w-auto sm:min-w-[18rem]">
+                            <div class="flex items-start justify-between gap-3">
+                                <div>
+                                    <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500"
+                                        x-text="filterOptionLabel(filter)"></div>
+                                    <div class="text-sm text-slate-700" x-text="formatFilterValue(filter)"></div>
+                                </div>
+                                <button type="button"
+                                    class="rounded-full p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                                    @click="removeFilter(filter)">
+                                    <span class="sr-only">Remove filter</span>
+                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="mt-3 space-y-2">
+                                <template x-if="filter === 'currency'">
+                                    <select x-model="currencyFilter" @change="applyFilters()"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <template x-for="option in currencyOptions" :key="option.value">
+                                            <option :value="option.value" x-text="option.label"></option>
+                                        </template>
+                                    </select>
+                                </template>
+                                <template x-if="filter === 'interval'">
+                                    <select x-model="intervalFilter" @change="applyFilters()"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <template x-for="option in intervalOptions" :key="option.value">
+                                            <option :value="option.value" x-text="option.label"></option>
+                                        </template>
+                                    </select>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
             </div>
         </section>
 
@@ -230,8 +282,26 @@
             processing: {
                 delete: null,
             },
+            sortOrder: '',
+            sortOptions: [
+                { value: 'updated_at_desc', label: 'Updated · Newest first' },
+                { value: 'updated_at_asc', label: 'Updated · Oldest first' },
+                { value: 'name_asc', label: 'Name · A → Z' },
+                { value: 'name_desc', label: 'Name · Z → A' },
+                { value: 'currency_asc', label: 'Currency · A → Z' },
+                { value: 'currency_desc', label: 'Currency · Z → A' },
+                { value: 'interval_asc', label: 'Interval · A → Z' },
+                { value: 'interval_desc', label: 'Interval · Z → A' },
+            ],
+            filterOptions: [
+                { key: 'currency', label: 'Currency' },
+                { key: 'interval', label: 'Billing interval' },
+            ],
+            activeFilters: [],
             init() {
                 this.loadFilterOptions();
+                this.sortOrder = this.defaultSort();
+                this.syncActiveFilters();
                 this.fetchTemplates();
             },
             loadFilterOptions() {
@@ -257,6 +327,7 @@
                         currency: this.currencyFilter !== 'all' ? this.currencyFilter : undefined,
                         billing_interval: this.intervalFilter !== 'all' ? this.intervalFilter : undefined,
                     },
+                    sort: this.sortOrder || undefined,
                 }
             },
             async fetchTemplates() {
@@ -323,6 +394,7 @@
                     this.perPage = perPage;
                     this.page = currentPage;
                     this.flash = null;
+                    this.syncActiveFilters();
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || 'Unable to load billing templates';
@@ -334,12 +406,19 @@
             },
             applyFilters() {
                 this.page = 1;
+                this.syncActiveFilters();
+                this.fetchTemplates();
+            },
+            applySorting() {
+                this.page = 1;
                 this.fetchTemplates();
             },
             resetFilters() {
                 this.keyword = '';
                 this.currencyFilter = 'all';
                 this.intervalFilter = 'all';
+                this.sortOrder = this.defaultSort();
+                this.activeFilters = [];
                 this.applyFilters();
             },
             goToPage(target) {
@@ -386,6 +465,71 @@
                 if (normalized === 'quarterly') return 'Quarterly';
                 if (normalized === 'yearly') return 'Yearly';
                 return value || 'Custom';
+            },
+            statusTabs() {
+                return this.intervalOptions.filter((option) => option.value !== 'all');
+            },
+            selectStatusTab(value) {
+                if (this.intervalFilter === value) {
+                    return;
+                }
+                this.intervalFilter = value;
+                this.applyFilters();
+            },
+            filterOptionLabel(key) {
+                const found = this.filterOptions.find((item) => item.key === key);
+                return found ? found.label : key;
+            },
+            formatFilterValue(key) {
+                switch (key) {
+                    case 'currency':
+                        return this.currencyFilter === 'all' ? 'Any currency' : this.currencyFilter;
+                    case 'interval':
+                        return this.intervalFilter === 'all'
+                            ? 'Any interval'
+                            : this.intervalLabel(this.intervalFilter);
+                    default:
+                        return '';
+                }
+            },
+            addFilter(event) {
+                const key = event?.target?.value;
+                if (!key) {
+                    return;
+                }
+                if (!this.activeFilters.includes(key)) {
+                    this.activeFilters.push(key);
+                }
+                if (event && event.target) {
+                    event.target.value = '';
+                }
+            },
+            removeFilter(key) {
+                this.activeFilters = this.activeFilters.filter((item) => item !== key);
+                switch (key) {
+                    case 'currency':
+                        this.currencyFilter = 'all';
+                        break;
+                    case 'interval':
+                        this.intervalFilter = 'all';
+                        break;
+                    default:
+                        break;
+                }
+                this.applyFilters();
+            },
+            syncActiveFilters() {
+                const next = [];
+                if (this.currencyFilter !== 'all') {
+                    next.push('currency');
+                }
+                if (this.intervalFilter !== 'all') {
+                    next.push('interval');
+                }
+                this.activeFilters = Array.from(new Set([...this.activeFilters.filter((item) => next.includes(item)), ...next]));
+            },
+            defaultSort() {
+                return 'updated_at_desc';
             },
             formatNumber(value) {
                 if (value === null || value === undefined) {
