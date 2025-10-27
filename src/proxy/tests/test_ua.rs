@@ -91,9 +91,9 @@ impl TestUa {
             .build();
 
         let incoming = endpoint.incoming_transactions()?;
-        self.dialog_layer = Some(Arc::new(DialogLayer::new(endpoint.inner.clone())));
-
-        let (state_sender, state_receiver) = unbounded_channel();
+        let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
+        let (state_sender, state_receiver) = dialog_layer.new_dialog_state_channel();
+        self.dialog_layer = Some(dialog_layer);
         self.state_receiver = Some(state_receiver);
 
         // Create Contact URI
@@ -375,7 +375,7 @@ impl TestUa {
         let mut events = Vec::new();
 
         if let Some(state_receiver) = &mut self.state_receiver {
-            while let Ok(state) = state_receiver.try_recv() {
+            while let Some(state) = state_receiver.recv().await {
                 match state {
                     DialogState::Calling(id) => {
                         events.push(TestUaEvent::IncomingCall(id));

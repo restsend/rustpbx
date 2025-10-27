@@ -19,7 +19,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::unbounded_channel;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -160,7 +159,7 @@ impl UserAgent {
                 }
             }
             // out dialog, new server dialog
-            let (state_sender, state_receiver) = unbounded_channel();
+            let (state_sender, state_receiver) = dialog_layer.new_dialog_state_channel();
             match tx.original.method {
                 rsip::Method::Invite | rsip::Method::Ack => {
                     let invitation_handler = match self.create_invitation_handler {

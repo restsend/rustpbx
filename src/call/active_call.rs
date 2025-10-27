@@ -1404,7 +1404,8 @@ impl ActiveCall {
             offer.as_ref().map(|s| s.as_str()).unwrap_or("<NO OFFER>")
         );
 
-        let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (dlg_state_sender, dlg_state_receiver) =
+            self.invitation.dialog_layer.new_dialog_state_channel();
         let session_id = self.session_id.clone();
         let session_id_clone = session_id.clone();
         let event_sender = self.event_sender.clone();
@@ -1527,7 +1528,8 @@ impl ActiveCall {
         track_id: &String,
         pending_dialog: PendingDialog,
     ) -> Result<()> {
-        let (dlg_state_sender, dlg_state_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (dlg_state_sender, dlg_state_receiver) =
+            self.invitation.dialog_layer.new_dialog_state_channel();
         let session_id = self.session_id.clone();
         let event_sender = self.event_sender.clone();
         let call_state = self.call_state.clone();

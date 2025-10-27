@@ -637,6 +637,7 @@ async fn test_auth_no_credentials() {
         None,
         None,
         None,
+        None,
     );
 
     let key = TransactionKey::from_request(&request, TransactionRole::Server).unwrap();
@@ -661,6 +662,7 @@ async fn test_auth_bypass_for_non_invite_register() {
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
         vec![rsip::Method::Invite, rsip::Method::Register],
+        None,
         None,
         None,
         None,
@@ -709,6 +711,7 @@ async fn test_auth_disabled_user() {
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
         vec![rsip::Method::Invite, rsip::Method::Register],
+        None,
         None,
         None,
         None,
