@@ -25,3 +25,5 @@ Cargo.lock
 .env
 cdr/
 *.sqlite3
+*.generated.toml
+*.bak

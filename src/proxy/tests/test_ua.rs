@@ -375,7 +375,7 @@ impl TestUa {
         let mut events = Vec::new();
 
         if let Some(state_receiver) = &mut self.state_receiver {
-            while let Some(state) = state_receiver.recv().await {
+            while let Ok(state) = state_receiver.try_recv() {
                 match state {
                     DialogState::Calling(id) => {
                         events.push(TestUaEvent::IncomingCall(id));

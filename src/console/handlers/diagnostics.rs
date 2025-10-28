@@ -7,11 +7,14 @@ use crate::{
         middleware::AuthRequired,
     },
     models::sip_trunk,
-    proxy::routing::{
-        self, SourceTrunk, TrunkDirection, build_source_trunk,
-        matcher::{RouteTrace, match_invite_with_trace},
-    },
     proxy::server::SipServerRef,
+    proxy::{
+        data::load_routes_from_db,
+        routing::{
+            self, SourceTrunk, TrunkDirection, build_source_trunk,
+            matcher::{RouteTrace, match_invite_with_trace},
+        },
+    },
 };
 use axum::{
     Router,
@@ -614,6 +617,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         direction: Some(model.direction.into()),
         inbound_hosts,
         recording,
+        origin: routing::ConfigOrigin::embedded(),
     })
 }
 
@@ -1028,6 +1032,22 @@ async fn probe_trunk_options(
     Json(response).into_response()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvaluationDataset {
+    Runtime,
+    Database,
+}
+
+impl EvaluationDataset {
+    fn from_label(input: &str) -> Option<Self> {
+        match input {
+            "runtime" | "active" | "live" | "formal" | "deployed" => Some(Self::Runtime),
+            "database" | "db" | "pending" => Some(Self::Database),
+            _ => None,
+        }
+    }
+}
+
 async fn route_evaluate(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
@@ -1061,6 +1081,23 @@ async fn route_evaluate(
             return bad_request(format!(
                 "unsupported direction '{}': use inbound/outbound/internal",
                 other
+            ));
+        }
+    };
+
+    let dataset_label = payload
+        .dataset
+        .as_ref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "database".to_string());
+
+    let dataset = match EvaluationDataset::from_label(&dataset_label) {
+        Some(kind) => kind,
+        None => {
+            return bad_request(format!(
+                "unsupported dataset '{}': use runtime or database",
+                dataset_label
             ));
         }
     };
@@ -1118,9 +1155,56 @@ async fn route_evaluate(
         };
 
     let data_context = server.data_context.clone();
-    let trunks_snapshot = data_context.trunks_snapshot().await;
-    let routes_snapshot = data_context.routes_snapshot().await;
     let default_route = data_context.default_route();
+
+    let (trunks_snapshot, routes_snapshot) = match dataset {
+        EvaluationDataset::Runtime => {
+            let trunks = data_context.trunks_snapshot().await;
+            let routes = data_context.routes_snapshot().await;
+            (trunks, routes)
+        }
+        EvaluationDataset::Database => {
+            let db = state.db();
+            let trunk_models = match sip_trunk::Entity::find().all(db).await {
+                Ok(models) => models,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "message": format!("failed to load trunks from database: {}", err),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+
+            let mut trunk_lookup: HashMap<i64, String> = HashMap::new();
+            let mut trunks: HashMap<String, routing::TrunkConfig> = HashMap::new();
+            for model in trunk_models {
+                if let Some(config) = trunk_config_from_model(&model) {
+                    if let Some(id) = config.id {
+                        trunk_lookup.insert(id, model.name.clone());
+                    }
+                    trunks.insert(model.name.clone(), config);
+                }
+            }
+
+            let routes = match load_routes_from_db(db, &trunk_lookup).await {
+                Ok(routes) => routes,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "message": format!("failed to load routes from database: {}", err),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+
+            (trunks, routes)
+        }
+    };
 
     let source_ip_input = normalize_optional_string(&payload.source_ip);
 
@@ -1128,7 +1212,7 @@ async fn route_evaluate(
     if let Some(ref source_ip) = source_ip_input {
         match source_ip.parse::<IpAddr>() {
             Ok(addr) => {
-                detected_trunk_from_ip = data_context.find_trunk_by_ip(&addr).await;
+                detected_trunk_from_ip = detect_trunk_by_ip(&trunks_snapshot, &addr).await;
             }
             Err(_) => return bad_request("invalid source_ip"),
         }
@@ -1399,6 +1483,7 @@ struct RouteEvaluationPayload {
     callee: String,
     caller: Option<String>,
     direction: Option<String>,
+    dataset: Option<String>,
     source_trunk: Option<String>,
     source_ip: Option<String>,
     request_uri: Option<String>,
@@ -1428,6 +1513,19 @@ struct RouteEvaluationResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rewrites: Vec<RewriteDiff>,
     outcome: RouteOutcomeView,
+}
+
+async fn detect_trunk_by_ip(
+    trunks: &HashMap<String, routing::TrunkConfig>,
+    addr: &IpAddr,
+) -> Option<String> {
+    for (name, config) in trunks.iter() {
+        let candidate = name.clone();
+        if config.matches_inbound_ip(addr).await {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[derive(Serialize)]

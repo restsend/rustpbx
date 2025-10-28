@@ -12,7 +12,7 @@ use crate::{
         FnCreateRouteInvite,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector, ProxyCallInspector},
-        locator::DialogTargetLocator,
+        locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
     },
 };
 use anyhow::{Result, anyhow};
@@ -62,6 +62,7 @@ pub struct SipServerInner {
     pub dialog_layer: Arc<DialogLayer>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_option: bool,
+    pub locator_events: Option<LocatorEventSender>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -89,6 +90,7 @@ pub struct SipServerBuilder {
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
     ignore_out_of_dialog_option: bool,
+    locator_events: Option<LocatorEventSender>,
 }
 
 impl SipServerBuilder {
@@ -110,6 +112,7 @@ impl SipServerBuilder {
             database: None,
             data_context: None,
             ignore_out_of_dialog_option: true,
+            locator_events: None,
         }
     }
 
@@ -187,6 +190,11 @@ impl SipServerBuilder {
 
     pub fn with_data_context(mut self, context: Arc<ProxyDataContext>) -> Self {
         self.data_context = Some(context);
+        self
+    }
+
+    pub fn with_locator_events(mut self, locator_events: Option<LocatorEventSender>) -> Self {
+        self.locator_events = locator_events;
         self
     }
 
@@ -309,18 +317,21 @@ impl SipServerBuilder {
                     client_key: None,
                     ca_certs: None,
                 };
-                let tls_conn =
-                    TlsListenerConnection::new(local_addr.into(), external_addr, tls_config)
-                        .await
-                        .map_err(|e| anyhow!("Failed to create TLS connection: {}", e))?;
-
-                info!(
-                    "start proxy, tls port: {} cert: {}, key: {}",
-                    tls_conn.get_addr(),
-                    cert_path,
-                    key_path
-                );
-                transport_layer.add_transport(tls_conn.into());
+                match TlsListenerConnection::new(local_addr.into(), external_addr, tls_config).await
+                {
+                    Ok(conn) => {
+                        info!(
+                            "start proxy, tls port: {} cert: {}, key: {}",
+                            conn.get_addr(),
+                            cert_path,
+                            key_path
+                        );
+                        transport_layer.add_transport(conn.into());
+                    }
+                    Err(e) => {
+                        warn!("failed to create TLS connection: {}", e);
+                    }
+                };
             } else {
                 warn!("skip starting TLS transport due to missing certificate or key");
             }
@@ -357,8 +368,17 @@ impl SipServerBuilder {
             endpoint_builder = endpoint_builder.with_inspector(inspector);
         }
 
-        endpoint_builder =
-            endpoint_builder.with_target_locator(DialogTargetLocator::new(locator.clone()));
+        let locator_events = self.locator_events.unwrap_or_else(|| {
+            let (tx, _) = tokio::sync::broadcast::channel(12);
+            tx
+        });
+
+        endpoint_builder = endpoint_builder
+            .with_target_locator(DialogTargetLocator::new(locator.clone()))
+            .with_transport_inspector(TransportInspectorLocator::new(
+                locator.clone(),
+                locator_events.clone(),
+            ));
 
         let endpoint = endpoint_builder.build();
 
@@ -367,18 +387,7 @@ impl SipServerBuilder {
         let proxycall_inspector = self.proxycall_inspector;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
-        let needs_db = self.config.trunks_source == crate::config::ProxyDataSource::Database
-            || self.config.routes_source == crate::config::ProxyDataSource::Database;
-
-        let database = if needs_db {
-            Some(
-                self.database
-                    .clone()
-                    .ok_or_else(|| anyhow!("proxy data requires a database connection"))?,
-            )
-        } else {
-            self.database.clone()
-        };
+        let database = self.database.clone();
 
         let data_context = if let Some(context) = self.data_context {
             context
@@ -407,6 +416,7 @@ impl SipServerBuilder {
             dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
             ignore_out_of_dialog_option: self.ignore_out_of_dialog_option,
+            locator_events: Some(locator_events),
         });
 
         let mut allow_methods = Vec::new();

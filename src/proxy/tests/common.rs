@@ -46,7 +46,6 @@ pub async fn create_test_server_with_config(
     let config = Arc::new(config);
     let endpoint = EndpointBuilder::new().build();
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
-
     // Create server inner directly
     let data_context = Arc::new(
         ProxyDataContext::new(config.clone(), None)
@@ -71,6 +70,7 @@ pub async fn create_test_server_with_config(
         create_route_invite: None,
         proxycall_inspector: None,
         ignore_out_of_dialog_option: true,
+        locator_events: None,
     });
 
     // Add test users

@@ -1,20 +1,24 @@
-use std::{collections::HashMap, fs, net::IpAddr, sync::Arc};
-
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use glob::glob;
-use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    fs,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
-    config::{ProxyConfig, ProxyDataSource, RecordingPolicy},
+    config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::{
-        DefaultRoute, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
-        RouteRule, TrunkConfig,
+        ConfigOrigin, DefaultRoute, DestConfig, MatchConditions, RewriteRules, RouteAction,
+        RouteDirection, RouteRule, TrunkConfig,
     },
 };
 
@@ -31,7 +35,8 @@ pub struct ReloadMetrics {
     pub total: usize,
     pub config_count: usize,
     pub file_count: usize,
-    pub db_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated: Option<GeneratedFileMetrics>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -39,6 +44,14 @@ pub struct ReloadMetrics {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedFileMetrics {
+    pub entries: usize,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
 }
 
 impl ProxyDataContext {
@@ -50,22 +63,14 @@ impl ProxyDataContext {
             acl_rules: RwLock::new(Vec::new()),
             db,
         };
-        let _ = ctx.reload_trunks().await?;
-        let _ = ctx.reload_routes().await?;
-        let _ = ctx.reload_acl_rules().await?;
+        let _ = ctx.reload_trunks(false).await?;
+        let _ = ctx.reload_routes(false).await?;
+        let _ = ctx.reload_acl_rules(false).await?;
         Ok(ctx)
     }
 
     pub fn config(&self) -> Arc<ProxyConfig> {
         self.config.clone()
-    }
-
-    pub fn trunks_source(&self) -> ProxyDataSource {
-        self.config.trunks_source
-    }
-
-    pub fn routes_source(&self) -> ProxyDataSource {
-        self.config.routes_source
     }
 
     pub fn default_route(&self) -> Option<DefaultRoute> {
@@ -98,38 +103,44 @@ impl ProxyDataContext {
         None
     }
 
-    pub async fn reload_trunks(&self) -> Result<ReloadMetrics> {
+    pub async fn reload_trunks(&self, generated_toml: bool) -> Result<ReloadMetrics> {
         let started_at = Utc::now();
+        let default_dir = self.config.generated_trunks_dir();
+        let generated = if generated_toml {
+            self.export_trunks_to_toml(default_dir.as_path()).await?
+        } else {
+            None
+        };
+        let mut generated_entries = 0usize;
+        if let Some(ref info) = generated {
+            generated_entries = info.entries;
+        }
         let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
-        let mut db_count = 0usize;
         let mut files: Vec<String> = Vec::new();
         let patterns = self.config.trunks_files.clone();
-        if self.config.trunks_source != ProxyDataSource::Database {
+        if !self.config.trunks.is_empty() {
             config_count = self.config.trunks.len();
-            if config_count > 0 {
-                info!(count = config_count, "loading trunks from embedded config");
-            }
-            trunks.extend(self.config.trunks.clone());
-            if !self.config.trunks_files.is_empty() {
-                let (file_trunks, file_paths) = load_trunks_from_files(&self.config.trunks_files)?;
-                file_count = file_trunks.len();
-                if !file_paths.is_empty() {
-                    files.extend(file_paths);
-                }
-                trunks.extend(file_trunks);
+            info!(count = config_count, "loading trunks from embedded config");
+            for (name, trunk) in self.config.trunks.iter() {
+                let mut copy = trunk.clone();
+                copy.origin = ConfigOrigin::embedded();
+                trunks.insert(name.clone(), copy);
             }
         }
-
-        if self.config.trunks_source != ProxyDataSource::Config {
-            let db = self
-                .db
-                .as_ref()
-                .ok_or_else(|| anyhow!("Database connection required for trunk reload"))?;
-            let db_trunks = load_trunks_from_db(db).await?;
-            db_count = db_trunks.len();
-            trunks.extend(db_trunks);
+        if !self.config.trunks_files.is_empty() {
+            let (file_trunks, file_paths) = load_trunks_from_files(&self.config.trunks_files)?;
+            file_count = file_trunks.len();
+            if !file_paths.is_empty() {
+                files.extend(file_paths);
+            }
+            trunks.extend(file_trunks);
+        }
+        if let Some(ref info) = generated {
+            let generated_pattern = vec![info.path.clone()];
+            let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
+            trunks.extend(generated_trunks);
         }
 
         let len = trunks.len();
@@ -138,13 +149,13 @@ impl ProxyDataContext {
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
             total = len,
-            config_count, file_count, db_count, duration_ms, "trunks reloaded"
+            config_count, file_count, generated_entries, duration_ms, "trunks reloaded"
         );
         Ok(ReloadMetrics {
             total: len,
             config_count,
             file_count,
-            db_count,
+            generated,
             files,
             patterns,
             started_at,
@@ -153,51 +164,45 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn reload_routes(&self) -> Result<ReloadMetrics> {
+    pub async fn reload_routes(&self, generated_toml: bool) -> Result<ReloadMetrics> {
         let started_at = Utc::now();
+        let default_dir = self.config.generated_routes_dir();
+        let generated = if generated_toml {
+            self.export_routes_to_toml(default_dir.as_path()).await?
+        } else {
+            None
+        };
+        let mut generated_entries = 0usize;
+        if let Some(ref info) = generated {
+            generated_entries = info.entries;
+        }
         let mut routes: Vec<RouteRule> = Vec::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
-        let mut db_count = 0usize;
         let mut files: Vec<String> = Vec::new();
         let patterns = self.config.routes_files.clone();
-        if self.config.routes_source != ProxyDataSource::Database {
-            if let Some(cfg_routes) = self.config.routes.clone() {
-                config_count = cfg_routes.len();
-                if config_count > 0 {
-                    info!(count = config_count, "loading routes from embedded config");
-                }
-                for route in cfg_routes {
-                    upsert_route(&mut routes, route);
-                }
-            }
-            if !self.config.routes_files.is_empty() {
-                let (file_routes, file_paths) = load_routes_from_files(&self.config.routes_files)?;
-                file_count = file_routes.len();
-                if !file_paths.is_empty() {
-                    files.extend(file_paths);
-                }
-                for route in file_routes {
-                    upsert_route(&mut routes, route);
-                }
+        if let Some(cfg_routes) = self.config.routes.clone() {
+            config_count = cfg_routes.len();
+            info!(count = config_count, "loading routes from embedded config");
+            for mut route in cfg_routes {
+                route.origin = ConfigOrigin::embedded();
+                upsert_route(&mut routes, route);
             }
         }
-
-        if self.config.routes_source != ProxyDataSource::Config {
-            let db = self
-                .db
-                .as_ref()
-                .ok_or_else(|| anyhow!("Database connection required for routing reload"))?;
-            let trunk_id_map = {
-                let trunks_guard = self.trunks.read().await;
-                trunks_guard
-                    .iter()
-                    .filter_map(|(name, trunk)| trunk.id.map(|id| (id, name.clone())))
-                    .collect::<HashMap<i64, String>>()
-            };
-            let db_routes = load_routes_from_db(db, &trunk_id_map).await?;
-            db_count = db_routes.len();
-            for route in db_routes {
+        if !self.config.routes_files.is_empty() {
+            let (file_routes, file_paths) = load_routes_from_files(&self.config.routes_files)?;
+            file_count = file_routes.len();
+            if !file_paths.is_empty() {
+                files.extend(file_paths);
+            }
+            for route in file_routes {
+                upsert_route(&mut routes, route);
+            }
+        }
+        if let Some(ref info) = generated {
+            let generated_pattern = vec![info.path.clone()];
+            let (generated_routes, _) = load_routes_from_files(&generated_pattern)?;
+            for route in generated_routes {
                 upsert_route(&mut routes, route);
             }
         }
@@ -209,13 +214,13 @@ impl ProxyDataContext {
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
             total = len,
-            config_count, file_count, db_count, duration_ms, "routes reloaded"
+            config_count, file_count, generated_entries, duration_ms, "routes reloaded"
         );
         Ok(ReloadMetrics {
             total: len,
             config_count,
             file_count,
-            db_count,
+            generated,
             files,
             patterns,
             started_at,
@@ -224,7 +229,7 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn reload_acl_rules(&self) -> Result<ReloadMetrics> {
+    pub async fn reload_acl_rules(&self, _generated_toml: bool) -> Result<ReloadMetrics> {
         let started_at = Utc::now();
         let mut rules: Vec<String> = Vec::new();
         let mut config_count = 0usize;
@@ -252,6 +257,17 @@ impl ProxyDataContext {
             rules.extend(file_rules);
         }
 
+        let generated_acl_path = self.config.generated_acl_dir().join("acl.generated.toml");
+        if generated_acl_path.exists() {
+            let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
+            let (generated_rules, generated_files) = load_acl_rules_from_files(&generated_pattern)?;
+            if !generated_files.is_empty() {
+                files.extend(generated_files);
+            }
+            file_count += generated_rules.len();
+            rules.extend(generated_rules);
+        }
+
         if rules.is_empty() {
             rules.push("allow all".to_string());
             rules.push("deny all".to_string());
@@ -269,7 +285,7 @@ impl ProxyDataContext {
             total: len,
             config_count,
             file_count,
-            db_count: 0,
+            generated: None,
             files,
             patterns: files_patterns,
             started_at,
@@ -277,21 +293,83 @@ impl ProxyDataContext {
             duration_ms,
         })
     }
+
+    async fn export_trunks_to_toml(
+        &self,
+        default_dir: &Path,
+    ) -> Result<Option<GeneratedFileMetrics>> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(None);
+        };
+        let Some(target_path) = resolve_generated_path(
+            &self.config.trunks_files,
+            default_dir,
+            "trunks.generated.toml",
+        ) else {
+            return Ok(None);
+        };
+
+        let trunks = load_trunks_from_db(db).await?;
+        let entries = trunks.len();
+        let backup = backup_existing_file(&target_path)?;
+        write_trunks_file(&target_path, &trunks)?;
+        info!(path = %target_path.display(), entries, "generated trunks file from database");
+        Ok(Some(GeneratedFileMetrics {
+            entries,
+            path: target_path.to_string_lossy().to_string(),
+            backup: backup.map(|path| path.to_string_lossy().to_string()),
+        }))
+    }
+
+    async fn export_routes_to_toml(
+        &self,
+        default_dir: &Path,
+    ) -> Result<Option<GeneratedFileMetrics>> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(None);
+        };
+        let Some(target_path) = resolve_generated_path(
+            &self.config.routes_files,
+            default_dir,
+            "routes.generated.toml",
+        ) else {
+            return Ok(None);
+        };
+
+        let trunk_lookup = {
+            let guard = self.trunks.read().await;
+            guard
+                .iter()
+                .filter_map(|(name, trunk)| trunk.id.map(|id| (id, name.clone())))
+                .collect::<HashMap<i64, String>>()
+        };
+
+        let routes = load_routes_from_db(db, &trunk_lookup).await?;
+        let entries = routes.len();
+        let backup = backup_existing_file(&target_path)?;
+        write_routes_file(&target_path, &routes)?;
+        info!(path = %target_path.display(), entries, "generated routes file from database");
+        Ok(Some(GeneratedFileMetrics {
+            entries,
+            path: target_path.to_string_lossy().to_string(),
+            backup: backup.map(|path| path.to_string_lossy().to_string()),
+        }))
+    }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct TrunkIncludeFile {
     #[serde(default)]
     trunks: HashMap<String, TrunkConfig>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct RouteIncludeFile {
     #[serde(default)]
     routes: Vec<RouteRule>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct AclIncludeFile {
     #[serde(default)]
     acl_rules: Vec<String>,
@@ -319,8 +397,9 @@ fn load_trunks_from_files(
             if data.trunks.is_empty() {
                 info!("trunk include file {} contained no trunks", path_display);
             }
-            for (name, trunk) in data.trunks {
+            for (name, mut trunk) in data.trunks {
                 info!("loaded trunk '{}' from {}", name, path_display);
+                trunk.origin = ConfigOrigin::from_file(path_display.clone());
                 trunks.insert(name, trunk);
             }
         }
@@ -348,8 +427,9 @@ fn load_routes_from_files(patterns: &[String]) -> Result<(Vec<RouteRule>, Vec<St
             if data.routes.is_empty() {
                 info!("route include file {} contained no routes", path_display);
             }
-            for route in data.routes {
+            for mut route in data.routes {
                 info!("loaded route '{}' from {}", route.name, path_display);
+                route.origin = ConfigOrigin::from_file(path_display.clone());
                 upsert_route(&mut routes, route);
             }
         }
@@ -387,6 +467,7 @@ fn load_acl_rules_from_files(patterns: &[String]) -> Result<(Vec<String>, Vec<St
 }
 
 fn upsert_route(routes: &mut Vec<RouteRule>, route: RouteRule) {
+    info!("upserted route '{}'", route.name);
     if let Some(idx) = routes
         .iter()
         .position(|existing| existing.name == route.name)
@@ -395,6 +476,93 @@ fn upsert_route(routes: &mut Vec<RouteRule>, route: RouteRule) {
     } else {
         routes.push(route);
     }
+}
+
+fn contains_glob_chars(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+fn resolve_generated_path(
+    patterns: &[String],
+    default_dir: &Path,
+    default_name: &str,
+) -> Option<PathBuf> {
+    for pattern in patterns {
+        if pattern.trim().is_empty() {
+            continue;
+        }
+        let path = Path::new(pattern);
+        if contains_glob_chars(pattern) {
+            if let Some(parent) = path.parent() {
+                if parent.as_os_str().is_empty() {
+                    return Some(default_dir.join(default_name));
+                }
+                return Some(parent.to_path_buf().join(default_name));
+            }
+            return Some(default_dir.join(default_name));
+        } else {
+            return Some(path.to_path_buf());
+        }
+    }
+    Some(default_dir.join(default_name))
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".to_string());
+    let backup_name = format!("{}.{}.bak", file_name, timestamp);
+    let backup_path = path.with_file_name(backup_name);
+    fs::rename(path, &backup_path).with_context(|| {
+        format!(
+            "failed to backup {} to {}",
+            path.display(),
+            backup_path.display()
+        )
+    })?;
+    Ok(Some(backup_path))
+}
+
+fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
+    ensure_parent_dir(path)?;
+    let mut data = TrunkIncludeFile::default();
+    data.trunks = trunks
+        .iter()
+        .map(|(name, trunk)| (name.clone(), trunk.clone()))
+        .collect();
+    let toml = toml::to_string_pretty(&data)
+        .with_context(|| format!("failed to serialize trunks toml for {}", path.display()))?;
+    fs::write(path, toml)
+        .with_context(|| format!("failed to write trunks file {}", path.display()))?;
+    Ok(())
+}
+
+fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
+    ensure_parent_dir(path)?;
+    let mut data = RouteIncludeFile::default();
+    data.routes = routes.to_vec();
+    let toml = toml::to_string_pretty(&data)
+        .with_context(|| format!("failed to serialize routes toml for {}", path.display()))?;
+    fs::write(path, toml)
+        .with_context(|| format!("failed to write routes file {}", path.display()))?;
+    Ok(())
 }
 
 async fn load_trunks_from_db(db: &DatabaseConnection) -> Result<HashMap<String, TrunkConfig>> {
@@ -463,12 +631,13 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         direction: Some(model.direction.into()),
         inbound_hosts,
         recording,
+        origin: ConfigOrigin::embedded(),
     };
 
     Some((model.name, trunk))
 }
 
-async fn load_routes_from_db(
+pub(crate) async fn load_routes_from_db(
     db: &DatabaseConnection,
     trunk_lookup: &HashMap<i64, String>,
 ) -> Result<Vec<RouteRule>> {
@@ -500,27 +669,30 @@ fn convert_route(
     let mut match_conditions = MatchConditions::default();
     if let Some(pattern) = model.source_pattern.clone() {
         if !pattern.is_empty() {
-            match_conditions.from_user = Some(pattern.clone());
-            match_conditions.caller = Some(pattern);
+            match_conditions.from_user = Some(pattern);
         }
     }
     if let Some(pattern) = model.destination_pattern.clone() {
         if !pattern.is_empty() {
-            match_conditions.to_user = Some(pattern.clone());
-            match_conditions.callee = Some(pattern);
+            match_conditions.to_user = Some(pattern);
         }
     }
 
     if let Some(filters) = model.header_filters.clone() {
         if let Ok(map) = serde_json::from_value::<HashMap<String, String>>(filters) {
-            match_conditions.headers = map;
+            apply_match_filters(&mut match_conditions, map);
         }
     }
+    finalize_match_conditions(&mut match_conditions);
 
     let rewrite_rules = model
         .rewrite_rules
         .clone()
-        .and_then(|value| serde_json::from_value::<RewriteRules>(value).ok());
+        .and_then(|value| serde_json::from_value::<RewriteRules>(value).ok())
+        .map(|mut rules| {
+            normalize_rewrite_rules(&mut rules);
+            rules
+        });
 
     let target_trunks: Vec<String> = model
         .target_trunks
@@ -568,8 +740,177 @@ fn convert_route(
         rewrite: rewrite_rules,
         action,
         disabled: Some(!model.is_active),
+        origin: ConfigOrigin::embedded(),
     };
     Ok(Some(route))
+}
+
+fn set_field(target: &mut Option<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    match target {
+        Some(existing) if existing == trimmed => {}
+        _ => *target = Some(trimmed.to_string()),
+    }
+}
+
+fn canonical_condition_key(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .replace('_', ".")
+        .replace('-', ".")
+}
+
+fn handle_match_key(match_conditions: &mut MatchConditions, key: &str, value: &str) -> bool {
+    let trimmed_key = key.trim();
+    if trimmed_key.is_empty() {
+        return true;
+    }
+    let canonical = canonical_condition_key(trimmed_key);
+    match canonical.as_str() {
+        "from.user" | "caller" | "from" => {
+            set_field(&mut match_conditions.from_user, value);
+            true
+        }
+        "from.host" => {
+            set_field(&mut match_conditions.from_host, value);
+            true
+        }
+        "to.user" | "callee" | "to" => {
+            set_field(&mut match_conditions.to_user, value);
+            true
+        }
+        "to.host" => {
+            set_field(&mut match_conditions.to_host, value);
+            true
+        }
+        "to.port" => {
+            set_field(&mut match_conditions.to_port, value);
+            true
+        }
+        "request.uri.user" => {
+            set_field(&mut match_conditions.request_uri_user, value);
+            true
+        }
+        "request.uri.host" => {
+            set_field(&mut match_conditions.request_uri_host, value);
+            true
+        }
+        "request.uri.port" => {
+            set_field(&mut match_conditions.request_uri_port, value);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn apply_match_filters(match_conditions: &mut MatchConditions, map: HashMap<String, String>) {
+    let mut headers = HashMap::new();
+    for (key, raw_value) in map {
+        let value = raw_value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if handle_match_key(match_conditions, &key, value) {
+            continue;
+        }
+        headers.insert(key.trim().to_string(), value.to_string());
+    }
+    match_conditions.headers = headers;
+}
+
+fn finalize_match_conditions(match_conditions: &mut MatchConditions) {
+    if let Some(value) = match_conditions.from.take() {
+        set_field(&mut match_conditions.from_user, value.as_str());
+    }
+    if let Some(value) = match_conditions.caller.take() {
+        set_field(&mut match_conditions.from_user, value.as_str());
+    }
+    if let Some(value) = match_conditions.to.take() {
+        set_field(&mut match_conditions.to_user, value.as_str());
+    }
+    if let Some(value) = match_conditions.callee.take() {
+        set_field(&mut match_conditions.to_user, value.as_str());
+    }
+
+    let entries = std::mem::take(&mut match_conditions.headers);
+    for (key, raw_value) in entries {
+        let trimmed_key = key.trim();
+        if trimmed_key.is_empty() {
+            continue;
+        }
+        let value = raw_value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if handle_match_key(match_conditions, trimmed_key, value) {
+            continue;
+        }
+        match_conditions
+            .headers
+            .insert(trimmed_key.to_string(), value.to_string());
+    }
+}
+
+fn handle_rewrite_key(rules: &mut RewriteRules, key: &str, value: &str) -> bool {
+    let trimmed_key = key.trim();
+    if trimmed_key.is_empty() {
+        return true;
+    }
+    let canonical = canonical_condition_key(trimmed_key);
+    match canonical.as_str() {
+        "from.user" => {
+            set_field(&mut rules.from_user, value);
+            true
+        }
+        "from.host" => {
+            set_field(&mut rules.from_host, value);
+            true
+        }
+        "to.user" => {
+            set_field(&mut rules.to_user, value);
+            true
+        }
+        "to.host" => {
+            set_field(&mut rules.to_host, value);
+            true
+        }
+        "to.port" => {
+            set_field(&mut rules.to_port, value);
+            true
+        }
+        "request.uri.user" => {
+            set_field(&mut rules.request_uri_user, value);
+            true
+        }
+        "request.uri.host" => {
+            set_field(&mut rules.request_uri_host, value);
+            true
+        }
+        "request.uri.port" => {
+            set_field(&mut rules.request_uri_port, value);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn normalize_rewrite_rules(rules: &mut RewriteRules) {
+    let mut headers = HashMap::new();
+    let existing = std::mem::take(&mut rules.headers);
+    for (key, raw_value) in existing {
+        let value = raw_value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if handle_rewrite_key(rules, &key, value) {
+            continue;
+        }
+        headers.insert(key.trim().to_string(), value.to_string());
+    }
+    rules.headers = headers;
 }
 
 fn extract_string_array(value: Option<serde_json::value::Value>) -> Vec<String> {
