@@ -522,6 +522,7 @@ impl ProxyModule for RegistrarModule {
                 locator_events
                     .send(LocatorEvent::Unregistered(Location {
                         aor: registered_aor.clone(),
+                        registered_aor: Some(registered_aor),
                         ..Default::default()
                     }))
                     .ok();
