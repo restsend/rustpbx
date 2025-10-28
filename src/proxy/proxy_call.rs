@@ -119,6 +119,12 @@ struct CallSession {
     media_stream: Arc<MediaStream>, // Always created now
     use_media_proxy: bool,          // Flag to control whether to use media stream proxy
     external_addr: Option<IpAddr>,  // Optional external IP address for media
+    original_caller: Option<String>,
+    original_callee: Option<String>,
+    routed_caller: Option<String>,
+    routed_callee: Option<String>,
+    routed_contact: Option<String>,
+    routed_destination: Option<String>,
 }
 
 #[derive(Debug)]
@@ -135,6 +141,10 @@ enum ParallelEvent {
         dialog_id: DialogId,
         answer: String,
         aor: String,
+        caller_uri: String,
+        callee_uri: String,
+        contact: String,
+        destination: Option<String>,
     },
     Failed {
         dialog_id: Option<DialogId>,
@@ -159,6 +169,17 @@ impl CallSession {
             .with_id(session_id)
             .with_cancel_token(cancel_token)
             .build();
+        let initial = server_dialog.initial_request();
+        let original_caller = initial
+            .from_header()
+            .ok()
+            .and_then(|header| header.uri().ok())
+            .map(|uri| uri.to_string());
+        let original_callee = initial
+            .to_header()
+            .ok()
+            .and_then(|header| header.uri().ok())
+            .map(|uri| uri.to_string());
         Self {
             server_dialog,
             callee_dialogs: Vec::new(),
@@ -175,11 +196,24 @@ impl CallSession {
             media_stream: Arc::new(stream),
             use_media_proxy,
             external_addr,
+            original_caller,
+            original_callee,
+            routed_caller: None,
+            routed_callee: None,
+            routed_contact: None,
+            routed_destination: None,
         }
     }
 
     fn add_callee_dialog(&mut self, dialog_id: DialogId) {
         self.callee_dialogs.push(dialog_id);
+    }
+
+    fn note_invite_details(&mut self, invite: &InviteOption) {
+        self.routed_caller = Some(invite.caller.to_string());
+        self.routed_callee = Some(invite.callee.to_string());
+        self.routed_contact = Some(invite.contact.to_string());
+        self.routed_destination = invite.destination.as_ref().map(|addr| addr.to_string());
     }
 
     fn is_webrtc_sdp(sdp: &str) -> bool {
@@ -406,7 +440,8 @@ impl CallSession {
         pending_dialog_id.to_tag = String::new();
         self.callee_dialogs.retain(|id| *id != pending_dialog_id);
         self.callee_dialogs.push(dialog_id);
-        self.connected_callee = Some(callee);
+        let resolved_callee = self.routed_callee.clone().unwrap_or(callee);
+        self.connected_callee = Some(resolved_callee);
         self.answer_time = Some(Instant::now());
 
         info!(
@@ -788,6 +823,13 @@ impl ProxyCall {
                 headers: self.dialplan.build_invite_headers(&target),
                 ..Default::default()
             };
+            let invite_caller = invite_option.caller.to_string();
+            let invite_callee = invite_option.callee.to_string();
+            let invite_contact = invite_option.contact.to_string();
+            let invite_destination = invite_option
+                .destination
+                .as_ref()
+                .map(|addr| addr.to_string());
 
             // Forward dialog state events to aggregator
             join_set.spawn({
@@ -820,6 +862,10 @@ impl ProxyCall {
             join_set.spawn({
                 let dialog_layer = dialog_layer.clone();
                 let ev_tx_c = ev_tx_c.clone();
+                let caller_snapshot = invite_caller.clone();
+                let callee_snapshot = invite_callee.clone();
+                let contact_snapshot = invite_contact.clone();
+                let destination_snapshot = invite_destination.clone();
                 async move {
                     let invite_result = dialog_layer.do_invite(invite_option, state_tx).await;
                     match invite_result {
@@ -832,6 +878,10 @@ impl ProxyCall {
                                         dialog_id: dlg.id(),
                                         answer,
                                         aor,
+                                        caller_uri: caller_snapshot,
+                                        callee_uri: callee_snapshot,
+                                        contact: contact_snapshot,
+                                        destination: destination_snapshot,
                                     });
                                 } else {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
@@ -905,8 +955,16 @@ impl ProxyCall {
                     dialog_id,
                     answer,
                     aor,
+                    caller_uri,
+                    callee_uri,
+                    contact,
+                    destination,
                 } => {
                     session.add_callee_dialog(dialog_id.clone());
+                    session.routed_caller = Some(caller_uri.clone());
+                    session.routed_callee = Some(callee_uri.clone());
+                    session.routed_contact = Some(contact.clone());
+                    session.routed_destination = destination.clone();
                     if accepted_idx.is_none() {
                         if let Err(e) = session.accept_call(dialog_id, aor, answer).await {
                             warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
@@ -1089,6 +1147,7 @@ impl ProxyCall {
     ) -> Result<(), (StatusCode, Option<String>)> {
         let (state_tx, mut state_rx) = mpsc::unbounded_channel();
         let dialog_layer = self.dialog_layer.clone();
+        session.note_invite_details(&invite_option);
 
         tokio::select! {
             _ = self.handle_callee_state(session, &mut state_rx) => {
@@ -1288,22 +1347,15 @@ impl ProxyCall {
             }
         });
 
-        let caller = self
-            .dialplan
-            .caller
-            .as_ref()
-            .map(|c| c.to_string())
+        let original_caller = session
+            .original_caller
+            .clone()
+            .or_else(|| self.dialplan.caller.as_ref().map(|c| c.to_string()))
             .unwrap_or_default();
-        let callee = session
-            .connected_callee
-            .as_ref()
-            .cloned()
-            .or_else(|| {
-                self.dialplan
-                    .get_all_targets()
-                    .first()
-                    .map(|location| location.aor.to_string())
-            })
+
+        let original_callee = session
+            .original_callee
+            .clone()
             .or_else(|| {
                 self.dialplan
                     .original
@@ -1311,7 +1363,24 @@ impl ProxyCall {
                     .ok()
                     .and_then(|to_header| to_header.uri().ok().map(|uri| uri.to_string()))
             })
+            .or_else(|| {
+                self.dialplan
+                    .get_all_targets()
+                    .first()
+                    .map(|location| location.aor.to_string())
+            })
             .unwrap_or_else(|| "unknown".to_string());
+
+        let caller = session
+            .routed_caller
+            .clone()
+            .unwrap_or_else(|| original_caller.clone());
+
+        let callee = session
+            .routed_callee
+            .clone()
+            .or_else(|| session.connected_callee.clone())
+            .unwrap_or_else(|| original_callee.clone());
 
         let mut extras_map: HashMap<String, Value> = HashMap::new();
         extras_map.insert(
@@ -1336,6 +1405,28 @@ impl ProxyCall {
                 );
             }
         }
+
+        let mut rewrite_payload = JsonMap::new();
+        rewrite_payload.insert(
+            "caller_original".to_string(),
+            Value::String(original_caller.clone()),
+        );
+        rewrite_payload.insert("caller_final".to_string(), Value::String(caller.clone()));
+        rewrite_payload.insert(
+            "callee_original".to_string(),
+            Value::String(original_callee.clone()),
+        );
+        rewrite_payload.insert("callee_final".to_string(), Value::String(callee.clone()));
+        if let Some(contact) = session.routed_contact.as_ref() {
+            rewrite_payload.insert("contact".to_string(), Value::String(contact.clone()));
+        }
+        if let Some(destination) = session.routed_destination.as_ref() {
+            rewrite_payload.insert(
+                "destination".to_string(),
+                Value::String(destination.clone()),
+            );
+        }
+        extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
 
         let extras = if extras_map.is_empty() {
             None

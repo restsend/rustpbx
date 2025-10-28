@@ -4,7 +4,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use sea_orm::sea_query::{Expr, Order};
@@ -60,7 +60,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/call-records",
             get(page_call_records).post(query_call_records),
         )
-        .route("/call-records/{id}", get(page_call_record_detail))
+        .route(
+            "/call-records/{id}",
+            get(page_call_record_detail).delete(delete_call_record),
+        )
 }
 
 async fn page_call_records(
@@ -228,6 +231,34 @@ async fn page_call_record_detail(
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
         }),
     )
+}
+
+async fn delete_call_record(
+    AxumPath(pk): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    match CallRecordEntity::delete_by_id(pk).exec(state.db()).await {
+        Ok(result) => {
+            if result.rows_affected == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "message": "Call record not found" })),
+                )
+                    .into_response()
+            } else {
+                StatusCode::NO_CONTENT.into_response()
+            }
+        }
+        Err(err) => {
+            warn!("failed to delete call record '{}': {}", pk, err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": err.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
@@ -523,6 +554,19 @@ fn build_record_payload(
         })
     });
 
+    let rewrite_caller_original =
+        json_lookup_nested_str(&record.metadata, &["rewrite", "caller_original"]);
+    let rewrite_caller_final =
+        json_lookup_nested_str(&record.metadata, &["rewrite", "caller_final"])
+            .or_else(|| caller_uri.clone());
+    let rewrite_callee_original =
+        json_lookup_nested_str(&record.metadata, &["rewrite", "callee_original"]);
+    let rewrite_callee_final =
+        json_lookup_nested_str(&record.metadata, &["rewrite", "callee_final"])
+            .or_else(|| callee_uri.clone());
+    let rewrite_contact = json_lookup_nested_str(&record.metadata, &["rewrite", "contact"]);
+    let rewrite_destination = json_lookup_nested_str(&record.metadata, &["rewrite", "destination"]);
+
     json!({
         "id": record.id,
         "call_id": record.call_id,
@@ -536,8 +580,8 @@ fn build_record_payload(
         "agent_extension": extension_number,
         "department": department_name,
         "queue": record.queue,
-    "caller_uri": caller_uri,
-    "callee_uri": callee_uri,
+        "caller_uri": caller_uri,
+        "callee_uri": callee_uri,
         "sip_gateway": sip_gateway,
         "sip_trunk": sip_trunk_name,
         "tags": tags,
@@ -550,6 +594,18 @@ fn build_record_payload(
         "started_at": record.started_at.to_rfc3339(),
         "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
         "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
+        "rewrite": {
+            "caller": {
+                "original": rewrite_caller_original,
+                "final": rewrite_caller_final,
+            },
+            "callee": {
+                "original": rewrite_callee_original,
+                "final": rewrite_callee_final,
+            },
+            "contact": rewrite_contact,
+            "destination": rewrite_destination,
+        },
     })
 }
 
@@ -579,6 +635,10 @@ fn build_detail_payload(
     });
 
     let signaling = record.signaling.clone().unwrap_or(Value::Null);
+    let rewrite = record_payload
+        .get("rewrite")
+        .cloned()
+        .unwrap_or(Value::Null);
 
     json!({
         "back_url": state.url_for("/call-records"),
@@ -590,6 +650,7 @@ fn build_detail_payload(
         "notes": Value::Null,
         "participants": participants,
         "signaling": signaling,
+        "rewrite": rewrite,
         "actions": json!({
             "download_recording": record.recording_url,
             "download_metadata": Value::Null,
@@ -682,6 +743,14 @@ fn json_lookup_number(source: &Option<Value>, key: &str) -> Option<f64> {
         .as_ref()
         .and_then(|value| value.get(key))
         .and_then(|value| value.as_f64())
+}
+
+fn json_lookup_nested_str(source: &Option<Value>, path: &[&str]) -> Option<String> {
+    let mut current = source.as_ref()?;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().map(|value| value.to_string())
 }
 
 async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
