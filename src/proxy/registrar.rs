@@ -2,6 +2,7 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::user::SipUser;
 use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
+use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsip::headers::UntypedHeader;
@@ -510,11 +511,21 @@ impl ProxyModule for RegistrarModule {
                 tx.reply(rsip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
+
             self.server
                 .locator
                 .unregister(user.username.as_str(), user.realm.as_deref())
                 .await
                 .ok();
+
+            if let Some(locator_events) = &self.server.locator_events {
+                locator_events
+                    .send(LocatorEvent::Unregistered(Location {
+                        aor: registered_aor.clone(),
+                        ..Default::default()
+                    }))
+                    .ok();
+            }
 
             let mut headers = Vec::new();
             if let Some(allows) = tx.endpoint_inner.allows.lock().unwrap().as_ref() {
@@ -593,10 +604,18 @@ impl ProxyModule for RegistrarModule {
             match self
                 .server
                 .locator
-                .register(user.username.as_str(), user.realm.as_deref(), location)
+                .register(
+                    user.username.as_str(),
+                    user.realm.as_deref(),
+                    location.clone(),
+                )
                 .await
             {
-                Ok(_) => {}
+                Ok(_) => {
+                    if let Some(locator_events) = &self.server.locator_events {
+                        locator_events.send(LocatorEvent::Registered(location)).ok();
+                    }
+                }
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
                     tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
