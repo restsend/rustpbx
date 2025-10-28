@@ -22,7 +22,8 @@ use tracing::debug;
 
 #[derive(Clone)]
 pub enum LocatorEvent {
-    Online(Vec<Location>),
+    Registered(Location),
+    Unregistered(Location),
     Offline(Vec<Location>),
 }
 
