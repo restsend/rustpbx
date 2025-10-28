@@ -1,4 +1,7 @@
 {% extends "console/layout.html" %}
+{% block js_ext %}
+<script src="{{jssip_js|default('//jssip.net/download/releases/jssip-3.10.0.js')}}"></script>
+{% endblock %}
 {% block title %}Testing · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
@@ -996,117 +999,287 @@
         </section>
 
         <section x-show="activeTab === 'dialer'" x-cloak x-transition.opacity class="space-y-6">
-            <div class="max-w-3xl rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-base font-semibold text-slate-900">Dial a synthetic call</h2>
-                <p class="mt-1 text-xs text-slate-500">Choose a trunk, set caller and callee details, and simulate a
-                    call flow. Signalling remains local to the console preview.</p>
-                <form class="mt-4 space-y-4" @submit.prevent="startDialTest">
-                    <div class="grid gap-4 md:grid-cols-2">
-                        <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Caller SIP
-                                URI</span>
-                            <input type="text" x-model.trim="dial.caller"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="sip:1001@example.com">
-                        </label>
-                        <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Callee SIP
-                                URI</span>
-                            <div class="flex gap-2">
-                                <input type="text" x-model.trim="dial.destination"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="sip:1000@example.com">
-                                <div class="relative" x-data="{ open: false }" @click.outside="open = false">
-                                    <button type="button" @click="open = !open"
-                                        class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.8">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
-                                        </svg>
-                                    </button>
-                                    <div x-cloak x-show="open" x-transition.origin.top.right
-                                        class="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-xl">
-                                        <template x-for="sample in dialer.destination_samples" :key="sample.value">
-                                            <button type="button" @click="dial.destination = sample.value; open = false"
-                                                class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-slate-100">
-                                                <span class="text-xs font-semibold text-slate-600"
-                                                    x-text="sample.label"></span>
-                                                <span class="font-mono text-xs text-slate-500"
-                                                    x-text="sample.value"></span>
-                                            </button>
-                                        </template>
+            <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+                <div class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="space-y-1">
+                            <h2 class="text-base font-semibold text-slate-900">Web Dialer (JsSIP)</h2>
+                            <p class="text-xs text-slate-500">Use the embedded JsSIP client to register over WebSocket
+                                and place quick diagnostic calls.</p>
+                        </div>
+                        <div class="mt-4 space-y-4">
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">WebSocket
+                                        SIP URL</span>
+                                    <input type="text" x-model.trim="sipForm.wsServer"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="wss://pbx.example.com/ws">
+                                    <span class="text-[11px] text-slate-400">Prefer secure wss:// transports.</span>
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">SIP
+                                        URI</span>
+                                    <input type="text" x-model.trim="sipForm.uri"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="sip:1001@example.com">
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Auth User
+                                        (optional)</span>
+                                    <input type="text" x-model.trim="sipForm.authUser"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="">
+                                </label>
+                                <label class="flex flex-col gap-1.5">
+                                    <span
+                                        class="text-xs font-semibold uppercase tracking-wide text-slate-400">Password</span>
+                                    <input type="password" x-model="sipForm.password"
+                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="••••••">
+                                </label>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-3">
+                                <button type="button" @click="registerSip" :disabled="sipRegistering"
+                                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                                    <template x-if="!sipRegistering">
+                                        <span class="inline-flex items-center gap-2">
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M4 8h12m-6-4v12" />
+                                            </svg>
+                                            Register
+                                        </span>
+                                    </template>
+                                    <template x-if="sipRegistering">
+                                        <span class="inline-flex items-center gap-2">
+                                            <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
+                                                stroke="currentColor" stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M4 10a6 6 0 0 1 6-6m0-2a8 8 0 1 0 8 8" />
+                                            </svg>
+                                            Registering...
+                                        </span>
+                                    </template>
+                                </button>
+                                <button type="button" @click="unregisterSip" :disabled="!hasSipUa"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                    Unregister
+                                </button>
+                                <span
+                                    class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold"
+                                    :class="sipStatusPill(sipStatusVariant)">
+                                    <span class="h-1.5 w-1.5 rounded-full"
+                                        :class="sipStatusDot(sipStatusVariant)"></span>
+                                    <span x-text="sipStatusText"></span>
+                                </span>
+                            </div>
+                            <template x-if="sipRegisterError">
+                                <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                                    x-text="sipRegisterError"></div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="space-y-1">
+                            <h3 class="text-sm font-semibold text-slate-900">Call Controls</h3>
+                            <p class="text-xs text-slate-500">Enter a destination number or URI, then place a live
+                                INVITE directly from the browser.</p>
+                        </div>
+                        <div class="mt-4 space-y-4">
+                            <label class="flex flex-col gap-2">
+                                <span
+                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">Destination</span>
+                                <div class="flex gap-2">
+                                    <input type="text" x-model.trim="sipForm.target"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="1000 or sip:1000@example.com">
+                                    <div class="relative" x-data="{ open: false }" @click.outside="open = false">
+                                        <button type="button" @click="open = !open"
+                                            class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.8">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
+                                            </svg>
+                                        </button>
+                                        <div x-cloak x-show="open" x-transition.origin.top.right
+                                            class="absolute right-0 z-20 mt-2 w-48 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-xl">
+                                            <template x-for="sample in dialer.destination_samples" :key="sample.value">
+                                                <button type="button"
+                                                    @click="sipForm.target = sample.value; open = false"
+                                                    class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-slate-100">
+                                                    <span class="text-xs font-semibold text-slate-600"
+                                                        x-text="sample.label"></span>
+                                                    <span class="font-mono text-xs text-slate-500"
+                                                        x-text="sample.value"></span>
+                                                </button>
+                                            </template>
+                                            <template x-if="!dialer.destination_samples?.length">
+                                                <div
+                                                    class="rounded border border-dashed border-slate-200 px-2 py-3 text-center text-[11px] text-slate-400">
+                                                    No presets
+                                                </div>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
+                            </label>
+                            <div class="flex flex-wrap items-center gap-3">
+                                <button type="button" @click="placeSipCall" :disabled="!canPlaceCall"
+                                    class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M2 5l4-2 3 6-3 1c1.5 3 4 5.5 7 7l1-3 6 3-2 4c-6-2-11-6.5-16-16Z" />
+                                    </svg>
+                                    Call
+                                </button>
+                                <button type="button" @click="hangupSipCall" :disabled="!hasSipSession"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60">
+                                    Hang up
+                                </button>
                             </div>
-                        </label>
-                    </div>
-                    <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source</span>
-                        <select x-model="dial.source"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="item in dialer.source_options" :key="item">
-                                <option :value="item" x-text="item"></option>
+                            <template x-if="sipIncoming">
+                                <div
+                                    class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+                                    <div class="font-semibold text-amber-800">Incoming call from <span
+                                            x-text="sipIncoming.displayName"></span></div>
+                                    <div class="text-[11px] text-amber-600" x-text="sipIncoming.uri"></div>
+                                    <div class="mt-2 flex flex-wrap gap-2">
+                                        <button type="button" @click="answerIncomingCall"
+                                            class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">
+                                            Answer
+                                        </button>
+                                        <button type="button" @click="rejectIncomingCall"
+                                            class="inline-flex items-center gap-2 rounded-lg border border-rose-300 px-3 py-1.5 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50">
+                                            Reject
+                                        </button>
+                                    </div>
+                                </div>
                             </template>
-                        </select>
-                    </label>
-                    <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Preferred
-                            trunk</span>
-                        <select x-model="dial.trunk"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="option in dialer.trunk_options" :key="option.id">
-                                <option :value="option.id" x-text="option.label"></option>
+                            <div class="text-xs text-slate-500">
+                                <span class="font-semibold text-slate-700">Call status:</span>
+                                <span x-text="sipCallStatus"></span>
+                            </div>
+                            <template x-if="sipCallError">
+                                <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                                    x-text="sipCallError"></div>
                             </template>
-                        </select>
-                    </label>
-                    <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Preferred
-                            codec</span>
-                        <select x-model="dial.codec"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <template x-for="item in dialer.codec_options" :key="item">
-                                <option :value="item" x-text="item"></option>
-                            </template>
-                        </select>
-                    </label>
-                    <template x-if="dialError">
-                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
-                            x-text="dialError"></div>
-                    </template>
-                    <button type="submit" :disabled="dialing"
-                        class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
-                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 4h2l2 12h4l2-12h2" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 4L9 2h2l2 2" />
-                        </svg>
-                        Start test call
-                    </button>
-                </form>
-                <div class="mt-4" x-show="dialResult">
-                    <div class="rounded-lg border px-4 py-3 text-xs"
-                        :class="(dialResult && dialResult.status === 'pass') ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'">
-                        <div class="flex items-center justify-between">
-                            <span class="font-semibold"
-                                x-text="dialResult && dialResult.status === 'pass' ? 'Simulation successful' : 'Simulation failed'"></span>
-                            <span x-text="dialResult ? dialResult.timestamp : ''"></span>
+                            <div class="grid gap-4 sm:grid-cols-2">
+                                <div class="flex flex-col gap-1">
+                                    <span
+                                        class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Remote
+                                        audio</span>
+                                    <audio x-ref="sipRemoteAudio" autoplay controls playsinline
+                                        class="w-full rounded-lg border border-slate-200">
+                                    </audio>
+                                </div>
+                                <div class="flex flex-col gap-1">
+                                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Local
+                                        audio</span>
+                                    <audio x-ref="sipLocalAudio" autoplay controls muted playsinline
+                                        class="w-full rounded-lg border border-slate-200">
+                                    </audio>
+                                    <span class="text-[11px] text-slate-400">Local stream stays muted so you can confirm
+                                        media is flowing.</span>
+                                </div>
+                            </div>
                         </div>
-                        <p class="mt-1" x-text="dialResult ? dialResult.details : ''"></p>
-                        <template x-if="dialResult && dialResult.summary">
-                            <div class="mt-3 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
-                                <div><span class="font-semibold text-slate-700">Caller:</span>
-                                    <span x-text="dialResult.summary.caller"></span>
-                                </div>
-                                <div><span class="font-semibold text-slate-700">Callee:</span>
-                                    <span x-text="dialResult.summary.callee"></span>
-                                </div>
-                                <div><span class="font-semibold text-slate-700">Trunk:</span>
-                                    <span x-text="dialResult.summary.trunk"></span>
-                                </div>
-                                <div><span class="font-semibold text-slate-700">Codec:</span>
-                                    <span x-text="dialResult.summary.codec"></span>
-                                </div>
+                    </div>
+                </div>
+
+                <div class="space-y-6">
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">SIP Requests / Responses</h3>
+                                <p class="text-xs text-slate-500">Captured raw SIP messages from JsSIP (latest 80
+                                    entries).</p>
                             </div>
-                        </template>
+                            <div class="flex items-center gap-3 text-[11px]">
+                                <label class="inline-flex items-center gap-1 text-slate-500">
+                                    <input type="checkbox" x-model="sipTrafficAutoScroll"
+                                        class="h-3.5 w-3.5 rounded border border-slate-300 text-sky-600 focus:ring-sky-500">
+                                    Auto scroll
+                                </label>
+                                <button type="button" @click="clearSipTraffic" :disabled="!sipTraffic.length"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
+                                    Clear
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-4 space-y-2 max-h-[32rem] overflow-y-auto" x-ref="sipTrafficContainer">
+                            <template x-if="!sipTraffic.length">
+                                <div
+                                    class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                                    Waiting for SIP traffic...
+                                </div>
+                            </template>
+                            <template x-for="item in sipTraffic" :key="item.id">
+                                <article class="rounded-lg border border-slate-200 bg-slate-50 p-3"
+                                    x-data="{ open: false }">
+                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                        <div>
+                                            <div class="font-mono text-[11px] text-slate-400" x-text="item.time"></div>
+                                            <div class="text-xs font-semibold text-slate-700" x-text="item.summary">
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                :class="item.direction === 'outgoing' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'">
+                                                <span x-text="item.direction === 'outgoing' ? 'Send' : 'Recv'"></span>
+                                            </span>
+                                            <button type="button" @click="open = !open"
+                                                class="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                                                <span x-text="open ? 'Hide raw' : 'Show raw'"></span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <pre x-show="open" x-transition
+                                        class="mt-2 max-h-64 overflow-auto rounded bg-slate-900/90 p-3 text-[11px] leading-tight text-slate-100"
+                                        x-text="item.payload"></pre>
+                                </article>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <div class="flex items-center justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">Registration & call events</h3>
+                                <p class="text-xs text-slate-500">Newest entries appear first to simplify
+                                    troubleshooting.</p>
+                            </div>
+                            <button type="button" @click="clearSipEvents" :disabled="!sipEvents.length"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
+                                Clear
+                            </button>
+                        </div>
+                        <div class="mt-4 space-y-2 max-h-80 overflow-y-auto">
+                            <template x-if="!sipEvents.length">
+                                <div
+                                    class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                                    No events yet.
+                                </div>
+                            </template>
+                            <template x-for="event in sipEvents" :key="event.id">
+                                <div class="flex gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                    <div class="font-mono text-[11px] text-slate-400" x-text="event.time"></div>
+                                    <div class="flex-1 space-y-1">
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                            :class="sipEventPill(event.level)">
+                                            <span class="h-1.5 w-1.5 rounded-full"
+                                                :class="sipStatusDot(event.level)"></span>
+                                            <span x-text="event.levelLabel"></span>
+                                        </span>
+                                        <p class="text-xs text-slate-600" x-text="event.message"></p>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1114,166 +1287,207 @@
 
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/jssip@3.10.0/dist/jssip.min.js" defer></script>
     <script>
         document.addEventListener('alpine:init', () => {
-            Alpine.data('testingConsole', (payload) => ({
-                init() {
-                    const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
-                    this.lastAudit = data.last_audit || null;
-                    this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
-                    this.routingChecks = Array.isArray(data.routing_checks) ? data.routing_checks : [];
-                    this.connection = data.connection || {};
-                    this.connectionTransports = Array.isArray(this.connection.transports)
-                        ? this.connection.transports
-                        : [];
-                    this.connectionAccounts = Array.isArray(this.connection.accounts)
-                        ? this.connection.accounts
-                        : [];
-                    this.connectionNotes = Array.isArray(this.connection.notes) ? this.connection.notes : [];
-                    this.initializeTrunkTests();
-                    this.dialer = data.dialer || { source_options: [], destination_samples: [], trunk_options: [] };
-                    if (!Array.isArray(this.dialer.codec_options) || !this.dialer.codec_options.length) {
-                        this.dialer.codec_options = [
-                            'Opus',
-                            'PCMU (G.711 μ-law)',
-                            'PCMA (G.711 A-law)',
-                            'G.722',
-                            'G.729',
-                        ];
-                    }
-                    this.dial.source = this.dialer.default_source || (this.dialer.source_options[0] || '');
-                    this.dial.trunk = this.dialer.trunk_options?.[0]?.id || '';
-                    this.dial.destination = this.dialer.destination_samples?.[0]?.value || '';
-                    this.dial.caller = this.dialer.default_caller || '';
-                    this.dial.codec = this.dialer.codec_options?.[0] || '';
-                    const firstCheck = this.routingChecks?.[0] || {};
-                    this.routingInput = firstCheck.input || '';
-                    this.routingDirection = firstCheck.direction || 'outbound';
-                    this.routingCaller = firstCheck.caller && firstCheck.caller !== '—' ? firstCheck.caller : '';
-                    this.routingRequestUri = '';
-                    this.routingSourceTrunk = '';
-                    this.routingSourceIp = firstCheck.sourceIp && firstCheck.sourceIp !== '—' ? firstCheck.sourceIp : '';
-                    this.routingResultSummary = null;
-                    this.routingError = null;
-                    this.basePath = "{{ base_path | default('/console')|safe }}"
-                    this.$watch('activeTab', (value) => {
-                        if (value === 'sip') {
+            Alpine.data('testingConsole', (payload) => {
+                let sipUa = null;
+                let sipSession = null;
+                return {
+                    init() {
+                        const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+                        this.lastAudit = data.last_audit || null;
+                        this.trunks = Array.isArray(data.trunks) ? data.trunks : [];
+                        this.routingChecks = Array.isArray(data.routing_checks) ? data.routing_checks : [];
+                        this.connection = data.connection || {};
+                        this.connectionTransports = Array.isArray(this.connection.transports)
+                            ? this.connection.transports
+                            : [];
+                        this.connectionAccounts = Array.isArray(this.connection.accounts)
+                            ? this.connection.accounts
+                            : [];
+                        this.connectionNotes = Array.isArray(this.connection.notes) ? this.connection.notes : [];
+                        this.initializeTrunkTests();
+                        this.dialer = data.dialer || { source_options: [], destination_samples: [] };
+                        this.initializeSipDefaults();
+                        const firstCheck = this.routingChecks?.[0] || {};
+                        this.routingInput = firstCheck.input || '';
+                        this.routingDirection = firstCheck.direction || 'outbound';
+                        this.routingCaller = firstCheck.caller && firstCheck.caller !== '—' ? firstCheck.caller : '';
+                        this.routingRequestUri = '';
+                        this.routingSourceTrunk = '';
+                        this.routingSourceIp = firstCheck.sourceIp && firstCheck.sourceIp !== '—' ? firstCheck.sourceIp : '';
+                        this.routingResultSummary = null;
+                        this.routingError = null;
+                        this.basePath = "{{ base_path | default('/console')|safe }}"
+                        this.$watch('activeTab', (value) => {
+                            if (value === 'sip') {
+                                this.ensureDialogsLoaded();
+                            }
+                        });
+                        this.$watch('trunks', () => {
+                            this.initializeTrunkTests();
+                        });
+                        this.$watch(() => this.connectionTransports, () => {
+                            this.initializeSipDefaults();
+                        });
+                        this.$watch(() => this.connectionAccounts, () => {
+                            this.initializeSipDefaults();
+                        });
+                        this.$watch(() => this.sipForm.uri, (value) => {
+                            this.updateSipDomain(value);
+                        });
+                    },
+                    basePath: '',
+                    lastAudit: null,
+                    trunks: [],
+                    routingChecks: [],
+                    connection: {},
+                    connectionTransports: [],
+                    connectionAccounts: [],
+                    connectionNotes: [],
+                    trunkTests: {},
+                    routingInput: '',
+                    routingDirection: 'outbound',
+                    routingAdvanced: false,
+                    routingCaller: '',
+                    routingRequestUri: '',
+                    routingSourceTrunk: '',
+                    routingSourceIp: '',
+                    routingLoading: false,
+                    routingError: null,
+                    routingResultSummary: null,
+                    dialogCallIdInput: '',
+                    dialogCallId: '',
+                    dialer: {},
+                    sipForm: { wsServer: '', uri: '', authUser: '', password: '', displayName: '', target: '' },
+                    get hasSipUa() {
+                        return Boolean(sipUa);
+                    },
+                    sipRegistering: false,
+                    sipRegistered: false,
+                    sipStatusText: 'Unregistered',
+                    sipStatusVariant: 'idle',
+                    sipRegisterError: null,
+                    sipCallStatus: 'Idle',
+                    sipCallError: null,
+                    sipCallDirection: null,
+                    sipIncoming: null,
+                    sipEvents: [],
+                    sipTraffic: [],
+                    sipTrafficAutoScroll: true,
+                    sipTrafficLimit: 80,
+                    sipLocalStream: null,
+                    sipDomain: '',
+                    sipDebugEnabled: false,
+                    hasSipSession: false,
+                    tabs: [
+                        { id: 'connection', label: 'Connection' },
+                        { id: 'trunks', label: 'Trunks' },
+                        { id: 'routing', label: 'Routing' },
+                        { id: 'sip', label: 'SIP State' },
+                        { id: 'dialer', label: 'Web Dialer' },
+                    ],
+                    activeTab: 'connection',
+                    selectTab(id) {
+                        this.activeTab = id;
+                        if (id === 'sip') {
                             this.ensureDialogsLoaded();
                         }
-                    });
-                    this.$watch('trunks', () => {
-                        this.initializeTrunkTests();
-                    });
-                },
-                basePath: '',
-                lastAudit: null,
-                trunks: [],
-                routingChecks: [],
-                connection: {},
-                connectionTransports: [],
-                connectionAccounts: [],
-                connectionNotes: [],
-                trunkTests: {},
-                routingInput: '',
-                routingDirection: 'outbound',
-                routingAdvanced: false,
-                routingCaller: '',
-                routingRequestUri: '',
-                routingSourceTrunk: '',
-                routingSourceIp: '',
-                routingLoading: false,
-                routingError: null,
-                routingResultSummary: null,
-                dialogCallIdInput: '',
-                dialogCallId: '',
-                dialer: {},
-                dial: { source: '', destination: '', trunk: '', caller: '', codec: '' },
-                dialing: false,
-                dialResult: null,
-                dialError: null,
-                tabs: [
-                    { id: 'connection', label: 'Connection' },
-                    { id: 'trunks', label: 'Trunks' },
-                    { id: 'routing', label: 'Routing' },
-                    { id: 'sip', label: 'SIP State' },
-                    { id: 'dialer', label: 'Dialer' },
-                ],
-                activeTab: 'connection',
-                selectTab(id) {
-                    this.activeTab = id;
-                    if (id === 'sip') {
-                        this.ensureDialogsLoaded();
-                    }
-                },
-                get healthyTrunks() {
-                    return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
-                },
-                get warningTrunks() {
-                    return this.trunks.filter((item) => this.statusLabel(item.status) !== 'Healthy').length;
-                },
-                get hasDialogFilter() {
-                    return Boolean(this.dialogCallId);
-                },
-                get hasLocatorInput() {
-                    return Boolean(
-                        (this.locatorUser && this.locatorUser.trim()) || (this.locatorUri && this.locatorUri.trim())
-                    );
-                },
-                dialogs: [],
-                dialogsMeta: null,
-                dialogsLoading: false,
-                dialogsError: null,
-                dialogsFetchedAt: null,
-                locatorUser: '',
-                locatorUri: '',
-                locatorLoading: false,
-                locatorClearing: false,
-                locatorError: null,
-                locatorResult: null,
-                locatorClearFeedback: null,
-                statusLabel(value) {
-                    switch ((value || '').toLowerCase()) {
-                        case 'healthy':
-                            return 'Healthy';
-                        case 'warning':
-                            return 'Warning';
-                        case 'lab':
-                            return 'Lab';
-                        default:
-                            return value || 'Unknown';
-                    }
-                },
-                statusPill(value) {
-                    const key = (value || '').toLowerCase();
-                    if (key === 'healthy') {
-                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                    }
-                    if (key === 'warning') {
-                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                    }
-                    if (key === 'lab') {
-                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                    }
-                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                },
-                statusDot(value) {
-                    switch ((value || '').toLowerCase()) {
-                        case 'healthy':
-                            return 'bg-emerald-500';
-                        case 'warning':
-                            return 'bg-amber-500';
-                        case 'lab':
-                            return 'bg-sky-500';
-                        default:
-                            return 'bg-slate-400';
-                    }
-                },
-                initializeTrunkTests() {
-                    const state = {};
-                    if (Array.isArray(this.trunks)) {
-                        this.trunks.forEach((trunk) => {
-                            state[trunk.id] = {
-                                address: trunk.ingress_ips?.[0] || trunk.egress || '',
+                    },
+                    get healthyTrunks() {
+                        return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
+                    },
+                    get warningTrunks() {
+                        return this.trunks.filter((item) => this.statusLabel(item.status) !== 'Healthy').length;
+                    },
+                    get hasDialogFilter() {
+                        return Boolean(this.dialogCallId);
+                    },
+                    get hasLocatorInput() {
+                        return Boolean(
+                            (this.locatorUser && this.locatorUser.trim()) || (this.locatorUri && this.locatorUri.trim())
+                        );
+                    },
+                    get canPlaceCall() {
+                        return Boolean(this.sipRegistered && !sipSession && !this.sipRegistering);
+                    },
+                    dialogs: [],
+                    dialogsMeta: null,
+                    dialogsLoading: false,
+                    dialogsError: null,
+                    dialogsFetchedAt: null,
+                    locatorUser: '',
+                    locatorUri: '',
+                    locatorLoading: false,
+                    locatorClearing: false,
+                    locatorError: null,
+                    locatorResult: null,
+                    locatorClearFeedback: null,
+                    statusLabel(value) {
+                        switch ((value || '').toLowerCase()) {
+                            case 'healthy':
+                                return 'Healthy';
+                            case 'warning':
+                                return 'Warning';
+                            case 'lab':
+                                return 'Lab';
+                            default:
+                                return value || 'Unknown';
+                        }
+                    },
+                    statusPill(value) {
+                        const key = (value || '').toLowerCase();
+                        if (key === 'healthy') {
+                            return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                        }
+                        if (key === 'warning') {
+                            return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                        }
+                        if (key === 'lab') {
+                            return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                        }
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    },
+                    statusDot(value) {
+                        switch ((value || '').toLowerCase()) {
+                            case 'healthy':
+                                return 'bg-emerald-500';
+                            case 'warning':
+                                return 'bg-amber-500';
+                            case 'lab':
+                                return 'bg-sky-500';
+                            default:
+                                return 'bg-slate-400';
+                        }
+                    },
+                    initializeTrunkTests() {
+                        const state = {};
+                        if (Array.isArray(this.trunks)) {
+                            this.trunks.forEach((trunk) => {
+                                state[trunk.id] = {
+                                    address: trunk.ingress_ips?.[0] || trunk.egress || '',
+                                    loading: false,
+                                    error: null,
+                                    result: null,
+                                    options: {
+                                        loading: false,
+                                        error: null,
+                                        result: null,
+                                    },
+                                };
+                            });
+                        }
+                        this.trunkTests = state;
+                    },
+                    ensureTrunkTestState(trunkId) {
+                        if (this.trunkTests[trunkId]) {
+                            return;
+                        }
+                        this.trunkTests = {
+                            ...this.trunkTests,
+                            [trunkId]: {
+                                address: '',
                                 loading: false,
                                 error: null,
                                 result: null,
@@ -1282,597 +1496,1084 @@
                                     error: null,
                                     result: null,
                                 },
-                            };
-                        });
-                    }
-                    this.trunkTests = state;
-                },
-                ensureTrunkTestState(trunkId) {
-                    if (this.trunkTests[trunkId]) {
-                        return;
-                    }
-                    this.trunkTests = {
-                        ...this.trunkTests,
-                        [trunkId]: {
-                            address: '',
-                            loading: false,
-                            error: null,
-                            result: null,
-                            options: {
-                                loading: false,
-                                error: null,
-                                result: null,
-                            },
-                        },
-                    };
-                },
-                async runTrunkTest(trunkId) {
-                    this.ensureTrunkTestState(trunkId);
-                    const state = this.trunkTests[trunkId];
-                    if (!state) {
-                        return;
-                    }
-                    const address = (state.address || '').trim();
-                    if (!address) {
-                        state.error = 'Provide a hostname or IP to evaluate.';
-                        state.result = null;
-                        this.trunkTests = { ...this.trunkTests };
-                        return;
-                    }
-                    state.loading = true;
-                    state.error = null;
-                    state.result = null;
-                    this.trunkTests = { ...this.trunkTests };
-                    try {
-                        const response = await fetch(this.buildUrl('/diagnostics/trunks/test'), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'same-origin',
-                            body: JSON.stringify({ trunk: trunkId, address }),
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `Evaluation failed (${response.status})`;
-                            throw new Error(message);
-                        }
-                        state.result = data;
-                        state.error = null;
-                    } catch (err) {
-                        state.error = err?.message || 'Evaluation failed.';
-                        state.result = null;
-                    } finally {
-                        state.loading = false;
-                        this.trunkTests = { ...this.trunkTests };
-                    }
-                },
-                async runTrunkOptions(trunkId) {
-                    this.ensureTrunkTestState(trunkId);
-                    const state = this.trunkTests[trunkId];
-                    if (!state) {
-                        return;
-                    }
-                    const payload = { trunk: trunkId };
-                    const address = (state.address || '').trim();
-                    if (address) {
-                        payload.address = address;
-                    }
-                    state.options.loading = true;
-                    state.options.error = null;
-                    state.options.result = null;
-                    this.trunkTests = { ...this.trunkTests };
-                    try {
-                        const response = await fetch(this.buildUrl('/diagnostics/trunks/options'), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'same-origin',
-                            body: JSON.stringify(payload),
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `OPTIONS probe failed (${response.status})`;
-                            throw new Error(message);
-                        }
-                        state.options.result = data;
-                        state.options.error = null;
-                    } catch (err) {
-                        state.options.error = err?.message || 'OPTIONS probe failed.';
-                        state.options.result = null;
-                    } finally {
-                        state.options.loading = false;
-                        this.trunkTests = { ...this.trunkTests };
-                    }
-                },
-                loadSampleRouting() {
-                    if (!this.routingChecks.length) {
-                        return;
-                    }
-                    const sample = this.routingChecks[0];
-                    this.routingInput = sample.input;
-                    this.routingDirection = sample.direction;
-                    this.routingCaller = sample.caller && sample.caller !== '—' ? sample.caller : '';
-                    this.routingRequestUri = '';
-                    this.routingSourceTrunk = '';
-                    this.routingSourceIp = sample.sourceIp && sample.sourceIp !== '—' ? sample.sourceIp : '';
-                    this.routingAdvanced = false;
-                    this.routingResultSummary = null;
-                    this.routingError = null;
-                },
-                async runRoutingCheck() {
-                    const callee = (this.routingInput || '').trim();
-                    if (!callee) {
-                        this.routingError = 'Provide a dialled number to continue.';
-                        return;
-                    }
-                    const payload = {
-                        callee,
-                        direction: this.routingDirection,
-                    };
-                    const caller = (this.routingCaller || '').trim();
-                    if (caller) {
-                        payload.caller = caller;
-                    }
-                    const sourceIp = (this.routingSourceIp || '').trim();
-                    if (sourceIp) {
-                        payload.source_ip = sourceIp;
-                    }
-                    if (this.routingRequestUri && this.routingRequestUri.trim()) {
-                        payload.request_uri = this.routingRequestUri.trim();
-                    }
-                    if (this.routingSourceTrunk) {
-                        payload.source_trunk = this.routingSourceTrunk;
-                    }
-                    this.routingLoading = true;
-                    this.routingError = null;
-                    this.routingResultSummary = null;
-                    const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
-                    try {
-                        const response = await fetch(this.buildUrl('/diagnostics/routes/evaluate'), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'same-origin',
-                            body: JSON.stringify(payload),
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `Routing evaluation failed (${response.status})`;
-                            throw new Error(message);
-                        }
-                        const summary = this.transformRoutingResult(data, callee);
-                        this.routingResultSummary = summary;
-                        const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
-                        const latencyMs = Math.max(1, Math.round(ended - started));
-                        this.updateRoutingChecks(summary, latencyMs);
-                    } catch (err) {
-                        this.routingError = err?.message || 'Routing evaluation failed.';
-                    } finally {
-                        this.routingLoading = false;
-                    }
-                },
-                startDialTest() {
-                    const trunk = (this.dial.trunk || '').trim();
-                    const caller = (this.dial.caller || '').trim();
-                    const callee = (this.dial.destination || '').trim();
-                    const codec = (this.dial.codec || '').trim();
-
-                    if (!trunk) {
-                        this.dialError = 'Select a trunk before starting the simulation.';
-                        return;
-                    }
-                    if (!caller) {
-                        this.dialError = 'Provide a caller SIP URI to continue.';
-                        return;
-                    }
-                    if (!callee) {
-                        this.dialError = 'Provide a callee SIP URI or number to continue.';
-                        return;
-                    }
-
-                    this.dialError = null;
-                    this.dialing = true;
-                    this.dialResult = null;
-                    window.setTimeout(() => {
-                        this.dialing = false;
-                        const success = Math.random() > 0.15;
-                        const codecLabel = codec || 'Auto';
-                        const detail = success
-                            ? `Simulated ${callee} via ${trunk} using ${codecLabel} · MOS 4.${Math.floor(Math.random() * 2) + 2}`
-                            : 'Synthetic call reported 486 Busy Here (simulated).';
-                        this.dialResult = {
-                            status: success ? 'pass' : 'fail',
-                            details: detail,
-                            timestamp: new Date().toLocaleTimeString(),
-                            summary: {
-                                caller,
-                                callee,
-                                trunk,
-                                codec: codecLabel,
                             },
                         };
-                    }, 1100);
-                },
-                updateRoutingChecks(summary, latencyMs) {
-                    if (!summary) {
-                        return;
-                    }
-                    const rewrites = Array.isArray(summary.rewriteOperations) && summary.rewriteOperations.length
-                        ? summary.rewriteOperations
-                        : ['no rewrite'];
-                    const card = {
-                        id: `dynamic-${Date.now()}`,
-                        input: summary.input,
-                        direction: summary.direction,
-                        matched_route: summary.rule || 'None',
-                        selected_trunk: summary.trunk || '—',
-                        caller: summary.caller || null,
-                        sourceIp: summary.sourceIp || null,
-                        rewrites,
-                        result: summary.status === 'success' ? 'ok' : 'warning',
-                        latency_ms: latencyMs,
-                    };
-                    this.routingChecks = [card, ...this.routingChecks].slice(0, 8);
-                },
-                transformRoutingResult(data, input) {
-                    const outcome = data?.outcome || {};
-                    const type = (outcome.type || 'not_handled').toLowerCase();
-                    let status = 'warning';
-                    let statusLabel = 'Not handled';
-                    let badgeClass = 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                    let outcomeLabel = 'No matching route';
-                    let historyDetails = 'No routing rule matched.';
-                    const defaultRoute = Boolean(data?.used_default_route);
-                    if (type === 'forward') {
-                        status = defaultRoute ? 'warning' : 'success';
-                        statusLabel = defaultRoute ? 'Forwarded (default)' : 'Forwarded';
-                        badgeClass = defaultRoute
-                            ? 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'
-                            : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                        const destination = outcome.destination || data?.selected_trunk || '—';
-                        outcomeLabel = defaultRoute
-                            ? `Forwarded via default route (${destination})`
-                            : `Forwarded to ${destination}`;
-                        historyDetails = `Forward via ${data?.selected_trunk || '—'} → ${destination}`;
-                    } else if (type === 'abort') {
-                        status = 'error';
-                        statusLabel = 'Rejected';
-                        badgeClass = 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
-                        const code = outcome.code || '';
-                        const reason = outcome.reason ? ` ${outcome.reason}` : '';
-                        outcomeLabel = `Rejected ${code}${reason}`.trim();
-                        historyDetails = outcomeLabel;
-                    }
-                    const rewriteOperations = Array.isArray(data?.rewrite_operations)
-                        ? data.rewrite_operations
-                        : [];
-                    const rewritesDiff = Array.isArray(data?.rewrites) ? data.rewrites : [];
-                    const summary = {
-                        rule: data?.matched_rule || (defaultRoute ? 'Default route' : null),
-                        status,
-                        statusLabel,
-                        badgeClass,
-                        direction: data?.direction || '',
-                        input,
-                        trunk: data?.selected_trunk || null,
-                        destination: outcome.destination || null,
-                        caller: data?.caller || null,
-                        requestUri: data?.request_uri || null,
-                        sourceIp: data?.source_ip || null,
-                        sourceTrunk: data?.source_trunk || null,
-                        detectedTrunk: data?.detected_trunk || null,
-                        defaultRoute,
-                        outcomeLabel,
-                        historyDetails,
-                        createdAt: data?.evaluated_at || null,
-                        rewriteOperations,
-                        rewritesDiff,
-                        rewritesText: rewriteOperations.length
-                            ? rewriteOperations.join(', ')
-                            : 'No rewrite changes',
-                        headers: Array.isArray(outcome.headers) ? outcome.headers : [],
-                        credential: outcome.credential || null,
-                        abort: type === 'abort'
-                            ? { code: outcome.code, reason: outcome.reason || null }
-                            : null,
-                    };
-                    return summary;
-                },
-                routingStatusDot(status) {
-                    switch ((status || '').toLowerCase()) {
-                        case 'success':
-                            return 'bg-emerald-500';
-                        case 'error':
-                            return 'bg-rose-500';
-                        case 'warning':
-                            return 'bg-amber-500';
-                        default:
-                            return 'bg-slate-400';
-                    }
-                },
-                formatList(value) {
-                    if (!value || (Array.isArray(value) && !value.length)) {
-                        return '—';
-                    }
-                    if (Array.isArray(value)) {
-                        return value.filter((item) => item !== null && item !== undefined && item !== '')
-                            .map((item) => String(item))
-                            .join(', ');
-                    }
-                    return String(value);
-                },
-                renderOptionsStatus(attempt) {
-                    if (!attempt) {
-                        return '—';
-                    }
-                    const code = attempt.status_code ? String(attempt.status_code) : '';
-                    const reason = attempt.reason ? String(attempt.reason) : '';
-                    const base = code ? `${code}${reason ? ` ${reason}` : ''}` : '';
-                    if (attempt.success) {
-                        return base || 'Success';
-                    }
-                    return attempt.error || base || 'No response';
-                },
-                displayValue(value) {
-                    if (!value && value !== 0) {
-                        return '—';
-                    }
-                    if (Array.isArray(value)) {
-                        return this.formatList(value);
-                    }
-                    if (typeof value === 'object') {
-                        return JSON.stringify(value);
-                    }
-                    return String(value);
-                },
-                formatDirection(value) {
-                    if (!value) {
-                        return '—';
-                    }
-                    if (Array.isArray(value)) {
-                        return value.map((item) => this.formatDirection(item)).join(' / ');
-                    }
-                    const key = String(value).toLowerCase();
-                    switch (key) {
-                        case 'inbound':
-                            return 'Inbound';
-                        case 'outbound':
-                            return 'Outbound';
-                        case 'internal':
-                            return 'Internal';
-                        case 'bidirectional':
-                            return 'Bidirectional';
-                        default:
-                            return String(value);
-                    }
-                },
-                applyDialogFilter() {
-                    const trimmed = (this.dialogCallIdInput || '').trim();
-                    this.dialogCallIdInput = trimmed;
-                    if (!trimmed) {
+                    },
+                    async runTrunkTest(trunkId) {
+                        this.ensureTrunkTestState(trunkId);
+                        const state = this.trunkTests[trunkId];
+                        if (!state) {
+                            return;
+                        }
+                        const address = (state.address || '').trim();
+                        if (!address) {
+                            state.error = 'Provide a hostname or IP to evaluate.';
+                            state.result = null;
+                            this.trunkTests = { ...this.trunkTests };
+                            return;
+                        }
+                        state.loading = true;
+                        state.error = null;
+                        state.result = null;
+                        this.trunkTests = { ...this.trunkTests };
+                        try {
+                            const response = await fetch(this.buildUrl('/diagnostics/trunks/test'), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({ trunk: trunkId, address }),
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `Evaluation failed (${response.status})`;
+                                throw new Error(message);
+                            }
+                            state.result = data;
+                            state.error = null;
+                        } catch (err) {
+                            state.error = err?.message || 'Evaluation failed.';
+                            state.result = null;
+                        } finally {
+                            state.loading = false;
+                            this.trunkTests = { ...this.trunkTests };
+                        }
+                    },
+                    async runTrunkOptions(trunkId) {
+                        this.ensureTrunkTestState(trunkId);
+                        const state = this.trunkTests[trunkId];
+                        if (!state) {
+                            return;
+                        }
+                        const payload = { trunk: trunkId };
+                        const address = (state.address || '').trim();
+                        if (address) {
+                            payload.address = address;
+                        }
+                        state.options.loading = true;
+                        state.options.error = null;
+                        state.options.result = null;
+                        this.trunkTests = { ...this.trunkTests };
+                        try {
+                            const response = await fetch(this.buildUrl('/diagnostics/trunks/options'), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify(payload),
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `OPTIONS probe failed (${response.status})`;
+                                throw new Error(message);
+                            }
+                            state.options.result = data;
+                            state.options.error = null;
+                        } catch (err) {
+                            state.options.error = err?.message || 'OPTIONS probe failed.';
+                            state.options.result = null;
+                        } finally {
+                            state.options.loading = false;
+                            this.trunkTests = { ...this.trunkTests };
+                        }
+                    },
+                    loadSampleRouting() {
+                        if (!this.routingChecks.length) {
+                            return;
+                        }
+                        const sample = this.routingChecks[0];
+                        this.routingInput = sample.input;
+                        this.routingDirection = sample.direction;
+                        this.routingCaller = sample.caller && sample.caller !== '—' ? sample.caller : '';
+                        this.routingRequestUri = '';
+                        this.routingSourceTrunk = '';
+                        this.routingSourceIp = sample.sourceIp && sample.sourceIp !== '—' ? sample.sourceIp : '';
+                        this.routingAdvanced = false;
+                        this.routingResultSummary = null;
+                        this.routingError = null;
+                    },
+                    async runRoutingCheck() {
+                        const callee = (this.routingInput || '').trim();
+                        if (!callee) {
+                            this.routingError = 'Provide a dialled number to continue.';
+                            return;
+                        }
+                        const payload = {
+                            callee,
+                            direction: this.routingDirection,
+                        };
+                        const caller = (this.routingCaller || '').trim();
+                        if (caller) {
+                            payload.caller = caller;
+                        }
+                        const sourceIp = (this.routingSourceIp || '').trim();
+                        if (sourceIp) {
+                            payload.source_ip = sourceIp;
+                        }
+                        if (this.routingRequestUri && this.routingRequestUri.trim()) {
+                            payload.request_uri = this.routingRequestUri.trim();
+                        }
+                        if (this.routingSourceTrunk) {
+                            payload.source_trunk = this.routingSourceTrunk;
+                        }
+                        this.routingLoading = true;
+                        this.routingError = null;
+                        this.routingResultSummary = null;
+                        const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                        try {
+                            const response = await fetch(this.buildUrl('/diagnostics/routes/evaluate'), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify(payload),
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `Routing evaluation failed (${response.status})`;
+                                throw new Error(message);
+                            }
+                            const summary = this.transformRoutingResult(data, callee);
+                            this.routingResultSummary = summary;
+                            const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                            const latencyMs = Math.max(1, Math.round(ended - started));
+                            this.updateRoutingChecks(summary, latencyMs);
+                        } catch (err) {
+                            this.routingError = err?.message || 'Routing evaluation failed.';
+                        } finally {
+                            this.routingLoading = false;
+                        }
+                    },
+                    initializeSipDefaults() {
+                        const transports = Array.isArray(this.connectionTransports) ? this.connectionTransports : [];
+                        if (!this.sipForm.wsServer) {
+                            const wsTransport = transports.find((item) => {
+                                const key = (item?.protocol || '').toLowerCase();
+                                return key.includes('ws');
+                            });
+                            if (wsTransport) {
+                                this.sipForm.wsServer = wsTransport.example_uri || wsTransport.address || '';
+                            } else if (typeof window !== 'undefined' && window.location) {
+                                const origin = window.location.origin || '';
+                                if (origin) {
+                                    const base = origin.replace(/^http/i, 'ws');
+                                    this.sipForm.wsServer = `${base.replace(/\/$/, '')}/ws`;
+                                }
+                            }
+                        }
+                        const accounts = Array.isArray(this.connectionAccounts) ? this.connectionAccounts : [];
+                        const primaryAccount = accounts[0] || null;
+                        if (primaryAccount) {
+                            if (!this.sipForm.uri && primaryAccount.uri) {
+                                this.sipForm.uri = primaryAccount.uri;
+                            }
+                            if (!this.sipForm.password && primaryAccount.password) {
+                                this.sipForm.password = primaryAccount.password;
+                            }
+                            if (!this.sipForm.displayName && primaryAccount.username) {
+                                this.sipForm.displayName = primaryAccount.username;
+                            }
+                        }
+                        if (!this.sipForm.target) {
+                            const sample = this.dialer?.destination_samples?.[0];
+                            if (sample?.value) {
+                                this.sipForm.target = sample.value;
+                            }
+                        }
+                        if (!this.sipDomain) {
+                            this.updateSipDomain(this.sipForm.uri);
+                        }
+                    },
+                    updateSipDomain(value) {
+                        const parsed = this.parseSipUri(value);
+                        this.sipDomain = parsed?.domain || '';
+                    },
+                    parseSipUri(input) {
+                        if (!input) {
+                            return null;
+                        }
+                        const trimmed = String(input).trim();
+                        if (!trimmed) {
+                            return null;
+                        }
+                        const sipMatch = trimmed.match(/^sip:([^@]+)@([^;>]+)$/i);
+                        if (sipMatch) {
+                            return { user: sipMatch[1], domain: sipMatch[2], uri: trimmed };
+                        }
+                        const simpleMatch = trimmed.match(/^([^@]+)@([^@:\s]+)$/);
+                        if (simpleMatch) {
+                            return { user: simpleMatch[1], domain: simpleMatch[2], uri: `sip:${simpleMatch[1]}@${simpleMatch[2]}` };
+                        }
+                        return null;
+                    },
+                    async registerSip() {
+                        if (this.sipRegistering) {
+                            return;
+                        }
+                        if (typeof window === 'undefined' || !window.JsSIP) {
+                            this.sipRegisterError = 'JsSIP library not loaded yet. Please retry in a moment.';
+                            return;
+                        }
+                        const wsUrl = (this.sipForm.wsServer || '').trim();
+                        const rawUri = (this.sipForm.uri || '').trim();
+                        if (!wsUrl || !rawUri) {
+                            this.sipRegisterError = 'Provide both the WebSocket URL and SIP URI.';
+                            return;
+                        }
+                        const parsed = this.parseSipUri(rawUri);
+                        if (!parsed) {
+                            this.sipRegisterError = 'Invalid SIP URI (expected sip:1001@example.com).';
+                            return;
+                        }
+                        this.sipRegisterError = null;
+                        this.sipRegistering = true;
+                        this.setSipStatus('Connecting...', 'pending');
+                        this.appendSipEvent(`Connecting to ${wsUrl}`, 'info');
+                        if (sipUa) {
+                            try {
+                                sipUa.stop();
+                            } catch (err) {
+                                // ignore cleanup errors
+                            }
+                            sipUa = null;
+                        }
+                        try {
+                            if (!this.sipDebugEnabled && window.JsSIP?.debug) {
+                                JsSIP.debug.enable('JsSIP:Transport JsSIP:RTCSession');
+                                this.sipDebugEnabled = true;
+                            }
+                        } catch (err) {
+                            // ignore debug errors
+                        }
+                        const socket = new JsSIP.WebSocketInterface(wsUrl);
+                        const configuration = {
+                            sockets: [socket],
+                            uri: parsed.uri,
+                            password: this.sipForm.password || '',
+                            register: true,
+                            display_name: this.sipForm.displayName || parsed.user,
+                        };
+                        if (this.sipForm.authUser && this.sipForm.authUser.trim()) {
+                            configuration.authorization_user = this.sipForm.authUser.trim();
+                        }
+                        const ua = new JsSIP.UA(configuration);
+                        sipUa = ua;
+                        ua.on('connected', () => {
+                            this.appendSipEvent('WebSocket connected', 'success');
+                            this.setSipStatus('Connected', 'pending');
+                            this.ensureTransportTap();
+                        });
+                        ua.on('disconnected', () => {
+                            this.appendSipEvent('WebSocket disconnected', 'warning');
+                            this.setSipStatus(this.sipRegistered ? 'Disconnected' : 'Unregistered', this.sipRegistered ? 'error' : 'idle');
+                            this.sipRegistered = false;
+                            this.sipRegistering = false;
+                            this.resetSipSessionState();
+                        });
+                        ua.on('registered', () => {
+                            this.sipRegistered = true;
+                            this.sipRegistering = false;
+                            this.appendSipEvent('Registered', 'success');
+                            this.setSipStatus('Registered', 'success');
+                            this.ensureTransportTap();
+                        });
+                        ua.on('unregistered', () => {
+                            this.appendSipEvent('Unregistered', 'info');
+                            this.setSipStatus('Unregistered', 'idle');
+                            this.sipRegistered = false;
+                            if (!this.sipRegistering) {
+                                this.resetSipSessionState();
+                            }
+                        });
+                        ua.on('registrationFailed', (data) => {
+                            const cause = data?.cause || 'unknown';
+                            this.appendSipEvent(`Registration failed: ${cause}`, 'error');
+                            this.sipRegisterError = `Registration failed: ${cause}`;
+                            this.setSipStatus('Registration failed', 'error');
+                            this.sipRegistering = false;
+                            this.sipRegistered = false;
+                            try {
+                                ua.stop();
+                            } catch (err) {
+                                // ignore
+                            }
+                        });
+                        ua.on('newRTCSession', (data) => {
+                            const session = data.session;
+                            if (sipSession && session !== sipSession) {
+                                this.appendSipEvent('Rejecting concurrent session (busy).', 'warning');
+                                session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+                                return;
+                            }
+                            if (data.originator === 'remote') {
+                                const identity = session.remote_identity;
+                                const displayName = identity?.display_name || identity?.uri?.user || 'Unknown caller';
+                                const uriText = identity?.uri?.toString ? identity.uri.toString() : '';
+                                this.sipIncoming = { displayName, uri: uriText };
+                                this.appendSipEvent(`Incoming call from ${displayName}`, 'info');
+                                this.bindSipSession(session, 'incoming');
+                            } else {
+                                this.bindSipSession(session, 'outgoing');
+                            }
+                        });
+                        ua.on('newMessage', (data) => {
+                            const originator = data.originator === 'remote' ? 'incoming' : 'outgoing';
+                            this.appendSipEvent(`${originator === 'incoming' ? 'Received' : 'Sent'} MESSAGE`, 'info');
+                        });
+                        try {
+                            ua.start();
+                        } catch (err) {
+                            const message = err?.message || 'Failed to start JsSIP UA';
+                            this.sipRegisterError = message;
+                            this.appendSipEvent(`UA start failed: ${message}`, 'error');
+                            this.setSipStatus('Unregistered', 'error');
+                            this.sipRegistering = false;
+                        }
+                    },
+                    unregisterSip() {
+                        this.sipRegisterError = null;
+                        this.appendSipEvent('Manual unregister requested', 'warning');
+                        if (sipSession) {
+                            this.hangupSipCall();
+                        }
+                        if (sipUa) {
+                            try {
+                                sipUa.unregister();
+                                sipUa.stop();
+                            } catch (err) {
+                                // ignore
+                            }
+                            sipUa = null;
+                        }
+                        this.sipRegistered = false;
+                        this.sipRegistering = false;
+                        this.setSipStatus('Unregistered', 'idle');
+                    },
+                    async placeSipCall() {
+                        if (!sipUa || !this.sipRegistered) {
+                            this.sipCallError = 'Register before placing a call.';
+                            return;
+                        }
+                        if (sipSession) {
+                            this.sipCallError = 'A call is already in progress.';
+                            return;
+                        }
+                        const targetUri = this.buildTargetUri(this.sipForm.target);
+                        if (!targetUri) {
+                            this.sipCallError = 'Enter a destination URI or number.';
+                            return;
+                        }
+                        this.sipCallError = null;
+                        let mediaStream = null;
+                        try {
+                            this.sipCallStatus = 'Requesting microphone access...';
+                            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                            this.sipLocalStream = mediaStream;
+                            if (this.$refs.sipLocalAudio) {
+                                this.$refs.sipLocalAudio.srcObject = mediaStream;
+                            }
+                        } catch (err) {
+                            const message = err?.message || 'Unable to access microphone';
+                            this.sipCallError = message;
+                            this.sipCallStatus = 'Idle';
+                            this.appendSipEvent(`Microphone access failed: ${message}`, 'error');
+                            return;
+                        }
+                        const options = {
+                            mediaStream,
+                            mediaConstraints: { audio: true, video: false },
+                            rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false },
+                            sessionTimersExpires: 120,
+                        };
+                        this.appendSipEvent(`Calling ${targetUri}`, 'info');
+                        try {
+                            const session = sipUa.call(targetUri, options);
+                            this.bindSipSession(session, 'outgoing');
+                        } catch (err) {
+                            const message = err?.message || 'Call failed';
+                            this.sipCallError = message;
+                            this.sipCallStatus = 'Idle';
+                            this.appendSipEvent(`Call start failed: ${message}`, 'error');
+                            this.releaseLocalStream();
+                        }
+                    },
+                    hangupSipCall() {
+                        if (!sipSession) {
+                            return;
+                        }
+                        this.appendSipEvent('Call terminated by user', 'warning');
+                        sipSession.terminate();
+                        this.resetSipSessionState();
+                    },
+                    async answerIncomingCall() {
+                        if (!sipSession || this.sipCallDirection !== 'incoming') {
+                            return;
+                        }
+                        this.sipCallError = null;
+                        try {
+                            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                            this.sipLocalStream = stream;
+                            if (this.$refs.sipLocalAudio) {
+                                this.$refs.sipLocalAudio.srcObject = stream;
+                            }
+                            sipSession.answer({
+                                mediaStream: stream,
+                                mediaConstraints: { audio: true, video: false },
+                            });
+                            this.appendSipEvent('Answered incoming call', 'success');
+                            this.sipIncoming = null;
+                        } catch (err) {
+                            const message = err?.message || 'Unable to access microphone';
+                            this.sipCallError = message;
+                            this.appendSipEvent(`Failed to answer: ${message}`, 'error');
+                        }
+                    },
+                    rejectIncomingCall() {
+                        if (!sipSession || this.sipCallDirection !== 'incoming') {
+                            return;
+                        }
+                        this.appendSipEvent('Rejected incoming call', 'warning');
+                        try {
+                            sipSession.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+                        } catch (err) {
+                            // ignore
+                        }
+                        this.resetSipSessionState();
+                    },
+                    bindSipSession(session, direction) {
+                        sipSession = session;
+                        this.hasSipSession = true;
+                        this.sipCallDirection = direction;
+                        this.sipCallStatus = direction === 'incoming' ? 'Waiting for answer...' : 'Calling...';
+                        this.sipCallError = null;
+                        session.on('progress', () => {
+                            this.sipCallStatus = 'Ringing...';
+                        });
+                        session.on('accepted', () => {
+                            this.sipCallStatus = 'Answered';
+                        });
+                        session.on('confirmed', () => {
+                            this.sipCallStatus = 'In call';
+                        });
+                        session.on('failed', (data) => {
+                            const cause = data?.cause || 'unknown reason';
+                            this.sipCallStatus = 'Failed';
+                            this.sipCallError = `Call failed: ${cause}`;
+                            this.appendSipEvent(`Call failed: ${cause}`, 'error');
+                            this.resetSipSessionState();
+                        });
+                        session.on('ended', (data) => {
+                            const cause = data?.cause ? ` (${data.cause})` : '';
+                            this.appendSipEvent(`Call ended${cause}`, 'info');
+                            this.sipCallStatus = 'Idle';
+                            this.resetSipSessionState();
+                        });
+                        session.on('sendingRequest', (event) => {
+                            const method = event?.request?.method;
+                            if (!method) {
+                                return;
+                            }
+                            const normalized = String(method).toUpperCase();
+                            if (normalized === 'CANCEL' || normalized === 'BYE') {
+                                this.appendSipEvent(`Sent ${normalized}`, normalized === 'CANCEL' ? 'warning' : 'info');
+                            }
+                        });
+                        session.on('peerconnection', (event) => {
+                            const pc = event?.peerconnection || session.connection;
+                            if (!pc) {
+                                return;
+                            }
+                            pc.addEventListener('track', (ev) => {
+                                const remoteStream = ev.streams?.[0];
+                                if (remoteStream && this.$refs.sipRemoteAudio) {
+                                    this.$refs.sipRemoteAudio.srcObject = remoteStream;
+                                }
+                            });
+                        });
+                    },
+                    resetSipSessionState() {
+                        sipSession = null;
+                        this.hasSipSession = false;
+                        this.sipCallDirection = null;
+                        this.sipIncoming = null;
+                        this.sipCallError = null;
+                        this.sipCallStatus = this.sipRegistered ? 'Idle' : 'Unregistered';
+                        this.releaseLocalStream();
+                        if (this.$refs.sipRemoteAudio) {
+                            this.$refs.sipRemoteAudio.srcObject = null;
+                        }
+                    },
+                    releaseLocalStream() {
+                        if (this.sipLocalStream) {
+                            try {
+                                this.sipLocalStream.getTracks().forEach((track) => track.stop());
+                            } catch (err) {
+                                // ignore
+                            }
+                        }
+                        this.sipLocalStream = null;
+                        if (this.$refs.sipLocalAudio) {
+                            this.$refs.sipLocalAudio.srcObject = null;
+                        }
+                    },
+                    appendSipEvent(message, level = 'info') {
+                        const labels = {
+                            success: 'Success',
+                            error: 'Error',
+                            warning: 'Warning',
+                            info: 'Info',
+                            pending: 'Pending',
+                            idle: 'Info',
+                        };
+                        const event = {
+                            id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                            time: new Date().toLocaleTimeString(),
+                            message,
+                            level,
+                            levelLabel: labels[level] || 'Info',
+                        };
+                        this.sipEvents = [event, ...this.sipEvents].slice(0, 80);
+                    },
+                    setSipStatus(text, variant = 'idle') {
+                        this.sipStatusText = text;
+                        this.sipStatusVariant = variant;
+                    },
+                    sipStatusPill(variant) {
+                        switch ((variant || '').toLowerCase()) {
+                            case 'success':
+                                return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                            case 'error':
+                                return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                            case 'warning':
+                                return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                            case 'pending':
+                                return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                            default:
+                                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                        }
+                    },
+                    sipEventPill(level) {
+                        switch ((level || '').toLowerCase()) {
+                            case 'success':
+                                return 'bg-emerald-100 text-emerald-700';
+                            case 'error':
+                                return 'bg-rose-100 text-rose-700';
+                            case 'warning':
+                                return 'bg-amber-100 text-amber-700';
+                            case 'pending':
+                                return 'bg-sky-100 text-sky-700';
+                            default:
+                                return 'bg-slate-100 text-slate-600';
+                        }
+                    },
+                    sipStatusDot(variant) {
+                        switch ((variant || '').toLowerCase()) {
+                            case 'success':
+                                return 'bg-emerald-500';
+                            case 'error':
+                                return 'bg-rose-500';
+                            case 'warning':
+                                return 'bg-amber-500';
+                            case 'pending':
+                                return 'bg-sky-500';
+                            default:
+                                return 'bg-slate-400';
+                        }
+                    },
+                    appendSipTraffic(direction, payload) {
+                        if (!payload && payload !== 0) {
+                            return;
+                        }
+                        let text;
+                        if (typeof payload === 'string') {
+                            text = payload;
+                        } else if (payload instanceof ArrayBuffer) {
+                            try {
+                                text = new TextDecoder().decode(payload);
+                            } catch (err) {
+                                text = '[binary payload]';
+                            }
+                        } else if (ArrayBuffer.isView(payload)) {
+                            try {
+                                text = new TextDecoder().decode(payload.buffer);
+                            } catch (err) {
+                                text = '[binary payload]';
+                            }
+                        } else {
+                            text = String(payload);
+                        }
+                        const summary = text.split(/\r?\n/)[0] || (direction === 'outgoing' ? 'Outbound message' : 'Inbound message');
+                        const entry = {
+                            id: `traffic-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                            time: new Date().toLocaleTimeString(),
+                            direction,
+                            summary,
+                            payload: text,
+                        };
+                        const limit = Number(this.sipTrafficLimit) || 80;
+                        this.sipTraffic = [...this.sipTraffic, entry].slice(-limit);
+                        this.$nextTick(() => {
+                            if (!this.sipTrafficAutoScroll) {
+                                return;
+                            }
+                            const container = this.$refs.sipTrafficContainer;
+                            if (container) {
+                                container.scrollTop = container.scrollHeight;
+                            }
+                        });
+                    },
+                    ensureTransportTap() {
+                        if (!sipUa || !sipUa.transport) {
+                            return;
+                        }
+                        const transport = sipUa.transport;
+                        const socketInterface = transport.socket || transport._socket || null;
+                        const ws = socketInterface?.__socket || socketInterface?._ws || transport._ws || socketInterface || null;
+                        const rawWs = ws && ws.readyState !== undefined ? ws : ws?._ws || null;
+                        const targetWs = rawWs || ws;
+                        if (!targetWs || targetWs.__rustpbxTap) {
+                            return;
+                        }
+                        targetWs.__rustpbxTap = true;
+                        const originalSend = typeof targetWs.send === 'function' ? targetWs.send.bind(targetWs) : null;
+                        if (originalSend) {
+                            targetWs.send = (data) => {
+                                if (typeof data === 'string' || data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+                                    this.appendSipTraffic('outgoing', data);
+                                }
+                                return originalSend(data);
+                            };
+                        }
+                        const handleIncoming = (event) => {
+                            if (!event) {
+                                return;
+                            }
+                            const data = event.data;
+                            if (typeof data === 'string' || data instanceof ArrayBuffer) {
+                                this.appendSipTraffic('incoming', data);
+                            } else if (data && typeof data.text === 'function') {
+                                data.text().then((text) => this.appendSipTraffic('incoming', text)).catch(() => { });
+                            }
+                        };
+                        if (typeof targetWs.addEventListener === 'function') {
+                            targetWs.addEventListener('message', handleIncoming);
+                        } else if ('onmessage' in targetWs) {
+                            const originalHandler = targetWs.onmessage;
+                            targetWs.onmessage = (event) => {
+                                handleIncoming(event);
+                                if (typeof originalHandler === 'function') {
+                                    originalHandler.call(targetWs, event);
+                                }
+                            };
+                        }
+                    },
+                    clearSipEvents() {
+                        this.sipEvents = [];
+                    },
+                    clearSipTraffic() {
+                        this.sipTraffic = [];
+                    },
+                    buildTargetUri(target) {
+                        if (!target) {
+                            return null;
+                        }
+                        const trimmed = String(target).trim();
+                        if (!trimmed) {
+                            return null;
+                        }
+                        if (trimmed.startsWith('sip:')) {
+                            return trimmed;
+                        }
+                        if (trimmed.includes('@')) {
+                            return `sip:${trimmed}`;
+                        }
+                        const domain = this.sipDomain || this.parseSipUri(this.sipForm.uri)?.domain;
+                        if (!domain) {
+                            return trimmed;
+                        }
+                        return `sip:${trimmed}@${domain}`;
+                    },
+                    updateRoutingChecks(summary, latencyMs) {
+                        if (!summary) {
+                            return;
+                        }
+                        const rewrites = Array.isArray(summary.rewriteOperations) && summary.rewriteOperations.length
+                            ? summary.rewriteOperations
+                            : ['no rewrite'];
+                        const card = {
+                            id: `dynamic-${Date.now()}`,
+                            input: summary.input,
+                            direction: summary.direction,
+                            matched_route: summary.rule || 'None',
+                            selected_trunk: summary.trunk || '—',
+                            caller: summary.caller || null,
+                            sourceIp: summary.sourceIp || null,
+                            rewrites,
+                            result: summary.status === 'success' ? 'ok' : 'warning',
+                            latency_ms: latencyMs,
+                        };
+                        this.routingChecks = [card, ...this.routingChecks].slice(0, 8);
+                    },
+                    transformRoutingResult(data, input) {
+                        const outcome = data?.outcome || {};
+                        const type = (outcome.type || 'not_handled').toLowerCase();
+                        let status = 'warning';
+                        let statusLabel = 'Not handled';
+                        let badgeClass = 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                        let outcomeLabel = 'No matching route';
+                        let historyDetails = 'No routing rule matched.';
+                        const defaultRoute = Boolean(data?.used_default_route);
+                        if (type === 'forward') {
+                            status = defaultRoute ? 'warning' : 'success';
+                            statusLabel = defaultRoute ? 'Forwarded (default)' : 'Forwarded';
+                            badgeClass = defaultRoute
+                                ? 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'
+                                : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                            const destination = outcome.destination || data?.selected_trunk || '—';
+                            outcomeLabel = defaultRoute
+                                ? `Forwarded via default route (${destination})`
+                                : `Forwarded to ${destination}`;
+                            historyDetails = `Forward via ${data?.selected_trunk || '—'} → ${destination}`;
+                        } else if (type === 'abort') {
+                            status = 'error';
+                            statusLabel = 'Rejected';
+                            badgeClass = 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                            const code = outcome.code || '';
+                            const reason = outcome.reason ? ` ${outcome.reason}` : '';
+                            outcomeLabel = `Rejected ${code}${reason}`.trim();
+                            historyDetails = outcomeLabel;
+                        }
+                        const rewriteOperations = Array.isArray(data?.rewrite_operations)
+                            ? data.rewrite_operations
+                            : [];
+                        const rewritesDiff = Array.isArray(data?.rewrites) ? data.rewrites : [];
+                        const summary = {
+                            rule: data?.matched_rule || (defaultRoute ? 'Default route' : null),
+                            status,
+                            statusLabel,
+                            badgeClass,
+                            direction: data?.direction || '',
+                            input,
+                            trunk: data?.selected_trunk || null,
+                            destination: outcome.destination || null,
+                            caller: data?.caller || null,
+                            requestUri: data?.request_uri || null,
+                            sourceIp: data?.source_ip || null,
+                            sourceTrunk: data?.source_trunk || null,
+                            detectedTrunk: data?.detected_trunk || null,
+                            defaultRoute,
+                            outcomeLabel,
+                            historyDetails,
+                            createdAt: data?.evaluated_at || null,
+                            rewriteOperations,
+                            rewritesDiff,
+                            rewritesText: rewriteOperations.length
+                                ? rewriteOperations.join(', ')
+                                : 'No rewrite changes',
+                            headers: Array.isArray(outcome.headers) ? outcome.headers : [],
+                            credential: outcome.credential || null,
+                            abort: type === 'abort'
+                                ? { code: outcome.code, reason: outcome.reason || null }
+                                : null,
+                        };
+                        return summary;
+                    },
+                    routingStatusDot(status) {
+                        switch ((status || '').toLowerCase()) {
+                            case 'success':
+                                return 'bg-emerald-500';
+                            case 'error':
+                                return 'bg-rose-500';
+                            case 'warning':
+                                return 'bg-amber-500';
+                            default:
+                                return 'bg-slate-400';
+                        }
+                    },
+                    formatList(value) {
+                        if (!value || (Array.isArray(value) && !value.length)) {
+                            return '—';
+                        }
+                        if (Array.isArray(value)) {
+                            return value.filter((item) => item !== null && item !== undefined && item !== '')
+                                .map((item) => String(item))
+                                .join(', ');
+                        }
+                        return String(value);
+                    },
+                    renderOptionsStatus(attempt) {
+                        if (!attempt) {
+                            return '—';
+                        }
+                        const code = attempt.status_code ? String(attempt.status_code) : '';
+                        const reason = attempt.reason ? String(attempt.reason) : '';
+                        const base = code ? `${code}${reason ? ` ${reason}` : ''}` : '';
+                        if (attempt.success) {
+                            return base || 'Success';
+                        }
+                        return attempt.error || base || 'No response';
+                    },
+                    displayValue(value) {
+                        if (!value && value !== 0) {
+                            return '—';
+                        }
+                        if (Array.isArray(value)) {
+                            return this.formatList(value);
+                        }
+                        if (typeof value === 'object') {
+                            return JSON.stringify(value);
+                        }
+                        return String(value);
+                    },
+                    formatDirection(value) {
+                        if (!value) {
+                            return '—';
+                        }
+                        if (Array.isArray(value)) {
+                            return value.map((item) => this.formatDirection(item)).join(' / ');
+                        }
+                        const key = String(value).toLowerCase();
+                        switch (key) {
+                            case 'inbound':
+                                return 'Inbound';
+                            case 'outbound':
+                                return 'Outbound';
+                            case 'internal':
+                                return 'Internal';
+                            case 'bidirectional':
+                                return 'Bidirectional';
+                            default:
+                                return String(value);
+                        }
+                    },
+                    applyDialogFilter() {
+                        const trimmed = (this.dialogCallIdInput || '').trim();
+                        this.dialogCallIdInput = trimmed;
+                        if (!trimmed) {
+                            if (this.dialogCallId) {
+                                this.dialogCallId = '';
+                                this.refreshDialogs();
+                            }
+                            return;
+                        }
+                        if (trimmed !== this.dialogCallId) {
+                            this.dialogCallId = trimmed;
+                        }
+                        this.refreshDialogs();
+                    },
+                    clearDialogFilter() {
+                        if (!this.dialogCallId && !(this.dialogCallIdInput && this.dialogCallIdInput.trim())) {
+                            return;
+                        }
+                        this.dialogCallIdInput = '';
                         if (this.dialogCallId) {
                             this.dialogCallId = '';
-                            this.refreshDialogs();
                         }
-                        return;
-                    }
-                    if (trimmed !== this.dialogCallId) {
-                        this.dialogCallId = trimmed;
-                    }
-                    this.refreshDialogs();
-                },
-                clearDialogFilter() {
-                    if (!this.dialogCallId && !(this.dialogCallIdInput && this.dialogCallIdInput.trim())) {
-                        return;
-                    }
-                    this.dialogCallIdInput = '';
-                    if (this.dialogCallId) {
-                        this.dialogCallId = '';
-                    }
-                    this.refreshDialogs();
-                },
-                ensureDialogsLoaded() {
-                    if (this.dialogsFetchedAt || this.dialogsLoading) {
-                        return;
-                    }
-                    this.fetchDialogs();
-                },
-                buildUrl(path) {
-                    const clean = path.startsWith('/') ? path : `/${path}`;
-                    return `${this.basePath}${clean}`;
-                },
-                async fetchDialogs(force = false) {
-                    if (this.dialogsLoading) {
-                        return;
-                    }
-                    if (!force && this.dialogsFetchedAt) {
-                        return;
-                    }
-                    this.dialogsLoading = true;
-                    this.dialogsError = null;
-                    try {
-                        const params = new URLSearchParams();
-                        if (this.dialogCallId) {
-                            params.set('call_id', this.dialogCallId);
+                        this.refreshDialogs();
+                    },
+                    ensureDialogsLoaded() {
+                        if (this.dialogsFetchedAt || this.dialogsLoading) {
+                            return;
                         }
-                        params.set('limit', '20');
-                        let url = this.buildUrl('/diagnostics/dialogs');
-                        const query = params.toString();
-                        if (query) {
-                            url = `${url}?${query}`;
+                        this.fetchDialogs();
+                    },
+                    buildUrl(path) {
+                        const clean = path.startsWith('/') ? path : `/${path}`;
+                        return `${this.basePath}${clean}`;
+                    },
+                    async fetchDialogs(force = false) {
+                        if (this.dialogsLoading) {
+                            return;
                         }
-                        const response = await fetch(url, {
-                            credentials: 'same-origin',
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `Failed to load dialogs (${response.status})`;
-                            throw new Error(message);
+                        if (!force && this.dialogsFetchedAt) {
+                            return;
                         }
-                        this.dialogs = Array.isArray(data?.items) ? data.items : [];
-                        this.dialogsMeta = {
-                            total: data?.total || 0,
-                            generated_at: data?.generated_at || null,
-                            has_more: Boolean(data?.has_more),
-                        };
-                        this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
-                    } catch (err) {
-                        this.dialogsError = err?.message || 'Failed to load dialogs.';
-                        this.dialogs = [];
-                        this.dialogsMeta = null;
+                        this.dialogsLoading = true;
+                        this.dialogsError = null;
+                        try {
+                            const params = new URLSearchParams();
+                            if (this.dialogCallId) {
+                                params.set('call_id', this.dialogCallId);
+                            }
+                            params.set('limit', '20');
+                            let url = this.buildUrl('/diagnostics/dialogs');
+                            const query = params.toString();
+                            if (query) {
+                                url = `${url}?${query}`;
+                            }
+                            const response = await fetch(url, {
+                                credentials: 'same-origin',
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `Failed to load dialogs (${response.status})`;
+                                throw new Error(message);
+                            }
+                            this.dialogs = Array.isArray(data?.items) ? data.items : [];
+                            this.dialogsMeta = {
+                                total: data?.total || 0,
+                                generated_at: data?.generated_at || null,
+                                has_more: Boolean(data?.has_more),
+                            };
+                            this.dialogsFetchedAt = data?.generated_at || new Date().toISOString();
+                        } catch (err) {
+                            this.dialogsError = err?.message || 'Failed to load dialogs.';
+                            this.dialogs = [];
+                            this.dialogsMeta = null;
+                            this.dialogsFetchedAt = null;
+                        } finally {
+                            this.dialogsLoading = false;
+                        }
+                    },
+                    refreshDialogs() {
                         this.dialogsFetchedAt = null;
-                    } finally {
-                        this.dialogsLoading = false;
-                    }
-                },
-                refreshDialogs() {
-                    this.dialogsFetchedAt = null;
-                    this.fetchDialogs(true);
-                },
-                dialogRolePill(role) {
-                    const key = (role || '').toLowerCase();
-                    if (key === 'server') {
+                        this.fetchDialogs(true);
+                    },
+                    dialogRolePill(role) {
+                        const key = (role || '').toLowerCase();
+                        if (key === 'server') {
+                            return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                        }
+                        if (key === 'client') {
+                            return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                        }
                         return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                    }
-                    if (key === 'client') {
-                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                    }
-                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                },
-                dialogStatePill(state) {
-                    const key = (state || '').toLowerCase();
-                    if (key === 'confirmed') {
-                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
-                    }
-                    if (['early', 'trying', 'calling'].includes(key)) {
-                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
-                    }
-                    if (['waitack', 'updated', 'notify', 'info', 'options'].includes(key)) {
-                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                    }
-                    return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
-                },
-                async performLocatorLookup(options = {}) {
-                    const preserveClearFeedback = Boolean(options?.preserveClearFeedback);
-                    if (!this.hasLocatorInput) {
-                        this.locatorError = 'Provide a user or SIP URI to continue.';
-                        return false;
-                    }
-                    this.locatorError = null;
-                    if (!preserveClearFeedback) {
-                        this.locatorClearFeedback = null;
-                    }
-                    this.locatorLoading = true;
-                    try {
-                        const response = await fetch(this.buildUrl('/diagnostics/locator/lookup'), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'same-origin',
-                            body: JSON.stringify({
-                                user: this.locatorUser || null,
-                                uri: this.locatorUri || null,
-                            }),
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `Lookup failed (${response.status})`;
-                            throw new Error(message);
+                    },
+                    dialogStatePill(state) {
+                        const key = (state || '').toLowerCase();
+                        if (key === 'confirmed') {
+                            return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
                         }
-                        this.locatorResult = data;
-                        return true;
-                    } catch (err) {
-                        this.locatorError = err?.message || 'Lookup failed.';
+                        if (['early', 'trying', 'calling'].includes(key)) {
+                            return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                        }
+                        if (['waitack', 'updated', 'notify', 'info', 'options'].includes(key)) {
+                            return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                        }
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    },
+                    async performLocatorLookup(options = {}) {
+                        const preserveClearFeedback = Boolean(options?.preserveClearFeedback);
+                        if (!this.hasLocatorInput) {
+                            this.locatorError = 'Provide a user or SIP URI to continue.';
+                            return false;
+                        }
+                        this.locatorError = null;
+                        if (!preserveClearFeedback) {
+                            this.locatorClearFeedback = null;
+                        }
+                        this.locatorLoading = true;
+                        try {
+                            const response = await fetch(this.buildUrl('/diagnostics/locator/lookup'), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({
+                                    user: this.locatorUser || null,
+                                    uri: this.locatorUri || null,
+                                }),
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `Lookup failed (${response.status})`;
+                                throw new Error(message);
+                            }
+                            this.locatorResult = data;
+                            return true;
+                        } catch (err) {
+                            this.locatorError = err?.message || 'Lookup failed.';
+                            this.locatorResult = null;
+                            return false;
+                        } finally {
+                            this.locatorLoading = false;
+                        }
+                    },
+                    async clearLocator() {
+                        if (!this.hasLocatorInput) {
+                            this.locatorError = 'Provide a user or SIP URI before clearing.';
+                            return;
+                        }
+                        this.locatorError = null;
+                        this.locatorClearing = true;
+                        try {
+                            const response = await fetch(this.buildUrl('/diagnostics/locator/clear'), {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({
+                                    user: this.locatorUser || null,
+                                    uri: this.locatorUri || null,
+                                }),
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const message = data?.message || `Clear failed (${response.status})`;
+                                throw new Error(message);
+                            }
+                            const removed = Boolean(data?.removed);
+                            const remaining = typeof data?.remaining === 'number' ? data.remaining : null;
+                            this.locatorClearFeedback = {
+                                message: removed
+                                    ? remaining
+                                        ? `Cleared registration; ${remaining} binding(s) remain.`
+                                        : 'Cleared registration.'
+                                    : 'No registration matched the request.',
+                                variant: removed ? 'success' : 'warning',
+                            };
+                            await this.performLocatorLookup({ preserveClearFeedback: true });
+                        } catch (err) {
+                            this.locatorError = err?.message || 'Clear failed.';
+                        } finally {
+                            this.locatorClearing = false;
+                        }
+                    },
+                    resetLocator() {
+                        this.locatorUser = '';
+                        this.locatorUri = '';
                         this.locatorResult = null;
-                        return false;
-                    } finally {
-                        this.locatorLoading = false;
-                    }
-                },
-                async clearLocator() {
-                    if (!this.hasLocatorInput) {
-                        this.locatorError = 'Provide a user or SIP URI before clearing.';
-                        return;
-                    }
-                    this.locatorError = null;
-                    this.locatorClearing = true;
-                    try {
-                        const response = await fetch(this.buildUrl('/diagnostics/locator/clear'), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            credentials: 'same-origin',
-                            body: JSON.stringify({
-                                user: this.locatorUser || null,
-                                uri: this.locatorUri || null,
-                            }),
-                        });
-                        const data = await response.json().catch(() => null);
-                        if (!response.ok) {
-                            const message = data?.message || `Clear failed (${response.status})`;
-                            throw new Error(message);
+                        this.locatorError = null;
+                        this.locatorClearFeedback = null;
+                    },
+                    formatDateTime(value) {
+                        if (!value) {
+                            return '—';
                         }
-                        const removed = Boolean(data?.removed);
-                        const remaining = typeof data?.remaining === 'number' ? data.remaining : null;
-                        this.locatorClearFeedback = {
-                            message: removed
-                                ? remaining
-                                    ? `Cleared registration; ${remaining} binding(s) remain.`
-                                    : 'Cleared registration.'
-                                : 'No registration matched the request.',
-                            variant: removed ? 'success' : 'warning',
-                        };
-                        await this.performLocatorLookup({ preserveClearFeedback: true });
-                    } catch (err) {
-                        this.locatorError = err?.message || 'Clear failed.';
-                    } finally {
-                        this.locatorClearing = false;
-                    }
-                },
-                resetLocator() {
-                    this.locatorUser = '';
-                    this.locatorUri = '';
-                    this.locatorResult = null;
-                    this.locatorError = null;
-                    this.locatorClearFeedback = null;
-                },
-                formatDateTime(value) {
-                    if (!value) {
-                        return '—';
-                    }
-                    try {
-                        const date = new Date(value);
-                        if (Number.isNaN(date.getTime())) {
+                        try {
+                            const date = new Date(value);
+                            if (Number.isNaN(date.getTime())) {
+                                return value;
+                            }
+                            return date.toLocaleString();
+                        } catch (err) {
                             return value;
                         }
-                        return date.toLocaleString();
-                    } catch (err) {
-                        return value;
-                    }
-                },
-                formatDuration(value) {
-                    if (value === null || value === undefined) {
-                        return '—';
-                    }
-                    const seconds = Number(value);
-                    if (!Number.isFinite(seconds)) {
-                        return '—';
-                    }
-                    if (seconds >= 3600) {
-                        const hours = Math.floor(seconds / 3600);
-                        const minutes = Math.floor((seconds % 3600) / 60);
-                        return `${hours}h ${minutes}m`;
-                    }
-                    if (seconds >= 60) {
-                        const minutes = Math.floor(seconds / 60);
-                        const secs = Math.floor(seconds % 60);
-                        return `${minutes}m ${secs}s`;
-                    }
-                    return `${Math.floor(seconds)}s`;
-                },
-                formatContactParams(params) {
-                    if (!params || typeof params !== 'object') {
-                        return '—';
-                    }
-                    const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
-                    return entries.length ? entries.join(', ') : '—';
-                },
-            }));
+                    },
+                    formatDuration(value) {
+                        if (value === null || value === undefined) {
+                            return '—';
+                        }
+                        const seconds = Number(value);
+                        if (!Number.isFinite(seconds)) {
+                            return '—';
+                        }
+                        if (seconds >= 3600) {
+                            const hours = Math.floor(seconds / 3600);
+                            const minutes = Math.floor((seconds % 3600) / 60);
+                            return `${hours}h ${minutes}m`;
+                        }
+                        if (seconds >= 60) {
+                            const minutes = Math.floor(seconds / 60);
+                            const secs = Math.floor(seconds % 60);
+                            return `${minutes}m ${secs}s`;
+                        }
+                        return `${Math.floor(seconds)}s`;
+                    },
+                    formatContactParams(params) {
+                        if (!params || typeof params !== 'object') {
+                            return '—';
+                        }
+                        const entries = Object.entries(params).map(([key, value]) => `${key}=${value}`);
+                        return entries.length ? entries.join(', ') : '—';
+                    },
+                };
+            });
         });
     </script>
     {% endblock %}

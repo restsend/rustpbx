@@ -12,6 +12,8 @@
     {% endfor %}
     <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
     <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
+    {% block js_ext %}
+    {% endblock %}
     <script>
         document.addEventListener('alpine:init', () => {
             const STORAGE_KEYS = {

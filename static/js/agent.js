@@ -424,7 +424,7 @@ function mainApp() {
                     if (firstSegmentUsage === undefined) {
                         firstSegmentUsage = `TTFS: ${(new Date() - startTime)} ms`
                     }
-                    this.sendTtsRequest(content, undefined, playId, firstSegmentUsage);
+                    this.sendTtsRequest(content, autoHangup, playId, firstSegmentUsage);
                     firstSegmentUsage = '';
                     return;
                 }
@@ -442,7 +442,7 @@ function mainApp() {
                         if (firstSegmentUsage === undefined) {
                             firstSegmentUsage = `TTFS: ${(new Date() - startTime)} ms`
                         }
-                        this.sendTtsRequest(segment, undefined, playId, firstSegmentUsage);
+                        this.sendTtsRequest(segment, autoHangup, playId, firstSegmentUsage);
                         firstSegmentUsage = ''
                     }
                     lastIndex = match.index + 1;
@@ -500,7 +500,6 @@ function mainApp() {
                     // Process the response as a stream
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
-
                     // Function to process each chunk
                     const processStream = ({ done, value }) => {
                         if (done) {
@@ -521,7 +520,6 @@ function mainApp() {
 
                         // Process SSE format - each line starts with "data: "
                         const lines = chunk.split('\n');
-
                         lines.forEach(line => {
                             if (line.startsWith('data: ')) {
                                 const data = line.substring(6);
@@ -540,7 +538,7 @@ function mainApp() {
                                         const toolCalls = jsonData.choices[0].delta.tool_calls;
                                         toolCalls.forEach(toolCall => {
                                             if (toolCall.function && toolCall.function.name === 'hangup') {
-                                                this.doHangup();
+                                                autoHangup = true;
                                             }
                                         });
                                     }

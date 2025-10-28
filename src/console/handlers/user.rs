@@ -56,6 +56,7 @@ pub async fn login_page(
             "registration_allowed": policy.allowed,
             "error_message": null,
             "identifier": "",
+            "next": query.next.clone(),
         }),
     )
 }
@@ -63,11 +64,20 @@ pub async fn login_page(
 pub async fn login_post(
     client_addr: ClientAddr,
     State(state): State<Arc<ConsoleState>>,
+    Query(query): Query<LoginQuery>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let identifier = form.identifier.trim();
     let password = form.password.trim();
-    let next = form.next.clone();
+    let next = match form
+        .next
+        .clone()
+        .and_then(|n| if n.trim().is_empty() { None } else { Some(n) })
+        .or(query.next.clone())
+    {
+        Some(value) if !value.trim().is_empty() => Some(value),
+        _ => None,
+    };
     let policy = match state.registration_policy().await {
         Ok(policy) => policy,
         Err(err) => {
@@ -89,6 +99,7 @@ pub async fn login_post(
                 "registration_allowed": policy.allowed,
                 "error_message": "Please provide both username/email and password",
                 "identifier": identifier,
+                "next": next.clone(),
             }),
         );
     }
@@ -98,7 +109,8 @@ pub async fn login_post(
             if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
                 warn!("failed to update last_login: {}", err);
             }
-            let mut response = Redirect::to(&state.url_for("/")).into_response();
+            let redirect_target = resolve_next_redirect(state.as_ref(), next.clone());
+            let mut response = Redirect::to(&redirect_target).into_response();
             if let Some(header) = state.session_cookie_header(user.id) {
                 response.headers_mut().append(SET_COOKIE, header);
             }
@@ -112,6 +124,7 @@ pub async fn login_post(
                 "registration_allowed": policy.allowed,
                 "error_message": "Invalid credentials",
                 "identifier": identifier,
+                "next": next,
             }),
         ),
         Err(err) => {
@@ -119,6 +132,24 @@ pub async fn login_post(
             (StatusCode::INTERNAL_SERVER_ERROR, "Sign-in failed").into_response()
         }
     }
+}
+
+fn resolve_next_redirect(state: &ConsoleState, next: Option<String>) -> String {
+    if let Some(raw) = next {
+        let candidate = raw.trim();
+        if candidate.starts_with('/') && !candidate.starts_with("//") && !candidate.contains("://")
+        {
+            if candidate == "/" {
+                return state.url_for("/");
+            }
+            if state.base_path() != "/" && candidate.starts_with(state.base_path()) {
+                return candidate.to_string();
+            }
+            return state.url_for(candidate);
+        }
+    }
+
+    state.url_for("/")
 }
 
 pub async fn logout(

@@ -15,6 +15,7 @@
         </div>
         {% endif %}
         <form action="{{ login_action }}" method="post" class="space-y-6">
+            <input type="hidden" name="next" value="{{ next | default('') }}" />
             <div class="space-y-2">
                 <label class="block text-sm font-medium text-slate-700">Email or username</label>
                 <input type="text" name="identifier" value="{{ identifier }}" required

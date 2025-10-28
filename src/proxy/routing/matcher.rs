@@ -163,20 +163,26 @@ async fn match_invite_impl(
             continue;
         }
 
-        info!("Matched rule: {:?}", rule.name);
         if let Some(trace) = &mut trace {
             trace.matched_rule = Some(rule.name.clone());
         }
 
         // Apply rewrite rules
-        if let Some(rewrite) = &rule.rewrite {
+        let rewrites = if let Some(rewrite) = &rule.rewrite {
             if let Some(trace) = &mut trace {
                 trace
                     .rewrite_operations
                     .extend(describe_rewrite_ops(rewrite));
             }
-            apply_rewrite_rules(&mut option, rewrite, origin)?;
-        }
+            apply_rewrite_rules(&mut option, rewrite, origin)?
+        } else {
+            HashMap::new()
+        };
+
+        info!(
+            "Matched rule: {:?} action:{:?} rewrites:{:?}",
+            rule.name, rule.action, rewrites
+        );
 
         // Handle based on action type
         match rule.action.get_action_type() {
@@ -420,18 +426,22 @@ fn apply_rewrite_rules(
     option: &mut InviteOption,
     rewrite: &crate::proxy::routing::RewriteRules,
     origin: &rsip::Request,
-) -> Result<()> {
+) -> Result<HashMap<String, String>> {
+    let mut rewrites = HashMap::new();
+
     // Rewrite caller
     if let Some(pattern) = &rewrite.from_user {
         let new_user =
             apply_rewrite_pattern_with_match(pattern, option.caller.user().unwrap_or_default())?;
         option.caller = update_uri_user(&option.caller, &new_user)?;
+        rewrites.insert("from.user".to_string(), new_user);
     }
 
     if let Some(pattern) = &rewrite.from_host {
         let new_host =
             apply_rewrite_pattern_with_match(pattern, &option.caller.host().to_string())?;
         option.caller = update_uri_host(&option.caller, &new_host)?;
+        rewrites.insert("from.host".to_string(), new_host);
     }
 
     // Rewrite callee
@@ -439,12 +449,14 @@ fn apply_rewrite_rules(
         let new_user =
             apply_rewrite_pattern_with_match(pattern, option.callee.user().unwrap_or_default())?;
         option.callee = update_uri_user(&option.callee, &new_user)?;
+        rewrites.insert("to.user".to_string(), new_user);
     }
 
     if let Some(pattern) = &rewrite.to_host {
         let new_host =
             apply_rewrite_pattern_with_match(pattern, &option.callee.host().to_string())?;
         option.callee = update_uri_host(&option.callee, &new_host)?;
+        rewrites.insert("to.host".to_string(), new_host);
     }
 
     // Add or modify headers
@@ -461,7 +473,7 @@ fn apply_rewrite_rules(
         }
     }
 
-    Ok(())
+    Ok(rewrites)
 }
 
 fn describe_rewrite_ops(rewrite: &crate::proxy::routing::RewriteRules) -> Vec<String> {
@@ -526,10 +538,6 @@ fn apply_rewrite_pattern_with_match(pattern: &str, original: &str) -> Result<Str
 fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
     // Common regex patterns we support
     let patterns = [
-        // +86(1\d{10}) - Chinese mobile number
-        (r"^\+86(1\d{10})$", vec![3]), // Group 1 starts at position 3
-        // +1(\d{10}) - US number
-        (r"^\+1(\d{10})$", vec![2]), // Group 1 starts at position 2
         // (\d+) - any digits
         (r"^(\d+)$", vec![0]), // Group 1 is the entire string if all digits
         // prefix(\d+)suffix

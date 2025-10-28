@@ -187,7 +187,18 @@ impl CallModule {
         let callee_is_same_realm = self.inner.server.is_same_realm(&callee_realm).await;
 
         let direction = match (caller_is_same_realm, callee_is_same_realm) {
-            (true, true) => DialDirection::Internal,
+            (true, true) => {
+                match self
+                    .inner
+                    .server
+                    .user_backend
+                    .get_user(callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                    .await
+                {
+                    Ok(None) => DialDirection::Outbound,
+                    _ => DialDirection::Internal,
+                }
+            }
             (true, false) => DialDirection::Outbound,
             (false, true) => DialDirection::Inbound,
             (false, false) => {
