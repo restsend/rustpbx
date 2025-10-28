@@ -12,8 +12,6 @@
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Voice analytics</p>
                 <h1 class="text-2xl font-semibold text-slate-900">Call records</h1>
-                <p class="text-sm text-slate-500">Filter, export, and drill into SIP & media diagnostics for every
-                    session.</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <button type="button"
@@ -303,8 +301,9 @@
                         <template x-for="record in paginatedRecords" :key="record.id">
                             <tr class="align-middle transition hover:bg-slate-50">
                                 <td class="whitespace-nowrap px-4 py-2">
-                                    <div class="font-semibold text-slate-900" x-text="record.display_id || record.id">
-                                    </div>
+                                    <a :href="recordDetailUrl(record)"
+                                        class="block font-semibold text-slate-900 transition hover:text-sky-700 hover:underline"
+                                        x-text="record.display_id || record.id"></a>
                                     <div class="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
                                         <span class="max-w-[180px] truncate font-mono" :title="record.call_id"
                                             x-text="record.call_id || '—'"></span>
@@ -429,6 +428,16 @@
                                                 </svg>
                                             </a>
                                         </template>
+                                        <button type="button"
+                                            class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-rose-200 text-rose-500 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+                                            :disabled="deletingId === record.id" @click.stop="deleteRecord(record)"
+                                            title="Delete record">
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M6 6h8m-7 3v6m6-6v6M4 6h12" />
+                                            </svg>
+                                        </button>
                                     </div>
                                 </td>
                             </tr>
@@ -517,6 +526,7 @@
             debounceTimer: null,
             copiedCallId: null,
             copyTimer: null,
+            deletingId: null,
             detailBase: '',
             _sync: {
                 filters: false,
@@ -989,13 +999,83 @@
                 if (record && record.detail_url) {
                     return record.detail_url;
                 }
-                const identifier = (record && (record.id || record.call_id)) || null;
-                if (!identifier) {
+                const id = record && record.id;
+                if (!id) {
                     return '#';
                 }
                 const base = this.detailBase ? this.detailBase : '';
-                const path = `${base}/call-records/${encodeURIComponent(identifier)}`;
+                const path = `${base}/call-records/${encodeURIComponent(id)}`;
                 return path.startsWith('/') ? path : `/${path}`;
+            },
+            recordDeleteUrl(record) {
+                if (record && record.detail_url) {
+                    return record.detail_url;
+                }
+                const id = record && record.id;
+                if (!id) {
+                    return '#';
+                }
+                const base = this.detailBase ? this.detailBase : '';
+                const path = `${base}/call-records/${encodeURIComponent(id)}`;
+                return path.startsWith('/') ? path : `/${path}`;
+            },
+            async deleteRecord(record) {
+                if (!record || !record.id) {
+                    return;
+                }
+                if (typeof window === 'undefined' || !window?.dispatchEvent) {
+                    this.executeDelete(record);
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete call record',
+                        message: 'This will permanently remove the call record and associated metadata.',
+                        confirmLabel: 'Delete',
+                        cancelLabel: 'Cancel',
+                        destructive: true,
+                        onConfirm: () => this.executeDelete(record),
+                    },
+                }));
+            },
+            async executeDelete(record) {
+                if (!record || !record.id) {
+                    return;
+                }
+                this.deletingId = record.id;
+                this.error = null;
+                const isLastItemOnPage = this.records.length <= 1;
+                const targetPage = isLastItemOnPage && this.currentPage > 1
+                    ? this.currentPage - 1
+                    : this.currentPage;
+                try {
+                    const response = await fetch(this.recordDeleteUrl(record), {
+                        method: 'DELETE',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    if (!response.ok) {
+                        let message = 'Failed to delete record';
+                        try {
+                            const data = await response.json();
+                            if (data && data.message) {
+                                message = data.message;
+                            }
+                        } catch (_) {
+                            // Response had no body to parse; continue with default message
+                        }
+                        throw new Error(message);
+                    }
+                    this.records = this.records.filter((item) => item.id !== record.id);
+                    this.currentPage = targetPage;
+                    await this.fetchRecords({ page: targetPage });
+                } catch (err) {
+                    console.error(err);
+                    this.error = err && err.message ? err.message : 'Failed to delete record';
+                } finally {
+                    this.deletingId = null;
+                }
             },
             async exportCsv() {
                 try {
