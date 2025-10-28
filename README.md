@@ -100,8 +100,6 @@ udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
 media_proxy = "auto"
-trunks_source = "config" # or "database"
-routes_source = "config" # or "database"
 
 # ACL rules
 acl_rules = [

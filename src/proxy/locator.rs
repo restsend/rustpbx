@@ -5,7 +5,10 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use rsipstack::{transaction::endpoint::TargetLocator, transport::SipAddr};
+use rsipstack::{
+    transaction::endpoint::{TargetLocator, TransportEventInspector},
+    transport::{SipAddr, TransportEvent},
+};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -17,7 +20,15 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::debug;
 
-type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
+#[derive(Clone)]
+pub enum LocatorEvent {
+    Online(Vec<Location>),
+    Offline(Vec<Location>),
+}
+
+pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
+pub type LocatorEventReceiver = tokio::sync::broadcast::Receiver<LocatorEvent>;
+pub type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
 
 #[async_trait]
 pub trait Locator: Send + Sync {
@@ -37,6 +48,7 @@ pub trait Locator: Send + Sync {
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
+    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>>;
 }
 
@@ -70,6 +82,47 @@ impl TargetLocator for DialogTargetLocator {
                 uri, e
             ))
         })
+    }
+}
+
+pub struct TransportInspectorLocator {
+    locator_events: LocatorEventSender,
+    locator: Arc<Box<dyn Locator>>,
+}
+
+impl TransportInspectorLocator {
+    pub fn new(
+        locator: Arc<Box<dyn Locator>>,
+        locator_events: LocatorEventSender,
+    ) -> Box<dyn TransportEventInspector> {
+        Box::new(Self {
+            locator,
+            locator_events,
+        }) as Box<dyn TransportEventInspector>
+    }
+}
+
+#[async_trait]
+impl TransportEventInspector for TransportInspectorLocator {
+    async fn handle(&self, event: &TransportEvent) {
+        match event {
+            TransportEvent::Closed(conn) => {
+                match self.locator.unregister_with_address(conn.get_addr()).await {
+                    Ok(Some(removed)) => {
+                        if !removed.is_empty() {
+                            self.locator_events
+                                .send(LocatorEvent::Offline(removed))
+                                .ok();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        debug!(error = %e, "Error unregistering location on transport close");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -133,6 +186,50 @@ impl Locator for MemoryLocator {
         let mut locations = self.locations.lock().await;
         locations.remove(&identifier);
         Ok(())
+    }
+
+    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+        let mut locations = self.locations.lock().await;
+        let mut identifiers_to_remove = Vec::new();
+        let mut removed_locations = Vec::new();
+
+        for (identifier, map) in locations.iter_mut() {
+            let keys_to_remove: Vec<String> = map
+                .iter()
+                .filter_map(|(key, loc)| {
+                    if let Some(dest) = &loc.destination {
+                        if dest == addr {
+                            return Some(key.clone());
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            for key in keys_to_remove {
+                if let Some(loc) = map.remove(&key) {
+                    removed_locations.push(loc);
+                }
+            }
+
+            if map.is_empty() {
+                identifiers_to_remove.push(identifier.clone());
+            }
+        }
+
+        for identifier in identifiers_to_remove {
+            if let Some(locs) = locations.remove(&identifier) {
+                for loc in locs.values() {
+                    removed_locations.push(loc.clone());
+                }
+            }
+        }
+
+        if removed_locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(removed_locations))
+        }
     }
 
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {

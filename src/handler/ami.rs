@@ -160,7 +160,7 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
             .into_response();
     };
 
-    match sip_server.inner.data_context.reload_trunks().await {
+    match sip_server.inner.data_context.reload_trunks(true).await {
         Ok(metrics) => {
             let total = metrics.total;
             Json(serde_json::json!({
@@ -199,7 +199,7 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
             .into_response();
     };
 
-    match sip_server.inner.data_context.reload_routes().await {
+    match sip_server.inner.data_context.reload_routes(true).await {
         Ok(metrics) => {
             let total = metrics.total;
             Json(serde_json::json!({
@@ -240,7 +240,7 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
 
     let context = sip_server.inner.data_context.clone();
 
-    match context.reload_acl_rules().await {
+    match context.reload_acl_rules(true).await {
         Ok(metrics) => {
             let total = metrics.total;
             let active_rules = context.acl_rules_snapshot().await;

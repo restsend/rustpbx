@@ -11,8 +11,30 @@ pub mod matcher;
 #[cfg(test)]
 mod tests;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    Embedded,
+    File(String),
+}
+
+impl ConfigOrigin {
+    pub fn embedded() -> Self {
+        Self::Embedded
+    }
+
+    pub fn from_file(path: impl Into<String>) -> Self {
+        Self::File(path.into())
+    }
+}
+
+impl Default for ConfigOrigin {
+    fn default() -> Self {
+        Self::Embedded
+    }
+}
+
 /// Single trunk configuration
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TrunkConfig {
     pub dest: String,
     pub backup_dest: Option<String>,
@@ -38,6 +60,30 @@ pub struct TrunkConfig {
     pub inbound_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingPolicy>,
+    #[serde(skip)]
+    pub origin: ConfigOrigin,
+}
+
+impl Default for TrunkConfig {
+    fn default() -> Self {
+        Self {
+            dest: String::new(),
+            backup_dest: None,
+            username: None,
+            password: None,
+            codec: Vec::new(),
+            disabled: None,
+            max_calls: None,
+            max_cps: None,
+            weight: None,
+            transport: None,
+            id: None,
+            direction: None,
+            inbound_hosts: Vec::new(),
+            recording: None,
+            origin: ConfigOrigin::embedded(),
+        }
+    }
 }
 
 impl TrunkConfig {
@@ -164,6 +210,8 @@ pub struct RouteRule {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    #[serde(skip)]
+    pub origin: ConfigOrigin,
 }
 
 impl Default for RouteRule {
@@ -179,6 +227,7 @@ impl Default for RouteRule {
             rewrite: None,
             action: RouteAction::default(),
             disabled: None,
+            origin: ConfigOrigin::embedded(),
         }
     }
 }
@@ -275,12 +324,6 @@ pub struct RewriteRules {
     /// Add/modify header fields (starting with header.)
     #[serde(flatten)]
     pub headers: HashMap<String, String>,
-
-    // Compatible simplified field names
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub caller: Option<String>,
-    pub callee: Option<String>,
 }
 
 /// Route action
@@ -311,7 +354,7 @@ impl Default for RouteAction {
     fn default() -> Self {
         RouteAction {
             action: None,
-            dest: Some(DestConfig::Single("default".to_string())),
+            dest: None,
             select: default_select(),
             hash_key: None,
             reject: None,

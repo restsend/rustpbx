@@ -9,7 +9,7 @@ use std::{
     hash::{Hash, Hasher},
     sync::Arc,
 };
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::{
     call::{DialDirection, RoutingState},
@@ -113,8 +113,8 @@ async fn match_invite_impl(
     let request_user = origin.uri.user().unwrap_or_default().to_string();
     let request_host = origin.uri.host().clone();
 
-    debug!(
-        "Matching {:?} INVITE: caller={}@{}, callee={}@{}, request={}@{}",
+    info!(
+        "Matching {:?} caller={}@{}, callee={}@{}, request={}@{}",
         direction, caller_user, caller_host, callee_user, callee_host, request_user, request_host
     );
 
@@ -163,7 +163,7 @@ async fn match_invite_impl(
             continue;
         }
 
-        info!("Matched rule: {}", rule.name);
+        info!("Matched rule: {:?}", rule.name);
         if let Some(trace) = &mut trace {
             trace.matched_rule = Some(rule.name.clone());
         }
@@ -237,11 +237,11 @@ async fn match_invite_impl(
                             "Selected trunk: {} for destination: {}",
                             selected_trunk, trunk_config.dest
                         );
-                        return Ok(RouteResult::Forward(option));
                     } else {
-                        warn!("Trunk '{}' not found in configuration", selected_trunk);
+                        info!("Trunk '{}' not found in configuration", selected_trunk);
                     }
                 }
+                return Ok(RouteResult::Forward(option));
             }
         }
     }
@@ -447,33 +447,6 @@ fn apply_rewrite_rules(
         option.callee = update_uri_host(&option.callee, &new_host)?;
     }
 
-    // Rewrite compatibility fields
-    if let Some(pattern) = &rewrite.caller {
-        let caller_full = format!(
-            "{}@{}",
-            option.caller.user().unwrap_or_default(),
-            option.caller.host()
-        );
-        let new_caller = apply_rewrite_pattern_with_match(pattern, &caller_full)?;
-        if let Some((user, host)) = new_caller.split_once('@') {
-            option.caller = update_uri_user(&option.caller, user)?;
-            option.caller = update_uri_host(&option.caller, host)?;
-        }
-    }
-
-    if let Some(pattern) = &rewrite.callee {
-        let callee_full = format!(
-            "{}@{}",
-            option.callee.user().unwrap_or_default(),
-            option.callee.host()
-        );
-        let new_callee = apply_rewrite_pattern_with_match(pattern, &callee_full)?;
-        if let Some((user, host)) = new_callee.split_once('@') {
-            option.callee = update_uri_user(&option.callee, user)?;
-            option.callee = update_uri_host(&option.callee, host)?;
-        }
-    }
-
     // Add or modify headers
     for (header_key, pattern) in &rewrite.headers {
         if let Some(header_name) = header_key.strip_prefix("header.") {
@@ -508,10 +481,6 @@ fn describe_rewrite_ops(rewrite: &crate::proxy::routing::RewriteRules) -> Vec<St
     push("request_uri.user", &rewrite.request_uri_user);
     push("request_uri.host", &rewrite.request_uri_host);
     push("request_uri.port", &rewrite.request_uri_port);
-    push("from", &rewrite.from);
-    push("to", &rewrite.to);
-    push("caller", &rewrite.caller);
-    push("callee", &rewrite.callee);
 
     for header in rewrite.headers.keys() {
         ops.push(header.to_string());

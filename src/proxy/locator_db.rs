@@ -239,6 +239,68 @@ impl Locator for DbLocator {
         Ok(())
     }
 
+    async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>> {
+        // Unregister all locations matching the given address
+        let host = addr.addr.to_string();
+        let transport = addr
+            .r#type
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "UDP".to_string());
+        let removed_locations = Entity::find()
+            .filter(Column::Destination.eq(&host))
+            .filter(Column::Transport.eq(&transport))
+            .all(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on lookup before unregister: {}", e))?;
+        if removed_locations.is_empty() {
+            return Ok(None);
+        }
+
+        Entity::delete_many()
+            .filter(Column::Destination.eq(&host))
+            .filter(Column::Transport.eq(&transport))
+            .exec(&self.db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Database error on unregister with address: {}", e))?;
+
+        let mut locations = Vec::new();
+        for loc in removed_locations {
+            let aor = rsip::Uri::try_from(loc.aor.as_str())
+                .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
+            let registered_aor = aor.clone();
+            // Parse transport from string
+            let transport = match loc.transport.to_uppercase().as_str() {
+                "UDP" => rsip::transport::Transport::Udp,
+                "TCP" => rsip::transport::Transport::Tcp,
+                "TLS" => rsip::transport::Transport::Tls,
+                "WS" => rsip::transport::Transport::Ws,
+                "WSS" => rsip::transport::Transport::Wss,
+                _ => rsip::transport::Transport::Udp, // Default to UDP
+            };
+
+            // Parse destination host to HostWithPort
+            let addr = loc.destination.try_into()?;
+
+            // Create SipAddr
+            let destination = SipAddr {
+                r#type: Some(transport),
+                addr,
+            };
+
+            locations.push(Location {
+                aor,
+                expires: loc.expires as u32,
+                destination: Some(destination),
+                supports_webrtc: loc.supports_webrtc,
+                transport: Some(transport),
+                registered_aor: Some(registered_aor),
+                user_agent: loc.user_agent.clone(),
+                ..Default::default()
+            });
+        }
+        Ok(Some(sort_locations_by_recency(locations)))
+    }
+
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
         // Standard implementation for other cases
         let username_key = username.trim().to_ascii_lowercase();

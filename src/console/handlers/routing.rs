@@ -12,7 +12,7 @@ use axum::{
     extract::{Json, Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -45,6 +45,8 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
                 .patch(update_routing)
                 .delete(delete_routing),
         )
+        .route("/routing/{id}/clone", post(clone_routing))
+        .route("/routing/{id}/toggle", post(toggle_routing))
         .route("/routing/{id}/data", get(route_detail_data))
 }
 
@@ -430,6 +432,29 @@ fn notes_value(notes: &[String]) -> Option<Value> {
     }
 }
 
+async fn generate_clone_name(db: &DatabaseConnection, original: &str) -> Result<String, DbErr> {
+    let trimmed = original.trim();
+    let base = if trimmed.is_empty() {
+        "Route copy".to_string()
+    } else {
+        format!("{trimmed} (copy)")
+    };
+
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    loop {
+        let existing = RoutingEntity::find()
+            .filter(RoutingColumn::Name.eq(candidate.clone()))
+            .one(db)
+            .await?;
+        if existing.is_none() {
+            return Ok(candidate);
+        }
+        candidate = format!("{base} {suffix}");
+        suffix += 1;
+    }
+}
+
 async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbErr> {
     SipTrunkEntity::find()
         .order_by_asc(SipTrunkColumn::Name)
@@ -486,7 +511,9 @@ fn build_route_console_payload(
         "status": status,
         "detail_url": state.url_for(&format!("/routing/{}", model.id)),
         "edit_url": state.url_for(&format!("/routing/{}", model.id)),
-        "delete_url": state.url_for(&format!("/routing/{}/delete", model.id)),
+        "delete_url": state.url_for(&format!("/routing/{}", model.id)),
+        "toggle_url": state.url_for(&format!("/routing/{}/toggle", model.id)),
+        "clone_url": state.url_for(&format!("/routing/{}/clone", model.id)),
     })
 }
 
@@ -895,9 +922,184 @@ pub async fn route_detail_data(
             "update_url": state.url_for(&format!("/routing/{}", id)),
             "delete_url": state.url_for(&format!("/routing/{}", id)),
             "detail_url": state.url_for(&format!("/routing/{}", id)),
+            "toggle_url": state.url_for(&format!("/routing/{}/toggle", id)),
+            "clone_url": state.url_for(&format!("/routing/{}/clone", id)),
         }
     }))
     .into_response()
+}
+
+pub async fn clone_routing(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match RoutingEntity::find_by_id(id).one(db).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "Route not found"})),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!("failed to load route {} for clone: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to clone routing rule"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut doc = RouteDocument::from_model(&model);
+    doc.id = None;
+
+    let name = match generate_clone_name(db, &doc.name).await {
+        Ok(name) => name,
+        Err(err) => {
+            warn!("failed to generate clone name for route {}: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to clone routing rule"})),
+            )
+                .into_response();
+        }
+    };
+    doc.name = name;
+    doc.ensure_consistency();
+
+    if let Err(err) = doc.validate() {
+        return bad_request(err.message().to_string());
+    }
+
+    let trunks = match load_trunks(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load trunks for route clone {}: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to clone routing rule"})),
+            )
+                .into_response();
+        }
+    };
+    let trunk_lookup = build_trunk_name_lookup(&trunks);
+
+    doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
+    if let Some(ref name) = doc.source_trunk {
+        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+            return bad_request(format!("Source trunk \"{}\" was not found", name));
+        }
+    }
+
+    let tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            warn!(
+                "failed to start transaction for route clone {}: {}",
+                id, err
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to clone routing rule"})),
+            )
+                .into_response();
+        }
+    };
+
+    let now = Utc::now();
+    let mut active: RoutingActiveModel = Default::default();
+    active.created_at = Set(now);
+    apply_document_to_active(&mut active, &doc, &trunk_lookup, now);
+
+    let new_model = match active.insert(&tx).await {
+        Ok(model) => model,
+        Err(err) => {
+            warn!("failed to insert cloned routing rule from {}: {}", id, err);
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to clone routing rule"})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(err) = tx.commit().await {
+        warn!("failed to commit cloned routing rule from {}: {}", id, err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"message": "Failed to clone routing rule"})),
+        )
+            .into_response();
+    }
+
+    Json(json!({"status": "ok", "id": new_model.id, "name": new_model.name})).into_response()
+}
+
+pub async fn toggle_routing(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match RoutingEntity::find_by_id(id).one(db).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"message": "Route not found"})),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!("failed to load route {} for toggle: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to toggle routing rule"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut doc = RouteDocument::from_model(&model);
+    doc.disabled = !doc.disabled;
+    doc.ensure_consistency();
+
+    let new_is_active = !model.is_active;
+    let mut active: RoutingActiveModel = model.into();
+    active.is_active = Set(new_is_active);
+    active.updated_at = Set(Utc::now());
+    let metadata = doc.metadata_value();
+    active.metadata = Set(if metadata.is_null() {
+        None
+    } else {
+        Some(metadata)
+    });
+
+    match active.update(db).await {
+        Ok(updated) => {
+            let disabled = !updated.is_active;
+            Json(json!({
+                "status": "ok",
+                "id": id,
+                "disabled": disabled,
+                "is_active": updated.is_active,
+            }))
+            .into_response()
+        }
+        Err(err) => {
+            warn!("failed to toggle routing rule {}: {}", id, err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to toggle routing rule"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub async fn create_routing(

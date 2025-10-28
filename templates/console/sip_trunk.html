@@ -68,13 +68,36 @@
                     </div>
                 </div>
                 <div class="mt-2 text-xs text-slate-500">
-                    Sources: config
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>,
-                    include files
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>,
-                    database
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.db_count) || 0"></span>.
+                    <span>Sources:</span>
+                    <span> embedded
+                        <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>
+                    </span>,
+                    <span> include files
+                        <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>
+                    </span>
+                    <template x-if="lastReload.generated">
+                        <span>, generated file
+                            <span class="font-semibold text-slate-700"
+                                x-text="Number(lastReload.generated.entries) || 0"></span>
+                        </span>
+                    </template>
                 </div>
+                <template x-if="lastReload.generated && (lastReload.generated.path || lastReload.generated.backup)">
+                    <div class="mt-2 text-xs text-slate-500">
+                        <template x-if="lastReload.generated.path">
+                            <div>
+                                <span class="font-semibold text-slate-600">Generated file</span>
+                                <span class="ml-1 break-all" x-text="lastReload.generated.path"></span>
+                            </div>
+                        </template>
+                        <template x-if="lastReload.generated.backup">
+                            <div class="mt-1">
+                                <span class="font-semibold text-slate-600">Previous backup</span>
+                                <span class="ml-1 break-all" x-text="lastReload.generated.backup"></span>
+                            </div>
+                        </template>
+                    </div>
+                </template>
                 <template x-if="lastReload.patterns && lastReload.patterns.length">
                     <div class="mt-2 text-xs text-slate-500">
                         <div class="font-semibold text-slate-600">Include patterns</div>
@@ -596,11 +619,19 @@
                     return Number.isFinite(value) && value >= 0 ? value : 0;
                 };
                 const durationRaw = Number(raw.duration_ms);
+                const generatedRaw = raw.generated;
+                const generated = generatedRaw && typeof generatedRaw === 'object'
+                    ? {
+                        entries: toCount(generatedRaw.entries),
+                        path: generatedRaw.path ? String(generatedRaw.path) : null,
+                        backup: generatedRaw.backup ? String(generatedRaw.backup) : null,
+                    }
+                    : null;
                 return {
                     total: toCount(raw.total),
                     config_count: toCount(raw.config_count),
                     file_count: toCount(raw.file_count),
-                    db_count: toCount(raw.db_count),
+                    generated,
                     duration_ms: Number.isFinite(durationRaw) ? durationRaw : null,
                     started_at: raw.started_at || null,
                     finished_at: raw.finished_at || null,

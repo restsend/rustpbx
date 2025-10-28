@@ -43,10 +43,10 @@ udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
 media_proxy = "auto"
-trunks_source = "config" # or "database"
-routes_source = "config" # or "database"
-# routes_files = ["config/routes/*.toml"]
-# trunks_files = ["config/trunks/*.toml"]
+# Base directory for generated routing/trunk/ACL files
+generated_dir = "./config"
+routes_files = ["config/routes/*.toml"]
+trunks_files = ["config/trunks/*.toml"]
 
 # ACL rules
 acl_rules = [
@@ -55,7 +55,7 @@ acl_rules = [
     "allow all",
     "deny all"
 ]
-# acl_files = ["config/acl/*.toml"]
+acl_files = ["config/acl/*.toml"]
 
 [ua.handler]
 type = "webhook"

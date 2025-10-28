@@ -8,7 +8,7 @@ use clap::Parser;
 use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -63,6 +63,10 @@ fn default_callid_suffix() -> Option<String> {
 
 fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
+}
+
+fn default_generated_config_dir() -> String {
+    "./config".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Copy, PartialEq, Eq)]
@@ -284,19 +288,6 @@ pub enum CallRecordConfig {
     },
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyDataSource {
-    Config,
-    Database,
-}
-
-impl Default for ProxyDataSource {
-    fn default() -> Self {
-        Self::Config
-    }
-}
-
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
@@ -365,13 +356,11 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub default: Option<DefaultRoute>,
     #[serde(default)]
-    pub trunks_source: ProxyDataSource,
-    #[serde(default)]
-    pub routes_source: ProxyDataSource,
-    #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(skip)]
     pub recorder_root: Option<String>,
+    #[serde(default = "default_generated_config_dir")]
+    pub generated_dir: String,
 }
 
 pub enum RouteResult {
@@ -433,6 +422,26 @@ impl ProxyConfig {
             requested.to_string()
         }
     }
+
+    pub fn generated_root_dir(&self) -> PathBuf {
+        let trimmed = self.generated_dir.trim();
+        if trimmed.is_empty() {
+            return PathBuf::from("./config");
+        }
+        PathBuf::from(trimmed)
+    }
+
+    pub fn generated_trunks_dir(&self) -> PathBuf {
+        self.generated_root_dir().join("trunks")
+    }
+
+    pub fn generated_routes_dir(&self) -> PathBuf {
+        self.generated_root_dir().join("routes")
+    }
+
+    pub fn generated_acl_dir(&self) -> PathBuf {
+        self.generated_root_dir().join("acl")
+    }
 }
 
 impl Default for ProxyConfig {
@@ -469,10 +478,9 @@ impl Default for ProxyConfig {
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
             default: None,
-            trunks_source: ProxyDataSource::default(),
-            routes_source: ProxyDataSource::default(),
             recording: None,
             recorder_root: None,
+            generated_dir: default_generated_config_dir(),
         }
     }
 }

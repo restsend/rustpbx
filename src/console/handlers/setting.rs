@@ -1,5 +1,5 @@
 use crate::app::AppStateInner;
-use crate::config::{CallRecordConfig, ProxyConfig, ProxyDataSource, UserBackendConfig};
+use crate::config::{CallRecordConfig, ProxyConfig, UserBackendConfig};
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
@@ -255,8 +255,8 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "ua_whitelist": proxy_cfg.ua_white_list.clone().unwrap_or_default(),
                 "ua_blacklist": proxy_cfg.ua_black_list.clone().unwrap_or_default(),
                 "data_sources": json!({
-                    "routes": format_proxy_data_source(proxy_cfg.routes_source),
-                    "trunks": format_proxy_data_source(proxy_cfg.trunks_source),
+                    "routes": "toml",
+                    "trunks": "toml",
                 }),
                 "rtp": config.rtp_config(),
                 "user_backends": proxy_cfg
@@ -1204,13 +1204,6 @@ fn build_port_list(proxy_cfg: &ProxyConfig) -> Vec<JsonValue> {
         ports.push(json!({ "label": "WS", "value": port }));
     }
     ports
-}
-
-fn format_proxy_data_source(source: ProxyDataSource) -> &'static str {
-    match source {
-        ProxyDataSource::Config => "config",
-        ProxyDataSource::Database => "database",
-    }
 }
 
 fn backend_kind(backend: &UserBackendConfig) -> String {

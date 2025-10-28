@@ -33,6 +33,16 @@
                     </template>
                     Reload routes
                 </button>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:ring-offset-2"
+                    @click="openValidation()">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M4 9a6 6 0 0 1 12 0c0 1.657-1.567 3.286-4.7 4.878l-.32.161a1 1 0 0 1-.96 0l-.32-.161C5.567 12.286 4 10.657 4 9Z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 13v3m-2 0h4" />
+                    </svg>
+                    Routing validation
+                </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -90,13 +100,36 @@
                     </div>
                 </div>
                 <div class="mt-2 text-xs text-slate-500">
-                    Sources: config
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>,
-                    include files
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>,
-                    database
-                    <span class="font-semibold text-slate-700" x-text="Number(lastReload.db_count) || 0"></span>.
+                    <span>Sources:</span>
+                    <span> embedded
+                        <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>
+                    </span>,
+                    <span> include files
+                        <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>
+                    </span>
+                    <template x-if="lastReload.generated">
+                        <span>, generated file
+                            <span class="font-semibold text-slate-700"
+                                x-text="Number(lastReload.generated.entries) || 0"></span>
+                        </span>
+                    </template>
                 </div>
+                <template x-if="lastReload.generated && (lastReload.generated.path || lastReload.generated.backup)">
+                    <div class="mt-2 text-xs text-slate-500">
+                        <template x-if="lastReload.generated.path">
+                            <div>
+                                <span class="font-semibold text-slate-600">Generated file</span>
+                                <span class="ml-1 break-all" x-text="lastReload.generated.path"></span>
+                            </div>
+                        </template>
+                        <template x-if="lastReload.generated.backup">
+                            <div class="mt-1">
+                                <span class="font-semibold text-slate-600">Previous backup</span>
+                                <span class="ml-1 break-all" x-text="lastReload.generated.backup"></span>
+                            </div>
+                        </template>
+                    </div>
+                </template>
                 <template x-if="lastReload.patterns && lastReload.patterns.length">
                     <div class="mt-2 text-xs text-slate-500">
                         <div class="font-semibold text-slate-600">Include patterns</div>
@@ -168,394 +201,511 @@
                 </div>
             </div>
 
-            <div class="mt-5 divide-y divide-slate-100">
-                <template x-if="loading">
-                    <div
-                        class="flex flex-col items-center justify-center gap-3 py-14 text-center text-sm text-slate-400">
-                        <svg class="h-10 w-10 animate-spin text-slate-300" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="1.8">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
-                        </svg>
-                        <div>Loading routes…</div>
-                    </div>
-                </template>
-                <template x-if="!loading && !filteredRoutes.length">
-                    <div
-                        class="flex flex-col items-center justify-center gap-3 py-14 text-center text-sm text-slate-400">
-                        <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h4l2-5 4 10 2-5h4" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 19h16" />
-                        </svg>
-                        <div>No routes found for the current filters.</div>
-                    </div>
-                </template>
-
-                <template x-for="route in filteredRoutes" :key="route.id">
-                    <article class="py-4" :class="route.disabled ? 'opacity-60' : ''" x-data="{ open: false }">
-                        <header
-                            class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition hover:border-sky-200 hover:shadow md:flex-row md:items-center md:justify-between">
-                            <div class="flex flex-1 flex-col gap-2">
-                                <div class="flex flex-wrap items-center gap-2">
-                                    <h3 class="text-base font-semibold text-slate-900">
-                                        <a :href="detailUrl(route)"
-                                            class="inline-flex items-center text-slate-900 transition hover:text-sky-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-                                            x-text="route.name"></a>
-                                    </h3>
-                                    <span
-                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-                                        :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'">
-                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="2">
-                                            <path x-show="route.direction === 'inbound'" stroke-linecap="round"
-                                                stroke-linejoin="round" d="M5 8l5 5 5-5" />
-                                            <path x-show="route.direction === 'outbound'" stroke-linecap="round"
-                                                stroke-linejoin="round" d="M5 12l5-5 5 5" />
-                                        </svg>
-                                        <span class="uppercase" x-text="route.direction"></span>
-                                    </span>
-                                    <span
-                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
-                                        Priority
-                                        <span class="font-semibold" x-text="route.priority"></span>
-                                    </span>
-                                    <span
-                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
-                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M6 6h8M6 10h5M6 14h8" />
-                                        </svg>
-                                        <span x-text="route.action.select.toUpperCase()"></span>
-                                    </span>
-                                    <template x-if="route.disabled">
-                                        <span Alpine.data('routingConsole', (options={})=> ({
-                                            basePath: '',
-                                            listEndpoint: '',
-                                            createUrl: '',
-                                            filtersRaw: {},
-                                            routes: [],
-                                            summary: { total_routes: 0, active_routes: 0, last_deploy: null },
-                                            pagination: null,
-                                            loading: false,
-                                            error: null,
-                                            search: '',
-                                            directionFilter: 'all',
-                                            statusFilter: 'all',
-                                            algorithmFilter: 'all',
-                                            algorithmOptions: [],
-                                            directionOptions: [],
-                                            statusOptions: [],
-                                            perPage: 20,
-                                            page: 1,
-                                            init() {
-                                            this.basePath = this.normalizeBasePath(options.basePath);
-                                            this.listEndpoint = this.resolvePath(`${this.basePath}/routing`);
-                                            this.createUrl = options.createUrl ||
-                                            this.resolvePath(`${this.basePath}/routing/new`);
-                                            this.filtersRaw = options.filters || {};
-                                            this.setupFilterOptions();
-                                            this.fetchRoutes();
-                                            },
-                                            normalizeBasePath(path) {
-                                            if (!path) {
-                                            return '';
-                                            }
-                                            const trimmed = String(path).trim();
-                                            if (!trimmed.length || trimmed === '/') {
-                                            return '';
-                                            }
-                                            return trimmed.replace(/\/$/, '');
-                                            },
-                                            resolvePath(path) {
-                                            const raw = (path || '').toString().trim();
-                                            if (!raw.length) {
-                                            return '/';
-                                            }
-                                            if (raw.startsWith('http://') || raw.startsWith('https://')) {
-                                            return raw;
-                                            }
-                                            const normalized = raw.replace(/\/+ /g, '/');
-                                            const withLeading = normalized.startsWith('/') ? normalized :
-                                            `/${normalized}`;
-                                            return withLeading.replace(/\/+/, '/');
-                                            },
-                                            setupFilterOptions() {
-                                            const raw = this.filtersRaw || {};
-                                            this.algorithmOptions =
-                                            this.normalizeAlgorithmOptions(raw.selection_algorithms);
-                                            if (!this.algorithmOptions.length) {
-                                            this.algorithmOptions = [
-                                            { value: 'rr', label: 'Round robin' },
-                                            { value: 'weight', label: 'Weighted' },
-                                            { value: 'hash', label: 'Deterministic hash' },
-                                            ];
-                                            }
-                                            this.directionOptions =
-                                            this.normalizeDirectionOptions(raw.direction_options);
-                                            this.statusOptions = this.normalizeStatusOptions(raw.status_options);
-                                            },
-                                            normalizeAlgorithmOptions(input) {
-                                            if (!Array.isArray(input)) {
-                                            return [];
-                                            }
-                                            return input
-                                            .map((item) => {
-                                            if (item && typeof item === 'object') {
-                                            const value = item.value ?? item.name ?? item.id ?? '';
-                                            const label = item.label ?? item.title ?? value;
-                                            if (!value || !label) return null;
-                                            return { value: String(value), label: String(label) };
-                                            }
-                                            if (typeof item === 'string') {
-                                            const pretty = item.replace(/_/g, ' ');
-                                            return {
-                                            value: item,
-                                            label: pretty.charAt(0).toUpperCase() + pretty.slice(1),
-                                            };
-                                            }
-                                            return null;
-                                            })
-                                            .filter(Boolean);
-                                            },
-                                            normalizeDirectionOptions(input) {
-                                            if (!Array.isArray(input)) {
-                                            return [];
-                                            }
-                                            return input
-                                            .map((value) => (typeof value === 'string' && value.trim().length ?
-                                            value.trim() : null))
-                                            .filter(Boolean);
-                                            },
-                                            normalizeStatusOptions(input) {
-                                            if (!Array.isArray(input)) {
-                                            return [];
-                                            }
-                                            return input
-                                            .map((item) => {
-                                            if (item && typeof item === 'object') {
-                                            return {
-                                            value: item.value,
-                                            label: item.label,
-                                            };
-                                            }
-                                            return null;
-                                            })
-                                            .filter((entry) => entry && entry.value !== undefined && entry.label);
-                                            },
-                                            buildPayload() {
-                                            const filters = {};
-                                            const term = this.search.trim();
-                                            if (term.length) {
-                                            filters.q = term;
-                                            }
-                                            if (this.directionFilter !== 'all') {
-                                            filters.direction = this.directionFilter;
-                                            }
-                                            if (this.statusFilter !== 'all') {
-                                            filters.status = this.statusFilter === 'disabled' ? 'paused' :
-                                            this.statusFilter;
-                                            }
-                                            if (this.algorithmFilter !== 'all') {
-                                            filters.selection = this.algorithmFilter;
-                                            }
-
-                                            return {
-                                            page: this.page,
-                                            per_page: this.perPage,
-                                            filters,
-                                            };
-                                            },
-                                            async fetchRoutes() {
-                                            this.loading = true;
-                                            this.error = null;
-                                            try {
-                                            const response = await fetch(this.listEndpoint, {
-                                            method: 'POST',
-                                            headers: {
-                                            'Content-Type': 'application/json',
-                                            'Accept': 'application/json',
-                                            },
-                                            body: JSON.stringify(this.buildPayload()),
-                                            });
-                                            const data = await response.json().catch(() => ({}));
-                                            if (!response.ok) {
-                                            throw new Error(data?.message || 'Failed to load routing rules');
-                                            }
-
-                                            this.routes = Array.isArray(data?.items) ? data.items : [];
-                                            this.summary = Object.assign(
-                                            { total_routes: 0, active_routes: 0, last_deploy: null },
-                                            data?.summary || {}
-                                            );
-                                            this.updateFiltersFromResponse(data?.filters);
-                                            this.updatePagination(data);
-                                            } catch (err) {
-                                            console.error(err);
-                                            this.error = err?.message || 'Unable to load routing rules';
-                                            } finally {
-                                            this.loading = false;
-                                            }
-                                            },
-                                            updateFiltersFromResponse(filters) {
-                                            if (!filters || typeof filters !== 'object') {
-                                            return;
-                                            }
-                                            this.filtersRaw = filters;
-                                            this.setupFilterOptions();
-                                            },
-                                            updatePagination(meta) {
-                                            const perPageRaw = Number(meta?.per_page);
-                                            const currentPageRaw = Number(meta?.page);
-                                            const totalItemsRaw = Number(meta?.total_items);
-                                            const totalPagesRaw = Number(meta?.total_pages);
-
-                                            const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw :
-                                            this.perPage;
-                                            const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0
-                                            ? totalItemsRaw
-                                            : this.routes.length;
-                                            const inferredPages = Math.max(Math.ceil(totalItems / perPage), 1);
-                                            const totalPages = Number.isFinite(totalPagesRaw) && totalPagesRaw >= 1
-                                            ? Math.max(Math.min(totalPagesRaw, inferredPages || 1), 1)
-                                            : inferredPages;
-                                            const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
-                                            ? Math.min(currentPageRaw, totalPages)
-                                            : Math.min(this.page || 1, totalPages);
-
-                                            const resultsCount = this.routes.length;
-                                            const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
-                                            const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1,
-                                            totalItems) : 0;
-
-                                            this.pagination = {
-                                            current_page: currentPage,
-                                            per_page: perPage,
-                                            total_items: totalItems,
-                                            total_pages: totalPages,
-                                            has_prev: currentPage > 1,
-                                            has_next: currentPage < totalPages, prev_page: currentPage> 1 ? currentPage
-                                                - 1 : null,
-                                                next_page: currentPage < totalPages ? currentPage + 1 : null,
-                                                    showing_from: showingFrom, showing_to: showingTo, };
-                                                    this.perPage=perPage; this.page=currentPage; }, applyFilters() {
-                                                    this.page=1; this.fetchRoutes(); }, setDirection(value) { if
-                                                    (this.directionFilter===value) { if (value !=='all' ) {
-                                                    this.directionFilter='all' ; this.applyFilters(); } return; }
-                                                    this.directionFilter=value; this.applyFilters(); }, setStatus(value)
-                                                    { if (this.statusFilter===value) { if (value !=='all' ) {
-                                                    this.statusFilter='all' ; this.applyFilters(); } return; }
-                                                    this.statusFilter=value; this.applyFilters(); }, setAlgorithm(value)
-                                                    { this.algorithmFilter=this.algorithmFilter===value ? 'all' : value;
-                                                    this.applyFilters(); }, get filteredRoutes() { return
-                                                    Array.isArray(this.routes) ? this.routes : []; }, get pausedRoutes()
-                                                    { const total=Number(this.summary.total_routes) || 0; const
-                                                    active=Number(this.summary.active_routes) || 0; return
-                                                    Math.max(total - active, 0); }, goToPage(target) { if
-                                                    (!this.pagination) return; const
-                                                    totalPages=this.pagination.total_pages || 1; const
-                                                    page=Math.min(Math.max(target, 1), totalPages); if
-                                                    (page===this.page) return; this.page=page; this.fetchRoutes(); },
-                                                    prevPage() { if (this.pagination?.has_prev) {
-                                                    this.goToPage(this.pagination.prev_page || (this.page - 1)); } },
-                                                    nextPage() { if (this.pagination?.has_next) {
-                                                    this.goToPage(this.pagination.next_page || (this.page + 1)); } },
-                                                    formatDate(value) { if (!value) return '—' ; const date=new
-                                                    Date(value); if (Number.isNaN(date.getTime())) { return value; }
-                                                    return date.toLocaleString(); }, matchEntries(route) {
-                                                    class="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-600 ring-1 ring-amber-100">
-                                                    ↺
-                                        </span>
-                                        <div>
-                                            <div class="text-xs font-semibold text-slate-500" x-text="item.label"></div>
-                                            <code class="text-xs text-slate-600" x-text="item.value"></code>
+            <div class="mt-5 overflow-hidden rounded-xl border border-slate-200">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th scope="col" class="px-4 py-3 text-left">Route</th>
+                                <th scope="col" class="px-4 py-3 text-left">Match</th>
+                                <th scope="col" class="px-4 py-3 text-left">Rewrite</th>
+                                <th scope="col" class="px-4 py-3 text-left">Source · Target</th>
+                                <th scope="col" class="px-4 py-3 text-left">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
+                            <template x-if="loading">
+                                <tr>
+                                    <td colspan="5" class="px-4 py-12 text-center text-sm text-slate-400">
+                                        <div class="flex flex-col items-center gap-2">
+                                            <svg class="h-8 w-8 animate-spin text-slate-300" viewBox="0 0 24 24"
+                                                fill="none" stroke="currentColor" stroke-width="1.8">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                            </svg>
+                                            <div>Loading routes…</div>
                                         </div>
-                                        </li>
-                                    </template>
-                                    <template x-if="!rewriteEntries(route).length">
-                                        <li class="text-xs text-slate-400">No rewrite applied</li>
-                                    </template>
-                                    </ul>
-                                </div>
-                            </div>
-
-                            <div class="grid gap-4 md:grid-cols-2">
-                                <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="mb-3 flex items-center justify-between">
-                                        <div>
-                                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                                                Trunk selection</div>
-                                            <div class="text-sm font-semibold text-slate-700"
-                                                x-text="selectionLabel(route)"></div>
-                                            <template x-if="route.action.hash_key">
-                                                <div class="text-xs text-slate-500">Hash key: <span class="font-mono"
-                                                        x-text="route.action.hash_key"></span></div>
+                                    </td>
+                                </tr>
+                            </template>
+                            <template x-if="!loading && !filteredRoutes.length">
+                                <tr>
+                                    <td colspan="5" class="px-4 py-12 text-center text-sm text-slate-400">
+                                        No routes found for the current filters.
+                                    </td>
+                                </tr>
+                            </template>
+                            <template x-for="route in filteredRoutes" :key="route.id">
+                                <tr class="align-top transition hover:bg-slate-50"
+                                    :class="route.disabled ? 'opacity-70 bg-slate-50' : ''">
+                                    <td class="w-72 px-4 py-3">
+                                        <div class="flex flex-col gap-2">
+                                            <div class="flex flex-wrap items-center gap-2">
+                                                <a :href="detailUrl(route)"
+                                                    class="text-sm font-semibold text-slate-900 transition hover:text-sky-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                                                    x-text="routeLabel(route)"></a>
+                                                <span
+                                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                                                    :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'">
+                                                    <span class="uppercase" x-text="route.direction"></span>
+                                                </span>
+                                                <span
+                                                    class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                                                    Priority
+                                                    <span class="font-semibold" x-text="route.priority"></span>
+                                                </span>
+                                                <template x-if="route.disabled">
+                                                    <span
+                                                        class="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-amber-600 ring-1 ring-amber-200">
+                                                        Paused
+                                                    </span>
+                                                </template>
+                                            </div>
+                                            <div class="text-xs text-slate-500">
+                                                <span class="font-semibold" x-text="selectionLabel(route)"></span>
+                                                <template x-if="route.action.hash_key">
+                                                    <span class="ml-2 font-mono text-slate-400"
+                                                        x-text="`hash: ${route.action.hash_key}`"></span>
+                                                </template>
+                                            </div>
+                                            <template x-if="route.notes && route.notes.length">
+                                                <div class="text-[11px] text-slate-400"
+                                                    x-text="route.notes.join(' · ')"></div>
                                             </template>
                                         </div>
-                                        <div
-                                            class="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
-                                            <span x-text="totalWeight(route)"></span>
-                                            total weight
-                                        </div>
-                                    </div>
-                                    <div class="space-y-2">
-                                        <template x-for="trunk in (route.action.trunks || [])" :key="trunk.name">
-                                            <div class="rounded-lg border border-slate-200 px-3 py-2">
-                                                <div
-                                                    class="flex items-center justify-between text-xs font-medium text-slate-600">
-                                                    <div class="flex items-center gap-2">
-                                                        <span
-                                                            class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-700">
-                                                            <span x-text="trunkInitial(trunk.name)"></span>
-                                                        </span>
-                                                        <span x-text="trunk.name"></span>
-                                                    </div>
-                                                    <div class="flex items-center gap-2">
-                                                        <span class="font-semibold text-slate-900"
-                                                            x-text="trunk.weight ?? '—'"></span>
-                                                        <span class="text-slate-400">wt</span>
-                                                        <span
-                                                            class="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-600"
-                                                            x-text="weightPercent(route, trunk) + '%' "></span>
-                                                    </div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="flex flex-col gap-1 text-xs text-slate-600">
+                                            <template x-for="item in matchPreview(route).items" :key="item.key">
+                                                <div>
+                                                    <span class="font-semibold" x-text="item.label"></span>:
+                                                    <span x-text="item.value"></span>
                                                 </div>
-                                                <div class="mt-2 h-1.5 w-full rounded-full bg-slate-100">
-                                                    <div class="h-full rounded-full bg-sky-500"
-                                                        :style="{ width: weightPercent(route, trunk) + '%' }"></div>
+                                            </template>
+                                            <template x-if="matchPreview(route).remaining">
+                                                <div class="text-slate-400">
+                                                    +<span x-text="matchPreview(route).remaining"></span> more
+                                                </div>
+                                            </template>
+                                            <template x-if="!matchPreview(route).items.length">
+                                                <div class="text-slate-400">—</div>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="flex flex-col gap-1 text-xs text-slate-600">
+                                            <template x-for="item in rewritePreview(route).items" :key="item.key">
+                                                <div>
+                                                    <span class="font-semibold" x-text="item.label"></span>:
+                                                    <span x-text="item.value"></span>
+                                                </div>
+                                            </template>
+                                            <template x-if="rewritePreview(route).remaining">
+                                                <div class="text-slate-400">
+                                                    +<span x-text="rewritePreview(route).remaining"></span> more
+                                                </div>
+                                            </template>
+                                            <template x-if="!rewritePreview(route).items.length">
+                                                <div class="text-slate-400">—</div>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 text-xs text-slate-600">
+                                        <div>
+                                            <span class="font-semibold">Source:</span>
+                                            <span x-text="sourceTrunkLabel(route)"></span>
+                                        </div>
+                                        <div class="mt-1">
+                                            <span class="font-semibold">Target:</span>
+                                            <span x-text="targetTrunksLabel(route)"></span>
+                                        </div>
+                                        <template x-if="trunkPreview(route).items.length">
+                                            <div class="mt-2 flex flex-wrap gap-1 text-[11px] text-slate-500">
+                                                <template x-for="trunk in trunkPreview(route).items" :key="trunk.name">
+                                                    <span
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-medium">
+                                                        <span x-text="trunk.name"></span>
+                                                        <span class="font-semibold" x-text="trunk.weight ?? '—'"></span>
+                                                    </span>
+                                                </template>
+                                                <template x-if="trunkPreview(route).remaining">
+                                                    <span class="text-slate-400">
+                                                        +<span x-text="trunkPreview(route).remaining"></span> more
+                                                    </span>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="flex flex-col items-end gap-3">
+                                            <div class="text-xs text-slate-500">
+                                                Last updated
+                                                <span class="font-semibold"
+                                                    x-text="formatDate(route.last_modified)"></span>
+                                            </div>
+                                            <div class="flex flex-wrap items-center justify-end gap-2">
+                                                <button type="button"
+                                                    class="inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition"
+                                                    :class="processingToggle === route.id ? 'border-slate-200 text-slate-400 cursor-not-allowed' : route.disabled ? 'border-emerald-200 text-emerald-600 hover:bg-emerald-50' : 'border-amber-200 text-amber-600 hover:bg-amber-50'"
+                                                    :disabled="processingToggle === route.id"
+                                                    @click="toggleRoute(route)">
+                                                    <template x-if="processingToggle === route.id">
+                                                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24"
+                                                            fill="none" stroke="currentColor" stroke-width="1.8">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                                        </svg>
+                                                    </template>
+                                                    <template x-if="processingToggle !== route.id">
+                                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path x-show="route.disabled" stroke-linecap="round"
+                                                                stroke-linejoin="round" d="M4 5h12l-6 8z" />
+                                                            <path x-show="!route.disabled" stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                                d="M5 4h2v12H5zM13 4h2v12h-2z" />
+                                                        </svg>
+                                                    </template>
+                                                    <span x-text="route.disabled ? 'Resume' : 'Pause'"></span>
+                                                </button>
+                                                <button type="button"
+                                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                                                    :class="processingClone === route.id ? 'border-slate-200 text-slate-300 cursor-not-allowed' : ''"
+                                                    :disabled="processingClone === route.id"
+                                                    @click="confirmClone(route)">
+                                                    <template x-if="processingClone === route.id">
+                                                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24"
+                                                            fill="none" stroke="currentColor" stroke-width="1.8">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                                        </svg>
+                                                    </template>
+                                                    <template x-if="processingClone !== route.id">
+                                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M4 6a2 2 0 0 1 2-2h6l4 4v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M8 4v4h4" />
+                                                        </svg>
+                                                    </template>
+                                                    Clone
+                                                </button>
+                                                <button type="button"
+                                                    class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-50"
+                                                    :class="processingDelete === route.id ? 'border-rose-100 text-rose-300 cursor-not-allowed' : ''"
+                                                    :disabled="processingDelete === route.id"
+                                                    @click="confirmDelete(route)">
+                                                    <template x-if="processingDelete === route.id">
+                                                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24"
+                                                            fill="none" stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                                                        </svg>
+                                                    </template>
+                                                    <template x-if="processingDelete !== route.id">
+                                                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none"
+                                                            stroke="currentColor" stroke-width="1.6">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                                                        </svg>
+                                                    </template>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+
+                <template x-if="pagination && filteredRoutes.length">
+                    <div
+                        class="flex flex-col gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            Showing <span class="font-semibold" x-text="pagination.showing_from"></span>
+                            – <span class="font-semibold" x-text="pagination.showing_to"></span>
+                            of <span class="font-semibold" x-text="pagination.total_items"></span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button type="button"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
+                                :class="pagination.has_prev ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
+                                :disabled="!pagination.has_prev" @click="prevPage()">
+                                Prev
+                            </button>
+                            <div class="text-sm font-semibold text-slate-600">
+                                Page <span x-text="pagination.current_page"></span> / <span
+                                    x-text="pagination.total_pages"></span>
+                            </div>
+                            <button type="button"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
+                                :class="pagination.has_next ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
+                                :disabled="!pagination.has_next" @click="nextPage()">
+                                Next
+                            </button>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </section>
+
+        <div x-show="validationOpen" x-cloak x-transition.opacity.duration.150ms
+            class="fixed inset-0 z-40 flex items-center justify-center px-4 py-12">
+            <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" @click="closeValidation()"></div>
+            <div class="relative z-10 w-full max-w-2xl origin-top rounded-2xl bg-white shadow-2xl ring-1 ring-black/10"
+                x-transition.scale.duration.150ms @keydown.escape.window="closeValidation()">
+                <div class="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Routing validation</h2>
+                        <p class="text-xs text-slate-500">Evaluate a dialled number against the current routing table
+                            without leaving this view.</p>
+                    </div>
+                    <button type="button"
+                        class="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                        @click="closeValidation()">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
+                        </svg>
+                    </button>
+                </div>
+                <form class="space-y-5 px-6 py-5" @submit.prevent="runValidation()">
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Dialled
+                                number</span>
+                            <input type="text" x-model.trim="validationInput" x-ref="validationInput"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="e.g. +14155550123" required>
+                        </label>
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction</span>
+                            <select x-model="validationDirection"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="outbound">Outbound</option>
+                                <option value="inbound">Inbound</option>
+                                <option value="internal">Internal</option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Caller SIP
+                                URI</span>
+                            <input type="text" x-model.trim="validationCaller"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="sip:caller@example.com">
+                        </label>
+                        <label class="flex flex-col gap-2">
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
+                                address</span>
+                            <input type="text" x-model.trim="validationSourceIp"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="203.0.113.10">
+                        </label>
+                    </div>
+                    <div class="space-y-2">
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Data
+                            source</span>
+                        <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+                            <label class="inline-flex items-center gap-2">
+                                <input type="radio" name="validation-dataset" value="runtime"
+                                    x-model="validationDataset"
+                                    class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-500">
+                                <span>Runtime</span>
+                            </label>
+                            <label class="inline-flex items-center gap-2">
+                                <input type="radio" name="validation-dataset" value="database"
+                                    x-model="validationDataset"
+                                    class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-500">
+                                <span>Database</span>
+                            </label>
+                        </div>
+                        <p class="text-xs text-slate-400">The default checks the routes in the database (inactive
+                            configuration).</p>
+                    </div>
+                    <button type="button"
+                        class="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 transition hover:text-slate-700"
+                        @click="validationAdvanced = !validationAdvanced">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                            stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                        </svg>
+                        <span x-text="validationAdvanced ? 'Hide advanced options' : 'Advanced options'"></span>
+                    </button>
+                    <template x-if="validationAdvanced">
+                        <div class="grid gap-4 md:grid-cols-2" x-transition>
+                            <label class="flex flex-col gap-2">
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Request
+                                    URI</span>
+                                <input type="text" x-model.trim="validationRequestUri"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="sip:destination@example.com">
+                            </label>
+                            <label class="flex flex-col gap-2">
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
+                                    trunk</span>
+                                <select x-model="validationSourceTrunk"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Auto detect</option>
+                                    <template x-for="option in trunkOptions" :key="option.value">
+                                        <option :value="option.value" x-text="option.label"></option>
+                                    </template>
+                                </select>
+                            </label>
+                        </div>
+                    </template>
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="text-xs text-slate-400" x-show="validationLatencyMs && !validationLoading">
+                            Evaluated in
+                            <span class="font-semibold text-slate-600"
+                                x-text="formatDuration(validationLatencyMs)"></span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3">
+                            <button type="button"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                                @click="resetValidation()" :disabled="validationLoading">
+                                Reset
+                            </button>
+                            <button type="submit" :disabled="validationLoading"
+                                class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                                <template x-if="!validationLoading">
+                                    <span class="inline-flex items-center gap-2">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12" />
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h12" />
+                                        </svg>
+                                        Evaluate
+                                    </span>
+                                </template>
+                                <template x-if="validationLoading">
+                                    <span class="inline-flex items-center gap-2">
+                                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
+                                            stroke="currentColor" stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M4 10a6 6 0 0 1 6-6m0-2a8 8 0 1 0 8 8" />
+                                        </svg>
+                                        Evaluating…
+                                    </span>
+                                </template>
+                            </button>
+                        </div>
+                    </div>
+                    <template x-if="validationLoading">
+                        <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
+                            Evaluating routing…
+                        </div>
+                    </template>
+                    <template x-if="validationError && !validationLoading">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                            x-text="validationError"></div>
+                    </template>
+                    <template x-if="validationResult && !validationLoading">
+                        <div
+                            class="space-y-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="font-semibold text-slate-700">Rule:</span>
+                                <span x-text="validationResult.rule || 'None'"></span>
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                    :class="validationResult.badgeClass">
+                                    <span class="h-1.5 w-1.5 rounded-full"
+                                        :class="validationStatusDot(validationResult.status)"></span>
+                                    <span x-text="validationResult.statusLabel"></span>
+                                </span>
+                            </div>
+                            <div class="grid gap-1 sm:grid-cols-2">
+                                <div><span class="font-semibold text-slate-700">Direction:</span>
+                                    <span class="uppercase" x-text="validationResult.direction || '—'"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Dialled:</span>
+                                    <span x-text="validationResult.input || '—'"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Trunk:</span>
+                                    <span x-text="validationResult.trunk || '—'"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Destination:</span>
+                                    <span x-text="displayValue(validationResult.destination)"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Caller:</span>
+                                    <span x-text="displayValue(validationResult.caller)"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Request URI:</span>
+                                    <span x-text="displayValue(validationResult.requestUri)"></span>
+                                </div>
+                                <div><span class="font-semibold text-slate-700">Source IP:</span>
+                                    <span x-text="displayValue(validationResult.sourceIp)"></span>
+                                </div>
+                                <template x-if="validationResult.sourceTrunk">
+                                    <div><span class="font-semibold text-slate-700">Provided source trunk:</span>
+                                        <span x-text="validationResult.sourceTrunk"></span>
+                                    </div>
+                                </template>
+                                <template x-if="validationResult.detectedTrunk">
+                                    <div><span class="font-semibold text-slate-700">Detected source trunk:</span>
+                                        <span x-text="validationResult.detectedTrunk"></span>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="text-[11px] text-slate-500">
+                                <span class="font-semibold text-slate-700">Outcome:</span>
+                                <span x-text="validationResult.outcomeLabel"></span>
+                                <template x-if="validationResult.defaultRoute">
+                                    <span> · used default route</span>
+                                </template>
+                            </div>
+                            <div class="text-[11px] text-slate-500">
+                                <span class="font-semibold text-slate-700">Rewrites:</span>
+                                <span x-text="validationResult.rewritesText"></span>
+                            </div>
+                            <div class="text-[11px] text-slate-400">
+                                Evaluated <span x-text="formatDate(validationResult.createdAt)"></span>
+                            </div>
+                            <template x-if="validationResult.rewritesDiff?.length">
+                                <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                    <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        Field changes
+                                    </div>
+                                    <div class="mt-2 grid gap-2">
+                                        <template x-for="item in validationResult.rewritesDiff"
+                                            :key="item.field + (item.after || '') + (item.before || '')">
+                                            <div class="rounded border border-slate-200 bg-white px-3 py-2">
+                                                <div class="text-[11px] font-semibold text-slate-700"
+                                                    x-text="item.field"></div>
+                                                <div class="text-[11px] text-slate-500"><span
+                                                        class="font-semibold">Before:</span>
+                                                    <span x-text="displayValue(item.before)"></span>
+                                                </div>
+                                                <div class="text-[11px] text-slate-500"><span
+                                                        class="font-semibold">After:</span>
+                                                    <span x-text="displayValue(item.after)"></span>
                                                 </div>
                                             </div>
                                         </template>
-                                        <template x-if="!(route.action.trunks || []).length">
-                                            <div
-                                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-400">
-                                                Uses default
-                                                destination</div>
-                                        </template>
                                     </div>
                                 </div>
-                                <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Trunk
-                                        mapping</div>
-                                    <dl class="mt-3 space-y-3 text-sm text-slate-700">
-                                        <div>
-                                            <dt class="text-xs font-semibold text-slate-500">Source trunk</dt>
-                                            <dd class="mt-1 font-medium" x-text="sourceTrunkLabel(route)"></dd>
-                                        </div>
-                                        <div>
-                                            <dt class="text-xs font-semibold text-slate-500">Destination trunks</dt>
-                                            <dd class="mt-1 text-sm" x-text="targetTrunksLabel(route)"></dd>
-                                        </div>
-                                    </dl>
+                            </template>
+                            <template x-if="validationResult.abort">
+                                <div
+                                    class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                                    <span class="font-semibold">Rejected:</span>
+                                    <span x-text="displayValue(validationResult.abort)"></span>
                                 </div>
-                            </div>
-
+                            </template>
+                            <template x-if="validationResult.headers && validationResult.headers.length">
+                                <div class="text-[11px] text-slate-500">
+                                    <span class="font-semibold text-slate-700">Headers:</span>
+                                    <span x-text="validationResult.headers.join(', ')"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </form>
             </div>
-            </article>
-            </template>
-    </div>
-    </section>
+        </div>
 
-</div>
+    </div>
 </div>
 
 <script>
@@ -583,6 +733,23 @@
             page: 1,
             reloading: false,
             lastReload: null,
+            processingDelete: null,
+            processingClone: null,
+            processingToggle: null,
+            trunkOptions: [],
+            validationOpen: false,
+            validationAdvanced: false,
+            validationInput: '',
+            validationDirection: 'outbound',
+            validationCaller: '',
+            validationRequestUri: '',
+            validationSourceIp: '',
+            validationSourceTrunk: '',
+            validationDataset: 'database',
+            validationLoading: false,
+            validationError: null,
+            validationResult: null,
+            validationLatencyMs: null,
 
             init() {
                 this.basePath = this.normalizeBasePath(options.basePath);
@@ -610,6 +777,10 @@
                 const collapsed = raw.replace(/\/{2,}/g, '/');
                 return collapsed.startsWith('/') ? collapsed : `/${collapsed}`;
             },
+            buildUrl(path) {
+                const clean = path.startsWith('/') ? path : `/${path}`;
+                return `${this.basePath}${clean}`;
+            },
             setupFilterOptions() {
                 const raw = this.filtersRaw || {};
                 this.algorithmOptions = this.normalizeAlgorithmOptions(raw.selection_algorithms);
@@ -622,6 +793,28 @@
                 }
                 this.directionOptions = this.normalizeDirectionOptions(raw.direction_options);
                 this.statusOptions = this.normalizeStatusOptions(raw.status_options);
+                this.trunkOptions = this.normalizeTrunkOptions(raw.trunks);
+            },
+            normalizeTrunkOptions(input) {
+                if (!Array.isArray(input)) {
+                    return [];
+                }
+                return input
+                    .map((item) => {
+                        if (!item || typeof item !== 'object') {
+                            return null;
+                        }
+                        const value = item.name || item.label || item.id;
+                        if (!value) {
+                            return null;
+                        }
+                        const label = item.display_name || item.label || item.name || String(value);
+                        return {
+                            value: String(value),
+                            label: String(label),
+                        };
+                    })
+                    .filter(Boolean);
             },
             normalizeAlgorithmOptions(input) {
                 if (!Array.isArray(input)) {
@@ -685,7 +878,6 @@
                 if (this.algorithmFilter !== 'all') {
                     filters.selection = this.algorithmFilter;
                 }
-
                 return {
                     page: this.page,
                     per_page: this.perPage,
@@ -708,15 +900,17 @@
                     if (!response.ok) {
                         throw new Error(data?.message || 'Failed to load routing rules');
                     }
-
                     const items = Array.isArray(data?.items) ? data.items : [];
                     this.routes = items.map((item) => ({
                         ...item,
                         disabled: Boolean(item?.disabled),
                         direction: item?.direction || 'outbound',
                         action: item?.action || {},
+                        notes: Array.isArray(item?.notes) ? item.notes : [],
+                        toggle_url: item?.toggle_url,
+                        clone_url: item?.clone_url,
+                        delete_url: item?.delete_url,
                     }));
-
                     this.summary = Object.assign(
                         { total_routes: 0, active_routes: 0, last_deploy: null },
                         data?.summary || {}
@@ -742,7 +936,6 @@
                 const currentPageRaw = Number(meta?.page);
                 const totalItemsRaw = Number(meta?.total_items);
                 const totalPagesRaw = Number(meta?.total_pages);
-
                 const perPage = Number.isFinite(perPageRaw) && perPageRaw > 0 ? perPageRaw : this.perPage;
                 const totalItems = Number.isFinite(totalItemsRaw) && totalItemsRaw >= 0
                     ? totalItemsRaw
@@ -754,11 +947,9 @@
                 const currentPage = Number.isFinite(currentPageRaw) && currentPageRaw > 0
                     ? Math.min(currentPageRaw, totalPages)
                     : Math.min(this.page || 1, totalPages);
-
                 const resultsCount = this.routes.length;
                 const showingFrom = resultsCount ? ((currentPage - 1) * perPage) + 1 : 0;
                 const showingTo = resultsCount ? Math.min(showingFrom + resultsCount - 1, totalItems) : 0;
-
                 this.pagination = {
                     current_page: currentPage,
                     per_page: perPage,
@@ -771,7 +962,6 @@
                     showing_from: showingFrom,
                     showing_to: showingTo,
                 };
-
                 this.perPage = perPage;
                 this.page = currentPage;
             },
@@ -862,11 +1052,19 @@
                     return Number.isFinite(value) && value >= 0 ? value : 0;
                 };
                 const durationRaw = Number(raw.duration_ms);
+                const generatedRaw = raw.generated;
+                const generated = generatedRaw && typeof generatedRaw === 'object'
+                    ? {
+                        entries: toCount(generatedRaw.entries),
+                        path: generatedRaw.path ? String(generatedRaw.path) : null,
+                        backup: generatedRaw.backup ? String(generatedRaw.backup) : null,
+                    }
+                    : null;
                 return {
                     total: toCount(raw.total),
                     config_count: toCount(raw.config_count),
                     file_count: toCount(raw.file_count),
-                    db_count: toCount(raw.db_count),
+                    generated,
                     duration_ms: Number.isFinite(durationRaw) ? durationRaw : null,
                     started_at: raw.started_at || null,
                     finished_at: raw.finished_at || null,
@@ -896,20 +1094,20 @@
             },
             matchEntries(route) {
                 const labels = {
-                    'from_user': 'From user regex',
-                    'from_host': 'From host regex',
-                    'to_user': 'To user regex',
-                    'to_host': 'To host regex',
-                    'to_port': 'To port',
-                    'request_uri_user': 'Request-URI user regex',
-                    'request_uri_host': 'Request-URI host regex',
-                    'request_uri_port': 'Request-URI port',
-                    'from': 'From',
-                    'to': 'To',
-                    'caller': 'Caller',
-                    'callee': 'Callee',
+                    'from_user': 'from.user',
+                    'from_host': 'from.host',
+                    'to_user': 'to.user',
+                    'to_host': 'to.host',
+                    'to_port': 'to.port',
+                    'request_uri_user': 'request.uri.user',
+                    'request_uri_host': 'request.uri.host',
+                    'request_uri_port': 'request.uri.port',
+                    'from': 'from',
+                    'to': 'to',
+                    'caller': 'caller',
+                    'callee': 'callee',
                 };
-                const match = route.match || {};
+                const match = route?.match || {};
                 const entries = [];
                 Object.entries(match).forEach(([key, value]) => {
                     if (value === null || value === undefined || value === '') {
@@ -948,7 +1146,7 @@
                     'caller': 'Rewrite Caller',
                     'callee': 'Rewrite Callee',
                 };
-                const rewrite = route.rewrite || {};
+                const rewrite = route?.rewrite || {};
                 const entries = [];
                 Object.entries(rewrite).forEach(([key, value]) => {
                     if (value === null || value === undefined || value === '') {
@@ -972,20 +1170,29 @@
                 });
                 return entries;
             },
-            weightPercent(route, trunk) {
-                const trunks = route.action?.trunks || [];
-                const total = trunks.reduce((sum, item) => sum + (item.weight || 0), 0) || 1;
-                const current = trunk.weight || 0;
-                return Math.round((current / total) * 100);
+            matchPreview(route) {
+                const entries = this.matchEntries(route);
+                return {
+                    items: entries.slice(0, 3),
+                    remaining: Math.max(entries.length - 3, 0),
+                };
             },
-            totalWeight(route) {
-                const trunks = route.action?.trunks || [];
-                if (!trunks.length) return '—';
-                const total = trunks.reduce((sum, item) => sum + (item.weight || 0), 0);
-                return total || '—';
+            rewritePreview(route) {
+                const entries = this.rewriteEntries(route);
+                return {
+                    items: entries.slice(0, 3),
+                    remaining: Math.max(entries.length - 3, 0),
+                };
+            },
+            trunkPreview(route) {
+                const trunks = Array.isArray(route?.action?.trunks) ? route.action.trunks : [];
+                return {
+                    items: trunks.slice(0, 3),
+                    remaining: Math.max(trunks.length - 3, 0),
+                };
             },
             selectionLabel(route) {
-                const select = (route.action?.select || 'rr').toLowerCase();
+                const select = (route?.action?.select || 'rr').toLowerCase();
                 const map = {
                     rr: 'Round robin balancing',
                     weight: 'Weighted distribution',
@@ -1008,15 +1215,6 @@
                 }
                 return this.resolvePath(`${this.basePath}/routing`);
             },
-            trunkInitial(name) {
-                if (!name) return '?';
-                return name
-                    .split(/[^a-zA-Z0-9]/)
-                    .filter(Boolean)
-                    .map((part) => part[0]?.toUpperCase())
-                    .join('')
-                    .slice(0, 2);
-            },
             sourceTrunkLabel(route) {
                 const value = route?.source_trunk;
                 if (typeof value === 'string') {
@@ -1035,6 +1233,164 @@
                     return 'Default destination';
                 }
                 return targets.join(', ');
+            },
+            routeLabel(route) {
+                if (!route) {
+                    return 'Route';
+                }
+                const name = (route.name || '').trim();
+                if (name.length) {
+                    return name;
+                }
+                if (route.id !== undefined && route.id !== null) {
+                    return `Route #${route.id}`;
+                }
+                return 'Route';
+            },
+            toggleEndpoint(route) {
+                if (!route || !route.id) {
+                    return null;
+                }
+                if (typeof route.toggle_url === 'string' && route.toggle_url.trim().length) {
+                    return this.resolvePath(route.toggle_url);
+                }
+                return this.resolvePath(`${this.basePath}/routing/${route.id}/toggle`);
+            },
+            cloneEndpoint(route) {
+                if (!route || !route.id) {
+                    return null;
+                }
+                if (typeof route.clone_url === 'string' && route.clone_url.trim().length) {
+                    return this.resolvePath(route.clone_url);
+                }
+                return this.resolvePath(`${this.basePath}/routing/${route.id}/clone`);
+            },
+            deleteEndpoint(route) {
+                if (!route || !route.id) {
+                    return null;
+                }
+                if (typeof route.delete_url === 'string' && route.delete_url.trim().length) {
+                    return this.resolvePath(route.delete_url);
+                }
+                return this.resolvePath(`${this.basePath}/routing/${route.id}`);
+            },
+            confirmDelete(route) {
+                if (!route || !route.id) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete routing rule',
+                        message: `Delete ${this.routeLabel(route)}? This action cannot be undone.`,
+                        confirmLabel: 'Delete',
+                        cancelLabel: 'Cancel',
+                        destructive: true,
+                        onConfirm: () => this.deleteRoute(route),
+                    },
+                }));
+            },
+            async deleteRoute(route) {
+                const endpoint = this.deleteEndpoint(route);
+                if (!endpoint) {
+                    return;
+                }
+                this.processingDelete = route.id;
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'DELETE',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to delete routing rule');
+                    }
+                    const label = this.routeLabel(route);
+                    await this.fetchRoutes();
+                    this.error = null;
+                    this.flash = `Deleted ${label}.`;
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to delete routing rule';
+                } finally {
+                    this.processingDelete = null;
+                }
+            },
+            confirmClone(route) {
+                if (!route || !route.id) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Clone routing rule',
+                        message: `Clone ${this.routeLabel(route)}?`,
+                        confirmLabel: 'Clone',
+                        cancelLabel: 'Cancel',
+                        destructive: false,
+                        onConfirm: () => this.cloneRoute(route),
+                    },
+                }));
+            },
+            async cloneRoute(route) {
+                const endpoint = this.cloneEndpoint(route);
+                if (!endpoint) {
+                    return;
+                }
+                this.processingClone = route.id;
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to clone routing rule');
+                    }
+                    const label = this.routeLabel(route);
+                    await this.fetchRoutes();
+                    this.error = null;
+                    this.flash = `Cloned ${label}.`;
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to clone routing rule';
+                } finally {
+                    this.processingClone = null;
+                }
+            },
+            async toggleRoute(route) {
+                const endpoint = this.toggleEndpoint(route);
+                if (!endpoint) {
+                    return;
+                }
+                if (this.processingToggle === route.id) {
+                    return;
+                }
+                this.processingToggle = route.id;
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update routing rule status');
+                    }
+                    const label = this.routeLabel(route);
+                    await this.fetchRoutes();
+                    this.error = null;
+                    const disabled = Boolean(data?.disabled);
+                    this.flash = disabled ? `Paused ${label}.` : `Resumed ${label}.`;
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to update routing rule status';
+                } finally {
+                    this.processingToggle = null;
+                }
             },
             confirmReload() {
                 if (this.reloading) {
@@ -1093,6 +1449,190 @@
                 } finally {
                     this.reloading = false;
                 }
+            },
+            resetValidation() {
+                this.validationInput = '';
+                this.validationDirection = this.directionFilter !== 'all' ? this.directionFilter : 'outbound';
+                this.validationCaller = '';
+                this.validationRequestUri = '';
+                this.validationSourceIp = '';
+                this.validationSourceTrunk = '';
+                this.validationDataset = 'database';
+                this.validationAdvanced = false;
+                this.validationLoading = false;
+                this.validationError = null;
+                this.validationResult = null;
+                this.validationLatencyMs = null;
+            },
+            openValidation() {
+                if (this.validationLoading) {
+                    return;
+                }
+                this.resetValidation();
+                this.validationOpen = true;
+                this.$nextTick(() => {
+                    this.$refs.validationInput?.focus();
+                });
+            },
+            closeValidation() {
+                this.validationOpen = false;
+            },
+            async runValidation() {
+                const callee = (this.validationInput || '').trim();
+                if (!callee) {
+                    this.validationError = 'Provide a dialled number to continue.';
+                    return;
+                }
+                const payload = {
+                    callee,
+                    direction: this.validationDirection || 'outbound',
+                    dataset: this.validationDataset || 'database',
+                };
+                const caller = (this.validationCaller || '').trim();
+                if (caller) {
+                    payload.caller = caller;
+                }
+                const sourceIp = (this.validationSourceIp || '').trim();
+                if (sourceIp) {
+                    payload.source_ip = sourceIp;
+                }
+                const requestUri = (this.validationRequestUri || '').trim();
+                if (requestUri) {
+                    payload.request_uri = requestUri;
+                }
+                const sourceTrunk = (this.validationSourceTrunk || '').trim();
+                if (sourceTrunk) {
+                    payload.source_trunk = sourceTrunk;
+                }
+                this.validationLoading = true;
+                this.validationError = null;
+                this.validationResult = null;
+                this.validationLatencyMs = null;
+                const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                try {
+                    const response = await fetch(this.buildUrl('/diagnostics/routes/evaluate'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json().catch(() => null);
+                    if (!response.ok) {
+                        const message = data?.message || `Routing evaluation failed (${response.status})`;
+                        throw new Error(message);
+                    }
+                    const summary = this.transformValidationResult(data, callee);
+                    this.validationResult = summary;
+                    const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                    const latencyMs = Math.max(1, Math.round(ended - started));
+                    this.validationLatencyMs = latencyMs;
+                } catch (err) {
+                    this.validationError = err?.message || 'Routing evaluation failed.';
+                } finally {
+                    this.validationLoading = false;
+                }
+            },
+            transformValidationResult(data, input) {
+                const outcome = data?.outcome || {};
+                const type = (outcome.type || 'not_handled').toLowerCase();
+                let status = 'warning';
+                let statusLabel = 'Not handled';
+                let badgeClass = 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                let outcomeLabel = 'No matching route';
+                let historyDetails = 'No matched route';
+                let defaultRoute = Boolean(data?.default_route);
+
+                if (type === 'forward') {
+                    status = 'success';
+                    statusLabel = 'Forwarded';
+                    badgeClass = 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    const destination = outcome.destination || 'destination not set';
+                    outcomeLabel = `Forwarded to ${destination}`;
+                    historyDetails = outcomeLabel;
+                } else if (type === 'abort') {
+                    status = 'error';
+                    statusLabel = 'Rejected';
+                    badgeClass = 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                    const code = outcome.code ? ` ${outcome.code}` : '';
+                    const reason = outcome.reason ? ` ${outcome.reason}` : '';
+                    outcomeLabel = `Rejected${code}${reason}`.trim();
+                    historyDetails = outcomeLabel;
+                }
+
+                const rewriteOperations = Array.isArray(data?.rewrite_operations)
+                    ? data.rewrite_operations
+                    : [];
+                const rewritesDiff = Array.isArray(data?.rewrites) ? data.rewrites : [];
+
+                return {
+                    rule: data?.matched_rule || (defaultRoute ? 'Default route' : null),
+                    status,
+                    statusLabel,
+                    badgeClass,
+                    direction: data?.direction || '',
+                    input,
+                    trunk: data?.selected_trunk || null,
+                    destination: outcome.destination || null,
+                    caller: data?.caller || null,
+                    requestUri: data?.request_uri || null,
+                    sourceIp: data?.source_ip || null,
+                    sourceTrunk: data?.source_trunk || null,
+                    detectedTrunk: data?.detected_trunk || null,
+                    defaultRoute,
+                    outcomeLabel,
+                    historyDetails,
+                    createdAt: data?.evaluated_at || null,
+                    rewriteOperations,
+                    rewritesDiff,
+                    rewritesText: rewriteOperations.length
+                        ? rewriteOperations.join(', ')
+                        : 'No rewrite changes',
+                    headers: Array.isArray(outcome.headers) ? outcome.headers : [],
+                    credential: outcome.credential || null,
+                    abort: type === 'abort'
+                        ? { code: outcome.code, reason: outcome.reason || null }
+                        : null,
+                };
+            },
+            validationStatusDot(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'success':
+                        return 'bg-emerald-500';
+                    case 'error':
+                        return 'bg-rose-500';
+                    case 'warning':
+                        return 'bg-amber-500';
+                    default:
+                        return 'bg-slate-400';
+                }
+            },
+            formatList(value) {
+                if (!value || (Array.isArray(value) && !value.length)) {
+                    return '—';
+                }
+                if (Array.isArray(value)) {
+                    return value
+                        .filter((item) => item !== null && item !== undefined && item !== '')
+                        .map((item) => String(item))
+                        .join(', ');
+                }
+                return String(value);
+            },
+            displayValue(value) {
+                if (!value && value !== 0) {
+                    return '—';
+                }
+                if (Array.isArray(value)) {
+                    return this.formatList(value);
+                }
+                if (typeof value === 'object') {
+                    try {
+                        return JSON.stringify(value);
+                    } catch (_) {
+                        return '—';
+                    }
+                }
+                return String(value);
             },
         }));
     });
