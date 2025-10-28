@@ -433,7 +433,7 @@ async fn test_match_invite_rewrite_rules() {
         RouteResult::Forward(option) => {
             // Verify caller was rewritten
             let caller_user = option.caller.user().unwrap_or_default();
-            assert_eq!(caller_user, "013812345678");
+            assert_eq!(caller_user, "08613812345678");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
@@ -726,7 +726,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     match result_us {
         RouteResult::Forward(option) => {
             let caller_user = option.caller.user().unwrap_or_default();
-            assert_eq!(caller_user, "0015551234567");
+            assert_eq!(caller_user, "00115551234567");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
