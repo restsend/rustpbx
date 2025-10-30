@@ -163,6 +163,8 @@ async fn match_invite_impl(
             continue;
         }
 
+        let captures = collect_match_captures(rule, &ctx)?;
+
         if let Some(trace) = &mut trace {
             trace.matched_rule = Some(rule.name.clone());
         }
@@ -174,7 +176,7 @@ async fn match_invite_impl(
                     .rewrite_operations
                     .extend(describe_rewrite_ops(rewrite));
             }
-            apply_rewrite_rules(&mut option, rewrite, origin)?
+            apply_rewrite_rules(&mut option, rewrite, origin, &captures)?
         } else {
             HashMap::new()
         };
@@ -378,6 +380,128 @@ fn matches_rule(rule: &crate::proxy::routing::RouteRule, ctx: &MatchContext) -> 
     Ok(true)
 }
 
+/// Collect capture groups from matched conditions to support rewrite templates
+fn collect_match_captures(
+    rule: &crate::proxy::routing::RouteRule,
+    ctx: &MatchContext,
+) -> Result<HashMap<String, Vec<String>>> {
+    let mut captures = HashMap::new();
+    let conditions = &rule.match_conditions;
+
+    collect_field_capture(
+        &mut captures,
+        "from.user",
+        conditions.from_user.as_deref(),
+        ctx.caller_user,
+    )?;
+
+    let caller_host = ctx.caller_host.to_string();
+    collect_field_capture(
+        &mut captures,
+        "from.host",
+        conditions.from_host.as_deref(),
+        &caller_host,
+    )?;
+
+    collect_field_capture(
+        &mut captures,
+        "to.user",
+        conditions.to_user.as_deref(),
+        ctx.callee_user,
+    )?;
+
+    let callee_host = ctx.callee_host.to_string();
+    collect_field_capture(
+        &mut captures,
+        "to.host",
+        conditions.to_host.as_deref(),
+        &callee_host,
+    )?;
+
+    collect_field_capture(
+        &mut captures,
+        "request_uri.user",
+        conditions.request_uri_user.as_deref(),
+        ctx.request_user,
+    )?;
+
+    let request_host = ctx.request_host.to_string();
+    collect_field_capture(
+        &mut captures,
+        "request_uri.host",
+        conditions.request_uri_host.as_deref(),
+        &request_host,
+    )?;
+
+    if let Some(pattern) = &conditions.caller {
+        let caller_full = format!("{}@{}", ctx.caller_user, ctx.caller_host);
+        collect_field_capture(
+            &mut captures,
+            "caller",
+            Some(pattern.as_str()),
+            &caller_full,
+        )?;
+    }
+
+    if let Some(pattern) = &conditions.callee {
+        let callee_full = format!("{}@{}", ctx.callee_user, ctx.callee_host);
+        collect_field_capture(
+            &mut captures,
+            "callee",
+            Some(pattern.as_str()),
+            &callee_full,
+        )?;
+    }
+
+    for (header_key, pattern) in &conditions.headers {
+        if let Some(header_name) = header_key.strip_prefix("header.") {
+            if let Some(value) = get_header_value(ctx.origin, header_name) {
+                collect_field_capture(&mut captures, header_key, Some(pattern.as_str()), &value)?;
+            }
+        }
+    }
+
+    Ok(captures)
+}
+
+fn collect_field_capture(
+    captures: &mut HashMap<String, Vec<String>>,
+    key: &str,
+    pattern: Option<&str>,
+    value: &str,
+) -> Result<()> {
+    if let Some(pattern) = pattern {
+        if let Some(groups) = extract_regex_captures(pattern, value)? {
+            captures.insert(key.to_string(), groups);
+        }
+    }
+    Ok(())
+}
+
+fn extract_regex_captures(pattern: &str, value: &str) -> Result<Option<Vec<String>>> {
+    if pattern.is_empty() {
+        return Ok(None);
+    }
+
+    // Compile pattern as regex to obtain capture groups
+    let regex =
+        Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+    if let Some(captures) = regex.captures(value) {
+        let mut groups = Vec::new();
+        for index in 0..captures.len() {
+            groups.push(
+                captures
+                    .get(index)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+        return Ok(Some(groups));
+    }
+
+    Ok(None)
+}
+
 /// Match pattern (supports regex)
 fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
     // If pattern doesn't contain regex special characters, use exact match
@@ -426,35 +550,44 @@ fn apply_rewrite_rules(
     option: &mut InviteOption,
     rewrite: &crate::proxy::routing::RewriteRules,
     origin: &rsip::Request,
+    captures: &HashMap<String, Vec<String>>,
 ) -> Result<HashMap<String, String>> {
     let mut rewrites = HashMap::new();
 
     // Rewrite caller
     if let Some(pattern) = &rewrite.from_user {
-        let new_user =
-            apply_rewrite_pattern_with_match(pattern, option.caller.user().unwrap_or_default())?;
+        let new_user = apply_rewrite_pattern_with_match(
+            pattern,
+            option.caller.user().unwrap_or_default(),
+            captures.get("from.user"),
+        )?;
         option.caller = update_uri_user(&option.caller, &new_user)?;
         rewrites.insert("from.user".to_string(), new_user);
     }
 
     if let Some(pattern) = &rewrite.from_host {
+        let current_host = option.caller.host().to_string();
         let new_host =
-            apply_rewrite_pattern_with_match(pattern, &option.caller.host().to_string())?;
+            apply_rewrite_pattern_with_match(pattern, &current_host, captures.get("from.host"))?;
         option.caller = update_uri_host(&option.caller, &new_host)?;
         rewrites.insert("from.host".to_string(), new_host);
     }
 
     // Rewrite callee
     if let Some(pattern) = &rewrite.to_user {
-        let new_user =
-            apply_rewrite_pattern_with_match(pattern, option.callee.user().unwrap_or_default())?;
+        let new_user = apply_rewrite_pattern_with_match(
+            pattern,
+            option.callee.user().unwrap_or_default(),
+            captures.get("to.user"),
+        )?;
         option.callee = update_uri_user(&option.callee, &new_user)?;
         rewrites.insert("to.user".to_string(), new_user);
     }
 
     if let Some(pattern) = &rewrite.to_host {
+        let current_host = option.callee.host().to_string();
         let new_host =
-            apply_rewrite_pattern_with_match(pattern, &option.callee.host().to_string())?;
+            apply_rewrite_pattern_with_match(pattern, &current_host, captures.get("to.host"))?;
         option.callee = update_uri_host(&option.callee, &new_host)?;
         rewrites.insert("to.host".to_string(), new_host);
     }
@@ -502,40 +635,81 @@ fn describe_rewrite_ops(rewrite: &crate::proxy::routing::RewriteRules) -> Vec<St
 }
 
 /// Apply rewrite pattern (supports capture groups)
-fn apply_rewrite_pattern_with_match(pattern: &str, original: &str) -> Result<String> {
-    // Support simple replacement patterns like "0{1}" where {1} is capture group
-    if pattern.contains('{') && pattern.contains('}') {
-        // This is a pattern with capture groups, need to extract from original value
-        // Simplified implementation: assume pattern is "prefix{1}suffix" format
-        let start = pattern.find('{').unwrap();
-        let end = pattern.find('}').unwrap();
-        let prefix = &pattern[..start];
-        let suffix = &pattern[end + 1..];
-        let group_str = &pattern[start + 1..end];
+fn apply_rewrite_pattern_with_match(
+    pattern: &str,
+    original: &str,
+    capture_groups: Option<&Vec<String>>,
+) -> Result<String> {
+    if !pattern.contains('{') {
+        return Ok(pattern.to_string());
+    }
 
-        if let Ok(group_num) = group_str.parse::<usize>() {
-            // For patterns like "0{1}", {1} represents first capture group
-            // We need to find what regex pattern was used to match this value
-            // and extract the corresponding capture group
+    let mut result = String::new();
+    let mut chars = pattern.chars().peekable();
 
-            // Try common regex patterns to extract capture groups
-            let capture_result = extract_capture_group(original, group_num);
-            if let Some(captured) = capture_result {
-                return Ok(format!("{}{}{}", prefix, captured, suffix));
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            let mut index_buffer = String::new();
+            let mut found_closing = false;
+
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next == '}' {
+                    found_closing = true;
+                    break;
+                }
+                index_buffer.push(next);
             }
 
-            // Fallback: More general handling: if there are digits, extract digit part
-            let digits: String = original.chars().filter(|c| c.is_ascii_digit()).collect();
-            return Ok(format!("{}{}{}", prefix, digits, suffix));
+            if !found_closing {
+                return Err(anyhow!(
+                    "Unclosed capture group placeholder in rewrite pattern '{}'",
+                    pattern
+                ));
+            }
+
+            if index_buffer.is_empty() {
+                return Err(anyhow!(
+                    "Empty capture group placeholder in rewrite pattern '{}'",
+                    pattern
+                ));
+            }
+
+            let index_value = index_buffer.parse::<usize>().map_err(|e| {
+                anyhow!(
+                    "Invalid capture group index '{}' in rewrite pattern '{}': {}",
+                    index_buffer,
+                    pattern,
+                    e
+                )
+            })?;
+
+            let replacement = capture_groups
+                .and_then(|groups| groups.get(index_value).cloned())
+                .or_else(|| {
+                    if index_value == 0 {
+                        Some(original.to_string())
+                    } else {
+                        extract_capture_group(original, index_value)
+                    }
+                })
+                .unwrap_or_else(|| original.to_string());
+
+            result.push_str(&replacement);
+        } else {
+            result.push(ch);
         }
     }
 
-    // Direct replacement
-    Ok(pattern.to_string())
+    Ok(result)
 }
 
 /// Extract capture group from common patterns
 fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
+    if group_num == 0 {
+        return Some(original.to_string());
+    }
+
     // Common regex patterns we support
     let patterns = [
         // (\d+) - any digits
@@ -553,7 +727,7 @@ fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
                     }
                 }
                 // Fallback for simple position-based extraction
-                if !positions.is_empty() && group_num == 1 && !positions.is_empty() {
+                if !positions.is_empty() && group_num == 1 {
                     let start_pos = positions[0];
                     if original.len() > start_pos {
                         // Extract digits from this position onward

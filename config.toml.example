@@ -6,6 +6,8 @@ http_addr = "0.0.0.0:8080"
 log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 recorder_path = "/tmp/recorders"
+# recorder_format can be "wav" (default) or "ogg" (requires enabling the 'opus' feature)
+recorder_format = "wav"
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 

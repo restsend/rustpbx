@@ -9,8 +9,9 @@ use crate::call::RoutingState;
 use crate::call::SipUser;
 use crate::call::TransactionCookie;
 use crate::callrecord::{
-    CallRecord, CallRecordHangupReason, CallRecordPersistArgs, extract_sip_username,
-    persist_call_record,
+    CallRecord, CallRecordHangupReason, CallRecordPersistArgs, apply_record_file_extras,
+    extract_sip_username, extras_map_to_metadata, extras_map_to_option,
+    persist_and_dispatch_record, sipflow::SipMessageItem,
 };
 use crate::config::ProxyConfig;
 use crate::config::RouteResult;
@@ -28,7 +29,7 @@ use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipConnection;
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
+use serde_json::{Number as JsonNumber, Value};
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -41,6 +42,25 @@ pub trait CallRouter: Send + Sync {
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
+}
+
+fn dialog_call_id(dialog_id: &DialogId) -> Option<String> {
+    let candidate = dialog_id.call_id.trim();
+    if !candidate.is_empty() {
+        return Some(candidate.to_string());
+    }
+
+    let raw = dialog_id.to_string();
+    let trimmed = raw
+        .split(|c| matches!(c, ';' | ':' | ' ' | '\t'))
+        .next()
+        .map(|s| s.trim())
+        .unwrap_or_default();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 #[async_trait]
@@ -385,7 +405,15 @@ impl CallModule {
             Value::Number(JsonNumber::from(u16::from(status_code.clone()))),
         );
 
-        let record = CallRecord {
+        let mut sip_flows: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
+        let leg_call_id = dialog_call_id(&dialog_id).unwrap_or_else(|| dialog_id.to_string());
+        if let Some(items) = self.inner.server.drain_sip_flow(&leg_call_id) {
+            if !items.is_empty() {
+                sip_flows.insert(leg_call_id, items);
+            }
+        }
+
+        let mut record = CallRecord {
             call_type: crate::call::ActiveCallType::Sip,
             option: None,
             call_id: dialog_id.to_string(),
@@ -400,76 +428,53 @@ impl CallModule {
             answer: None,
             hangup_reason: Some(CallRecordHangupReason::BySystem),
             recorder: Vec::new(),
-            extras: if extras_map.is_empty() {
-                None
-            } else {
-                Some(extras_map.clone())
-            },
+            extras: None,
             dump_event_file: None,
             refer_callrecord: None,
+            sip_flows,
         };
 
-        if let Some(db) = self.inner.server.database.as_ref() {
-            let direction = if cookie.is_from_trunk() {
-                "inbound".to_string()
-            } else {
-                "internal".to_string()
-            };
-            let trunk_name = cookie.get_source_trunk();
-            let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
-                let trunks = self.inner.server.data_context.trunks_snapshot().await;
-                let trunk_id = trunks.get(name).and_then(|config| config.id);
-                (Some(name.clone()), trunk_id)
-            } else {
-                (None, None)
-            };
+        apply_record_file_extras(&record, &mut extras_map);
+        record.extras = extras_map_to_option(&extras_map);
 
-            let metadata_value = if extras_map.is_empty() {
-                None
-            } else {
-                let mut map = JsonMap::new();
-                for (key, value) in extras_map.iter() {
-                    map.insert(key.clone(), value.clone());
-                }
-                Some(Value::Object(map))
-            };
+        let direction = if cookie.is_from_trunk() {
+            "inbound".to_string()
+        } else {
+            "internal".to_string()
+        };
+        let trunk_name = cookie.get_source_trunk();
+        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
+            let trunks = self.inner.server.data_context.trunks_snapshot().await;
+            let trunk_id = trunks.get(name).and_then(|config| config.id);
+            (Some(name.clone()), trunk_id)
+        } else {
+            (None, None)
+        };
 
-            let persist_args = CallRecordPersistArgs {
-                direction,
-                status: "failed".to_string(),
-                from_number: extract_sip_username(&caller),
-                to_number: extract_sip_username(&callee),
-                caller_name: None,
-                agent_name: None,
-                queue: None,
-                department_id: None,
-                extension_id: None,
-                sip_trunk_id,
-                route_id: None,
-                sip_gateway,
-                recording_url: None,
-                recording_duration_secs: None,
-                has_transcript: false,
-                transcript_status: "pending".to_string(),
-                transcript_language: None,
-                tags: None,
-                quality_mos: None,
-                quality_latency_ms: None,
-                quality_jitter_ms: None,
-                quality_packet_loss_percent: None,
-                analytics: None,
-                metadata: metadata_value,
-            };
+        let metadata_value = extras_map_to_metadata(&extras_map);
 
-            if let Err(err) = persist_call_record(db, &record, persist_args).await {
-                warn!(dialog_id = %dialog_id, error = %err, "failed to persist failed call record");
-            }
+        let mut persist_args = CallRecordPersistArgs::default();
+        persist_args.direction = direction;
+        persist_args.status = "failed".to_string();
+        persist_args.from_number = extract_sip_username(&caller);
+        persist_args.to_number = extract_sip_username(&callee);
+        persist_args.sip_trunk_id = sip_trunk_id;
+        persist_args.sip_gateway = sip_gateway;
+        persist_args.metadata = metadata_value;
+
+        let (persist_error, send_error) = persist_and_dispatch_record(
+            self.inner.server.database.as_ref(),
+            self.inner.server.callrecord_sender.as_ref(),
+            record,
+            persist_args,
+        )
+        .await;
+
+        if let Some(err) = persist_error {
+            warn!(dialog_id = %dialog_id, error = %err, "failed to persist failed call record");
         }
-
-        if let Some(sender) = self.inner.server.callrecord_sender.as_ref() {
-            if let Err(e) = sender.send(record) {
-                warn!(error=%e, "failed to send call record");
-            }
+        if let Some(err) = send_error {
+            warn!(dialog_id = %dialog_id, error = %err, "failed to send call record");
         }
         Ok(())
     }

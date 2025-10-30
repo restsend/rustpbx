@@ -6,7 +6,10 @@ use super::{
 };
 use crate::{
     call::TransactionCookie,
-    callrecord::CallRecordSender,
+    callrecord::{
+        CallRecordSender,
+        sipflow::{SipFlow, SipFlowBuilder, SipMessageItem},
+    },
     config::{ProxyConfig, RtpConfig},
     proxy::{
         FnCreateRouteInvite,
@@ -63,6 +66,7 @@ pub struct SipServerInner {
     pub create_route_invite: Option<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_option: bool,
     pub locator_events: Option<LocatorEventSender>,
+    pub sip_flow: Option<SipFlow>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -364,9 +368,14 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
+        let mut sip_flow_builder = SipFlowBuilder::new().with_max_items(config.sip_flow_max_items);
         if let Some(inspector) = self.message_inspector {
-            endpoint_builder = endpoint_builder.with_inspector(inspector);
+            sip_flow_builder = sip_flow_builder.register_inspector(inspector);
         }
+
+        let sip_flow = sip_flow_builder.build();
+        endpoint_builder = endpoint_builder
+            .with_inspector(Box::new(sip_flow.clone()) as Box<dyn MessageInspector>);
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
             let (tx, _) = tokio::sync::broadcast::channel(12);
@@ -417,6 +426,7 @@ impl SipServerBuilder {
             create_route_invite: self.create_route_invite,
             ignore_out_of_dialog_option: self.ignore_out_of_dialog_option,
             locator_events: Some(locator_events),
+            sip_flow: Some(sip_flow),
         });
 
         let mut allow_methods = Vec::new();
@@ -667,6 +677,14 @@ impl Drop for SipServerInner {
 }
 
 impl SipServerInner {
+    pub fn drain_sip_flow(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
+        self.sip_flow.as_ref().and_then(|flow| flow.take(call_id))
+    }
+
+    pub fn sip_flow_snapshot(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
+        self.sip_flow.as_ref().and_then(|flow| flow.get(call_id))
+    }
+
     pub fn default_contact_uri(&self) -> Option<rsip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
         let mut params = Vec::new();

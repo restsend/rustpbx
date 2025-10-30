@@ -3,7 +3,7 @@ use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
-    media::engine::StreamEngine,
+    media::{engine::StreamEngine, recorder::RecorderFormat},
     proxy::{
         acl::AclModule,
         auth::AuthModule,
@@ -111,7 +111,7 @@ impl AppStateInner {
         let recorder_file = root.join(session_id);
         if recorder_file.extension().is_none() {
             recorder_file
-                .with_extension("wav")
+                .with_extension(self.config.recorder_format.extension())
                 .to_string_lossy()
                 .to_string()
         } else {
@@ -135,7 +135,13 @@ impl AppStateBuilder {
         }
     }
 
-    pub fn with_config(mut self, config: Config) -> Self {
+    pub fn with_config(mut self, mut config: Config) -> Self {
+        if config.recorder_format == RecorderFormat::Ogg && !RecorderFormat::Ogg.is_supported() {
+            warn!(
+                "recorder_format=ogg requires compiling with the 'opus' feature; falling back to wav"
+            );
+            config.recorder_format = RecorderFormat::Wav;
+        }
         self.config = Some(config);
         if self.config_loaded_at.is_none() {
             self.config_loaded_at = Some(Utc::now());

@@ -1,5 +1,6 @@
 use crate::{
     call::{DialDirection, user::SipUser},
+    media::recorder::RecorderFormat,
     proxy::routing::{DefaultRoute, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
@@ -130,6 +131,8 @@ pub struct Config {
 
     #[serde(default = "default_config_recorder_path")]
     pub recorder_path: String,
+    #[serde(default)]
+    pub recorder_format: RecorderFormat,
     pub callrecord: Option<CallRecordConfig>,
     #[serde(default = "default_config_media_cache_path")]
     pub media_cache_path: String,
@@ -361,6 +364,7 @@ pub struct ProxyConfig {
     pub recorder_root: Option<String>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
+    pub sip_flow_max_items: Option<usize>,
 }
 
 pub enum RouteResult {
@@ -481,6 +485,7 @@ impl Default for ProxyConfig {
             recording: None,
             recorder_root: None,
             generated_dir: default_generated_config_dir(),
+            sip_flow_max_items: None,
         }
     }
 }
@@ -532,6 +537,7 @@ impl Default for Config {
             ua: Some(UseragentConfig::default()),
             proxy: None,
             recorder_path: default_config_recorder_path(),
+            recorder_format: RecorderFormat::default(),
             media_cache_path: default_config_media_cache_path(),
             callrecord: None,
             llmproxy: None,

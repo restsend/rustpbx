@@ -179,6 +179,9 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
         }
         key_items.push(json!({ "label": "Recorder path", "value": config.recorder_path.clone() }));
+        key_items.push(
+            json!({ "label": "Recorder format", "value": config.recorder_format.extension() }),
+        );
         key_items
             .push(json!({ "label": "Media cache path", "value": config.media_cache_path.clone() }));
         key_items
@@ -527,6 +530,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         "Server-side spool paths for recordings and media cache.",
     );
     spool_profile.insert("recorder_path", json!(&config.recorder_path));
+    spool_profile.insert("recorder_format", json!(config.recorder_format.extension()));
     spool_profile.insert("media_cache_path", json!(&config.media_cache_path));
 
     let active_profile_id = callrecord_profile.id.clone();
@@ -538,6 +542,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         "active_profile": active_profile_id,
         "description": active_description,
         "recorder_path": &config.recorder_path,
+        "recorder_format": config.recorder_format.extension(),
         "media_cache_path": &config.media_cache_path,
     });
 

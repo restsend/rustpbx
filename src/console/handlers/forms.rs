@@ -90,6 +90,8 @@ pub struct BillTemplatePayload {
     pub billing_interval: Option<BillingInterval>,
     pub included_minutes: Option<i32>,
     pub included_messages: Option<i32>,
+    pub initial_increment_secs: Option<i32>,
+    pub billing_increment_secs: Option<i32>,
     pub overage_rate_per_minute: Option<f64>,
     pub setup_fee: Option<f64>,
     pub tax_percent: Option<f64>,

@@ -26,7 +26,7 @@
             </div>
         </header>
 
-        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total calls</div>
                 <div class="mt-2 flex items-baseline gap-2">
@@ -67,6 +67,11 @@
                         <span>Unique DIDs</span>
                         <span class="font-semibold text-slate-900" x-text="summary.unique_dids"></span>
                     </div>
+                    <div class="flex items-center justify-between">
+                        <span>Billable minutes</span>
+                        <span class="font-semibold text-slate-900"
+                            x-text="formatNumber(summary.billing_billable_minutes)"></span>
+                    </div>
                 </div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
@@ -77,26 +82,57 @@
                 </div>
                 <p class="mt-2 text-[11px] text-slate-400" x-show="summary.transcribed">Ready for semantic search</p>
             </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
+                <div class="mt-2 space-y-1 text-xs text-slate-600">
+                    <div class="flex items-center justify-between">
+                        <span>Charged calls</span>
+                        <span class="font-semibold text-slate-900"
+                            x-text="formatNumber(summary.billing_charged_calls)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Rated calls</span>
+                        <span class="font-semibold text-slate-900"
+                            x-text="formatNumber(summary.billing_rated_calls)"></span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span>Total billed</span>
+                        <span class="font-semibold text-slate-900" x-text="billingSummaryTotal()"></span>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div class="flex flex-wrap items-center gap-2">
-                        <button type="button"
-                            class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
-                            :class="statusFilter === 'any' ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
-                            @click="selectStatusTab('any')">
-                            All statuses
-                        </button>
-                        <template x-for="tab in statusTabs()" :key="tab.value">
-                            <button type="button"
-                                class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
-                                :class="statusFilter === tab.value ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
-                                @click="selectStatusTab(tab.value)">
-                                <span x-text="tab.label"></span>
-                            </button>
-                        </template>
+                    <div class="flex flex-wrap items-center gap-4">
+                        <div class="flex items-center gap-2">
+                            <div class="inline-flex overflow-hidden rounded-full border border-slate-200 bg-white">
+                                <template x-for="(tab, idx) in statusTabs()" :key="`status-${tab.value}`">
+                                    <button type="button"
+                                        class="px-3 py-1.5 text-xs font-semibold transition focus:outline-none" :class="[
+                                            statusFilter === tab.value ? 'bg-sky-600 text-white' : 'text-slate-600 hover:bg-slate-100',
+                                            idx < statusTabs().length - 1 ? 'border-r border-slate-200' : ''
+                                        ]" @click="selectStatusTab(tab.value)">
+                                        <span x-text="tab.label"></span>
+                                    </button>
+                                </template>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="inline-flex overflow-hidden rounded-full border border-slate-200 bg-white">
+                                <template x-for="(tab, idx) in directionTabs()" :key="`direction-${tab.value}`">
+                                    <button type="button"
+                                        class="px-3 py-1.5 text-xs font-semibold transition focus:outline-none" :class="[
+                                            directionFilter === tab.value ? 'bg-gray-600 text-white' : 'text-slate-600 hover:bg-slate-100',
+                                            idx < directionTabs().length - 1 ? 'border-r border-slate-200' : ''
+                                        ]" @click="selectDirectionTab(tab.value)">
+                                        <span x-text="tab.label"></span>
+                                    </button>
+                                </template>
+                            </div>
+                        </div>
                     </div>
                     <div
                         class="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center lg:justify-end lg:gap-3">
@@ -245,6 +281,14 @@
                                         </template>
                                     </div>
                                 </template>
+                                <template x-if="filter === 'billing_status'">
+                                    <select x-model="billingStatusFilter"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <template x-for="option in filterOptions.billing_status" :key="option">
+                                            <option :value="option" x-text="billingStatusLabel(option)"></option>
+                                        </template>
+                                    </select>
+                                </template>
                             </div>
                         </div>
                     </template>
@@ -294,6 +338,7 @@
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Status</th>
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Tags</th>
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Transcript</th>
+                            <th scope="col" class="whitespace-nowrap px-4 py-2">Billing</th>
                             <th scope="col" class="whitespace-nowrap px-4 py-2 text-right">Actions</th>
                         </tr>
                     </thead>
@@ -343,12 +388,18 @@
                                         <span x-text="directionLabel(record.direction)"></span>
                                     </div>
                                     <div class="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
-                                        <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 4v12M12 8h4" />
-                                        </svg>
-                                        <span x-text="record.sip_gateway || '—'"></span>
+                                        <template x-if="record.sip_gateway">
+                                            <div>
+                                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none"
+                                                    stroke="currentColor" stroke-width="1.6">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M4 4h12v12H4z" />
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M8 4v12M12 8h4" />
+                                                </svg>
+                                                <span x-text="record.sip_gateway || '—'"></span>
+                                            </div>
+                                        </template>
                                     </div>
                                 </td>
                                 <td class="px-4 py-2">
@@ -391,8 +442,6 @@
                                             </span>
                                         </template>
                                         <template x-if="!(record.tags || []).length">
-                                            <span class="rounded-full bg-slate-50 px-2 py-0.5 text-slate-400">No
-                                                tags</span>
                                         </template>
                                     </div>
                                 </td>
@@ -405,6 +454,14 @@
                                                 d="M5 10h10M10 5l5 5-5 5" />
                                         </svg>
                                         <span x-text="record.has_transcript ? 'Ready' : 'Pending'"></span>
+                                    </div>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-2">
+                                    <div class="flex flex-col gap-1 text-xs">
+                                        <span class="text-sm font-semibold text-slate-900"
+                                            x-text="formatBillingAmount(record.billing)"></span>
+                                        <span class="text-[11px] text-slate-400"
+                                            x-text="formatBillingMinutes(record.billing)"></span>
                                     </div>
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-2 text-right text-xs font-semibold">
@@ -498,6 +555,13 @@
                 avg_duration: 0,
                 total_minutes: 0,
                 unique_dids: 0,
+                billing_billable_minutes: 0,
+                billing_rated_calls: 0,
+                billing_charged_calls: 0,
+                billing_included_calls: 0,
+                billing_zero_duration_calls: 0,
+                billing_unrated_calls: 0,
+                billing_revenue: [],
             },
             filterOptions: {
                 status: ['any'],
@@ -505,6 +569,7 @@
                 departments: [],
                 sip_trunks: [],
                 tags: [],
+                billing_status: ['any'],
             },
             search: '',
             statusFilter: 'any',
@@ -515,6 +580,7 @@
             selectedDepartments: [],
             selectedSipTrunks: [],
             selectedTags: [],
+            billingStatusFilter: 'any',
             exportedAt: null,
             loading: false,
             error: null,
@@ -547,8 +613,10 @@
                 { key: 'departments', label: 'Departments' },
                 { key: 'sip_trunks', label: 'SIP trunks' },
                 { key: 'tags', label: 'Tags' },
+                { key: 'billing_status', label: 'Billing status' },
             ],
             activeFilters: [],
+            persistentFilters: [],
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
 
@@ -582,6 +650,7 @@
                     departments: [],
                     sip_trunks: [],
                     tags: [],
+                    billing_status: ['any'],
                 }, options || {});
                 this.filterOptions.status = Array.isArray(this.filterOptions.status)
                     ? this.filterOptions.status
@@ -598,6 +667,9 @@
                 this.filterOptions.tags = Array.isArray(this.filterOptions.tags)
                     ? this.filterOptions.tags
                     : [];
+                this.filterOptions.billing_status = Array.isArray(this.filterOptions.billing_status)
+                    ? this.filterOptions.billing_status
+                    : ['any'];
 
                 if (Array.isArray(data.page_size_options) && data.page_size_options.length) {
                     const normalized = data.page_size_options
@@ -654,6 +726,7 @@
                 this.$watch('search', scheduleWatcher);
                 this.$watch('statusFilter', immediateWatcher);
                 this.$watch('directionFilter', immediateWatcher);
+                this.$watch('billingStatusFilter', immediateWatcher);
                 this.$watch('dateFrom', immediateWatcher);
                 this.$watch('dateTo', immediateWatcher);
                 this.$watch('onlyTranscribed', immediateWatcher);
@@ -691,6 +764,13 @@
                     avg_duration: 0,
                     total_minutes: 0,
                     unique_dids: 0,
+                    billing_billable_minutes: 0,
+                    billing_rated_calls: 0,
+                    billing_charged_calls: 0,
+                    billing_included_calls: 0,
+                    billing_zero_duration_calls: 0,
+                    billing_unrated_calls: 0,
+                    billing_revenue: [],
                 };
                 if (!summary || typeof summary !== 'object') {
                     return defaults;
@@ -748,6 +828,11 @@
                 const direction = (this.directionFilter || '').toLowerCase();
                 if (direction && direction !== 'any') {
                     filters.direction = direction;
+                }
+
+                const billingStatus = (this.billingStatusFilter || '').toLowerCase();
+                if (billingStatus && billingStatus !== 'any') {
+                    filters.billing_status = billingStatus;
                 }
 
                 if (this.dateFrom) {
@@ -928,6 +1013,7 @@
                 this.search = '';
                 this.statusFilter = 'any';
                 this.directionFilter = 'any';
+                this.billingStatusFilter = 'any';
                 this.dateFrom = '';
                 this.dateTo = '';
                 this.onlyTranscribed = false;
@@ -936,6 +1022,7 @@
                 this.selectedTags = [];
                 this.sortOrder = this.defaultSort();
                 this.activeFilters = [];
+                this.persistentFilters = [];
                 this.$nextTick(() => {
                     this._sync.filters = false;
                     this.applyFilters();
@@ -1131,6 +1218,8 @@
                     'Queue',
                     'Tags',
                     'Transcript',
+                    'Billing status',
+                    'Billing total',
                 ];
                 return [header]
                     .concat(
@@ -1147,6 +1236,8 @@
                             record?.queue || '',
                             (Array.isArray(record?.tags) ? record.tags : []).join('|'),
                             record?.has_transcript ? 'Yes' : 'No',
+                            this.billingStatusLabel(record?.billing?.status),
+                            this.formatBillingAmount(record?.billing),
                         ])
                     )
                     .map((line) =>
@@ -1169,11 +1260,20 @@
                         label: this.statusLabel(value),
                     }));
             },
+            directionTabs() {
+                const options = Array.isArray(this.filterOptions.direction) ? this.filterOptions.direction : [];
+                return options
+                    .filter((value) => value !== 'any')
+                    .map((value) => ({
+                        value,
+                        label: this.directionLabel(value),
+                    }));
+            },
             selectStatusTab(value) {
-                if (this.statusFilter === value) {
-                    return;
-                }
-                this.statusFilter = value;
+                this.statusFilter = this.statusFilter === value ? 'any' : value;
+            },
+            selectDirectionTab(value) {
+                this.directionFilter = this.directionFilter === value ? 'any' : value;
             },
             filterOptionLabel(key) {
                 switch (key) {
@@ -1191,6 +1291,8 @@
                         return 'SIP trunks';
                     case 'tags':
                         return 'Tags';
+                    case 'billing_status':
+                        return 'Billing status';
                     default:
                         return key;
                 }
@@ -1264,6 +1366,10 @@
                         const selected = Array.isArray(this.selectedTags) ? this.selectedTags : [];
                         return selected.length ? selected.join(', ') : 'Any tag';
                     }
+                    case 'billing_status':
+                        return this.billingStatusFilter && this.billingStatusFilter !== 'any'
+                            ? this.billingStatusLabel(this.billingStatusFilter)
+                            : 'Any billing status';
                     default:
                         return '';
                 }
@@ -1275,6 +1381,9 @@
                 }
                 if (!this.activeFilters.includes(key)) {
                     this.activeFilters = [...this.activeFilters, key];
+                }
+                if (this.shouldPersistFilter(key) && !this.persistentFilters.includes(key)) {
+                    this.persistentFilters = [...this.persistentFilters, key];
                 }
                 if (event && event.target) {
                     event.target.value = '';
@@ -1313,10 +1422,16 @@
                     case 'tags':
                         this.selectedTags = [];
                         break;
+                    case 'billing_status':
+                        this.billingStatusFilter = 'any';
+                        break;
                     default:
                         break;
                 }
                 this.activeFilters = this.activeFilters.filter((item) => item !== key);
+                if (this.shouldPersistFilter(key)) {
+                    this.persistentFilters = this.persistentFilters.filter((item) => item !== key);
+                }
                 this.$nextTick(() => {
                     this._sync.filters = false;
                     this.syncActiveFilters();
@@ -1327,45 +1442,51 @@
                 return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks', 'tags'].includes(key);
             },
             syncActiveFilters() {
+                const manualFilters = Array.isArray(this.activeFilters)
+                    ? [...this.activeFilters]
+                    : [];
                 const statusActive = this.statusFilter && this.statusFilter !== 'any';
                 const directionActive = this.directionFilter && this.directionFilter !== 'any';
+                const billingStatusActive = this.billingStatusFilter && this.billingStatusFilter !== 'any';
                 const hasDate = Boolean(this.dateFrom) || Boolean(this.dateTo);
                 const departmentsSelected = Array.isArray(this.selectedDepartments) && this.selectedDepartments.length;
                 const sipSelected = Array.isArray(this.selectedSipTrunks) && this.selectedSipTrunks.length;
                 const tagsSelected = Array.isArray(this.selectedTags) && this.selectedTags.length;
-                const persisted = this.activeFilters.filter((item) => this.shouldPersistFilter(item));
                 const next = [];
-                if (statusActive) {
-                    next.push('status');
-                }
-                if (directionActive || this.activeFilters.includes('direction')) {
-                    next.push('direction');
-                }
-                if (hasDate || this.activeFilters.includes('date_range')) {
-                    next.push('date_range');
-                }
-                if (this.onlyTranscribed || this.activeFilters.includes('only_transcribed')) {
-                    next.push('only_transcribed');
-                }
-                if (departmentsSelected || this.activeFilters.includes('departments')) {
-                    next.push('departments');
-                }
-                if (sipSelected || this.activeFilters.includes('sip_trunks')) {
-                    next.push('sip_trunks');
-                }
-                if (tagsSelected || this.activeFilters.includes('tags')) {
-                    next.push('tags');
-                }
-                const ordered = [...persisted, ...next];
-                const seen = new Set();
-                const unique = [];
-                ordered.forEach((item) => {
-                    if (!seen.has(item)) {
-                        seen.add(item);
-                        unique.push(item);
+                const addUnique = (key) => {
+                    if (!next.includes(key)) {
+                        next.push(key);
                     }
-                });
-                this.activeFilters = unique;
+                };
+
+                (this.persistentFilters || []).forEach((key) => addUnique(key));
+
+                if (statusActive) {
+                    addUnique('status');
+                }
+                if (directionActive || this.persistentFilters.includes('direction')) {
+                    addUnique('direction');
+                }
+                if (billingStatusActive || manualFilters.includes('billing_status')) {
+                    addUnique('billing_status');
+                }
+                if (hasDate || this.persistentFilters.includes('date_range')) {
+                    addUnique('date_range');
+                }
+                if (this.onlyTranscribed || this.persistentFilters.includes('only_transcribed')) {
+                    addUnique('only_transcribed');
+                }
+                if (departmentsSelected || this.persistentFilters.includes('departments')) {
+                    addUnique('departments');
+                }
+                if (sipSelected || this.persistentFilters.includes('sip_trunks')) {
+                    addUnique('sip_trunks');
+                }
+                if (tagsSelected || this.persistentFilters.includes('tags')) {
+                    addUnique('tags');
+                }
+
+                this.activeFilters = next;
             },
             defaultSort() {
                 return 'started_at_desc';
@@ -1398,6 +1519,22 @@
                         return value || 'Unknown';
                 }
             },
+            billingStatusLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'charged':
+                        return 'Charged';
+                    case 'included':
+                        return 'Included';
+                    case 'zero-duration':
+                        return 'Zero duration';
+                    case 'unrated':
+                        return 'Unrated';
+                    case 'any':
+                        return 'Any billing status';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
             statusClasses(status) {
                 switch ((status || '').toLowerCase()) {
                     case 'completed':
@@ -1406,6 +1543,20 @@
                         return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
                     case 'failed':
                         return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+            },
+            billingStatusClasses(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'charged':
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    case 'included':
+                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    case 'zero-duration':
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    case 'unrated':
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
                     default:
                         return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
                 }
@@ -1433,6 +1584,78 @@
                     default:
                         return 'border border-slate-200 bg-slate-50 text-slate-700';
                 }
+            },
+            formatCurrency(amount, currency) {
+                if (amount === null || amount === undefined) {
+                    return '—';
+                }
+                const numeric = Number(amount);
+                if (!Number.isFinite(numeric)) {
+                    return '—';
+                }
+                const symbol = (currency || 'USD').toString().trim().toUpperCase() || 'USD';
+                return `${symbol} ${numeric.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                })}`;
+            },
+            formatBillingAmount(billing) {
+                if (!billing || typeof billing !== 'object') {
+                    return '—';
+                }
+                const status = (billing.status || '').toLowerCase();
+                const amount = billing.amount || {};
+                const total = amount.total ?? amount.subtotal ?? null;
+                if (total !== null && total !== undefined) {
+                    return this.formatCurrency(total, billing.currency || 'USD');
+                }
+                if (status === 'included') {
+                    return 'Included';
+                }
+                if (status === 'zero-duration') {
+                    return '0.00';
+                }
+                if (status === 'unrated') {
+                    return 'Unrated';
+                }
+                return '—';
+            },
+            formatBillingMinutes(billing) {
+                if (!billing || typeof billing !== 'object') {
+                    return '—';
+                }
+                const source = billing.billable_minutes !== undefined
+                    ? Number(billing.billable_minutes)
+                    : (typeof billing.billable_secs === 'number'
+                        ? Number(billing.billable_secs) / 60.0
+                        : NaN);
+                if (!Number.isFinite(source) || source <= 0) {
+                    return '—';
+                }
+                return `${source.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                })} min`;
+            },
+            billingRevenueEntries() {
+                const entries = Array.isArray(this.summary.billing_revenue)
+                    ? this.summary.billing_revenue
+                    : [];
+                return entries
+                    .map((entry) => ({
+                        currency: (entry?.currency || 'USD').toString().trim().toUpperCase() || 'USD',
+                        total: Number(entry?.total ?? 0),
+                    }))
+                    .filter((entry) => Number.isFinite(entry.total));
+            },
+            billingSummaryTotal() {
+                const entries = this.billingRevenueEntries();
+                if (!entries.length) {
+                    return '—';
+                }
+                return entries
+                    .map((entry) => this.formatCurrency(entry.total, entry.currency))
+                    .join(' · ');
             },
             qualityTone(value) {
                 const mos = Number(value || 0);
