@@ -1106,6 +1106,34 @@
                                         </button>
                                         <div x-cloak x-show="open" x-transition.origin.top.right
                                             class="absolute right-0 z-20 mt-2 w-48 rounded-lg border border-slate-200 bg-white p-2 text-sm shadow-xl">
+                                            <template x-if="sipRecentTargets.length">
+                                                <div
+                                                    class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    Recent
+                                                </div>
+                                            </template>
+                                            <template x-for="recent in sipRecentTargets" :key="recent.value">
+                                                <button type="button"
+                                                    @click="sipForm.target = recent.value; open = false"
+                                                    class="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-slate-100">
+                                                    <span class="text-xs font-semibold text-slate-600"
+                                                        x-text="recent.label || recent.value"></span>
+                                                    <template x-if="recent.label && recent.label !== recent.value">
+                                                        <span class="font-mono text-xs text-slate-500"
+                                                            x-text="recent.value"></span>
+                                                    </template>
+                                                </button>
+                                            </template>
+                                            <template
+                                                x-if="sipRecentTargets.length && dialer.destination_samples?.length">
+                                                <div class="my-1 border-t border-slate-100"></div>
+                                            </template>
+                                            <template x-if="dialer.destination_samples?.length">
+                                                <div
+                                                    class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    Presets
+                                                </div>
+                                            </template>
                                             <template x-for="sample in dialer.destination_samples" :key="sample.value">
                                                 <button type="button"
                                                     @click="sipForm.target = sample.value; open = false"
@@ -1116,10 +1144,11 @@
                                                         x-text="sample.value"></span>
                                                 </button>
                                             </template>
-                                            <template x-if="!dialer.destination_samples?.length">
+                                            <template
+                                                x-if="!sipRecentTargets.length && !dialer.destination_samples?.length">
                                                 <div
                                                     class="rounded border border-dashed border-slate-200 px-2 py-3 text-center text-[11px] text-slate-400">
-                                                    No presets
+                                                    No entries yet
                                                 </div>
                                             </template>
                                         </div>
@@ -1179,11 +1208,9 @@
                                 <div class="flex flex-col gap-1">
                                     <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Local
                                         audio</span>
-                                    <audio x-ref="sipLocalAudio" autoplay controls muted playsinline
+                                    <audio x-ref="sipLocalAudio" autoplay controls playsinline
                                         class="w-full rounded-lg border border-slate-200">
                                     </audio>
-                                    <span class="text-[11px] text-slate-400">Local stream stays muted so you can confirm
-                                        media is flowing.</span>
                                 </div>
                             </div>
                         </div>
@@ -1195,8 +1222,7 @@
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h3 class="text-sm font-semibold text-slate-900">SIP Requests / Responses</h3>
-                                <p class="text-xs text-slate-500">Captured raw SIP messages from JsSIP (latest 80
-                                    entries).</p>
+                                <p class="text-xs text-slate-500">Latest 80 WebSocket messages captured from JsSIP.</p>
                             </div>
                             <div class="flex items-center gap-3 text-[11px]">
                                 <label class="inline-flex items-center gap-1 text-slate-500">
@@ -1210,38 +1236,45 @@
                                 </button>
                             </div>
                         </div>
-                        <div class="mt-4 space-y-2 max-h-[32rem] overflow-y-auto" x-ref="sipTrafficContainer">
+                        <div class="mt-4 max-h-[32rem] overflow-y-auto" x-ref="sipTrafficContainer">
                             <template x-if="!sipTraffic.length">
                                 <div
                                     class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
                                     Waiting for SIP traffic...
                                 </div>
                             </template>
-                            <template x-for="item in sipTraffic" :key="item.id">
-                                <article class="rounded-lg border border-slate-200 bg-slate-50 p-3"
-                                    x-data="{ open: false }">
-                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                        <div>
-                                            <div class="font-mono text-[11px] text-slate-400" x-text="item.time"></div>
-                                            <div class="text-xs font-semibold text-slate-700" x-text="item.summary">
+                            <div class="space-y-2">
+                                <template x-for="item in sipTraffic" :key="item.id">
+                                    <article class="rounded-lg border border-slate-200 bg-slate-50"
+                                        x-data="{ open: false }">
+                                        <button type="button" @click="open = !open"
+                                            class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-slate-600 transition hover:bg-slate-100">
+                                            <div class="space-y-1">
+                                                <div class="flex items-center gap-2">
+                                                    <div class="font-mono text-[11px] text-slate-400"
+                                                        x-text="item.time"></div>
+                                                    <span
+                                                        class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                                                        :class="item.direction === 'outgoing'
+                                                            ? 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
+                                                            : 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'"
+                                                        x-text="item.direction === 'outgoing' ? 'Request' : 'Response'"></span>
+                                                </div>
+                                                <div class="text-xs font-semibold text-slate-700" x-text="item.summary">
+                                                </div>
                                             </div>
-                                        </div>
-                                        <div class="flex items-center gap-2">
-                                            <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                                :class="item.direction === 'outgoing' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'">
-                                                <span x-text="item.direction === 'outgoing' ? 'Send' : 'Recv'"></span>
-                                            </span>
-                                            <button type="button" @click="open = !open"
-                                                class="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                                                <span x-text="open ? 'Hide raw' : 'Show raw'"></span>
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <pre x-show="open" x-transition
-                                        class="mt-2 max-h-64 overflow-auto rounded bg-slate-900/90 p-3 text-[11px] leading-tight text-slate-100"
-                                        x-text="item.payload"></pre>
-                                </article>
-                            </template>
+                                            <svg class="h-4 w-4 text-slate-400 transition"
+                                                :class="open ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="none"
+                                                stroke="currentColor" stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 8l4 4 4-4" />
+                                            </svg>
+                                        </button>
+                                        <pre x-show="open" x-transition
+                                            class="max-h-64 overflow-auto rounded-b bg-slate-900/90 p-3 text-[11px] leading-tight text-slate-100"
+                                            x-text="item.payload"></pre>
+                                    </article>
+                                </template>
+                            </div>
                         </div>
                     </div>
 
@@ -1293,6 +1326,8 @@
             Alpine.data('testingConsole', (payload) => {
                 let sipUa = null;
                 let sipSession = null;
+                const RECENT_TARGETS_KEY = 'rustpbx.console.sipRecentTargets';
+                const FALLBACK_ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302'] }];
                 return {
                     init() {
                         const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
@@ -1310,6 +1345,8 @@
                         this.initializeTrunkTests();
                         this.dialer = data.dialer || { source_options: [], destination_samples: [] };
                         this.initializeSipDefaults();
+                        this.loadRecentTargets({ overwrite: true });
+                        this.ensureIceServers();
                         const firstCheck = this.routingChecks?.[0] || {};
                         this.routingInput = firstCheck.input || '';
                         this.routingDirection = firstCheck.direction || 'outbound';
@@ -1361,8 +1398,9 @@
                     dialogCallId: '',
                     dialer: {},
                     sipForm: { wsServer: '', uri: '', authUser: '', password: '', displayName: '', target: '' },
+                    sipUaReady: false,
                     get hasSipUa() {
-                        return Boolean(sipUa);
+                        return Boolean(this.sipUaReady);
                     },
                     sipRegistering: false,
                     sipRegistered: false,
@@ -1375,6 +1413,12 @@
                     sipIncoming: null,
                     sipEvents: [],
                     sipTraffic: [],
+                    sipRecentTargets: [],
+                    sipIceServers: [],
+                    sipIceServersError: null,
+                    sipIceServersFetched: false,
+                    sipIceServersPromise: null,
+                    sipIceServersLoading: false,
                     sipTrafficAutoScroll: true,
                     sipTrafficLimit: 80,
                     sipLocalStream: null,
@@ -1382,13 +1426,13 @@
                     sipDebugEnabled: false,
                     hasSipSession: false,
                     tabs: [
+                        { id: 'dialer', label: 'Web Dialer' },
                         { id: 'connection', label: 'Connection' },
                         { id: 'trunks', label: 'Trunks' },
                         { id: 'routing', label: 'Routing' },
                         { id: 'sip', label: 'SIP State' },
-                        { id: 'dialer', label: 'Web Dialer' },
                     ],
-                    activeTab: 'connection',
+                    activeTab: 'dialer',
                     selectTab(id) {
                         this.activeTab = id;
                         if (id === 'sip') {
@@ -1703,6 +1747,166 @@
                         }
                         return null;
                     },
+                    loadRecentTargets(options = {}) {
+                        const overwrite = Boolean(options?.overwrite);
+                        if (typeof window === 'undefined') {
+                            this.sipRecentTargets = [];
+                            return;
+                        }
+                        let entries = [];
+                        try {
+                            const raw = window.localStorage?.getItem(RECENT_TARGETS_KEY);
+                            if (raw) {
+                                const parsed = JSON.parse(raw);
+                                if (Array.isArray(parsed)) {
+                                    entries = parsed
+                                        .map((item) => {
+                                            if (!item) {
+                                                return null;
+                                            }
+                                            if (typeof item === 'string') {
+                                                const value = item.trim();
+                                                return value ? { value, label: value } : null;
+                                            }
+                                            if (typeof item === 'object' && item.value) {
+                                                const value = String(item.value).trim();
+                                                if (!value) {
+                                                    return null;
+                                                }
+                                                const label = item.label ? String(item.label).trim() : value;
+                                                return { value, label };
+                                            }
+                                            return null;
+                                        })
+                                        .filter(Boolean)
+                                        .slice(0, 5);
+                                }
+                            }
+                        } catch (err) {
+                            entries = [];
+                        }
+                        this.sipRecentTargets = entries;
+                        const first = this.sipRecentTargets[0];
+                        if (first && (overwrite || !this.sipForm.target)) {
+                            this.sipForm.target = first.value;
+                        }
+                    },
+                    persistRecentTargets() {
+                        if (typeof window === 'undefined' || !window.localStorage) {
+                            return;
+                        }
+                        try {
+                            window.localStorage.setItem(RECENT_TARGETS_KEY, JSON.stringify(this.sipRecentTargets));
+                        } catch (err) {
+                            // ignore persistence errors
+                        }
+                    },
+                    rememberRecentTarget(rawInput, resolvedValue) {
+                        const raw = rawInput ? String(rawInput).trim() : '';
+                        const resolved = resolvedValue ? String(resolvedValue).trim() : '';
+                        const value = resolved || raw;
+                        if (!value) {
+                            return;
+                        }
+                        const label = raw || value;
+                        const deduped = (this.sipRecentTargets || []).filter((item) => item && item.value !== value);
+                        this.sipRecentTargets = [{ value, label }, ...deduped].slice(0, 5);
+                        this.persistRecentTargets();
+                    },
+                    normalizeIceServers(servers) {
+                        if (!Array.isArray(servers)) {
+                            return [];
+                        }
+                        return servers
+                            .map((item) => {
+                                if (!item) {
+                                    return null;
+                                }
+                                const urls = Array.isArray(item.urls)
+                                    ? item.urls.filter((url) => typeof url === 'string' && url.trim())
+                                    : (typeof item.urls === 'string' && item.urls.trim()
+                                        ? [item.urls.trim()]
+                                        : []);
+                                if (!urls.length) {
+                                    return null;
+                                }
+                                const server = { urls };
+                                if (item.username) {
+                                    server.username = item.username;
+                                }
+                                if (item.credential) {
+                                    server.credential = item.credential;
+                                }
+                                return server;
+                            })
+                            .filter(Boolean);
+                    },
+                    async ensureIceServers(options = {}) {
+                        const force = Boolean(options?.force);
+                        if (this.sipIceServersPromise) {
+                            try {
+                                await this.sipIceServersPromise;
+                            } catch (err) {
+                                // handled downstream
+                            }
+                            return this.sipIceServers;
+                        }
+                        if (this.sipIceServersFetched && !force) {
+                            return this.sipIceServers;
+                        }
+                        this.sipIceServersPromise = this.fetchIceServers({ force });
+                        try {
+                            await this.sipIceServersPromise;
+                        } finally {
+                            this.sipIceServersPromise = null;
+                        }
+                        return this.sipIceServers;
+                    },
+                    async fetchIceServers({ force = false } = {}) {
+                        if (this.sipIceServersLoading && !force) {
+                            return this.sipIceServers;
+                        }
+                        this.sipIceServersLoading = true;
+                        let servers = [];
+                        try {
+                            let url = '/iceservers';
+                            if (typeof window !== 'undefined' && window.location) {
+                                url = new URL('/iceservers', window.location.origin).toString();
+                            }
+                            const response = await fetch(url, {
+                                credentials: 'same-origin',
+                                headers: { Accept: 'application/json' },
+                            });
+                            const data = await response.json().catch(() => null);
+                            if (!response.ok) {
+                                const statusText = response.statusText || `status ${response.status}`;
+                                throw new Error(`request failed (${statusText})`);
+                            }
+                            servers = this.normalizeIceServers(data);
+                            if (!servers.length) {
+                                servers = this.normalizeIceServers(FALLBACK_ICE_SERVERS);
+                                if (!this.sipIceServersFetched || force) {
+                                    this.appendSipEvent('ICE server list empty, using fallback STUN.', 'warning');
+                                }
+                            } else if (!this.sipIceServersFetched || force) {
+                                const count = servers.length;
+                                this.appendSipEvent(`Loaded ${count} ICE server${count === 1 ? '' : 's'}.`, 'info');
+                            }
+                            this.sipIceServersError = null;
+                        } catch (err) {
+                            const message = err?.message || 'failed to load ICE servers';
+                            this.sipIceServersError = message;
+                            if (!this.sipIceServersFetched || force) {
+                                this.appendSipEvent(`ICE servers unavailable: ${message}. Using fallback STUN.`, 'warning');
+                            }
+                            servers = this.normalizeIceServers(FALLBACK_ICE_SERVERS);
+                        } finally {
+                            this.sipIceServers = servers;
+                            this.sipIceServersLoading = false;
+                            this.sipIceServersFetched = true;
+                        }
+                        return this.sipIceServers;
+                    },
                     async registerSip() {
                         if (this.sipRegistering) {
                             return;
@@ -1722,6 +1926,7 @@
                             this.sipRegisterError = 'Invalid SIP URI (expected sip:1001@example.com).';
                             return;
                         }
+                        await this.ensureIceServers();
                         this.sipRegisterError = null;
                         this.sipRegistering = true;
                         this.setSipStatus('Connecting...', 'pending');
@@ -1733,6 +1938,7 @@
                                 // ignore cleanup errors
                             }
                             sipUa = null;
+                            this.sipUaReady = false;
                         }
                         try {
                             if (!this.sipDebugEnabled && window.JsSIP?.debug) {
@@ -1753,18 +1959,26 @@
                         if (this.sipForm.authUser && this.sipForm.authUser.trim()) {
                             configuration.authorization_user = this.sipForm.authUser.trim();
                         }
+                        const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                        if (iceServers.length) {
+                            configuration.pcConfig = { iceServers };
+                            configuration.iceServers = iceServers;
+                        }
                         const ua = new JsSIP.UA(configuration);
                         sipUa = ua;
+                        this.sipUaReady = true;
                         ua.on('connected', () => {
                             this.appendSipEvent('WebSocket connected', 'success');
                             this.setSipStatus('Connected', 'pending');
                             this.ensureTransportTap();
+                            this.sipUaReady = true;
                         });
                         ua.on('disconnected', () => {
                             this.appendSipEvent('WebSocket disconnected', 'warning');
                             this.setSipStatus(this.sipRegistered ? 'Disconnected' : 'Unregistered', this.sipRegistered ? 'error' : 'idle');
                             this.sipRegistered = false;
                             this.sipRegistering = false;
+                            this.sipUaReady = false;
                             this.resetSipSessionState();
                         });
                         ua.on('registered', () => {
@@ -1773,11 +1987,13 @@
                             this.appendSipEvent('Registered', 'success');
                             this.setSipStatus('Registered', 'success');
                             this.ensureTransportTap();
+                            this.sipUaReady = true;
                         });
                         ua.on('unregistered', () => {
                             this.appendSipEvent('Unregistered', 'info');
                             this.setSipStatus('Unregistered', 'idle');
                             this.sipRegistered = false;
+                            this.sipUaReady = false;
                             if (!this.sipRegistering) {
                                 this.resetSipSessionState();
                             }
@@ -1789,6 +2005,7 @@
                             this.setSipStatus('Registration failed', 'error');
                             this.sipRegistering = false;
                             this.sipRegistered = false;
+                            this.sipUaReady = false;
                             try {
                                 ua.stop();
                             } catch (err) {
@@ -1825,6 +2042,8 @@
                             this.appendSipEvent(`UA start failed: ${message}`, 'error');
                             this.setSipStatus('Unregistered', 'error');
                             this.sipRegistering = false;
+                            this.sipUaReady = false;
+                            sipUa = null;
                         }
                     },
                     unregisterSip() {
@@ -1841,6 +2060,7 @@
                                 // ignore
                             }
                             sipUa = null;
+                            this.sipUaReady = false;
                         }
                         this.sipRegistered = false;
                         this.sipRegistering = false;
@@ -1855,11 +2075,14 @@
                             this.sipCallError = 'A call is already in progress.';
                             return;
                         }
-                        const targetUri = this.buildTargetUri(this.sipForm.target);
+                        const rawTarget = this.sipForm.target;
+                        const targetUri = this.buildTargetUri(rawTarget);
                         if (!targetUri) {
                             this.sipCallError = 'Enter a destination URI or number.';
                             return;
                         }
+                        await this.ensureIceServers();
+                        this.rememberRecentTarget(rawTarget, targetUri);
                         this.sipCallError = null;
                         let mediaStream = null;
                         try {
@@ -1868,6 +2091,7 @@
                             this.sipLocalStream = mediaStream;
                             if (this.$refs.sipLocalAudio) {
                                 this.$refs.sipLocalAudio.srcObject = mediaStream;
+                                this.$refs.sipLocalAudio.muted = false;
                             }
                         } catch (err) {
                             const message = err?.message || 'Unable to access microphone';
@@ -1882,6 +2106,10 @@
                             rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false },
                             sessionTimersExpires: 120,
                         };
+                        const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                        if (iceServers.length) {
+                            options.pcConfig = { iceServers };
+                        }
                         this.appendSipEvent(`Calling ${targetUri}`, 'info');
                         try {
                             const session = sipUa.call(targetUri, options);
@@ -1908,15 +2136,22 @@
                         }
                         this.sipCallError = null;
                         try {
+                            await this.ensureIceServers();
                             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                             this.sipLocalStream = stream;
                             if (this.$refs.sipLocalAudio) {
                                 this.$refs.sipLocalAudio.srcObject = stream;
+                                this.$refs.sipLocalAudio.muted = false;
                             }
-                            sipSession.answer({
+                            const options = {
                                 mediaStream: stream,
                                 mediaConstraints: { audio: true, video: false },
-                            });
+                            };
+                            const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                            if (iceServers.length) {
+                                options.pcConfig = { iceServers };
+                            }
+                            sipSession.answer(options);
                             this.appendSipEvent('Answered incoming call', 'success');
                             this.sipIncoming = null;
                         } catch (err) {
@@ -1947,10 +2182,14 @@
                             this.sipCallStatus = 'Ringing...';
                         });
                         session.on('accepted', () => {
-                            this.sipCallStatus = 'Answered';
+                            const identity = session.remote_identity;
+                            const name = identity?.display_name || identity?.uri?.user || 'remote party';
+                            this.sipCallStatus = `Answered by ${name}`;
                         });
                         session.on('confirmed', () => {
-                            this.sipCallStatus = 'In call';
+                            const identity = session.remote_identity;
+                            const name = identity?.display_name || identity?.uri?.user || 'remote party';
+                            this.sipCallStatus = `In call with ${name}`;
                         });
                         session.on('failed', (data) => {
                             const cause = data?.cause || 'unknown reason';
@@ -1997,7 +2236,16 @@
                         this.sipCallStatus = this.sipRegistered ? 'Idle' : 'Unregistered';
                         this.releaseLocalStream();
                         if (this.$refs.sipRemoteAudio) {
-                            this.$refs.sipRemoteAudio.srcObject = null;
+                            const remoteEl = this.$refs.sipRemoteAudio;
+                            const remoteStream = remoteEl.srcObject;
+                            if (remoteStream && typeof remoteStream.getTracks === 'function') {
+                                try {
+                                    remoteStream.getTracks().forEach((track) => track.stop());
+                                } catch (err) {
+                                    // ignore track stop errors
+                                }
+                            }
+                            remoteEl.srcObject = null;
                         }
                     },
                     releaseLocalStream() {
@@ -2011,6 +2259,7 @@
                         this.sipLocalStream = null;
                         if (this.$refs.sipLocalAudio) {
                             this.$refs.sipLocalAudio.srcObject = null;
+                            this.$refs.sipLocalAudio.muted = false;
                         }
                     },
                     appendSipEvent(message, level = 'info') {
@@ -2098,6 +2347,10 @@
                             }
                         } else {
                             text = String(payload);
+                        }
+                        const last = this.sipTraffic[this.sipTraffic.length - 1];
+                        if (last && last.direction === direction && last.payload === text) {
+                            return;
                         }
                         const summary = text.split(/\r?\n/)[0] || (direction === 'outgoing' ? 'Outbound message' : 'Inbound message');
                         const entry = {

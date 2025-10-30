@@ -56,6 +56,7 @@ struct ParsedContact {
     uri_string: String,
     params: Vec<ContactParam>,
     wildcard: bool,
+    has_angle_brackets: bool,
 }
 
 impl ParsedContact {
@@ -66,6 +67,7 @@ impl ParsedContact {
             uri_string: String::new(),
             params: Vec::new(),
             wildcard: true,
+            has_angle_brackets: false,
         }
     }
 
@@ -147,9 +149,13 @@ impl ParsedContact {
             value.push('"');
             value.push(' ');
         }
-        value.push('<');
-        value.push_str(&self.uri_string);
-        value.push('>');
+        if self.has_angle_brackets {
+            value.push('<');
+            value.push_str(&self.uri_string);
+            value.push('>');
+        } else {
+            value.push_str(&self.uri_string);
+        }
 
         for param in self.params.iter() {
             if param.matches("expires") {
@@ -250,6 +256,7 @@ fn parse_contact_entry(entry: &str) -> Result<ParsedContact> {
 
     let mut remainder = trimmed;
     let mut display_name = None;
+    let mut has_angle_brackets = false;
 
     if remainder.starts_with('"') {
         if let Some(relative_end) = remainder[1..].find('"') {
@@ -271,6 +278,7 @@ fn parse_contact_entry(entry: &str) -> Result<ParsedContact> {
             .ok_or_else(|| anyhow!("contact header missing '>'"))?;
         let uri = remainder[1..end_idx].trim();
         let params = remainder[end_idx + 1..].trim();
+        has_angle_brackets = true;
         (uri.to_string(), params)
     } else {
         let mut segments = remainder.splitn(2, ';');
@@ -297,6 +305,7 @@ fn parse_contact_entry(entry: &str) -> Result<ParsedContact> {
         uri_string: uri_part,
         params,
         wildcard: false,
+        has_angle_brackets,
     })
 }
 
@@ -411,6 +420,19 @@ mod tests {
     fn parse_contact_wildcard() {
         let parsed = parse_contact_entry("*").expect("parse wildcard");
         assert!(parsed.is_wildcard());
+    }
+
+    #[test]
+    fn parse_contact_without_angle_brackets() {
+        let value = "sip:alice@example.com;transport=ws;expires=120";
+        let parsed = parse_contact_entry(value).expect("parse contact");
+        assert!(!parsed.is_wildcard());
+        let rendered = parsed.contact_value(60);
+        assert!(rendered.starts_with("sip:alice@example.com"));
+        assert!(!rendered.contains('<'));
+        assert!(!rendered.contains('>'));
+        assert!(rendered.contains("transport=ws"));
+        assert!(rendered.contains("expires=60"));
     }
 }
 

@@ -82,6 +82,7 @@ cat > config.toml << EOF
 http_addr = "0.0.0.0:8080"
 log_level = "info"
 recorder_path = "/tmp/recorders"
+recorder_format = "wav" # or "ogg" when built with --features opus
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://./db/rustpbx.sqlite3"
 

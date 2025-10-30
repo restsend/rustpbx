@@ -1,9 +1,10 @@
 use crate::{AudioFrame, PcmBuf, Samples, media::codecs::samples_to_bytes};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp,
     collections::HashMap,
     path::Path,
     sync::{
@@ -23,6 +24,190 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+#[cfg(feature = "opus")]
+use crc32fast::Hasher;
+#[cfg(feature = "opus")]
+use opus::{Application, Channels, Encoder};
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RecorderFormat {
+    Wav,
+    Ogg,
+}
+
+#[cfg(feature = "opus")]
+struct OggStreamWriter {
+    encoder: Encoder,
+    serial: u32,
+    sequence: u32,
+    granule_position: u64,
+    sample_rate: u32,
+}
+
+#[cfg(feature = "opus")]
+impl OggStreamWriter {
+    fn new(sample_rate: u32) -> Result<Self> {
+        let normalized = match sample_rate {
+            8000 | 12000 | 16000 | 24000 | 48000 => sample_rate,
+            _ => 16000,
+        };
+
+        let encoder = Encoder::new(normalized, Channels::Stereo, Application::Audio)
+            .map_err(|e| anyhow!("Failed to create Opus encoder: {e}"))?;
+
+        let mut serial = rand::random::<u32>();
+        if serial == 0 {
+            serial = 1;
+        }
+
+        Ok(Self {
+            encoder,
+            serial,
+            sequence: 0,
+            granule_position: 0,
+            sample_rate: normalized,
+        })
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn granule_increment(&self, frame_samples: usize) -> u64 {
+        let factor = 48000 / self.sample_rate;
+        (frame_samples as u64) * (factor as u64)
+    }
+
+    fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
+        let mut buffer = vec![0u8; 4096];
+        let len = self
+            .encoder
+            .encode(pcm, &mut buffer)
+            .map_err(|e| anyhow!("Failed to encode Opus frame: {e}"))?;
+        buffer.truncate(len);
+        Ok(buffer)
+    }
+
+    async fn write_headers(&mut self, file: &mut File) -> Result<()> {
+        let head = Self::build_opus_head(self.sample_rate);
+        self.write_page(file, &head, 0, 0x02).await?;
+
+        let tags = Self::build_opus_tags();
+        self.write_page(file, &tags, 0, 0x00).await?;
+        Ok(())
+    }
+
+    async fn write_audio_packet(
+        &mut self,
+        file: &mut File,
+        packet: &[u8],
+        frame_samples: usize,
+    ) -> Result<()> {
+        let increment = self.granule_increment(frame_samples);
+        self.granule_position = self.granule_position.saturating_add(increment);
+        self.write_page(file, packet, self.granule_position, 0x00)
+            .await
+    }
+
+    async fn finalize(&mut self, file: &mut File) -> Result<()> {
+        self.write_page(file, &[], self.granule_position, 0x04)
+            .await
+    }
+
+    async fn write_page(
+        &mut self,
+        file: &mut File,
+        packet: &[u8],
+        granule_pos: u64,
+        header_type: u8,
+    ) -> Result<()> {
+        let mut segments = Vec::new();
+        if !packet.is_empty() {
+            let mut remaining = packet.len();
+            while remaining >= 255 {
+                segments.push(255u8);
+                remaining -= 255;
+            }
+            segments.push(remaining as u8);
+        }
+
+        let mut page = Vec::with_capacity(27 + segments.len() + packet.len());
+        page.extend_from_slice(b"OggS");
+        page.push(0); // version
+        page.push(header_type);
+        page.extend_from_slice(&granule_pos.to_le_bytes());
+        page.extend_from_slice(&self.serial.to_le_bytes());
+        page.extend_from_slice(&self.sequence.to_le_bytes());
+        page.extend_from_slice(&0u32.to_le_bytes()); // checksum placeholder
+        page.push(segments.len() as u8);
+        page.extend_from_slice(&segments);
+        page.extend_from_slice(packet);
+
+        let mut hasher = Hasher::new();
+        hasher.update(&page);
+        let checksum = hasher.finalize();
+        page[22..26].copy_from_slice(&checksum.to_le_bytes());
+
+        file.write_all(&page).await?;
+        self.sequence = self.sequence.wrapping_add(1);
+        Ok(())
+    }
+
+    fn build_opus_head(sample_rate: u32) -> Vec<u8> {
+        let mut head = Vec::with_capacity(19);
+        head.extend_from_slice(b"OpusHead");
+        head.push(1); // version
+        head.push(2); // channel count (stereo)
+        head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
+        head.extend_from_slice(&sample_rate.to_le_bytes());
+        head.extend_from_slice(&0i16.to_le_bytes()); // output gain
+        head.push(0); // channel mapping family
+        head
+    }
+
+    fn build_opus_tags() -> Vec<u8> {
+        const VENDOR: &str = "rustpbx";
+        let vendor_bytes = VENDOR.as_bytes();
+        let mut tags = Vec::with_capacity(8 + 4 + vendor_bytes.len() + 4);
+        tags.extend_from_slice(b"OpusTags");
+        tags.extend_from_slice(&(vendor_bytes.len() as u32).to_le_bytes());
+        tags.extend_from_slice(vendor_bytes);
+        tags.extend_from_slice(&0u32.to_le_bytes()); // user comment list length
+        tags
+    }
+}
+
+impl RecorderFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            RecorderFormat::Wav => "wav",
+            RecorderFormat::Ogg => "ogg",
+        }
+    }
+
+    pub fn is_supported(&self) -> bool {
+        match self {
+            RecorderFormat::Wav => true,
+            RecorderFormat::Ogg => cfg!(feature = "opus"),
+        }
+    }
+
+    pub fn effective(&self) -> RecorderFormat {
+        if self.is_supported() {
+            *self
+        } else {
+            RecorderFormat::Wav
+        }
+    }
+}
+
+impl Default for RecorderFormat {
+    fn default() -> Self {
+        RecorderFormat::Wav
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -33,6 +218,8 @@ pub struct RecorderOption {
     pub samplerate: u32,
     #[serde(default)]
     pub ptime: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<RecorderFormat>,
 }
 
 impl RecorderOption {
@@ -42,6 +229,10 @@ impl RecorderOption {
             ..Default::default()
         }
     }
+
+    pub fn resolved_format(&self, default: RecorderFormat) -> RecorderFormat {
+        self.format.unwrap_or(default).effective()
+    }
 }
 
 impl Default for RecorderOption {
@@ -50,6 +241,7 @@ impl Default for RecorderOption {
             recorder_file: "".to_string(),
             samplerate: 16000,
             ptime: 200,
+            format: None,
         }
     }
 }
@@ -139,42 +331,84 @@ impl Recorder {
     pub async fn process_recording(
         &self,
         file_path: &Path,
-        mut receiver: UnboundedReceiver<AudioFrame>,
+        receiver: UnboundedReceiver<AudioFrame>,
     ) -> Result<()> {
+        let requested_format = self.option.format.unwrap_or(RecorderFormat::Wav);
+        let effective_format = requested_format.effective();
+
+        if requested_format != effective_format {
+            warn!(
+                session_id = self.session_id,
+                requested = requested_format.extension(),
+                "Recorder format requires unavailable feature; falling back to wav"
+            );
+        }
+
+        if effective_format == RecorderFormat::Ogg {
+            #[cfg(feature = "opus")]
+            {
+                return self.process_recording_ogg(file_path, receiver).await;
+            }
+            #[cfg(not(feature = "opus"))]
+            {
+                unreachable!(
+                    "RecorderFormat::effective() should prevent ogg when opus feature is disabled"
+                );
+            }
+        }
+
+        self.process_recording_wav(file_path, receiver).await
+    }
+
+    fn ensure_parent_dir(&self, file_path: &Path) -> Result<()> {
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
-                if let Err(_) = std::fs::create_dir_all(parent) {
+                if let Err(e) = std::fs::create_dir_all(parent) {
                     warn!(
-                        "Failed to create recording file parent directory: {}",
+                        "Failed to create recording file parent directory: {} {}",
+                        e,
                         file_path.display()
                     );
-                    return Err(anyhow::anyhow!(
-                        "Failed to create recording file parent directory"
-                    ));
+                    return Err(anyhow!("Failed to create recording file parent directory"));
                 }
             }
         }
-        let mut file = match File::create(file_path).await {
-            Ok(file) => file,
+        Ok(())
+    }
+
+    async fn create_output_file(&self, file_path: &Path) -> Result<File> {
+        self.ensure_parent_dir(file_path)?;
+        match File::create(file_path).await {
+            Ok(file) => {
+                info!(
+                    session_id = self.session_id,
+                    "recorder: created recording file: {}",
+                    file_path.display()
+                );
+                Ok(file)
+            }
             Err(e) => {
                 warn!(
                     "Failed to create recording file: {} {}",
                     e,
                     file_path.display()
                 );
-                return Err(anyhow::anyhow!("Failed to create recording file"));
+                Err(anyhow!("Failed to create recording file"))
             }
-        };
-        info!(
-            session_id = self.session_id,
-            "recorder: created recording file: {}",
-            file_path.display()
-        );
-        // Create an initial WAV header
+        }
+    }
+
+    async fn process_recording_wav(
+        &self,
+        file_path: &Path,
+        mut receiver: UnboundedReceiver<AudioFrame>,
+    ) -> Result<()> {
+        let mut file = self.create_output_file(file_path).await?;
         self.update_wav_header(&mut file).await?;
         let chunk_size = (self.option.samplerate / 1000 * self.option.ptime) as usize;
         info!(
             session_id = self.session_id,
+            format = "wav",
             "Recording to {} ptime: {}ms chunk_size: {}",
             file_path.display(),
             self.option.ptime,
@@ -195,15 +429,123 @@ impl Recorder {
                     self.update_wav_header(&mut file).await?;
                 }
                 _ = self.cancel_token.cancelled() => {
-                    // Flush remaining buffer content before exiting
                     self.flush_buffers(&mut file).await?;
-
-                    // Update the final header before finishing
                     self.update_wav_header(&mut file).await?;
                     return Ok(());
                 }
             }
         }
+    }
+
+    #[cfg(feature = "opus")]
+    async fn process_recording_ogg(
+        &self,
+        file_path: &Path,
+        mut receiver: UnboundedReceiver<AudioFrame>,
+    ) -> Result<()> {
+        let mut file = self.create_output_file(file_path).await?;
+        let mut writer = OggStreamWriter::new(self.option.samplerate)?;
+        if writer.sample_rate() != self.option.samplerate {
+            warn!(
+                session_id = self.session_id,
+                requested = self.option.samplerate,
+                using = writer.sample_rate(),
+                "Adjusted recorder samplerate to Opus-compatible value"
+            );
+        }
+        writer.write_headers(&mut file).await?;
+
+        let chunk_size = (self.option.samplerate / 1000 * self.option.ptime) as usize;
+        info!(
+            session_id = self.session_id,
+            format = "ogg",
+            "Recording to {} ptime: {}ms chunk_size: {}",
+            file_path.display(),
+            self.option.ptime,
+            chunk_size
+        );
+
+        let frame_samples = cmp::max(1, (writer.sample_rate() / 50) as usize);
+        let frame_step = frame_samples * 2; // stereo samples
+        let mut pending: Vec<i16> = Vec::new();
+
+        let mut interval = IntervalStream::new(tokio::time::interval(Duration::from_millis(
+            self.option.ptime as u64,
+        )));
+
+        loop {
+            select! {
+                Some(frame) = receiver.recv() => {
+                    self.append_frame(frame).await.ok();
+                }
+                _ = interval.next() => {
+                    let (mono_buf, stereo_buf) = self.pop(chunk_size).await;
+                    if mono_buf.is_empty() && stereo_buf.is_empty() {
+                        continue;
+                    }
+
+                    let mix = Self::mix_buffers(&mono_buf, &stereo_buf);
+                    pending.extend_from_slice(&mix);
+
+                    let encoded_samples = self
+                        .encode_pending_frames(&mut pending, frame_step, &mut writer, &mut file, false)
+                        .await?;
+                    if encoded_samples > 0 {
+                        self.samples_written.fetch_add(encoded_samples, Ordering::SeqCst);
+                    }
+                }
+                _ = self.cancel_token.cancelled() => {
+                    let (mono_buf, stereo_buf) = self.pop(usize::MAX).await;
+                    if !mono_buf.is_empty() || !stereo_buf.is_empty() {
+                        let mix = Self::mix_buffers(&mono_buf, &stereo_buf);
+                        pending.extend_from_slice(&mix);
+                    }
+
+                    let encoded_samples = self
+                        .encode_pending_frames(&mut pending, frame_step, &mut writer, &mut file, true)
+                        .await?;
+                    if encoded_samples > 0 {
+                        self.samples_written.fetch_add(encoded_samples, Ordering::SeqCst);
+                    }
+
+                    writer.finalize(&mut file).await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "opus")]
+    async fn encode_pending_frames(
+        &self,
+        pending: &mut Vec<i16>,
+        frame_step: usize,
+        writer: &mut OggStreamWriter,
+        file: &mut File,
+        pad_final: bool,
+    ) -> Result<usize> {
+        let mut total_samples = 0usize;
+        let samples_per_channel = frame_step / 2;
+        while pending.len() >= frame_step {
+            let frame: Vec<i16> = pending.drain(..frame_step).collect();
+            let packet = writer.encode_frame(&frame)?;
+            writer
+                .write_audio_packet(file, &packet, samples_per_channel)
+                .await?;
+            total_samples += samples_per_channel;
+        }
+
+        if pad_final && !pending.is_empty() {
+            let mut frame: Vec<i16> = pending.drain(..).collect();
+            frame.resize(frame_step, 0);
+            let packet = writer.encode_frame(&frame)?;
+            writer
+                .write_audio_packet(file, &packet, samples_per_channel)
+                .await?;
+            total_samples += samples_per_channel;
+        }
+
+        Ok(total_samples)
     }
 
     /// Get or assign channel index for a track

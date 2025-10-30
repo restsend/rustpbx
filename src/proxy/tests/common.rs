@@ -71,6 +71,7 @@ pub async fn create_test_server_with_config(
         proxycall_inspector: None,
         ignore_out_of_dialog_option: true,
         locator_events: None,
+        sip_flow: None,
     });
 
     // Add test users

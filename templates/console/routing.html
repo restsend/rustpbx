@@ -283,9 +283,19 @@
                                                 </div>
                                             </template>
                                             <template x-if="matchPreview(route).remaining">
-                                                <div class="text-slate-400">
+                                                <button type="button"
+                                                    class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
+                                                    @click="toggleMatch(route)">
                                                     +<span x-text="matchPreview(route).remaining"></span> more
-                                                </div>
+                                                </button>
+                                            </template>
+                                            <template
+                                                x-if="matchPreview(route).expanded && matchPreview(route).total > 3">
+                                                <button type="button"
+                                                    class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
+                                                    @click="toggleMatch(route)">
+                                                    Show less
+                                                </button>
                                             </template>
                                             <template x-if="!matchPreview(route).items.length">
                                                 <div class="text-slate-400">—</div>
@@ -301,9 +311,19 @@
                                                 </div>
                                             </template>
                                             <template x-if="rewritePreview(route).remaining">
-                                                <div class="text-slate-400">
+                                                <button type="button"
+                                                    class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
+                                                    @click="toggleRewrite(route)">
                                                     +<span x-text="rewritePreview(route).remaining"></span> more
-                                                </div>
+                                                </button>
+                                            </template>
+                                            <template
+                                                x-if="rewritePreview(route).expanded && rewritePreview(route).total > 3">
+                                                <button type="button"
+                                                    class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
+                                                    @click="toggleRewrite(route)">
+                                                    Show less
+                                                </button>
                                             </template>
                                             <template x-if="!rewritePreview(route).items.length">
                                                 <div class="text-slate-400">—</div>
@@ -750,6 +770,8 @@
             validationError: null,
             validationResult: null,
             validationLatencyMs: null,
+            expandedMatch: {},
+            expandedRewrite: {},
 
             init() {
                 this.basePath = this.normalizeBasePath(options.basePath);
@@ -911,6 +933,8 @@
                         clone_url: item?.clone_url,
                         delete_url: item?.delete_url,
                     }));
+                    this.expandedMatch = {};
+                    this.expandedRewrite = {};
                     this.summary = Object.assign(
                         { total_routes: 0, active_routes: 0, last_deploy: null },
                         data?.summary || {}
@@ -1092,6 +1116,46 @@
                 }
                 return 'Reload complete.';
             },
+            routeKey(route) {
+                if (!route || typeof route !== 'object') {
+                    return '';
+                }
+                if (route.id !== undefined && route.id !== null) {
+                    return `id:${route.id}`;
+                }
+                if (route.uuid) {
+                    return `uuid:${route.uuid}`;
+                }
+                if (route.name) {
+                    return `name:${route.name}`;
+                }
+                const index = this.routes.indexOf(route);
+                return index >= 0 ? `idx:${index}` : '';
+            },
+            isMatchExpanded(route) {
+                const key = this.routeKey(route);
+                return Boolean(key && this.expandedMatch[key]);
+            },
+            toggleMatch(route) {
+                const key = this.routeKey(route);
+                if (!key) {
+                    return;
+                }
+                const next = !this.expandedMatch[key];
+                this.expandedMatch = { ...this.expandedMatch, [key]: next };
+            },
+            isRewriteExpanded(route) {
+                const key = this.routeKey(route);
+                return Boolean(key && this.expandedRewrite[key]);
+            },
+            toggleRewrite(route) {
+                const key = this.routeKey(route);
+                if (!key) {
+                    return;
+                }
+                const next = !this.expandedRewrite[key];
+                this.expandedRewrite = { ...this.expandedRewrite, [key]: next };
+            },
             matchEntries(route) {
                 const labels = {
                     'from_user': 'from.user',
@@ -1133,18 +1197,18 @@
             },
             rewriteEntries(route) {
                 const labels = {
-                    'from_user': 'Rewrite From user',
-                    'from_host': 'Rewrite From host',
-                    'to_user': 'Rewrite To user',
-                    'to_host': 'Rewrite To host',
-                    'to_port': 'Rewrite To port',
-                    'request_uri_user': 'Rewrite Request-URI user',
-                    'request_uri_host': 'Rewrite Request-URI host',
-                    'request_uri_port': 'Rewrite Request-URI port',
-                    'from': 'Rewrite From',
-                    'to': 'Rewrite To',
-                    'caller': 'Rewrite Caller',
-                    'callee': 'Rewrite Callee',
+                    'from_user': 'from.user',
+                    'from_host': 'from.host',
+                    'to_user': 'to.user',
+                    'to_host': 'to.host',
+                    'to_port': 'to.port',
+                    'request_uri_user': 'request.uri.user',
+                    'request_uri_host': 'request.uri.host',
+                    'request_uri_port': 'request.uri.port',
+                    'from': 'from',
+                    'to': 'to',
+                    'caller': 'caller',
+                    'callee': 'callee',
                 };
                 const rewrite = route?.rewrite || {};
                 const entries = [];
@@ -1172,16 +1236,22 @@
             },
             matchPreview(route) {
                 const entries = this.matchEntries(route);
+                const expanded = this.isMatchExpanded(route);
                 return {
-                    items: entries.slice(0, 3),
-                    remaining: Math.max(entries.length - 3, 0),
+                    items: expanded ? entries : entries.slice(0, 3),
+                    remaining: expanded ? 0 : Math.max(entries.length - 3, 0),
+                    total: entries.length,
+                    expanded,
                 };
             },
             rewritePreview(route) {
                 const entries = this.rewriteEntries(route);
+                const expanded = this.isRewriteExpanded(route);
                 return {
-                    items: entries.slice(0, 3),
-                    remaining: Math.max(entries.length - 3, 0),
+                    items: expanded ? entries : entries.slice(0, 3),
+                    remaining: expanded ? 0 : Math.max(entries.length - 3, 0),
+                    total: entries.length,
+                    expanded,
                 };
             },
             trunkPreview(route) {

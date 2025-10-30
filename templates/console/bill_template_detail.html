@@ -48,6 +48,10 @@ site_name | default('RustPBX') }}{% endblock %}
                         <dd class="text-sm text-slate-700" x-text="intervalLabel(form.billing_interval)"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
+                        <dt class="uppercase tracking-wide">Init / Bill incr. (s)</dt>
+                        <dd class="text-sm text-slate-700" x-text="cadenceLabel()"></dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-6">
                         <dt class="uppercase tracking-wide">Updated</dt>
                         <dd class="text-sm text-slate-700" x-text="formatDate(model?.updated_at)"></dd>
                     </div>
@@ -109,24 +113,6 @@ site_name | default('RustPBX') }}{% endblock %}
             </section>
 
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Allowances</h2>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Included minutes
-                        <input type="number" min="0" step="1" x-model="form.included_minutes"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 15000">
-                    </label>
-                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Included messages
-                        <input type="number" min="0" step="1" x-model="form.included_messages"
-                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 5000">
-                    </label>
-                </div>
-            </section>
-
-            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <h2 class="text-sm font-semibold text-slate-900">Pricing</h2>
                 <div class="mt-4 grid gap-4 md:grid-cols-3">
                     <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -148,17 +134,42 @@ site_name | default('RustPBX') }}{% endblock %}
                             placeholder="e.g. 7.5">
                     </label>
                 </div>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Initial increment (seconds)
+                        <input type="number" min="1" step="1" x-model="form.initial_increment_secs"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 30">
+                        <span class="text-xs font-normal text-slate-400">Minimum billable duration once the call is
+                            answered.</span>
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Billing increment (seconds)
+                        <input type="number" min="1" step="1" x-model="form.billing_increment_secs"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 6">
+                        <span class="text-xs font-normal text-slate-400">Rounding step after the initial increment
+                            (industry examples: 1/1, 30/6, 60/60).</span>
+                    </label>
+                </div>
             </section>
-
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-900">Metadata</h2>
-                <p class="mt-1 text-xs text-slate-500">Optional JSON payload stored alongside the template (for
-                    reporting or enrichment).</p>
-                <textarea rows="6" x-model="form.metadata"
-                    class="mt-4 font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder='{"bundle": "apac-premium", "notes": "Includes weekend minutes"}'></textarea>
+                <h2 class="text-sm font-semibold text-slate-900">Allowances</h2>
+                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Included minutes
+                        <input type="number" min="0" step="1" x-model="form.included_minutes"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 15000">
+                    </label>
+                    <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Included messages
+                        <input type="number" min="0" step="1" x-model="form.included_messages"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="e.g. 5000">
+                    </label>
+                </div>
             </section>
-
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400">Updates are saved through the API without reloading this page.</p>
                 <div class="flex items-center gap-3">
@@ -202,6 +213,8 @@ site_name | default('RustPBX') }}{% endblock %}
                 billing_interval: 'monthly',
                 included_minutes: '',
                 included_messages: '',
+                initial_increment_secs: '60',
+                billing_increment_secs: '60',
                 overage_rate_per_minute: '',
                 setup_fee: '',
                 tax_percent: '',
@@ -252,6 +265,12 @@ site_name | default('RustPBX') }}{% endblock %}
                 this.form.billing_interval = (model.billing_interval || 'monthly').toLowerCase();
                 this.form.included_minutes = model.included_minutes != null ? String(model.included_minutes) : '';
                 this.form.included_messages = model.included_messages != null ? String(model.included_messages) : '';
+                this.form.initial_increment_secs = model.initial_increment_secs != null
+                    ? String(model.initial_increment_secs)
+                    : this.form.initial_increment_secs;
+                this.form.billing_increment_secs = model.billing_increment_secs != null
+                    ? String(model.billing_increment_secs)
+                    : this.form.billing_increment_secs || this.form.initial_increment_secs;
                 this.form.overage_rate_per_minute = model.overage_rate_per_minute != null ? String(model.overage_rate_per_minute) : '';
                 this.form.setup_fee = model.setup_fee != null ? String(model.setup_fee) : '';
                 this.form.tax_percent = model.tax_percent != null ? String(model.tax_percent) : '';
@@ -272,6 +291,18 @@ site_name | default('RustPBX') }}{% endblock %}
                 if (normalized === 'quarterly') return 'Quarterly';
                 if (normalized === 'yearly') return 'Yearly';
                 return value || 'Custom';
+            },
+            cadenceLabel(initial = this.form.initial_increment_secs, billing = this.form.billing_increment_secs) {
+                const init = Number(initial);
+                const step = Number(billing);
+                const hasInitial = Number.isFinite(init) && init > 0;
+                const hasBilling = Number.isFinite(step) && step > 0;
+                if (!hasInitial && !hasBilling) {
+                    return '—';
+                }
+                const initialLabel = hasInitial ? `${Math.round(init)}s` : '—';
+                const billingLabel = hasBilling ? `${Math.round(step)}s` : '—';
+                return `${initialLabel} / ${billingLabel}`;
             },
             formatDate(value) {
                 if (!value) return '—';
@@ -330,6 +361,19 @@ site_name | default('RustPBX') }}{% endblock %}
                     }
                 });
 
+                const cadenceFields = [
+                    ['initial_increment_secs', this.form.initial_increment_secs],
+                    ['billing_increment_secs', this.form.billing_increment_secs],
+                ];
+                cadenceFields.forEach(([key, value]) => {
+                    if (value !== '' && value !== null && value !== undefined) {
+                        const num = Number(value);
+                        if (!Number.isNaN(num)) {
+                            params.set(key, String(Math.max(1, Math.round(num))));
+                        }
+                    }
+                });
+
                 const numericFloatFields = [
                     ['overage_rate_per_minute', this.form.overage_rate_per_minute],
                     ['setup_fee', this.form.setup_fee],
@@ -358,6 +402,24 @@ site_name | default('RustPBX') }}{% endblock %}
                 }
                 if (!this.form.billing_interval.trim()) {
                     this.error = 'Billing interval is required.';
+                    return;
+                }
+                const initialSeconds = Number(this.form.initial_increment_secs);
+                if (!Number.isFinite(initialSeconds) || initialSeconds <= 0) {
+                    this.error = 'Initial increment must be a positive number of seconds.';
+                    return;
+                }
+                const billingSeconds = Number(this.form.billing_increment_secs);
+                if (!Number.isFinite(billingSeconds) || billingSeconds <= 0) {
+                    this.error = 'Billing increment must be a positive number of seconds.';
+                    return;
+                }
+                if (billingSeconds > initialSeconds) {
+                    this.error = 'Billing increment cannot exceed the initial increment.';
+                    return;
+                }
+                if (initialSeconds > 86400 || billingSeconds > 86400) {
+                    this.error = 'Billing increments must be 86400 seconds (24 hours) or less.';
                     return;
                 }
                 this.saving = true;

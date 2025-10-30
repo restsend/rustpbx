@@ -17,7 +17,53 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
+
+pub struct DialogStateReceiverGuard {
+    pub(super) dialog_layer: Arc<DialogLayer>,
+    pub(super) receiver: DialogStateReceiver,
+    pub(super) dialog_id: Option<DialogId>,
+}
+
+impl DialogStateReceiverGuard {
+    pub fn new(dialog_layer: Arc<DialogLayer>, receiver: DialogStateReceiver) -> Self {
+        Self {
+            dialog_layer,
+            receiver,
+            dialog_id: None,
+        }
+    }
+    pub async fn recv(&mut self) -> Option<DialogState> {
+        let state = self.receiver.recv().await;
+        if let Some(ref s) = state {
+            self.dialog_id = Some(s.id().clone());
+        }
+        state
+    }
+}
+
+impl Drop for DialogStateReceiverGuard {
+    fn drop(&mut self) {
+        let id = match self.dialog_id.take() {
+            Some(id) => id,
+            None => return,
+        };
+
+        match self.dialog_layer.get_dialog(&id) {
+            Some(dialog) => {
+                info!(%id, "dialog removed on state receiver drop");
+                self.dialog_layer.remove_dialog(&id);
+                tokio::spawn(async move {
+                    if let Err(e) = dialog.hangup().await {
+                        warn!(%id, "error hanging up dialog on drop: {}", e);
+                    }
+                });
+            }
+            None => {}
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Invitation {
     pub dialog_layer: Arc<DialogLayer>,

@@ -45,6 +45,8 @@ pub struct Model {
     pub billing_interval: BillingInterval,
     pub included_minutes: i32,
     pub included_messages: i32,
+    pub initial_increment_secs: i32,
+    pub billing_increment_secs: i32,
     pub overage_rate_per_minute: f64,
     pub setup_fee: f64,
     pub tax_percent: f64,
@@ -90,6 +92,8 @@ impl MigrationTrait for Migration {
                     )
                     .col(integer(Column::IncludedMinutes).not_null().default(0))
                     .col(integer(Column::IncludedMessages).not_null().default(0))
+                    .col(integer(Column::InitialIncrementSecs).not_null().default(60))
+                    .col(integer(Column::BillingIncrementSecs).not_null().default(60))
                     .col(double(Column::OverageRatePerMinute).default(0.0))
                     .col(double(Column::SetupFee).default(0.0))
                     .col(double(Column::TaxPercent).default(0.0))

@@ -1,7 +1,12 @@
+use self::sipflow::SipMessageItem;
 use crate::{
     call::{ActiveCallType, CallOption},
     config::{CallRecordConfig, S3Vendor},
-    models::call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
+    models::{
+        bill_template::{Entity as BillTemplateEntity, Model as BillTemplateModel},
+        call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
+        sip_trunk::Entity as SipTrunkEntity,
+    },
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -18,13 +23,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value, json};
 use serde_with::skip_serializing_none;
 use std::{
-    collections::HashMap, convert::TryFrom, future::Future, path::Path, pin::Pin, str::FromStr,
-    sync::Arc, time::Instant,
+    collections::HashMap, convert::TryFrom, future::Future, mem, path::Path, pin::Pin,
+    str::FromStr, sync::Arc, time::Instant,
 };
-use tokio::{fs::File, io::AsyncWriteExt, select};
+use tokio::sync::mpsc::error::SendError;
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+    select,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+pub mod sipflow;
 #[cfg(test)]
 mod tests;
 
@@ -95,10 +106,13 @@ pub struct CallRecord {
     pub answer: Option<String>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub recorder: Vec<CallRecordMedia>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
     pub dump_event_file: Option<String>,
     pub refer_callrecord: Option<Box<CallRecord>>,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub sip_flows: HashMap<String, Vec<SipMessageItem>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,14 +183,110 @@ impl ToString for CallRecordHangupReason {
         }
     }
 }
+
+fn sanitize_filename_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        "leg".to_string()
+    } else {
+        sanitized
+    }
+}
+
+pub fn default_cdr_file_name(record: &CallRecord) -> String {
+    format!(
+        "{}_{}.json",
+        record.start_time.format("%Y%m%d-%H%M%S"),
+        record.call_id
+    )
+}
+
+pub fn default_sip_flow_file_name(record: &CallRecord, leg: &str) -> String {
+    format!(
+        "{}_{}_{}.sipflow.jsonl",
+        record.start_time.format("%Y%m%d-%H%M%S"),
+        record.call_id,
+        sanitize_filename_component(leg)
+    )
+}
+
+pub fn apply_record_file_extras(record: &CallRecord, extras: &mut HashMap<String, Value>) {
+    if !record.sip_flows.is_empty() {
+        let entries: Vec<Value> = record
+            .sip_flows
+            .keys()
+            .map(|leg| json!({ "leg": leg, "path": default_sip_flow_file_name(record, leg) }))
+            .collect();
+        extras.insert("sip_flow_files".to_string(), Value::Array(entries));
+    }
+
+    extras.insert(
+        "cdr_file".to_string(),
+        Value::String(default_cdr_file_name(record)),
+    );
+}
+
+pub fn extras_map_to_option(extras: &HashMap<String, Value>) -> Option<HashMap<String, Value>> {
+    if extras.is_empty() {
+        None
+    } else {
+        Some(extras.clone())
+    }
+}
+
+pub fn extras_map_to_metadata(extras: &HashMap<String, Value>) -> Option<Value> {
+    if extras.is_empty() {
+        return None;
+    }
+
+    let mut map = JsonMap::new();
+    for (key, value) in extras.iter() {
+        map.insert(key.clone(), value.clone());
+    }
+    Some(Value::Object(map))
+}
+
+pub async fn persist_and_dispatch_record(
+    db: Option<&DatabaseConnection>,
+    sender: Option<&CallRecordSender>,
+    record: CallRecord,
+    args: CallRecordPersistArgs,
+) -> (Option<anyhow::Error>, Option<SendError<CallRecord>>) {
+    let persist_error = match db {
+        Some(db_conn) => match persist_call_record(db_conn, &record, args).await {
+            Ok(_) => None,
+            Err(err) => Some(err),
+        },
+        None => {
+            let _ = args;
+            None
+        }
+    };
+
+    let send_error = if let Some(sender) = sender {
+        match sender.send(record) {
+            Ok(_) => None,
+            Err(err) => Some(err),
+        }
+    } else {
+        None
+    };
+
+    (persist_error, send_error)
+}
+
 pub trait CallRecordFormatter: Send + Sync {
     fn format_file_name(&self, root: &str, record: &CallRecord) -> String {
-        format!(
-            "{}/{}_{}.json",
-            root.trim_end_matches('/'),
-            record.start_time.format("%Y%m%d-%H%M%S"),
-            record.call_id
-        )
+        let trimmed_root = root.trim_end_matches('/');
+        let file_name = default_cdr_file_name(record);
+        if trimmed_root.is_empty() {
+            file_name
+        } else {
+            format!("{}/{}", trimmed_root, file_name)
+        }
     }
 
     fn format(&self, record: &CallRecord) -> Result<String> {
@@ -190,6 +300,15 @@ pub trait CallRecordFormatter: Send + Sync {
             record.start_time.format("%Y%m%d"),
             record.call_id
         )
+    }
+    fn format_sip_flow_path(&self, root: &str, record: &CallRecord, leg: &str) -> String {
+        let trimmed_root = root.trim_end_matches('/');
+        let file_name = default_sip_flow_file_name(record, leg);
+        if trimmed_root.is_empty() {
+            file_name
+        } else {
+            format!("{}/{}", trimmed_root, file_name)
+        }
     }
     fn format_media_path(
         &self,
@@ -308,31 +427,35 @@ impl CallRecordManager {
         record: CallRecord,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
+            let mut record = record;
+            let sip_flows = mem::take(&mut record.sip_flows);
             let start_time = Instant::now();
-            let r = match config.as_ref() {
-                CallRecordConfig::Local { root } => {
-                    let file_content = formatter.format(&record)?;
-                    let file_name = formatter.format_file_name(root, &record);
-                    let mut file = File::create(&file_name).await.map_err(|e| {
-                        anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
-                    })?;
-                    file.write_all(file_content.as_bytes()).await?;
-                    file.flush().await?;
-                    Ok(file_name.to_string())
+            let result = match (config.as_ref(), sip_flows) {
+                (CallRecordConfig::Local { root }, flows) => {
+                    Self::save_local_record(formatter.clone(), root, &mut record, flows).await
                 }
-                CallRecordConfig::S3 {
-                    vendor,
-                    bucket,
-                    region,
-                    access_key,
-                    secret_key,
-                    endpoint,
-                    root,
-                    with_media,
-                    keep_media_copy,
-                } => {
+                (
+                    CallRecordConfig::S3 {
+                        vendor,
+                        bucket,
+                        region,
+                        access_key,
+                        secret_key,
+                        endpoint,
+                        root,
+                        with_media,
+                        keep_media_copy,
+                    },
+                    flows,
+                ) => {
+                    if !flows.is_empty() {
+                        warn!(
+                            legs = flows.len(),
+                            "SIP flow export for S3 target is not implemented; dropping entries"
+                        );
+                    }
                     Self::save_with_s3_like(
-                        formatter,
+                        formatter.clone(),
                         vendor,
                         bucket,
                         region,
@@ -346,14 +469,23 @@ impl CallRecordManager {
                     )
                     .await
                 }
-                CallRecordConfig::Http {
-                    url,
-                    headers,
-                    with_media,
-                    keep_media_copy,
-                } => {
+                (
+                    CallRecordConfig::Http {
+                        url,
+                        headers,
+                        with_media,
+                        keep_media_copy,
+                    },
+                    flows,
+                ) => {
+                    if !flows.is_empty() {
+                        warn!(
+                            legs = flows.len(),
+                            "SIP flow export for HTTP target is not implemented; dropping entries"
+                        );
+                    }
                     Self::save_with_http(
-                        formatter,
+                        formatter.clone(),
                         url,
                         headers,
                         with_media,
@@ -363,7 +495,7 @@ impl CallRecordManager {
                     .await
                 }
             };
-            let file_name = match r {
+            let file_name = match result {
                 Ok(file_name) => file_name,
                 Err(e) => {
                     warn!("Failed to save call record: {}", e);
@@ -379,6 +511,71 @@ impl CallRecordManager {
             );
             Ok(())
         })
+    }
+
+    async fn save_local_record(
+        formatter: Arc<dyn CallRecordFormatter>,
+        root: &String,
+        record: &mut CallRecord,
+        sip_flows: HashMap<String, Vec<SipMessageItem>>,
+    ) -> Result<String> {
+        let mut recorded_files = Vec::new();
+
+        for (leg, entries) in sip_flows.into_iter() {
+            if entries.is_empty() {
+                continue;
+            }
+            let file_path = formatter.format_sip_flow_path(root, record, &leg);
+            if let Some(parent) = Path::new(&file_path).parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            let mut file = File::create(&file_path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to create SIP flow file {}: {}", file_path, e)
+            })?;
+            for entry in entries {
+                let line = serde_json::to_string(&entry)?;
+                file.write_all(line.as_bytes()).await?;
+                file.write_all(b"\n").await?;
+            }
+            file.flush().await?;
+            recorded_files.push((leg, file_path));
+        }
+
+        if recorded_files.is_empty() {
+            Self::remove_sip_flow_metadata(record);
+        } else {
+            Self::attach_sip_flow_metadata(record, &recorded_files);
+        }
+
+        let file_content = formatter.format(record)?;
+        let file_name = formatter.format_file_name(root, record);
+        let mut file = File::create(&file_name).await.map_err(|e| {
+            anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
+        })?;
+        file.write_all(file_content.as_bytes()).await?;
+        file.flush().await?;
+        Ok(file_name.to_string())
+    }
+
+    fn attach_sip_flow_metadata(record: &mut CallRecord, files: &[(String, String)]) {
+        let mut extras = record.extras.take().unwrap_or_default();
+        let entries: Vec<Value> = files
+            .iter()
+            .map(|(leg, path)| json!({ "leg": leg, "path": path }))
+            .collect();
+        extras.insert("sip_flow_files".to_string(), Value::Array(entries));
+        record.extras = Some(extras);
+    }
+
+    fn remove_sip_flow_metadata(record: &mut CallRecord) {
+        if let Some(mut extras) = record.extras.take() {
+            extras.remove("sip_flow_files");
+            if extras.is_empty() {
+                record.extras = None;
+            } else {
+                record.extras = Some(extras);
+            }
+        }
     }
 
     async fn save_with_http(
@@ -745,6 +942,18 @@ pub async fn persist_call_record(
         .and_then(|extra| extra.get("display_id").cloned());
     let caller_uri = normalize_endpoint_uri(&record.caller);
     let callee_uri = normalize_endpoint_uri(&record.callee);
+    let billing_context = resolve_billing_context(db, sip_trunk_id).await?;
+    let billing_computation = compute_billing(duration_secs, &billing_context);
+    let billing_snapshot = billing_context.snapshot.clone();
+    let billing_method = billing_computation.method.clone();
+    let billing_status = Some(billing_computation.status.clone());
+    let billing_currency = billing_computation.currency.clone();
+    let billing_billable_secs = billing_computation.billable_secs;
+    let billing_rate_per_minute = billing_computation.rate_per_minute;
+    let billing_amount_subtotal = billing_computation.amount_subtotal;
+    let billing_amount_tax = billing_computation.amount_tax;
+    let billing_amount_total = billing_computation.amount_total;
+    let billing_result_value = billing_computation.to_json();
     if let Some(model) = CallRecordEntity::find()
         .filter(CallRecordColumn::CallId.eq(record.call_id.clone()))
         .one(db)
@@ -765,6 +974,7 @@ pub async fn persist_call_record(
         active.department_id = Set(department_id);
         active.extension_id = Set(extension_id);
         active.sip_trunk_id = Set(sip_trunk_id);
+        active.billing_template_id = Set(billing_context.template_id);
         active.route_id = Set(route_id);
         active.sip_gateway = Set(sip_gateway.clone());
         active.caller_uri = Set(caller_uri.clone());
@@ -780,6 +990,16 @@ pub async fn persist_call_record(
         active.quality_jitter_ms = Set(args.quality_jitter_ms);
         active.quality_packet_loss_percent = Set(args.quality_packet_loss_percent);
         active.analytics = Set(analytics.clone());
+        active.billing_snapshot = Set(billing_snapshot.clone());
+        active.billing_method = Set(billing_method.clone());
+        active.billing_status = Set(billing_status.clone());
+        active.billing_currency = Set(billing_currency.clone());
+        active.billing_billable_secs = Set(billing_billable_secs);
+        active.billing_rate_per_minute = Set(billing_rate_per_minute);
+        active.billing_amount_subtotal = Set(billing_amount_subtotal);
+        active.billing_amount_tax = Set(billing_amount_tax);
+        active.billing_amount_total = Set(billing_amount_total);
+        active.billing_result = Set(billing_result_value.clone());
         active.metadata = Set(metadata_value.clone());
         active.signaling = Set(signaling_value.clone());
         active.updated_at = Set(record.end_time);
@@ -803,6 +1023,7 @@ pub async fn persist_call_record(
         department_id: Set(department_id),
         extension_id: Set(extension_id),
         sip_trunk_id: Set(sip_trunk_id),
+        billing_template_id: Set(billing_context.template_id),
         route_id: Set(route_id),
         sip_gateway: Set(sip_gateway.clone()),
         caller_uri: Set(caller_uri.clone()),
@@ -818,6 +1039,16 @@ pub async fn persist_call_record(
         quality_jitter_ms: Set(args.quality_jitter_ms),
         quality_packet_loss_percent: Set(args.quality_packet_loss_percent),
         analytics: Set(analytics.clone()),
+        billing_snapshot: Set(billing_snapshot.clone()),
+        billing_method: Set(billing_method.clone()),
+        billing_status: Set(billing_status),
+        billing_currency: Set(billing_currency),
+        billing_billable_secs: Set(billing_billable_secs),
+        billing_rate_per_minute: Set(billing_rate_per_minute),
+        billing_amount_subtotal: Set(billing_amount_subtotal),
+        billing_amount_tax: Set(billing_amount_tax),
+        billing_amount_total: Set(billing_amount_total),
+        billing_result: Set(billing_result_value),
         metadata: Set(metadata_value.clone()),
         signaling: Set(signaling_value.clone()),
         created_at: Set(record.start_time),
@@ -908,12 +1139,10 @@ fn call_leg_payload(role: &str, record: &CallRecord) -> Value {
             .hangup_reason
             .as_ref()
             .map(|reason| reason.to_string()),
-    "start_time": record.start_time.clone(),
-    "ring_time": record.ring_time.clone(),
-    "answer_time": record.answer_time.clone(),
-    "end_time": record.end_time.clone(),
-        "offer": record.offer.clone(),
-        "answer": record.answer.clone(),
+        "start_time": record.start_time.clone(),
+        "ring_time": record.ring_time.clone(),
+        "answer_time": record.answer_time.clone(),
+        "end_time": record.end_time.clone(),
     })
 }
 
@@ -959,4 +1188,323 @@ fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<
     } else {
         Some(Value::Object(map))
     }
+}
+
+const BILLING_METHOD_TEMPLATE: &str = "template";
+const BILLING_STATUS_UNRATED: &str = "unrated";
+const BILLING_STATUS_ZERO_DURATION: &str = "zero-duration";
+const BILLING_STATUS_INCLUDED: &str = "included";
+const BILLING_STATUS_CHARGED: &str = "charged";
+
+#[derive(Debug, Clone, Default)]
+struct BillingContext {
+    template_id: Option<i64>,
+    snapshot: Option<Value>,
+    parameters: Option<BillingParameters>,
+}
+
+#[derive(Debug, Clone)]
+struct BillingParameters {
+    template_id: Option<i64>,
+    template_name: Option<String>,
+    display_name: Option<String>,
+    currency: String,
+    initial_increment_secs: i32,
+    billing_increment_secs: i32,
+    overage_rate_per_minute: f64,
+    tax_percent: f64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct BillingTemplateSnapshot {
+    id: Option<i64>,
+    name: Option<String>,
+    display_name: Option<String>,
+    description: Option<String>,
+    currency: Option<String>,
+    billing_interval: Option<Value>,
+    included_minutes: Option<i32>,
+    included_messages: Option<i32>,
+    initial_increment_secs: Option<i32>,
+    billing_increment_secs: Option<i32>,
+    overage_rate_per_minute: Option<f64>,
+    setup_fee: Option<f64>,
+    tax_percent: Option<f64>,
+    metadata: Option<Value>,
+    captured_at: Option<Value>,
+}
+
+impl BillingParameters {
+    fn from_template(template: &BillTemplateModel) -> Self {
+        Self {
+            template_id: Some(template.id),
+            template_name: Some(template.name.clone()),
+            display_name: template.display_name.clone(),
+            currency: template.currency.clone(),
+            initial_increment_secs: template.initial_increment_secs.max(1),
+            billing_increment_secs: template.billing_increment_secs.max(1),
+            overage_rate_per_minute: template.overage_rate_per_minute.max(0.0),
+            tax_percent: template.tax_percent.max(0.0),
+        }
+    }
+
+    fn from_snapshot(snapshot: &BillingTemplateSnapshot) -> Self {
+        Self {
+            template_id: snapshot.id,
+            template_name: snapshot.name.clone(),
+            display_name: snapshot.display_name.clone(),
+            currency: snapshot
+                .currency
+                .clone()
+                .unwrap_or_else(|| "USD".to_string()),
+            initial_increment_secs: snapshot.initial_increment_secs.unwrap_or(60).max(1),
+            billing_increment_secs: snapshot.billing_increment_secs.unwrap_or(60).max(1),
+            overage_rate_per_minute: snapshot.overage_rate_per_minute.unwrap_or(0.0).max(0.0),
+            tax_percent: snapshot.tax_percent.unwrap_or(0.0).max(0.0),
+        }
+    }
+}
+
+async fn resolve_billing_context(
+    db: &DatabaseConnection,
+    sip_trunk_id: Option<i64>,
+) -> Result<BillingContext> {
+    let Some(trunk_id) = sip_trunk_id else {
+        return Ok(BillingContext::default());
+    };
+
+    let Some(trunk) = SipTrunkEntity::find_by_id(trunk_id).one(db).await? else {
+        return Ok(BillingContext::default());
+    };
+
+    let mut context = BillingContext {
+        template_id: trunk.billing_template_id,
+        snapshot: trunk.billing_snapshot.clone(),
+        parameters: None,
+    };
+
+    if let Some(snapshot) = context.snapshot.clone() {
+        if let Some(params) = extract_billing_parameters(&snapshot) {
+            if context.template_id.is_none() {
+                context.template_id = params.template_id;
+            }
+            context.parameters = Some(params);
+        }
+    }
+
+    if context.parameters.is_none() {
+        if let Some(template_id) = context.template_id {
+            if let Some(template) = BillTemplateEntity::find_by_id(template_id).one(db).await? {
+                context.parameters = Some(BillingParameters::from_template(&template));
+                if context.snapshot.is_none() {
+                    context.snapshot = Some(build_bill_template_snapshot(&template));
+                }
+            }
+        }
+    }
+
+    Ok(context)
+}
+
+fn build_bill_template_snapshot(template: &BillTemplateModel) -> Value {
+    json!({
+        "id": template.id,
+        "name": template.name,
+        "display_name": template.display_name,
+        "description": template.description,
+        "currency": template.currency,
+        "billing_interval": template.billing_interval,
+        "included_minutes": template.included_minutes,
+        "included_messages": template.included_messages,
+        "initial_increment_secs": template.initial_increment_secs,
+        "billing_increment_secs": template.billing_increment_secs,
+        "overage_rate_per_minute": template.overage_rate_per_minute,
+        "setup_fee": template.setup_fee,
+        "tax_percent": template.tax_percent,
+        "metadata": template.metadata.clone(),
+        "captured_at": Utc::now(),
+    })
+}
+
+fn extract_billing_parameters(snapshot: &Value) -> Option<BillingParameters> {
+    serde_json::from_value::<BillingTemplateSnapshot>(snapshot.clone())
+        .map(|data| BillingParameters::from_snapshot(&data))
+        .ok()
+}
+
+#[derive(Debug, Clone)]
+struct BillingComputation {
+    method: Option<String>,
+    status: String,
+    currency: Option<String>,
+    billable_secs: Option<i32>,
+    rate_per_minute: Option<f64>,
+    amount_subtotal: Option<f64>,
+    amount_tax: Option<f64>,
+    amount_total: Option<f64>,
+    detail: Option<Value>,
+}
+
+impl Default for BillingComputation {
+    fn default() -> Self {
+        Self {
+            method: None,
+            status: String::new(),
+            currency: None,
+            billable_secs: None,
+            rate_per_minute: None,
+            amount_subtotal: None,
+            amount_tax: None,
+            amount_total: None,
+            detail: None,
+        }
+    }
+}
+
+impl BillingComputation {
+    fn to_json(&self) -> Option<Value> {
+        if self.status.is_empty()
+            && self.method.is_none()
+            && self.currency.is_none()
+            && self.billable_secs.is_none()
+            && self.rate_per_minute.is_none()
+            && self.amount_subtotal.is_none()
+            && self.amount_tax.is_none()
+            && self.amount_total.is_none()
+            && self.detail.is_none()
+        {
+            return None;
+        }
+
+        Some(json!({
+            "method": self.method.clone(),
+            "status": self.status.clone(),
+            "currency": self.currency.clone(),
+            "billable_secs": self.billable_secs,
+            "rate_per_minute": self.rate_per_minute,
+            "amount": {
+                "subtotal": self.amount_subtotal,
+                "tax": self.amount_tax,
+                "total": self.amount_total,
+            },
+            "detail": self.detail.clone(),
+        }))
+    }
+}
+
+fn compute_billing(duration_secs: i32, context: &BillingContext) -> BillingComputation {
+    if duration_secs <= 0 {
+        return BillingComputation {
+            method: context
+                .parameters
+                .as_ref()
+                .map(|_| BILLING_METHOD_TEMPLATE.to_string()),
+            status: BILLING_STATUS_ZERO_DURATION.to_string(),
+            currency: context
+                .parameters
+                .as_ref()
+                .map(|params| params.currency.clone()),
+            billable_secs: Some(0),
+            rate_per_minute: context
+                .parameters
+                .as_ref()
+                .map(|params| params.overage_rate_per_minute),
+            amount_subtotal: Some(0.0),
+            amount_tax: Some(0.0),
+            amount_total: Some(0.0),
+            detail: Some(json!({
+                "reason": "zero_duration",
+                "template_id": context.template_id,
+                "raw_duration_secs": duration_secs,
+            })),
+        };
+    }
+
+    let Some(params) = context.parameters.as_ref() else {
+        return BillingComputation {
+            method: None,
+            status: BILLING_STATUS_UNRATED.to_string(),
+            currency: None,
+            billable_secs: Some(0),
+            rate_per_minute: None,
+            amount_subtotal: None,
+            amount_tax: None,
+            amount_total: None,
+            detail: Some(json!({
+                "reason": "missing_billing_parameters",
+                "template_id": context.template_id,
+                "raw_duration_secs": duration_secs,
+            })),
+        };
+    };
+
+    let billed_secs = apply_billing_increments(
+        duration_secs,
+        params.initial_increment_secs,
+        params.billing_increment_secs,
+    );
+    let billable_minutes = billed_secs as f64 / 60.0;
+    let rate = params.overage_rate_per_minute.max(0.0);
+    let subtotal = round_currency((billable_minutes * rate).max(0.0));
+    let tax = round_currency((subtotal * params.tax_percent / 100.0).max(0.0));
+    let total = round_currency((subtotal + tax).max(0.0));
+
+    let status = if total <= 0.0 {
+        BILLING_STATUS_INCLUDED.to_string()
+    } else {
+        BILLING_STATUS_CHARGED.to_string()
+    };
+
+    BillingComputation {
+        method: Some(BILLING_METHOD_TEMPLATE.to_string()),
+        status,
+        currency: Some(params.currency.clone()),
+        billable_secs: Some(billed_secs),
+        rate_per_minute: Some(rate),
+        amount_subtotal: Some(subtotal),
+        amount_tax: Some(tax),
+        amount_total: Some(total),
+        detail: Some(json!({
+            "template": {
+                "id": params.template_id,
+                "name": params.template_name,
+                "display_name": params.display_name,
+            },
+            "raw_duration_secs": duration_secs,
+            "billable_secs": billed_secs,
+            "billable_minutes": (billable_minutes * 10_000.0).round() / 10_000.0,
+            "rounding_delta_secs": billed_secs.saturating_sub(duration_secs.max(0)),
+            "increments": {
+                "initial_secs": params.initial_increment_secs,
+                "billing_secs": params.billing_increment_secs,
+            },
+            "computed_at": Utc::now(),
+        })),
+    }
+}
+
+fn apply_billing_increments(
+    duration_secs: i32,
+    initial_increment_secs: i32,
+    billing_increment_secs: i32,
+) -> i32 {
+    if duration_secs <= 0 {
+        return 0;
+    }
+
+    let initial = initial_increment_secs.max(1);
+    let increment = billing_increment_secs.max(1);
+
+    if duration_secs <= initial {
+        initial
+    } else {
+        let remaining = duration_secs - initial;
+        let increments = (remaining + increment - 1) / increment;
+        initial + increments * increment
+    }
+}
+
+fn round_currency(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }

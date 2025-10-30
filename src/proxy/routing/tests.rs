@@ -433,7 +433,7 @@ async fn test_match_invite_rewrite_rules() {
         RouteResult::Forward(option) => {
             // Verify caller was rewritten
             let caller_user = option.caller.user().unwrap_or_default();
-            assert_eq!(caller_user, "08613812345678");
+            assert_eq!(caller_user, "013812345678");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
@@ -726,7 +726,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     match result_us {
         RouteResult::Forward(option) => {
             let caller_user = option.caller.user().unwrap_or_default();
-            assert_eq!(caller_user, "00115551234567");
+            assert_eq!(caller_user, "0015551234567");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
@@ -782,6 +782,79 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         RouteResult::Forward(option) => {
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "ext12345");
+        }
+        RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_rewrite_from_host_uses_match_capture() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+
+    trunks.insert(
+        "trunk1".to_string(),
+        TrunkConfig {
+            dest: "sip:gateway.example.com:5060".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "host_rewrite_rule".to_string(),
+        description: None,
+        priority: 100,
+        match_conditions: MatchConditions {
+            from_user: Some("^\\+1(\\d{10})$".to_string()),
+            from_host: Some("^(gw-[a-z-]+)\\.provider\\.net$".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            from_user: Some("001{1}".to_string()),
+            from_host: Some("proxy-{1}.internal".to_string()),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: None,
+            dest: Some(DestConfig::Single("trunk1".to_string())),
+            select: "rr".to_string(),
+            hash_key: None,
+            reject: None,
+        },
+        disabled: None,
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:+15551234567@gw-us-west.provider.net",
+        "sip:1001@example.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Forward(option) => {
+            let caller_user = option.caller.user().unwrap_or_default();
+            assert_eq!(caller_user, "0015551234567");
+
+            let caller_host = option.caller.host().to_string();
+            assert_eq!(caller_host, "proxy-gw-us-west.internal");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),

@@ -30,6 +30,7 @@ async fn test_save_with_http_without_media() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     // Test without media (should not fail if no server available)
@@ -99,6 +100,7 @@ async fn test_save_with_http_with_media() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     // Test with media
@@ -156,6 +158,7 @@ async fn test_save_with_http_with_custom_headers() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -211,6 +214,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -273,6 +277,7 @@ async fn test_save_with_s3_like_memory_store() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     // This test will only succeed if there's a local minio instance running
@@ -341,6 +346,7 @@ async fn test_save_with_s3_like_with_media() {
         extras: Some(extras),
         dump_event_file: None,
         refer_callrecord: None,
+        sip_flows: HashMap::new(),
     };
 
     // Test with different S3 vendors

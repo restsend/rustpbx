@@ -28,6 +28,7 @@ pub struct Model {
     pub department_id: Option<i64>,
     pub extension_id: Option<i64>,
     pub sip_trunk_id: Option<i64>,
+    pub billing_template_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
     pub caller_uri: Option<String>,
@@ -43,6 +44,16 @@ pub struct Model {
     pub quality_jitter_ms: Option<f64>,
     pub quality_packet_loss_percent: Option<f64>,
     pub analytics: Option<Json>,
+    pub billing_snapshot: Option<Json>,
+    pub billing_method: Option<String>,
+    pub billing_status: Option<String>,
+    pub billing_currency: Option<String>,
+    pub billing_billable_secs: Option<i32>,
+    pub billing_rate_per_minute: Option<f64>,
+    pub billing_amount_subtotal: Option<f64>,
+    pub billing_amount_tax: Option<f64>,
+    pub billing_amount_total: Option<f64>,
+    pub billing_result: Option<Json>,
     pub metadata: Option<Json>,
     pub signaling: Option<Json>,
     pub created_at: DateTimeUtc,
@@ -84,9 +95,23 @@ pub enum Relation {
         on_update = "Cascade"
     )]
     Route,
+    #[sea_orm(
+        belongs_to = "super::bill_template::Entity",
+        from = "Column::BillingTemplateId",
+        to = "super::bill_template::Column::Id",
+        on_delete = "SetNull",
+        on_update = "Cascade"
+    )]
+    BillTemplate,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Related<super::bill_template::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BillTemplate.def()
+    }
+}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -115,6 +140,7 @@ impl MigrationTrait for Migration {
                     .col(integer_null(Column::DepartmentId))
                     .col(integer_null(Column::ExtensionId))
                     .col(integer_null(Column::SipTrunkId))
+                    .col(integer_null(Column::BillingTemplateId))
                     .col(integer_null(Column::RouteId))
                     .col(string_null(Column::SipGateway).char_len(160))
                     .col(text_null(Column::CallerUri))
@@ -134,6 +160,16 @@ impl MigrationTrait for Migration {
                     .col(double_null(Column::QualityJitterMs))
                     .col(double_null(Column::QualityPacketLossPercent))
                     .col(json_null(Column::Analytics))
+                    .col(json_null(Column::BillingSnapshot))
+                    .col(string_null(Column::BillingMethod).char_len(32))
+                    .col(string_null(Column::BillingStatus).char_len(32))
+                    .col(string_null(Column::BillingCurrency).char_len(8))
+                    .col(integer_null(Column::BillingBillableSecs))
+                    .col(double_null(Column::BillingRatePerMinute))
+                    .col(double_null(Column::BillingAmountSubtotal))
+                    .col(double_null(Column::BillingAmountTax))
+                    .col(double_null(Column::BillingAmountTotal))
+                    .col(json_null(Column::BillingResult))
                     .col(json_null(Column::Metadata))
                     .col(json_null(Column::Signaling))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
@@ -168,6 +204,17 @@ impl MigrationTrait for Migration {
                             .name("fk_call_records_route")
                             .from(Entity, Column::RouteId)
                             .to(super::routing::Entity, super::routing::Column::Id)
+                            .on_delete(MigrationForeignKeyAction::SetNull)
+                            .on_update(MigrationForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_call_records_bill_template")
+                            .from(Entity, Column::BillingTemplateId)
+                            .to(
+                                super::bill_template::Entity,
+                                super::bill_template::Column::Id,
+                            )
                             .on_delete(MigrationForeignKeyAction::SetNull)
                             .on_update(MigrationForeignKeyAction::Cascade),
                     )

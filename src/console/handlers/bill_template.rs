@@ -1,5 +1,8 @@
 use crate::{
-    console::handlers::forms::{self, BillTemplatePayload, ListQuery},
+    console::handlers::{
+        bad_request,
+        forms::{self, BillTemplatePayload, ListQuery},
+    },
     console::{ConsoleState, middleware::AuthRequired},
     models::bill_template::{
         ActiveModel as BillTemplateActiveModel, BillingInterval, Column as BillTemplateColumn,
@@ -16,8 +19,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Order;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder,
+    ActiveModelTrait, ActiveValue, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -372,6 +375,34 @@ async fn build_filters_payload(db: &DatabaseConnection) -> Value {
     }
 }
 
+fn normalize_increment_value(raw: i32, field: &str) -> Result<i32, Response> {
+    if raw <= 0 {
+        return Err(bad_request(format!("{field} must be greater than zero")));
+    }
+    if raw > 86_400 {
+        return Err(bad_request(format!(
+            "{field} must be less than or equal to 86400 seconds"
+        )));
+    }
+    Ok(raw)
+}
+
+fn validate_billing_pair(initial: i32, billing: i32) -> Result<(), Response> {
+    if billing > initial {
+        return Err(bad_request(
+            "billing_increment_secs cannot exceed initial_increment_secs",
+        ));
+    }
+    Ok(())
+}
+
+fn active_value_i32(value: &ActiveValue<i32>, fallback: i32) -> i32 {
+    match value {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => *v,
+        _ => fallback,
+    }
+}
+
 fn apply_form_to_active_model(
     active: &mut BillTemplateActiveModel,
     form: &BillTemplatePayload,
@@ -383,8 +414,21 @@ fn apply_form_to_active_model(
         active.name = Set(name);
         active.currency = Set(form.currency.clone().unwrap_or("USD".into()));
         active.billing_interval = Set(form.billing_interval.unwrap_or(BillingInterval::Monthly));
+
+        let initial_increment = normalize_increment_value(
+            form.initial_increment_secs.unwrap_or(60),
+            "initial_increment_secs",
+        )?;
+        let billing_increment = normalize_increment_value(
+            form.billing_increment_secs.unwrap_or(initial_increment),
+            "billing_increment_secs",
+        )?;
+        validate_billing_pair(initial_increment, billing_increment)?;
+
         active.included_minutes = Set(form.included_minutes.unwrap_or(0));
         active.included_messages = Set(form.included_messages.unwrap_or(0));
+        active.initial_increment_secs = Set(initial_increment);
+        active.billing_increment_secs = Set(billing_increment);
         active.overage_rate_per_minute = Set(form.overage_rate_per_minute.unwrap_or(0.0));
         active.setup_fee = Set(form.setup_fee.unwrap_or(0.0));
         active.tax_percent = Set(form.tax_percent.unwrap_or(0.0));
@@ -404,6 +448,26 @@ fn apply_form_to_active_model(
         }
         if form.included_messages.is_some() {
             active.included_messages = Set(form.included_messages.unwrap_or(0));
+        }
+        let current_initial = active_value_i32(&active.initial_increment_secs, 60);
+        let current_billing = active_value_i32(&active.billing_increment_secs, current_initial);
+        let mut desired_initial = current_initial;
+        let mut desired_billing = current_billing;
+        let mut touched = false;
+
+        if let Some(initial) = form.initial_increment_secs {
+            desired_initial = normalize_increment_value(initial, "initial_increment_secs")?;
+            touched = true;
+        }
+        if let Some(increment) = form.billing_increment_secs {
+            desired_billing = normalize_increment_value(increment, "billing_increment_secs")?;
+            touched = true;
+        }
+
+        if touched {
+            validate_billing_pair(desired_initial, desired_billing)?;
+            active.initial_increment_secs = Set(desired_initial);
+            active.billing_increment_secs = Set(desired_billing);
         }
         if form.overage_rate_per_minute.is_some() {
             active.overage_rate_per_minute = Set(form.overage_rate_per_minute.unwrap_or(0.0));

@@ -84,7 +84,7 @@
             </div>
         </header>
 
-        <section class="grid gap-4 sm:grid-cols-3">
+        <section class="grid gap-4 sm:grid-cols-4">
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Duration</div>
                 <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="formatDuration(record.duration_secs)">
@@ -110,6 +110,25 @@
                 </div>
                 <p class="mt-1 text-xs text-slate-500"
                     x-text="transcript.available || transcriptVisible ? 'Generated '+(transcript.generated_at || '') : 'Request on demand to analyse conversation outcome.'">
+                </p>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
+                <div class="mt-2 flex items-center justify-between gap-2">
+                    <span class="text-2xl font-semibold text-slate-900"
+                        x-text="formatBillingAmount(record.billing)"></span>
+                    <span class="text-xs font-semibold uppercase text-slate-400"
+                        x-text="(record.billing && record.billing.currency) ? record.billing.currency : ''"></span>
+                </div>
+                <div class="mt-2 inline-flex items-center gap-2">
+                    <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                        :class="billingStatusClasses(record.billing?.status)">
+                        <span x-text="billingStatusLabel(record.billing?.status)"></span>
+                    </span>
+                    <span class="text-[11px] text-slate-500" x-text="formatBillingMinutes(record.billing)"></span>
+                </div>
+                <p class="mt-1 text-xs text-slate-500"
+                    x-text="billing?.summary?.rate_per_minute !== undefined ? ('Rate ' + formatCurrency(billing.summary.rate_per_minute, billing.summary.currency)) : 'Real-time charge capture.'">
                 </p>
             </div>
         </section>
@@ -247,6 +266,87 @@
                             Last updated <span x-text="formatDateTime(notes.updated_at)"></span>
                         </p>
                     </div>
+                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 lg:col-span-2">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Billing details</h2>
+                                <p class="text-xs text-slate-500">Snapshot of increments, rate, and totals at hangup.
+                                </p>
+                            </div>
+                        </div>
+                        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+                            <dl class="space-y-2 text-sm text-slate-600">
+                                <div class="flex items-center justify-between">
+                                    <dt>Status</dt>
+                                    <dd>
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                            :class="billingStatusClasses(billing.summary?.status || record.billing?.status)">
+                                            <span
+                                                x-text="billingStatusLabel(billing.summary?.status || record.billing?.status)"></span>
+                                        </span>
+                                    </dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt>Billable seconds</dt>
+                                    <dd x-text="billing.summary?.billable_secs ?? record.billing?.billable_secs ?? '—'">
+                                    </dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt>Billable minutes</dt>
+                                    <dd x-text="formatBillingMinutes(billing.summary || record.billing)"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt>Rate / min</dt>
+                                    <dd
+                                        x-text="billing.summary?.rate_per_minute !== undefined ? formatCurrency(billing.summary.rate_per_minute, billing.summary?.currency || record.billing?.currency) : '—'">
+                                    </dd>
+                                </div>
+                            </dl>
+                            <dl class="space-y-2 text-sm text-slate-600">
+                                <div class="flex items-center justify-between">
+                                    <dt>Subtotal</dt>
+                                    <dd
+                                        x-text="billing.summary?.amount?.subtotal !== undefined ? formatCurrency(billing.summary.amount.subtotal, billing.summary?.currency || record.billing?.currency) : '—'">
+                                    </dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt>Tax</dt>
+                                    <dd
+                                        x-text="billing.summary?.amount?.tax !== undefined ? formatCurrency(billing.summary.amount.tax, billing.summary?.currency || record.billing?.currency) : '—'">
+                                    </dd>
+                                </div>
+                                <div class="flex items-center justify-between font-semibold">
+                                    <dt>Total</dt>
+                                    <dd x-text="formatBillingAmount(billing.summary || record.billing)"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt>Increments</dt>
+                                    <dd
+                                        x-text="billing.summary?.increments ? (billing.summary.increments.initial_secs + ' / ' + billing.summary.increments.billing_secs + ' s') : '—'">
+                                    </dd>
+                                </div>
+                            </dl>
+                        </div>
+                        <template x-if="billing.result">
+                            <details
+                                class="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600">
+                                <summary class="cursor-pointer text-xs font-semibold text-slate-500">Computation trace
+                                </summary>
+                                <pre class="max-h-48 overflow-auto rounded bg-white/70 p-3"
+                                    x-text="formatJson(billing.result)"></pre>
+                            </details>
+                        </template>
+                        <template x-if="billing.snapshot">
+                            <details
+                                class="mt-2 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600">
+                                <summary class="cursor-pointer text-xs font-semibold text-slate-500">Template snapshot
+                                </summary>
+                                <pre class="max-h-48 overflow-auto rounded bg-white/70 p-3"
+                                    x-text="formatJson(billing.snapshot)"></pre>
+                            </details>
+                        </template>
+                    </div>
                 </div>
             </div>
 
@@ -345,119 +445,201 @@
 
                     <div x-show="insightTab === 'sip-flow'" x-cloak x-transition.opacity
                         id="call-record-diagnostics-sip" role="tabpanel" tabindex="0">
-                        <p class="text-xs text-slate-500">Inspect signalling direction, status codes, and raw payloads
-                            to debug call setup.</p>
-                        <div class="mt-4 divide-y divide-slate-100">
-                            <template x-for="(entry, index) in sipFlow" :key="index">
-                                <div class="flex flex-col gap-2 py-3">
-                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                        <div class="flex flex-col">
-                                            <div class="text-xs text-slate-400"
-                                                x-text="formatDateTime(entry.timestamp) + ' · ' + (entry.offset || '')">
-                                            </div>
+                        <p class="text-xs text-slate-500">Compare caller, PBX, and callee lanes. Click a row to inspect
+                            the raw SIP payload.</p>
+                        <div class="mt-4 flex flex-col gap-4 lg:flex-row">
+                            <div class="lg:w-7/12 lg:min-w-0 space-y-3">
+                                <div class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                                    <div class="max-h-[520px] overflow-y-auto">
+                                        <table class="w-full table-fixed divide-y divide-slate-100 text-sm">
+                                            <thead
+                                                class="sticky top-0 z-10 bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                                <tr>
+                                                    <template x-for="column in sipFlowColumns" :key="column.id">
+                                                        <th scope="col" class="px-3 py-2 text-left"
+                                                            :class="column.id === 'time' ? 'w-28' : 'w-1/3'">
+                                                            <span x-text="column.label"></span>
+                                                        </th>
+                                                    </template>
+                                                </tr>
+                                            </thead>
+                                            <tbody class="bg-white">
+                                                <template x-if="sipFlowEntries.length">
+                                                    <template x-for="entry in sipFlowEntries"
+                                                        :key="'sip-' + entry.sequence">
+                                                        <tr class="cursor-pointer transition" :class="selectedSipEntry && selectedSipEntry.sequence === entry.sequence
+                                                                ? 'bg-sky-50 ring-1 ring-inset ring-sky-300'
+                                                                : 'hover:bg-slate-50'" @click="selectSipEntry(entry)">
+                                                            <template x-for="column in sipFlowColumns"
+                                                                :key="column.id + '-' + entry.sequence">
+                                                                <td
+                                                                    class="align-top px-3 py-3 whitespace-normal break-words">
+                                                                    <template x-if="column.id === 'time'">
+                                                                        <div class="space-y-1 text-xs text-slate-600">
+                                                                            <div class="font-mono text-[12px] font-semibold text-slate-700"
+                                                                                x-text="formatRelativeToStart(entry)">
+                                                                            </div>
+                                                                            <div class="text-[10px] font-mono text-slate-400"
+                                                                                x-text="entry.offset || ''"></div>
+                                                                            <div class="text-[10px] uppercase tracking-wide text-slate-400"
+                                                                                x-text="(entry.flow_direction || entry.direction || '') ? (entry.flow_direction || entry.direction || '').toUpperCase() : ''">
+                                                                            </div>
+                                                                        </div>
+                                                                    </template>
+                                                                    <template x-if="column.id !== 'time'">
+                                                                        <div
+                                                                            class="space-y-1 text-[11px] text-slate-600">
+                                                                            <template
+                                                                                x-if="column.id === 'pbx' && isB2bua(entry)">
+                                                                                <div
+                                                                                    class="mb-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                                                                    <span
+                                                                                        x-text="entry.leg_role_label || 'B2BUA leg'"></span>
+                                                                                    <span x-show="entry.leg_label"
+                                                                                        class="font-mono"
+                                                                                        x-text="entry.leg_label"></span>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="column.id === (entry.lane_display || entry.lane_from)">
+                                                                                <div class="flex items-start gap-2"
+                                                                                    :class="laneCell(entry, column.id) === 'to' ? 'justify-end text-right' : 'text-left'">
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'left'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'left'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <div class="space-y-1"
+                                                                                        :class="laneCell(entry, column.id) === 'to' ? 'text-right' : 'text-left'">
+                                                                                        <span
+                                                                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold"
+                                                                                            :class="laneCell(entry, column.id) === 'to' ? 'bg-slate-100 text-slate-600' : 'bg-slate-200 text-slate-700'">
+                                                                                            <span
+                                                                                                x-text="entry.method || entry.status_code || '—'"></span>
+                                                                                            <span
+                                                                                                x-show="entry.status_code && entry.method && entry.method !== String(entry.status_code)"
+                                                                                                class="text-emerald-600"
+                                                                                                x-text="entry.status_code"></span>
+                                                                                        </span>
+                                                                                        <div class="leading-snug break-words"
+                                                                                            x-text="formatSummary(entry.summary)">
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'right'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'right'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="column.id !== (entry.lane_display || entry.lane_from) && laneCell(entry, column.id) === 'from'">
+                                                                                <div
+                                                                                    class="flex items-center justify-center text-base leading-none text-slate-300">
+                                                                                    <span
+                                                                                        x-text="cellArrow(entry, column.id)"></span>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="column.id !== (entry.lane_display || entry.lane_from) && laneCell(entry, column.id) === 'to'">
+                                                                                <div
+                                                                                    class="flex items-center justify-center text-base leading-none text-slate-300">
+                                                                                    <span
+                                                                                        x-text="cellArrow(entry, column.id)"></span>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="laneCell(entry, column.id) === 'self'">
+                                                                                <div
+                                                                                    class="mx-auto h-1.5 w-1.5 rounded-full bg-slate-400">
+                                                                                </div>
+                                                                            </template>
+                                                                        </div>
+                                                                    </template>
+                                                                </td>
+                                                            </template>
+                                                        </tr>
+                                                    </template>
+                                                </template>
+                                                <template x-if="!sipFlowEntries.length">
+                                                    <tr>
+                                                        <td class="px-4 py-6 text-center text-xs text-slate-400"
+                                                            :colspan="sipFlowColumns.length">
+                                                            No SIP trace captured for this session.
+                                                        </td>
+                                                    </tr>
+                                                </template>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="h-full rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                                    <template x-if="selectedSipEntry">
+                                        <div class="flex h-full flex-col">
                                             <div
-                                                class="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
-                                                <span
-                                                    class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
-                                                    x-text="directionLabel(entry.direction)"></span>
-                                                <span x-text="entry.summary"></span>
+                                                class="flex flex-col gap-2 border-b border-slate-200 pb-3 text-sm text-slate-600">
+                                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                                    <span
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-700">
+                                                        <span
+                                                            x-text="selectedSipEntry.method || selectedSipEntry.status_code || 'Message'"></span>
+                                                        <span
+                                                            x-show="selectedSipEntry.status_code && selectedSipEntry.method && selectedSipEntry.method !== String(selectedSipEntry.status_code)"
+                                                            class="text-emerald-600"
+                                                            x-text="selectedSipEntry.status_code"></span>
+                                                    </span>
+                                                    <span class="font-mono text-[13px] text-slate-700"
+                                                        x-text="formatDateTimeWithMs(selectedSipEntry.timestamp)"></span>
+                                                    <span class="font-mono text-[11px] text-slate-400"
+                                                        x-text="formatRelativeToStart(selectedSipEntry)"></span>
+                                                </div>
+                                                <div
+                                                    class="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                                    <span x-text="selectedSipEntry.from_label"></span>
+                                                    <span class="text-base leading-none text-slate-300"
+                                                        x-text="selectedSipEntry.arrow === 'right' ? '→' : '←'"></span>
+                                                    <span x-text="selectedSipEntry.to_label"></span>
+                                                    <span x-show="selectedSipEntry.leg_role_label"
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                        x-text="selectedSipEntry.leg_role_label"></span>
+                                                    <span x-show="selectedSipEntry.leg_label"
+                                                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 font-mono text-[10px] text-slate-500"
+                                                        x-text="selectedSipEntry.leg_label"></span>
+                                                </div>
+                                                <div class="text-sm font-semibold text-slate-700"
+                                                    x-text="selectedSipEntry.summary"></div>
                                             </div>
-                                            <div class="text-xs text-slate-500">
-                                                <span class="font-semibold" x-text="entry.method"></span>
-                                                <span class="ml-2"
-                                                    x-text="entry.status_code ? ('Code ' + entry.status_code) : ''"></span>
+                                            <div class="mt-3 flex-1 overflow-auto">
+                                                <pre
+                                                    class="h-96 max-w-full overflow-auto whitespace-pre rounded bg-slate-950/90 p-3 text-[11px] leading-relaxed text-emerald-100"><code x-text="selectedSipEntry.raw || 'No raw payload captured.'"></code></pre>
                                             </div>
                                         </div>
-                                        <button type="button"
-                                            class="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 transition hover:text-sky-600"
-                                            @click="toggleSipRaw(index)">
-                                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
-                                                stroke="currentColor" stroke-width="1.6">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 7l6 6-6 6" />
-                                            </svg>
-                                            <span x-text="isSipExpanded(index) ? 'Hide raw' : 'View raw'"></span>
-                                        </button>
-                                    </div>
-                                    <pre x-show="isSipExpanded(index)" x-collapse
-                                        class="overflow-x-auto rounded-lg border border-slate-200 bg-slate-950/90 p-3 text-[10px] text-emerald-100"><code x-text="entry.raw || 'No raw payload captured.'"></code></pre>
+                                    </template>
+                                    <template x-if="!selectedSipEntry">
+                                        <div class="flex h-full items-center justify-center text-xs text-slate-400">
+                                            Select a SIP message to inspect its raw payload.
+                                        </div>
+                                    </template>
                                 </div>
-                            </template>
-                            <template x-if="!sipFlow.length">
-                                <div class="py-8 text-center text-xs text-slate-400">No SIP trace captured for this
-                                    session.</div>
-                            </template>
+                            </div>
                         </div>
                     </div>
-                </div>
-
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Signaling exchange</h2>
-                    <p class="text-xs text-slate-500">Inspect original offers and answers captured for each leg.</p>
-                    <div class="mt-2" x-show="signaling && signaling.is_b2bua">
-                        <span
-                            class="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700">
-                            <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                stroke-width="1.6">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h12M10 4l6 6-6 6" />
-                            </svg>
-                            B2BUA bridged
-                        </span>
-                    </div>
-                    <template x-if="signalingLegs.length">
-                        <div class="mt-4 space-y-4">
-                            <template x-for="(leg, index) in signalingLegs" :key="(leg.call_id || '') + index">
-                                <div class="rounded-lg border border-slate-200 p-4">
-                                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                        <div class="space-y-1">
-                                            <div class="text-xs font-semibold uppercase tracking-wide text-slate-400"
-                                                x-text="legLabel(leg.role)"></div>
-                                            <div class="text-sm font-semibold text-slate-900"
-                                                x-text="(leg.caller || '—') + ' → ' + (leg.callee || '—')"></div>
-                                            <div class="text-xs text-slate-500">
-                                                <span x-text="'Status ' + (leg.status_code || '—')"></span>
-                                                <span x-show="leg.hangup_reason" class="ml-2"
-                                                    x-text="'Hangup ' + leg.hangup_reason"></span>
-                                            </div>
-                                            <div class="text-xs text-slate-500 space-x-2">
-                                                <span x-show="leg.start_time"
-                                                    x-text="'Start ' + formatDateTime(leg.start_time)"></span>
-                                                <span x-show="leg.end_time"
-                                                    x-text="'· End ' + formatDateTime(leg.end_time)"></span>
-                                            </div>
-                                        </div>
-                                        <div class="text-xs text-slate-500 space-y-1">
-                                            <div x-show="leg.call_type" x-text="'Type ' + leg.call_type"></div>
-                                            <div x-show="leg.call_id" x-text="'Call-ID ' + leg.call_id"></div>
-                                        </div>
-                                    </div>
-                                    <div class="mt-3 grid gap-3 sm:grid-cols-2">
-                                        <details class="rounded border border-slate-200 bg-slate-50">
-                                            <summary
-                                                class="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-600">
-                                                Offer SDP
-                                            </summary>
-                                            <pre class="max-h-60 overflow-auto px-3 py-2 text-[10px] leading-relaxed text-slate-800"
-                                                x-text="leg.offer || 'No offer captured.'"></pre>
-                                        </details>
-                                        <details class="rounded border border-slate-200 bg-slate-50">
-                                            <summary
-                                                class="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-600">
-                                                Answer SDP
-                                            </summary>
-                                            <pre class="max-h-60 overflow-auto px-3 py-2 text-[10px] leading-relaxed text-slate-800"
-                                                x-text="leg.answer || 'No answer captured.'"></pre>
-                                        </details>
-                                    </div>
-                                </div>
-                            </template>
-                        </div>
-                    </template>
-                    <template x-if="!signalingLegs.length">
-                        <div
-                            class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
-                            No signaling exchange stored.
-                        </div>
-                    </template>
                 </div>
             </div>
         </section>
@@ -475,7 +657,39 @@
                     : null;
                 const topLevelRewrite = (data.rewrite && typeof data.rewrite === 'object') ? data.rewrite : null;
                 this.rewrite = recordRewrite || topLevelRewrite || {};
-                this.sipFlow = Array.isArray(data.sip_flow) ? data.sip_flow : [];
+                const sipFlowPayload = (data.sip_flow && typeof data.sip_flow === 'object' && !Array.isArray(data.sip_flow))
+                    ? data.sip_flow
+                    : { entries: Array.isArray(data.sip_flow) ? data.sip_flow : [] };
+                const sipFlowEntriesRaw = Array.isArray(sipFlowPayload.entries) ? sipFlowPayload.entries : [];
+                this.sipFlowEntries = sipFlowEntriesRaw.map((entry, index) => {
+                    const clone = Object.assign({}, entry || {});
+                    if (clone.sequence === undefined || clone.sequence === null) {
+                        clone.sequence = index;
+                    }
+                    return clone;
+                });
+                const payloadColumnLabels = {};
+                if (Array.isArray(sipFlowPayload.columns)) {
+                    sipFlowPayload.columns.forEach((column) => {
+                        if (!column || typeof column !== 'object') {
+                            return;
+                        }
+                        const normalized = this.normalizeLaneId(column.id || column.label);
+                        if (normalized && ['time', 'caller', 'pbx', 'callee'].includes(normalized)) {
+                            payloadColumnLabels[normalized] = column.label || column.id || payloadColumnLabels[normalized];
+                        }
+                    });
+                }
+                this.sipFlowColumns = [
+                    { id: 'time', label: payloadColumnLabels.time || 'Time' },
+                    { id: 'caller', label: payloadColumnLabels.caller || 'Caller' },
+                    { id: 'pbx', label: payloadColumnLabels.pbx || 'PBX' },
+                    { id: 'callee', label: payloadColumnLabels.callee || 'Callee' },
+                ];
+                this.selectedSipEntry = this.sipFlowEntries.length ? this.sipFlowEntries[0] : null;
+                const recordStartTs = this.parseTimestamp(this.record.started_at);
+                const firstEntryTs = this.sipFlowEntries.length ? this.parseTimestamp(this.sipFlowEntries[0].timestamp) : null;
+                this.flowStartEpoch = Number.isFinite(recordStartTs) ? recordStartTs : firstEntryTs;
                 this.mediaMetrics = data.media_metrics || {};
                 this.transcript = data.transcript || { available: false, segments: [] };
                 this.transcriptPreview = data.transcript_preview || null;
@@ -483,18 +697,27 @@
                 this.notes = data.notes || { text: '', updated_at: null };
                 this.noteDraft = this.notes.text || '';
                 this.participants = Array.isArray(data.participants) ? data.participants : [];
-                this.signaling = (data.signaling && typeof data.signaling === 'object') ? data.signaling : {};
-                this.signalingLegs = Array.isArray(this.signaling.legs) ? this.signaling.legs : [];
                 this.actions = data.actions || {};
                 this.backUrl = data.back_url || '/console/call-records';
+                this.billing = data.billing || {
+                    summary: (this.record && this.record.billing) || {},
+                    snapshot: null,
+                    result: null,
+                };
+                if (!this.record.billing && this.billing && this.billing.summary) {
+                    this.record.billing = this.billing.summary;
+                }
                 this.durationHint = this.record.ended_at ? `Ended ${this.formatDateTime(this.record.ended_at)}` : 'No hangup timestamp recorded';
                 this.detailTab = 'overview';
                 this.insightTab = (this.transcriptVisible || (this.transcript && this.transcript.available))
                     ? 'transcription'
-                    : (this.sipFlow.length ? 'sip-flow' : 'transcription');
+                    : (this.sipFlowEntries.length ? 'sip-flow' : 'transcription');
             },
             record: {},
-            sipFlow: [],
+            sipFlowEntries: [],
+            sipFlowColumns: [],
+            selectedSipEntry: null,
+            flowStartEpoch: null,
             mediaMetrics: {},
             transcript: {},
             transcriptPreview: null,
@@ -502,17 +725,15 @@
             notes: {},
             noteDraft: '',
             participants: [],
-            signaling: {},
-            signalingLegs: [],
             rewrite: {},
             actions: {},
             backUrl: '/console/call-records',
+            billing: {},
             tagInput: '',
             asrProcessing: false,
             durationHint: '',
             detailTab: 'overview',
             insightTab: 'transcription',
-            expandedSip: [],
             copiedCallId: null,
             copyTimer: null,
             addTag() {
@@ -561,17 +782,186 @@
                     this.asrProcessing = false;
                 }, 1200);
             },
-            toggleSipRaw(index) {
-                const set = new Set(this.expandedSip);
-                if (set.has(index)) {
-                    set.delete(index);
-                } else {
-                    set.add(index);
+            selectSipEntry(entry) {
+                if (!entry) {
+                    this.selectedSipEntry = null;
+                    return;
                 }
-                this.expandedSip = Array.from(set);
+                if (this.selectedSipEntry && this.selectedSipEntry.sequence === entry.sequence) {
+                    this.selectedSipEntry = null;
+                } else {
+                    this.selectedSipEntry = entry;
+                }
             },
-            isSipExpanded(index) {
-                return this.expandedSip.includes(index);
+            laneCell(entry, columnId) {
+                if (!entry || !columnId) {
+                    return 'none';
+                }
+                const target = this.normalizeLaneId(columnId);
+                if (!target) {
+                    return 'none';
+                }
+                const laneFrom = this.normalizeLaneId(entry.lane_from);
+                const laneTo = this.normalizeLaneId(entry.lane_to);
+                if (laneFrom === target && laneTo === target) {
+                    return 'self';
+                }
+                if (laneFrom === target) {
+                    return 'from';
+                }
+                if (laneTo === target) {
+                    return 'to';
+                }
+                return 'none';
+            },
+            lanePosition(laneId) {
+                switch (this.normalizeLaneId(laneId)) {
+                    case 'caller':
+                        return 0;
+                    case 'pbx':
+                        return 1;
+                    case 'callee':
+                        return 2;
+                    default:
+                        return 1;
+                }
+            },
+            cellArrow(entry, columnId) {
+                if (!entry || !columnId) {
+                    return '';
+                }
+                const cellType = this.laneCell(entry, columnId);
+                if (cellType !== 'from' && cellType !== 'to') {
+                    return '';
+                }
+                const fromLane = this.normalizeLaneId(entry.lane_from);
+                const toLane = this.normalizeLaneId(entry.lane_to);
+                if (!fromLane || !toLane || fromLane === toLane) {
+                    return '';
+                }
+                return this.lanePosition(toLane) > this.lanePosition(fromLane) ? '→' : '←';
+            },
+            arrowPlacement(entry, columnId, cellType) {
+                const arrow = this.cellArrow(entry, columnId);
+                if (!arrow) {
+                    return 'none';
+                }
+                if (cellType === 'from') {
+                    return arrow === '→' ? 'right' : 'left';
+                }
+                if (cellType === 'to') {
+                    return arrow === '→' ? 'left' : 'right';
+                }
+                return 'none';
+            },
+            normalizeLaneId(value) {
+                const normalized = (value || '').toString().trim().toLowerCase();
+                if (!normalized) {
+                    return '';
+                }
+                switch (normalized) {
+                    case 'pbx':
+                    case 'proxy':
+                    case 'server':
+                    case 'sip_server':
+                    case 'b2bua':
+                        return 'pbx';
+                    case 'caller':
+                    case 'source':
+                    case 'src':
+                        return 'caller';
+                    case 'callee':
+                    case 'destination':
+                    case 'dst':
+                        return 'callee';
+                    case 'time':
+                    case 'timestamp':
+                        return 'time';
+                    default:
+                        return normalized;
+                }
+            },
+            parseTimestamp(value) {
+                if (!value) {
+                    return NaN;
+                }
+                const date = new Date(value);
+                if (!Number.isNaN(date.getTime())) {
+                    return date.getTime();
+                }
+                const parsed = Date.parse(value);
+                return Number.isNaN(parsed) ? NaN : parsed;
+            },
+            formatRelativeToStart(entry) {
+                if (!entry) {
+                    return '—';
+                }
+                const timestamp = this.parseTimestamp(entry.timestamp);
+                if (!Number.isFinite(timestamp)) {
+                    return entry.offset || '—';
+                }
+                if (!Number.isFinite(this.flowStartEpoch)) {
+                    return entry.offset || '—';
+                }
+                return this.formatDiffWithMs(timestamp - this.flowStartEpoch);
+            },
+            formatDiffWithMs(diffMs) {
+                if (!Number.isFinite(diffMs)) {
+                    return '—';
+                }
+                const sign = diffMs < 0 ? '-' : '+';
+                const abs = Math.abs(diffMs);
+                const totalSeconds = Math.floor(abs / 1000);
+                const milliseconds = abs % 1000;
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+                const pad = (num, len = 2) => String(num).padStart(len, '0');
+                const base = hours > 0
+                    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+                    : `${pad(minutes)}:${pad(seconds)}`;
+                return `${sign}${base}.${pad(milliseconds, 3)}`;
+            },
+            formatDateTimeWithMs(value) {
+                const timestamp = this.parseTimestamp(value);
+                if (!Number.isFinite(timestamp)) {
+                    return value || '—';
+                }
+                const date = new Date(timestamp);
+                const pad = (num, len = 2) => String(num).padStart(len, '0');
+                const year = date.getFullYear();
+                const month = pad(date.getMonth() + 1);
+                const day = pad(date.getDate());
+                const hours = pad(date.getHours());
+                const minutes = pad(date.getMinutes());
+                const seconds = pad(date.getSeconds());
+                const milliseconds = pad(date.getMilliseconds(), 3);
+                return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
+            },
+            formatSummary(value) {
+                const original = (value || '').toString().trim();
+                if (!original) {
+                    return '—';
+                }
+                const compact = original
+                    .replace(/sips?:[^\s>]+/gi, '')
+                    .replace(/<[^>]*>/g, '')
+                    .replace(/"[^"\\]*"/g, '')
+                    .replace(/\bSIP\/2\.0\b/gi, '')
+                    .replace(/\bOK\b/gi, '')
+                    .replace(/\s{2,}/g, ' ')
+                    .trim();
+                if (!compact) {
+                    const firstToken = original.split(/\s+/)[0];
+                    return firstToken || '—';
+                }
+                return compact.length > 60 ? `${compact.slice(0, 57)}…` : compact;
+            },
+            isB2bua(entry) {
+                if (!entry || !entry.leg_role) {
+                    return false;
+                }
+                return entry.leg_role.toLowerCase() === 'b2bua';
             },
             async copyCallId(callId) {
                 if (!callId) {
@@ -626,16 +1016,6 @@
                     this.copyTimer = null;
                 }, 1500);
             },
-            legLabel(value) {
-                switch ((value || '').toLowerCase()) {
-                    case 'primary':
-                        return 'Primary leg';
-                    case 'b2bua':
-                        return 'Bridged leg';
-                    default:
-                        return value || 'Signaling leg';
-                }
-            },
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'completed':
@@ -660,6 +1040,20 @@
                         return value || 'Unknown';
                 }
             },
+            billingStatusLabel(value) {
+                switch ((value || '').toLowerCase()) {
+                    case 'charged':
+                        return 'Charged';
+                    case 'included':
+                        return 'Included';
+                    case 'zero-duration':
+                        return 'Zero duration';
+                    case 'unrated':
+                        return 'Unrated';
+                    default:
+                        return value || 'Unknown';
+                }
+            },
             statusClasses(status) {
                 switch ((status || '').toLowerCase()) {
                     case 'completed':
@@ -668,6 +1062,20 @@
                         return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
                     case 'failed':
                         return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                    default:
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                }
+            },
+            billingStatusClasses(status) {
+                switch ((status || '').toLowerCase()) {
+                    case 'charged':
+                        return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                    case 'included':
+                        return 'bg-sky-50 text-sky-600 ring-1 ring-sky-200';
+                    case 'zero-duration':
+                        return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                    case 'unrated':
+                        return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
                     default:
                         return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
                 }
@@ -695,6 +1103,58 @@
                     default:
                         return 'border border-slate-200 bg-slate-50 text-slate-700';
                 }
+            },
+            formatCurrency(amount, currency) {
+                if (amount === null || amount === undefined) {
+                    return '—';
+                }
+                const numeric = Number(amount);
+                if (!Number.isFinite(numeric)) {
+                    return '—';
+                }
+                const symbol = (currency || 'USD').toString().trim().toUpperCase() || 'USD';
+                return `${symbol} ${numeric.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                })}`;
+            },
+            formatBillingAmount(billing) {
+                if (!billing || typeof billing !== 'object') {
+                    return '—';
+                }
+                const status = (billing.status || '').toLowerCase();
+                const amount = billing.amount || {};
+                const total = amount.total ?? amount.subtotal ?? null;
+                if (total !== null && total !== undefined) {
+                    return this.formatCurrency(total, billing.currency || (this.billing?.summary?.currency) || 'USD');
+                }
+                if (status === 'included') {
+                    return 'Included';
+                }
+                if (status === 'zero-duration') {
+                    return '0.00';
+                }
+                if (status === 'unrated') {
+                    return 'Unrated';
+                }
+                return '—';
+            },
+            formatBillingMinutes(billing) {
+                if (!billing || typeof billing !== 'object') {
+                    return '—';
+                }
+                const minutes = billing.billable_minutes !== undefined
+                    ? Number(billing.billable_minutes)
+                    : (typeof billing.billable_secs === 'number'
+                        ? Number(billing.billable_secs) / 60.0
+                        : NaN);
+                if (!Number.isFinite(minutes) || minutes <= 0) {
+                    return '—';
+                }
+                return `${minutes.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                })} min`;
             },
             qualityTone(value) {
                 const mos = Number(value || 0);
@@ -741,6 +1201,16 @@
                     return date.toLocaleString();
                 } catch (err) {
                     return value;
+                }
+            },
+            formatJson(value) {
+                if (!value) {
+                    return '—';
+                }
+                try {
+                    return JSON.stringify(value, null, 2);
+                } catch (err) {
+                    return String(value);
                 }
             },
         }));

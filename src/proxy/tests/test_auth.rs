@@ -460,6 +460,7 @@ async fn test_guest_call_allowed_extension() {
         proxycall_inspector: None,
         ignore_out_of_dialog_option: true,
         locator_events: None,
+        sip_flow: None,
     });
 
     let module = AuthModule::new(server_inner);

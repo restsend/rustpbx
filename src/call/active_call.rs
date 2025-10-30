@@ -406,10 +406,22 @@ impl ActiveCall {
             } else {
                 recorder_option.ptime
             };
+            let requested_format = recorder_option
+                .format
+                .unwrap_or(self.app_state.config.recorder_format);
+            let format = requested_format.effective();
+            if requested_format != format {
+                warn!(
+                    session_id = self.session_id,
+                    requested = requested_format.extension(),
+                    "Recorder format fallback to wav due to unsupported feature"
+                );
+            }
             let recorder_config = RecorderOption {
                 recorder_file,
                 samplerate: recorder_samplerate,
                 ptime: recorder_ptime,
+                format: Some(format),
             };
             Some(recorder_config)
         } else {
@@ -1712,6 +1724,7 @@ impl ActiveCallState {
             dump_event_file,
             recorder,
             refer_callrecord,
+            sip_flows: HashMap::new(),
         }
     }
 }
