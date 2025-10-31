@@ -217,7 +217,7 @@ pub struct OutputSentence {
     pub end_time: Option<u32>,
     pub text: String,
     pub words: Vec<OutputWord>,
-    pub heartbeat: bool,
+    pub heartbeat: Option<bool>,
     pub sentence_end: bool,
 }
 
@@ -318,7 +318,7 @@ impl AliyunAsrClient {
                             let payload = response.payload.ok_or(anyhow!("missing payload"))?;
                             let output = payload.output.ok_or(anyhow!("missing output"))?;
 
-                            if output.sentence.heartbeat {
+                            if output.sentence.heartbeat.unwrap_or(false) {
                                 continue;
                             }
 
