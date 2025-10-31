@@ -50,7 +50,7 @@ impl Command {
         let format = option.codec.as_deref().unwrap_or("pcm");
 
         let sample_rate = option.samplerate.unwrap_or(16000) as u32;
-        let volume = (option.volume.unwrap_or(5) * 10) as u32; // Convert to 0 - 100 range
+        let volume = option.volume.unwrap_or(50) as u32;
         let rate = option.speed.unwrap_or(1.0);
 
         Command {
