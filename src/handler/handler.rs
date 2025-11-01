@@ -1,7 +1,7 @@
 use super::middleware::clientaddr::ClientAddr;
 use crate::{
     app::AppState,
-    call::{ActiveCall, ActiveCallType, Command, active_call::CallParams},
+    call::{ActiveCall, ActiveCallType, Command, active_call::{ActiveCallGuard, CallParams}},
     event::SessionEvent,
     media::track::TrackConfig,
 };
@@ -129,33 +129,12 @@ pub async fn call_handler(
         let mut event_receiver = active_call.event_sender.subscribe();
         let send_to_ws_loop = async {
             while let Ok(event) = event_receiver.recv().await {
-                match event {
-                    SessionEvent::Binary { data,.. } => {
-                        let message = Message::Binary(data.into());
-                        if let Err(e) = ws_sender.send(message).await {
-                            warn!(session_id, %client_ip, "Failed to send WebSocket message: {}", e);
-                            break;
-                        }
-                    }
-                    SessionEvent::Ping { timestamp, payload }=>{
-                        let payload = payload.unwrap_or_else(|| timestamp.to_string());
-                        if let Err(_) = ws_sender.send(Message::Ping(payload.into())).await {
-                            break;
-                        }
-                    }
-                    _ => {
-                        match serde_json::to_string(&event) {
-                            Ok(message) => {
-                                if let Err(e) = ws_sender.send(Message::Text(message.into())).await {
-                                    warn!(session_id, %client_ip, "Failed to send WebSocket message: {}", e);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(session_id, %client_ip, "Failed to serialize event: {}", e);
-                            }
-                        }
-                    }
+                let message = match event.try_into() {
+                    Ok(msg) => msg,
+                    Err(_) => continue,
+                };
+                if let Err(_) = ws_sender.send(message).await {
+                    break;
                 }
             }
         };
@@ -175,50 +154,38 @@ pub async fn call_handler(
                 }
             }
         };
-
-        let active_calls = {
-            let mut calls = app_state.active_calls.lock().await;
-            calls.insert(session_id.clone(), active_call.clone());
-            calls.len()
-        };
-        info!(session_id, %client_ip, active_calls, ?call_type,"new call started");
-
+        let guard = ActiveCallGuard::new(active_call.clone());
+        info!(session_id, %client_ip, active_calls = guard.active_calls, ?call_type,"new call started");
+        let receiver = active_call.new_receiver();
+        
         let (r,_) = join!{
-            active_call.serve(),
+            active_call.serve(receiver),
             async {
                 select!{
                     _ = send_ping_loop => {},
                     _ = cancel_token.cancelled() => {},
-                    _ = send_to_ws_loop => { cancel_token.cancel() },
+                    _ = send_to_ws_loop => { },
                     _ = recv_from_ws_loop => {
                         info!(session_id, %client_ip, "WebSocket closed by client");
-                        cancel_token.cancel()
                     },
                 }
+                cancel_token.cancel();
             }
         };
-
         match r {
             Ok(_) => info!(session_id, %client_ip, "call ended successfully"),
             Err(e) => warn!(session_id, %client_ip, "call ended with error: {}", e),
         }
 
-        app_state.active_calls.lock().await.remove(&session_id);
-
+        active_call.cleanup().await.ok();
         // Drain remaining events
         while let Ok(event) = event_receiver.try_recv() {
-            match event {
-                SessionEvent::Binary { .. } => { }
-                _ => {
-                    match serde_json::to_string(&event) {
-                        Ok(message) => {
-                            if let Err(_) = ws_sender.send(Message::Text(message.into())).await {
-                                break;
-                            }
-                        }
-                        Err(_) => {}
-                    }
-                }
+            let message = match event.try_into() {
+                Ok(msg) => msg,
+                Err(_) => continue,
+            };
+            if let Err(_) = ws_sender.send(message).await {
+                break;
             }
         };
         ws_sender.flush().await.ok();
@@ -226,4 +193,19 @@ pub async fn call_handler(
         debug!(session_id, %client_ip, "WebSocket connection closed");
     });
     resp
+}
+
+impl TryInto<Message> for SessionEvent {
+    type Error = serde_json::Error;
+
+    fn try_into(self) -> Result<Message, <Self as TryInto<Message>>::Error> {
+        match self {
+            SessionEvent::Binary { data, .. } => Ok(Message::Binary(data.into())),
+            SessionEvent::Ping { timestamp, payload } => {
+                let payload = payload.unwrap_or_else(|| timestamp.to_string());
+                Ok(Message::Ping(payload.into()))
+            }
+            event => serde_json::to_string(&event).map(|payload| Message::Text(payload.into())),
+        }
+    }
 }

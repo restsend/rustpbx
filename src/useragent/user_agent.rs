@@ -2,7 +2,7 @@ use super::registration::RegistrationHandle;
 use crate::call::sip::Invitation;
 use crate::config::UseragentConfig;
 use crate::useragent::invitation::{
-    FnCreateInvitationHandler, PendingDialog, default_create_invite_handler,
+    FnCreateInvitationHandler, PendingDialog, PendingDialogGuard, default_create_invite_handler,
 };
 use anyhow::{Result, anyhow};
 use humantime::parse_duration;
@@ -203,6 +203,7 @@ impl UserAgent {
                             params: vec![],
                             headers: vec![],
                         });
+
                     let dialog = match dialog_layer.get_or_create_server_invite(
                         &tx,
                         state_sender,
@@ -225,19 +226,20 @@ impl UserAgent {
                             continue;
                         }
                     };
-                    let dialog_id_str = dialog.id().to_string();
 
+                    let dialog_id_str = dialog.id().to_string();
                     let token = self.token.child_token();
                     let pending_dialog = PendingDialog {
                         token: token.clone(),
                         dialog: dialog.clone(),
                         state_receiver,
                     };
-                    self.invitation
-                        .pending_dialogs
-                        .lock()
-                        .await
-                        .insert(dialog_id_str.clone(), pending_dialog);
+
+                    let guard = Arc::new(PendingDialogGuard::new(
+                        self.invitation.clone(),
+                        dialog_id_str.clone(),
+                        pending_dialog,
+                    ));
 
                     let accept_timeout = self
                         .config
@@ -245,24 +247,17 @@ impl UserAgent {
                         .as_ref()
                         .and_then(|t| parse_duration(t).ok())
                         .unwrap_or_else(|| Duration::from_secs(60));
-                    let pending_dialogs = self.invitation.pending_dialogs.clone();
+
                     let token_ref = token.clone();
-                    let dialog_id_str_clone = dialog_id_str.clone();
+                    let guard_ref = guard.clone();
                     tokio::spawn(async move {
                         select! {
                             _ = token_ref.cancelled() => {}
                             _ = tokio::time::sleep(accept_timeout) => {}
                         }
-                        if let Some(call) =
-                            pending_dialogs.lock().await.remove(&dialog_id_str_clone)
-                        {
-                            warn!(dialog_id = %dialog_id_str_clone, timeout = ?accept_timeout, "accept timeout, rejecting dialog");
-                            call.dialog
-                                .reject(Some(rsip::StatusCode::BusyHere), None)
-                                .ok();
-                            token_ref.cancel();
-                        }
+                        guard_ref.drop_async().await;
                     });
+
                     let mut dialog_ref = dialog.clone();
                     let token_ref = token.clone();
                     let routing_state = self.routing_state.clone();
@@ -280,9 +275,7 @@ impl UserAgent {
                                 Ok(_) => (),
                                 Err(e) => {
                                     info!(id = dialog_id_str, "error handling invite: {:?}", e);
-                                    dialog
-                                        .reject(Some(rsip::StatusCode::ServerInternalError), None)
-                                        .ok();
+                                    guard.drop_async().await;
                                 }
                             }
                         };

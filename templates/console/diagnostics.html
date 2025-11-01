@@ -137,6 +137,140 @@
                         </ul>
                     </div>
                 </template>
+
+                <div class="mt-6 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <h3 class="text-sm font-semibold text-slate-900">WebRTC connectivity probe</h3>
+                            <p class="text-xs text-slate-500">Gather ICE candidates to verify browser reachability to
+                                the PBX WebRTC edge.</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3 text-[11px]">
+                            <label class="inline-flex items-center gap-1 text-slate-500">
+                                <input type="checkbox" x-model="webrtcTest.useServerIce"
+                                    class="h-3.5 w-3.5 rounded border border-slate-300 text-sky-600 focus:ring-sky-500">
+                                Use /iceservers data
+                            </label>
+                            <button type="button" @click="runWebrtcTest" :disabled="webrtcTest.loading"
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+                                <template x-if="!webrtcTest.loading">
+                                    <span class="inline-flex items-center gap-1">
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                            stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h14M10 3v14" />
+                                        </svg>
+                                        Run probe
+                                    </span>
+                                </template>
+                                <template x-if="webrtcTest.loading">
+                                    <span class="inline-flex items-center gap-1">
+                                        <svg class="h-3.5 w-3.5 animate-spin" viewBox="0 0 20 20" fill="none"
+                                            stroke="currentColor" stroke-width="1.6">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M4 10a6 6 0 0 1 6-6m0-2a8 8 0 1 0 8 8" />
+                                        </svg>
+                                        Probing…
+                                    </span>
+                                </template>
+                            </button>
+                        </div>
+                    </div>
+                    <template x-if="webrtcTest.error">
+                        <div class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                            x-text="webrtcTest.error"></div>
+                    </template>
+                    <template x-if="webrtcTest.loading">
+                        <div class="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
+                            Running WebRTC probe…
+                        </div>
+                    </template>
+                    <template x-if="webrtcTest.result && !webrtcTest.loading">
+                        <div class="mt-4 space-y-3 text-xs text-slate-600">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="font-semibold text-slate-700">Ran at:</span>
+                                <span x-text="formatDateTime(webrtcTest.result.timestamp)"></span>
+                                <span
+                                    class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500"
+                                    x-text="webrtcTest.result.iceSource === 'server' ? 'Server ICE' : 'Fallback ICE'"></span>
+                            </div>
+                            <div class="grid gap-3 sm:grid-cols-2">
+                                <div>
+                                    <span class="font-semibold text-slate-700">ICE servers used</span>
+                                    <div class="mt-1 space-y-1">
+                                        <template x-for="(server, index) in webrtcTest.result.iceServers"
+                                            :key="server.urls.join(',') + index">
+                                            <div class="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                                                <div class="font-mono text-[10px]" x-text="server.urls.join(', ')">
+                                                </div>
+                                                <template x-if="server.username">
+                                                    <div class="text-[10px] text-slate-400"
+                                                        x-text="'User ' + server.username"></div>
+                                                </template>
+                                                <template x-if="server.credential">
+                                                    <div class="text-[10px] text-slate-400">Credential supplied</div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                        <template x-if="!webrtcTest.result.iceServers.length">
+                                            <div
+                                                class="rounded border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-400">
+                                                No ICE servers applied (browser defaults).
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div class="space-y-1">
+                                    <div><span class="font-semibold text-slate-700">Time to first candidate:</span>
+                                        <span x-text="formatMs(webrtcTest.result.timeToFirstCandidateMs)"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">ICE gathering complete:</span>
+                                        <span x-text="formatMs(webrtcTest.result.iceGatherDurationMs)"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Candidates discovered:</span>
+                                        <span x-text="webrtcTest.result.candidateTotal"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Candidate types:</span>
+                                        <span x-text="webrtcTest.result.typeSummary"></span>
+                                    </div>
+                                    <div><span class="font-semibold text-slate-700">Addresses seen:</span>
+                                        <span x-text="displayValue(webrtcTest.result.addresses)"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <template x-if="webrtcTest.result.candidates.length">
+                                <div class="space-y-2">
+                                    <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        Candidate details
+                                    </div>
+                                    <div class="grid gap-2">
+                                        <template x-for="item in webrtcTest.result.candidates" :key="item.id">
+                                            <div class="rounded border border-slate-200 bg-white px-3 py-2">
+                                                <div
+                                                    class="flex flex-wrap items-center gap-2 text-[11px] font-semibold text-slate-700">
+                                                    <span x-text="(item.type || 'unknown').toUpperCase()"></span>
+                                                    <span x-text="(item.protocol || '').toUpperCase()"></span>
+                                                    <span
+                                                        x-text="item.address ? item.address + ':' + (item.port || '0') : '—'"></span>
+                                                </div>
+                                                <div class="text-[11px] text-slate-500" x-text="item.candidate"></div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    <template
+                                        x-if="webrtcTest.result.candidateTotal > webrtcTest.result.candidates.length">
+                                        <div class="text-[10px] text-slate-400">
+                                            Showing
+                                            <span x-text="webrtcTest.result.candidates.length"></span>
+                                            of
+                                            <span x-text="webrtcTest.result.candidateTotal"></span>
+                                            candidates.
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
             </div>
         </section>
 
@@ -1196,23 +1330,8 @@
                                 <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
                                     x-text="sipCallError"></div>
                             </template>
-                            <div class="grid gap-4 sm:grid-cols-2">
-                                <div class="flex flex-col gap-1">
-                                    <span
-                                        class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Remote
-                                        audio</span>
-                                    <audio x-ref="sipRemoteAudio" autoplay controls playsinline
-                                        class="w-full rounded-lg border border-slate-200">
-                                    </audio>
-                                </div>
-                                <div class="flex flex-col gap-1">
-                                    <span class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Local
-                                        audio</span>
-                                    <audio x-ref="sipLocalAudio" autoplay controls playsinline
-                                        class="w-full rounded-lg border border-slate-200">
-                                    </audio>
-                                </div>
-                            </div>
+                            <audio x-ref="sipRemoteAudio" autoplay playsinline hidden></audio>
+                            <audio x-ref="sipLocalAudio" autoplay playsinline hidden></audio>
                         </div>
                     </div>
                 </div>
@@ -1383,6 +1502,7 @@
                     connectionTransports: [],
                     connectionAccounts: [],
                     connectionNotes: [],
+                    webrtcTest: { useServerIce: true, loading: false, error: null, result: null },
                     trunkTests: {},
                     routingInput: '',
                     routingDirection: 'outbound',
@@ -1906,6 +2026,149 @@
                             this.sipIceServersFetched = true;
                         }
                         return this.sipIceServers;
+                    },
+                    async runWebrtcTest() {
+                        if (this.webrtcTest.loading) {
+                            return;
+                        }
+                        if (typeof window === 'undefined' || typeof window.RTCPeerConnection === 'undefined') {
+                            this.webrtcTest.error = 'WebRTC APIs are not available in this browser.';
+                            return;
+                        }
+                        this.webrtcTest.loading = true;
+                        this.webrtcTest.error = null;
+                        this.webrtcTest.result = null;
+                        let pc;
+                        let dataChannel = null;
+                        try {
+                            let servers = [];
+                            let usingServerList = false;
+                            if (this.webrtcTest.useServerIce) {
+                                const resolved = await this.ensureIceServers();
+                                if (Array.isArray(resolved) && resolved.length) {
+                                    servers = resolved;
+                                    usingServerList = !this.sipIceServersError;
+                                }
+                            }
+                            if (!servers.length) {
+                                servers = this.normalizeIceServers(FALLBACK_ICE_SERVERS);
+                                usingServerList = false;
+                            }
+                            const config = servers.length ? { iceServers: servers } : {};
+                            const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                            let firstCandidateMs = null;
+                            const allCandidates = [];
+                            pc = new RTCPeerConnection(config);
+                            try {
+                                dataChannel = pc.createDataChannel('rustpbx-probe');
+                            } catch (err) {
+                                // ignore data channel errors (not critical for ICE gathering)
+                            }
+                            const gatherPromise = new Promise((resolve, reject) => {
+                                let settled = false;
+                                const timeoutId = setTimeout(() => {
+                                    if (settled) {
+                                        return;
+                                    }
+                                    settled = true;
+                                    reject(new Error('ICE gathering timed out after 10 seconds.'));
+                                }, 10000);
+                                const finish = () => {
+                                    if (settled) {
+                                        return;
+                                    }
+                                    settled = true;
+                                    clearTimeout(timeoutId);
+                                    resolve();
+                                };
+                                pc.onicecandidate = (event) => {
+                                    if (event && event.candidate) {
+                                        if (firstCandidateMs === null) {
+                                            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                                            firstCandidateMs = now - started;
+                                        }
+                                        const source = event.candidate;
+                                        const payload = typeof source.toJSON === 'function' ? source.toJSON() : {};
+                                        const entry = {
+                                            id: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                            type: source.type || payload.type || '',
+                                            protocol: source.protocol || payload.protocol || '',
+                                            address: source.address || payload.address || '',
+                                            port: source.port || payload.port || null,
+                                            candidate: source.candidate,
+                                            foundation: source.foundation || payload.foundation || '',
+                                            priority: source.priority || payload.priority || null,
+                                            relatedAddress: source.relatedAddress || payload.relatedAddress || '',
+                                            relatedPort: source.relatedPort || payload.relatedPort || null,
+                                        };
+                                        allCandidates.push(entry);
+                                    } else {
+                                        finish();
+                                    }
+                                };
+                                pc.onicegatheringstatechange = () => {
+                                    if (pc.iceGatheringState === 'complete') {
+                                        finish();
+                                    }
+                                };
+                            });
+                            const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+                            await pc.setLocalDescription(offer);
+                            await gatherPromise;
+                            const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                            const totalMs = Math.max(1, Math.round(ended - started));
+                            const typeCounts = allCandidates.reduce((acc, item) => {
+                                const key = (item.type || 'unknown').toLowerCase();
+                                acc[key] = (acc[key] || 0) + 1;
+                                return acc;
+                            }, {});
+                            const typeSummary = Object.keys(typeCounts).length
+                                ? Object.entries(typeCounts)
+                                    .map(([key, count]) => `${key}:${count}`)
+                                    .join(', ')
+                                : '—';
+                            const uniqueAddresses = Array.from(
+                                new Set(allCandidates.map((item) => item.address).filter(Boolean)),
+                            );
+                            const displayedCandidates = allCandidates.slice(0, 12);
+                            const normalizedServers = Array.isArray(servers)
+                                ? servers.map((server) => ({
+                                    urls: Array.isArray(server.urls) ? server.urls : [],
+                                    username: server.username || null,
+                                    credential: Boolean(server.credential),
+                                }))
+                                : [];
+                            this.webrtcTest.result = {
+                                timestamp: new Date().toISOString(),
+                                iceSource: usingServerList ? 'server' : 'fallback',
+                                iceServers: normalizedServers,
+                                timeToFirstCandidateMs: firstCandidateMs !== null ? Math.round(firstCandidateMs) : null,
+                                iceGatherDurationMs: totalMs,
+                                candidates: displayedCandidates,
+                                candidateTotal: allCandidates.length,
+                                typeSummary,
+                                addresses: uniqueAddresses,
+                            };
+                        } catch (err) {
+                            this.webrtcTest.error = err?.message || 'WebRTC probe failed.';
+                            this.webrtcTest.result = null;
+                        } finally {
+                            this.webrtcTest.loading = false;
+                            if (dataChannel && dataChannel.close) {
+                                try {
+                                    dataChannel.close();
+                                } catch (err) {
+                                    // ignore close errors
+                                }
+                            }
+                            if (pc && pc.close) {
+                                try {
+                                    pc.close();
+                                } catch (err) {
+                                    // ignore close errors
+                                }
+                            }
+                        }
                     },
                     async registerSip() {
                         if (this.sipRegistering) {
@@ -2539,6 +2802,18 @@
                             default:
                                 return 'bg-slate-400';
                         }
+                    },
+                    formatMs(value) {
+                        if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                            return '—';
+                        }
+                        const ms = Number(value);
+                        if (ms < 1000) {
+                            return `${ms} ms`;
+                        }
+                        const seconds = ms / 1000;
+                        const precision = seconds >= 10 ? 1 : 2;
+                        return `${seconds.toFixed(precision)} s`;
                     },
                     formatList(value) {
                         if (!value || (Array.isArray(value) && !value.length)) {

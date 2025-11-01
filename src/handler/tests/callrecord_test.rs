@@ -149,7 +149,7 @@ async fn test_call_record_creation() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // The call should be removed from active_calls after completion
-    let active_calls = state.active_calls.lock().await;
+    let active_calls = state.active_calls.lock().unwrap();
     assert!(
         active_calls.is_empty(),
         "Active calls should be empty after call completion"

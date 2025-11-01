@@ -13,8 +13,8 @@ use crate::callrecord::{
     extract_sip_username, extras_map_to_metadata, extras_map_to_option,
     persist_and_dispatch_record, sipflow::SipMessageItem,
 };
-use crate::config::ProxyConfig;
-use crate::config::RouteResult;
+use crate::config::{ProxyConfig, RouteResult, default_config_recorder_path};
+use crate::media::recorder::RecorderOption;
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::ProxyCall;
 use crate::proxy::proxy_call::ProxyCallBuilder;
@@ -23,6 +23,7 @@ use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use glob::Pattern;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
@@ -30,7 +31,7 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipConnection;
 use serde_json::{Number as JsonNumber, Value};
-use std::{collections::HashMap, net::IpAddr, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -271,6 +272,214 @@ impl CallModule {
         Ok(dialplan)
     }
 
+    fn apply_recording_policy(&self, mut dialplan: Dialplan, caller: &SipUser) -> Dialplan {
+        let policy = match self.inner.config.recording.as_ref() {
+            Some(policy) if policy.enabled => policy,
+            _ => return dialplan,
+        };
+
+        if dialplan.recording.enabled {
+            return dialplan;
+        }
+
+        if !policy.directions.is_empty()
+            && !policy
+                .directions
+                .iter()
+                .any(|direction| direction.matches(&dialplan.direction))
+        {
+            return dialplan;
+        }
+
+        let caller_identity = Self::caller_identity(caller);
+        if Self::matches_any_pattern(&caller_identity, &policy.caller_deny) {
+            return dialplan;
+        }
+        if !policy.caller_allow.is_empty()
+            && !Self::matches_any_pattern(&caller_identity, &policy.caller_allow)
+        {
+            return dialplan;
+        }
+
+        let callee_identity = Self::callee_identity(&dialplan).unwrap_or_default();
+        if Self::matches_any_pattern(&callee_identity, &policy.callee_deny) {
+            return dialplan;
+        }
+        if !policy.callee_allow.is_empty()
+            && !Self::matches_any_pattern(&callee_identity, &policy.callee_allow)
+        {
+            return dialplan;
+        }
+
+        let recorder_option =
+            match self.build_recorder_option(&dialplan, policy, &caller_identity, &callee_identity)
+            {
+                Some(option) => option,
+                None => return dialplan,
+            };
+
+        debug!(
+            session_id = dialplan.session_id.as_deref(),
+            caller = %caller_identity,
+            callee = %callee_identity,
+            "recording policy enabled for dialplan"
+        );
+
+        dialplan.recording.enabled = true;
+        dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
+        dialplan.recording.filename_pattern = policy.filename_pattern.clone();
+
+        if let Some(existing) = dialplan.recording.recorder_config.as_mut() {
+            if existing.recorder_file.is_empty() {
+                existing.recorder_file = recorder_option.recorder_file.clone();
+            }
+            if existing.format.is_none() {
+                existing.format = recorder_option.format;
+            }
+            if let Some(rate) = policy.samplerate {
+                existing.samplerate = rate;
+            }
+            if let Some(ptime) = policy.ptime {
+                existing.ptime = ptime;
+            }
+        } else {
+            dialplan.recording.recorder_config = Some(recorder_option);
+        }
+
+        dialplan
+    }
+
+    fn matches_any_pattern(value: &str, patterns: &[String]) -> bool {
+        patterns
+            .iter()
+            .any(|pattern| Self::match_pattern(pattern, value))
+    }
+
+    fn match_pattern(pattern: &str, value: &str) -> bool {
+        if pattern == "*" {
+            return true;
+        }
+        Pattern::new(pattern)
+            .map(|compiled| compiled.matches(value))
+            .unwrap_or_else(|_| pattern.eq_ignore_ascii_case(value))
+    }
+
+    fn caller_identity(caller: &SipUser) -> String {
+        caller.to_string()
+    }
+
+    fn callee_identity(dialplan: &Dialplan) -> Option<String> {
+        dialplan
+            .original
+            .to_header()
+            .ok()
+            .and_then(|header| header.uri().ok())
+            .map(Self::identity_from_uri)
+    }
+
+    fn identity_from_uri(uri: rsip::Uri) -> String {
+        let user = uri.user().unwrap_or_default().to_string();
+        let host = uri.host().to_string();
+        if user.is_empty() {
+            host
+        } else {
+            format!("{}@{}", user, host)
+        }
+    }
+
+    fn build_recorder_option(
+        &self,
+        dialplan: &Dialplan,
+        policy: &crate::config::RecordingPolicy,
+        caller: &str,
+        callee: &str,
+    ) -> Option<RecorderOption> {
+        let session_id = dialplan
+            .session_id
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let root = self
+            .inner
+            .config
+            .recorder_root
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(default_config_recorder_path);
+        let pattern = policy.filename_pattern.as_deref().unwrap_or("{session_id}");
+        let direction = match dialplan.direction {
+            DialDirection::Inbound => "inbound",
+            DialDirection::Outbound => "outbound",
+            DialDirection::Internal => "internal",
+        };
+        let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let rendered =
+            Self::render_filename(pattern, &session_id, caller, callee, direction, &timestamp);
+        let sanitized = Self::sanitize_filename_component(&rendered, &session_id);
+        let mut path = PathBuf::from(root);
+        if sanitized.is_empty() {
+            return None;
+        }
+        path.push(sanitized);
+        if path.extension().is_none() {
+            path.set_extension(self.inner.config.recorder_format.extension());
+        }
+        let mut option = RecorderOption::new(path.to_string_lossy().to_string());
+        if let Some(rate) = policy.samplerate {
+            option.samplerate = rate;
+        }
+        if let Some(ptime) = policy.ptime {
+            option.ptime = ptime;
+        }
+        option.format = Some(self.inner.config.recorder_format);
+        Some(option)
+    }
+
+    fn render_filename(
+        pattern: &str,
+        session_id: &str,
+        caller: &str,
+        callee: &str,
+        direction: &str,
+        timestamp: &str,
+    ) -> String {
+        let mut rendered = pattern.to_string();
+        for (token, value) in [
+            ("{session_id}", session_id),
+            ("{caller}", caller),
+            ("{callee}", callee),
+            ("{direction}", direction),
+            ("{timestamp}", timestamp),
+        ] {
+            rendered = rendered.replace(token, value);
+        }
+        rendered
+    }
+
+    fn sanitize_filename_component(value: &str, fallback: &str) -> String {
+        let mut sanitized = String::with_capacity(value.len());
+        let mut last_was_sep = false;
+        for ch in value.chars() {
+            let allowed = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.');
+            if allowed {
+                sanitized.push(ch);
+                last_was_sep = false;
+            } else if !last_was_sep {
+                sanitized.push('_');
+                last_was_sep = true;
+            }
+            if sanitized.len() >= 120 {
+                break;
+            }
+        }
+        let trimmed = sanitized.trim_matches('_').trim_matches('.');
+        if trimmed.is_empty() {
+            fallback.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
     async fn build_dialplan(
         &self,
         tx: &mut Transaction,
@@ -304,6 +513,7 @@ impl CallModule {
         } else {
             dialplan
         };
+        let dialplan = self.apply_recording_policy(dialplan, caller);
         Ok(dialplan)
     }
 

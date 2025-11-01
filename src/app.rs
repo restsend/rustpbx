@@ -29,8 +29,8 @@ use std::{
     path::Path,
     sync::atomic::{AtomicBool, AtomicU64},
 };
+use tokio::net::TcpListener;
 use tokio::select;
-use tokio::{net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -43,7 +43,7 @@ pub struct AppStateInner {
     pub useragent: Option<Arc<UserAgent>>,
     pub sip_server: Option<SipServer>,
     pub token: CancellationToken,
-    pub active_calls: Arc<Mutex<HashMap<String, ActiveCallRef>>>,
+    pub active_calls: Arc<std::sync::Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub total_calls: AtomicU64,
@@ -242,6 +242,13 @@ impl AppStateBuilder {
                             }
                         }
                     }
+                    if proxy_config.recorder_root.is_none() {
+                        proxy_config.recorder_root = Some(config.recorder_path.clone());
+                    }
+                    proxy_config.recorder_format = config.recorder_format;
+                    if proxy_config.recording.is_none() {
+                        proxy_config.recording = config.recording.clone();
+                    }
                     let proxy_config = Arc::new(proxy_config);
                     let builder = SipServerBuilder::new(proxy_config.clone())
                         .with_cancel_token(token.child_token())
@@ -273,7 +280,7 @@ impl AppStateBuilder {
             useragent,
             sip_server,
             token,
-            active_calls: Arc::new(Mutex::new(HashMap::new())),
+            active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
             stream_engine,
             callrecord_sender,
             total_calls: AtomicU64::new(0),

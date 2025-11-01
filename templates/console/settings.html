@@ -348,6 +348,83 @@
                 </div>
             </div>
 
+            <div class="grid gap-6 lg:grid-cols-2">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Platform settings</h2>
+                            <p class="text-xs text-slate-500">Update logging and RTP configuration. Restart required.
+                            </p>
+                        </div>
+                    </div>
+                    <form class="mt-4 space-y-4" @submit.prevent="savePlatformSettings">
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Log
+                                    level</label>
+                                <select x-model="platformDraft.log_level" :disabled="platformProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Default</option>
+                                    <option value="trace">Trace</option>
+                                    <option value="debug">Debug</option>
+                                    <option value="info">Info</option>
+                                    <option value="warn">Warn</option>
+                                    <option value="error">Error</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Log
+                                    file</label>
+                                <input type="text" x-model="platformDraft.log_file" :disabled="platformProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/var/log/rustpbx.log" />
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">External
+                                IP</label>
+                            <input type="text" x-model="platformDraft.external_ip" :disabled="platformProcessing"
+                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="1.2.3.4" />
+                        </div>
+                        <div class="grid gap-4 sm:grid-cols-2">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">RTP
+                                    start port</label>
+                                <input type="number" min="1" max="65535" x-model="platformDraft.rtp_start_port"
+                                    :disabled="platformProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="12000" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">RTP
+                                    end port</label>
+                                <input type="number" min="1" max="65535" x-model="platformDraft.rtp_end_port"
+                                    :disabled="platformProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="42000" />
+                            </div>
+                        </div>
+                        <div
+                            class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                            <span>Changes apply after a restart.</span>
+                            <div class="flex gap-2">
+                                <button type="button"
+                                    class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                    @click="resetPlatformDraft" :disabled="platformProcessing">
+                                    Reset
+                                </button>
+                                <button type="submit"
+                                    class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    :disabled="platformProcessing">
+                                    <span x-text="platformProcessing ? 'Saving…' : 'Save changes'"></span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
@@ -443,8 +520,241 @@
                         </div>
                     </div>
                 </div>
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Recorder storage</h2>
+                            <p class="text-xs text-slate-500">Manage recorder output paths and call record storage
+                                targets.</p>
+                        </div>
+                    </div>
+                    <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder
+                                    path</label>
+                                <input type="text" x-model="storageDraft.recorder_path" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/tmp/recorder" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Media
+                                    cache path</label>
+                                <input type="text" x-model="storageDraft.media_cache_path" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/tmp/mediacache" />
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder
+                                    format</label>
+                                <select x-model="storageDraft.recorder_format" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">Default</option>
+                                    <option value="wav">WAV (PCM)</option>
+                                    <option value="ogg">OGG (Opus)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call
+                                    record storage</label>
+                                <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="local">Local disk</option>
+                                    <option value="disabled">Disabled</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div x-show="storageDraft.callrecord_mode === 'local'" x-cloak>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call
+                                record root</label>
+                            <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
+                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="/tmp/cdr" />
+                            <p class="mt-1 text-xs text-slate-400">Recordings are written under this directory when
+                                local storage is enabled.</p>
+                        </div>
+                        <div
+                            class="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                            Recording policy configuration moved to the Recording policy tab.
+                        </div>
+                        <div
+                            class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                            <span>Restart required to apply.</span>
+                            <div class="flex gap-2">
+                                <button type="button"
+                                    class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                    @click="resetStorageDraft" :disabled="storageProcessing">
+                                    Reset
+                                </button>
+                                <button type="submit"
+                                    class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    :disabled="storageProcessing">
+                                    <span x-text="storageProcessing ? 'Saving…' : 'Save changes'"></span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
             </div>
 
+        </section>
+
+        <section x-show="activeTab === 'recording'" x-cloak x-transition.opacity class="space-y-6"
+            id="settings-tab-recording" role="tabpanel" tabindex="0">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Recording policy</h2>
+                        <p class="text-xs text-slate-500">Enable automatic media capture based on caller and callee
+                            rules.</p>
+                    </div>
+                </div>
+                <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">Policy
+                                status</label>
+                            <p class="text-xs text-slate-500">Toggle recording and adjust rules for directions,
+                                identities, and output format.</p>
+                        </div>
+                        <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
+                            <input type="checkbox"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                x-model="storageDraft.recording_enabled" :disabled="storageProcessing">
+                            <span>Enable</span>
+                        </label>
+                    </div>
+                    <div x-show="storageDraft.recording_enabled" x-cloak
+                        class="border-t border-slate-200 pt-4 space-y-4">
+                        <div class="grid gap-4 sm:grid-cols-2">
+                            <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                                <input type="checkbox"
+                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                    x-model="storageDraft.recording_auto_start" :disabled="storageProcessing">
+                                <span>Auto start when answered</span>
+                            </label>
+                            <div>
+                                <span
+                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">Directions</span>
+                                <div class="mt-2 grid gap-2 sm:grid-cols-3">
+                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="storageDraft.recording_direction_inbound"
+                                            :disabled="storageProcessing">
+                                        <span>Inbound</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="storageDraft.recording_direction_outbound"
+                                            :disabled="storageProcessing">
+                                        <span>Outbound</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="storageDraft.recording_direction_internal"
+                                            :disabled="storageProcessing">
+                                        <span>Internal</span>
+                                    </label>
+                                </div>
+                                <p class="mt-1 text-[11px] text-slate-400">Uncheck to restrict capture to specific call
+                                    flows.</p>
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Caller
+                                    allow list</label>
+                                <textarea x-model="storageDraft.recording_caller_allow" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    rows="3" placeholder="alice@example.com"></textarea>
+                                <p class="mt-1 text-[11px] text-slate-400">One pattern per line. Supports glob
+                                    wildcards.</p>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Caller
+                                    deny list</label>
+                                <textarea x-model="storageDraft.recording_caller_deny" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    rows="3" placeholder="sales@*"></textarea>
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Callee
+                                    allow list</label>
+                                <textarea x-model="storageDraft.recording_callee_allow" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    rows="3" placeholder="support@company.com"></textarea>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Callee
+                                    deny list</label>
+                                <textarea x-model="storageDraft.recording_callee_deny" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    rows="3" placeholder="test-*"></textarea>
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-3">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Sample
+                                    rate (Hz)</label>
+                                <input type="number" min="8000" step="1000" x-model="storageDraft.recording_samplerate"
+                                    :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="16000" />
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Packet
+                                    time (ms)</label>
+                                <input type="number" min="10" step="10" x-model="storageDraft.recording_ptime"
+                                    :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="200" />
+                            </div>
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Filename
+                                    pattern</label>
+                                <input type="text" x-model="storageDraft.recording_filename_pattern"
+                                    :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="{timestamp}_{caller}_{callee}" />
+                                <p class="mt-1 text-[11px] text-slate-400">Tokens: {session_id}, {caller}, {callee},
+                                    {direction}, {timestamp}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <template x-if="!storageDraft.recording_enabled">
+                        <div
+                            class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                            Recording is currently disabled. Enable the policy to configure capture rules.
+                        </div>
+                    </template>
+                    <div
+                        class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                        <span>Restart required to apply.</span>
+                        <div class="flex gap-2">
+                            <button type="button"
+                                class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                @click="resetStorageDraft" :disabled="storageProcessing">
+                                Reset
+                            </button>
+                            <button type="submit"
+                                class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="storageProcessing">
+                                <span x-text="storageProcessing ? 'Saving…' : 'Save changes'"></span>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
         </section>
 
         <section x-show="activeTab === 'security'" x-cloak x-transition.opacity class="space-y-6"
@@ -489,14 +799,6 @@
                                     x-text="acl.reload_supported ? 'Available' : 'Proxy offline'"></div>
                                 <div class="text-xs text-slate-500">Live reload requires the SIP proxy.</div>
                             </div>
-                        </div>
-                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50">
-                            <div
-                                class="border-b border-slate-200 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                                Active rules snapshot
-                            </div>
-                            <pre class="max-h-48 overflow-auto px-4 py-3 text-xs text-slate-600"
-                                x-text="formatAclRules(acl.active_rules)"></pre>
                         </div>
                         <template x-if="acl.metrics">
                             <div class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-3">
@@ -601,77 +903,39 @@
                 </div>
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex items-center justify-between">
-                            <h2 class="text-base font-semibold text-slate-900">Trusted sources</h2>
-                            <span class="text-xs text-slate-400"
-                                x-text="(security.trusted_ips || []).length ? (security.trusted_ips.length + ' entries') : 'No entries'"></span>
+                        <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-base font-semibold text-slate-900">Update rules</h2>
+                                <p class="text-xs text-slate-500">Edit ACL entries and blocked user agents. Restart
+                                    required.</p>
+                            </div>
                         </div>
-                        <div class="mt-3 space-y-2 text-xs text-slate-600">
-                            <template x-for="(item, index) in (security.trusted_ips || [])" :key="item + '-' + index">
-                                <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <div class="font-mono"
-                                        x-text="typeof item === 'string' ? item : (item.cidr || item.address || JSON.stringify(item))">
-                                    </div>
-                                    <div class="mt-1 text-[11px] text-slate-400"
-                                        x-text="item.label || item.note || 'Trusted IP / network'"></div>
+                        <form class="mt-4 space-y-4" @submit.prevent="saveSecuritySettings">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">ACL
+                                    rules</label>
+                                <textarea rows="6" x-model="securityDraft.acl_rules" :disabled="securityProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="allow all&#10;deny all"></textarea>
+                                <p class="mt-1 text-xs text-slate-400">One rule per line, matching the ACL syntax.</p>
+                            </div>
+                            <div
+                                class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                                <span>Restart required to apply.</span>
+                                <div class="flex gap-2">
+                                    <button type="button"
+                                        class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                        @click="resetSecurityDraft" :disabled="securityProcessing">
+                                        Reset
+                                    </button>
+                                    <button type="submit"
+                                        class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                        :disabled="securityProcessing">
+                                        <span x-text="securityProcessing ? 'Saving…' : 'Save changes'"></span>
+                                    </button>
                                 </div>
-                            </template>
-                            <template x-if="!(security.trusted_ips || []).length">
-                                <div
-                                    class="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400">
-                                    No trusted CIDRs configured.
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex items-center justify-between">
-                            <h2 class="text-base font-semibold text-slate-900">Blocked user agents</h2>
-                            <span class="text-xs text-slate-400"
-                                x-text="(security.blocked_user_agents || []).length ? (security.blocked_user_agents.length + ' entries') : 'No entries'"></span>
-                        </div>
-                        <div class="mt-3 space-y-2 text-xs text-slate-600">
-                            <template x-for="(agent, index) in (security.blocked_user_agents || [])"
-                                :key="agent + '-' + index">
-                                <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono">
-                                    <span x-text="agent"></span>
-                                </div>
-                            </template>
-                            <template x-if="!(security.blocked_user_agents || []).length">
-                                <div
-                                    class="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400">
-                                    No user agents blocked.
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <div class="flex items-center justify-between">
-                            <h2 class="text-base font-semibold text-slate-900">Threat feed</h2>
-                            <span class="text-xs text-slate-400"
-                                x-text="(security.threat_feed || []).length ? (security.threat_feed.length + ' entries') : 'No entries'"></span>
-                        </div>
-                        <div class="mt-3 space-y-2 text-xs text-slate-600">
-                            <template x-for="(entry, index) in (security.threat_feed || [])"
-                                :key="index + '-' + (entry?.id || '')">
-                                <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <div class="font-semibold text-slate-800"
-                                        x-text="entry.title || entry.id || 'Feed item'">
-                                    </div>
-                                    <div class="mt-1 text-[11px] text-slate-500"
-                                        x-text="entry.description || entry.note || 'No description provided.'"></div>
-                                    <div class="mt-1 text-[11px] text-slate-400" x-text="entry.source || ''"></div>
-                                </div>
-                            </template>
-                            <template x-if="!(security.threat_feed || []).length">
-                                <div
-                                    class="rounded-lg border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400">
-                                    No active threats reported.
-                                </div>
-                            </template>
-                        </div>
+                            </div>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -1310,6 +1574,7 @@
             tabs: [
                 { id: 'platform', label: 'Platform overview' },
                 { id: 'storage', label: 'Storage & retention' },
+                { id: 'recording', label: 'Recording policy' },
                 { id: 'security', label: 'Security posture' },
                 { id: 'asr', label: 'ASR integrations' },
                 { id: 'departments', label: 'Departments' },
@@ -1323,6 +1588,38 @@
             configMeta: { key_items: [] },
             acl: { active_rules: [], embedded_count: 0, file_patterns: [], reload_supported: false, metrics: null },
             operations: [],
+            platformDraft: {
+                log_level: '',
+                log_file: '',
+                external_ip: '',
+                rtp_start_port: '',
+                rtp_end_port: '',
+            },
+            platformProcessing: false,
+            storageDraft: {
+                recorder_path: '',
+                recorder_format: 'wav',
+                media_cache_path: '',
+                callrecord_mode: 'local',
+                callrecord_root: '',
+                recording_enabled: false,
+                recording_auto_start: true,
+                recording_direction_inbound: true,
+                recording_direction_outbound: true,
+                recording_direction_internal: true,
+                recording_caller_allow: '',
+                recording_caller_deny: '',
+                recording_callee_allow: '',
+                recording_callee_deny: '',
+                recording_samplerate: '',
+                recording_ptime: '',
+                recording_filename_pattern: '',
+            },
+            storageProcessing: false,
+            securityDraft: {
+                acl_rules: '',
+            },
+            securityProcessing: false,
             aclReloading: false,
             aclReloadModal: {
                 open: false,
@@ -1342,6 +1639,7 @@
                 checks: [],
             },
             server: {},
+            recordingPolicy: null,
             retention: {},
             security: {},
             asr: {},
@@ -1416,6 +1714,7 @@
                     ? data.operations
                     : (Array.isArray((data.server || {}).operations) ? data.server.operations : []);
                 this.server = data.server || {};
+                this.recordingPolicy = data.recording || null;
                 if (!this.operations.length && Array.isArray(this.server.operations)) {
                     this.operations = this.server.operations;
                 }
@@ -1446,6 +1745,9 @@
                         this.selectedStorageProfile = this.storageProfiles[0].id;
                     }
                 }
+                this.initPlatformDraft();
+                this.initStorageDraft();
+                this.initSecurityDraft();
                 this.directory = { departments: [], users: [], pending_invites: [] };
                 this.departmentPagination = null;
                 this.userPagination = null;
@@ -1794,6 +2096,27 @@
                 }
                 const trimmed = String(value).trim();
                 return trimmed.length ? trimmed : null;
+            },
+            normalizeOptionalNumber(value) {
+                const trimmed = this.normalizeOptionalString(value);
+                if (trimmed === null) {
+                    return null;
+                }
+                const numeric = Number(trimmed);
+                if (!Number.isFinite(numeric) || numeric <= 0) {
+                    return null;
+                }
+                return Math.floor(numeric);
+            },
+            listFromTextarea(value) {
+                if (value === null || value === undefined) {
+                    return [];
+                }
+                const items = String(value)
+                    .split(/\n|,/)
+                    .map((line) => line.trim())
+                    .filter((line) => line.length);
+                return items;
             },
             slugify(value) {
                 return String(value || '')
@@ -2761,6 +3084,331 @@
                     return `${seconds.toFixed(1)}s`;
                 }
                 return `${Math.round(value)}ms`;
+            },
+            initPlatformDraft() {
+                const rtp = this.proxyConfig?.rtp || {};
+                const toStringOrEmpty = (value) => (value === undefined || value === null || value === ''
+                    ? ''
+                    : String(value));
+                this.platformDraft = {
+                    log_level: this.platform?.log_level || '',
+                    log_file: this.platform?.log_file || '',
+                    external_ip: rtp?.external_ip || '',
+                    rtp_start_port: toStringOrEmpty(rtp?.start_port),
+                    rtp_end_port: toStringOrEmpty(rtp?.end_port),
+                };
+            },
+            resetPlatformDraft() {
+                this.initPlatformDraft();
+            },
+            parsePortValue(value) {
+                const trimmed = String(value ?? '').trim();
+                if (!trimmed.length) {
+                    return null;
+                }
+                const parsed = Number.parseInt(trimmed, 10);
+                if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+                    return undefined;
+                }
+                return parsed;
+            },
+            async savePlatformSettings() {
+                if (this.platformProcessing) {
+                    return;
+                }
+                const startPortValue = this.parsePortValue(this.platformDraft.rtp_start_port);
+                if (startPortValue === undefined) {
+                    this.$dispatch('toast', {
+                        title: 'Invalid value',
+                        message: 'Start port must be a number between 1 and 65535.',
+                    });
+                    return;
+                }
+                const endPortValue = this.parsePortValue(this.platformDraft.rtp_end_port);
+                if (endPortValue === undefined) {
+                    this.$dispatch('toast', {
+                        title: 'Invalid value',
+                        message: 'End port must be a number between 1 and 65535.',
+                    });
+                    return;
+                }
+                if (startPortValue !== null && endPortValue !== null && startPortValue > endPortValue) {
+                    this.$dispatch('toast', {
+                        title: 'Invalid range',
+                        message: 'Start port must be less than or equal to end port.',
+                    });
+                    return;
+                }
+                const body = {
+                    log_level: this.normalizeOptionalString(this.platformDraft.log_level),
+                    log_file: this.normalizeOptionalString(this.platformDraft.log_file),
+                    external_ip: this.normalizeOptionalString(this.platformDraft.external_ip),
+                    rtp_start_port: startPortValue,
+                    rtp_end_port: endPortValue,
+                };
+                this.platformProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/platform`, {
+                        method: 'PATCH',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update platform settings');
+                    }
+                    this.platform.log_level = data?.platform?.log_level ?? null;
+                    this.platform.log_file = data?.platform?.log_file ?? null;
+                    const rtp = data?.rtp || {};
+                    if (!this.proxyConfig.rtp || typeof this.proxyConfig.rtp !== 'object') {
+                        this.proxyConfig.rtp = {};
+                    }
+                    this.proxyConfig.rtp.external_ip = rtp.external_ip ?? null;
+                    this.proxyConfig.rtp.start_port = rtp.start_port ?? null;
+                    this.proxyConfig.rtp.end_port = rtp.end_port ?? null;
+                    this.initPlatformDraft();
+                    this.$dispatch('toast', {
+                        title: 'Settings saved',
+                        message: data?.message || 'Platform settings saved. Restart required to apply.',
+                    });
+                    this.lastOperation = {
+                        label: 'Platform settings',
+                        timestamp: new Date().toLocaleString(),
+                        status: 'Saved. Restart required.',
+                    };
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Update failed',
+                        message: err?.message || 'Unable to update platform settings.',
+                    });
+                } finally {
+                    this.platformProcessing = false;
+                }
+            },
+            initStorageDraft() {
+                const meta = this.server?.storage || {};
+                const recorderPath = meta?.recorder_path || '';
+                const recorderFormat = (meta?.recorder_format || 'wav').toString();
+                const mediaCache = meta?.media_cache_path || '';
+                let callrecordMode = (meta?.mode || '').toString().toLowerCase();
+                if (callrecordMode !== 'local') {
+                    callrecordMode = 'disabled';
+                }
+                let callrecordRoot = '';
+                const callrecordProfile = (this.storageProfiles || []).find((profile) => String(profile?.id || '').startsWith('callrecord'));
+                if (callrecordProfile && callrecordProfile.config && callrecordProfile.config.root) {
+                    callrecordRoot = callrecordProfile.config.root;
+                }
+                const recording = meta?.recording || this.recordingPolicy || {};
+                const normalizeList = (list) => Array.isArray(list) ? list.join('\n') : '';
+                const directionList = Array.isArray(recording?.directions)
+                    ? recording.directions.map((d) => String(d || '').toLowerCase())
+                    : null;
+                const directionDefault = directionList === null;
+                const directionInbound = directionDefault ? true : directionList.includes('inbound');
+                const directionOutbound = directionDefault ? true : directionList.includes('outbound');
+                const directionInternal = directionDefault ? true : directionList.includes('internal');
+                this.storageDraft = {
+                    recorder_path: recorderPath,
+                    recorder_format: recorderFormat || 'wav',
+                    media_cache_path: mediaCache,
+                    callrecord_mode: callrecordMode || 'disabled',
+                    callrecord_root: callrecordRoot || '',
+                    recording_enabled: !!recording?.enabled,
+                    recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
+                    recording_direction_inbound: directionInbound,
+                    recording_direction_outbound: directionOutbound,
+                    recording_direction_internal: directionInternal,
+                    recording_caller_allow: normalizeList(recording?.caller_allow),
+                    recording_caller_deny: normalizeList(recording?.caller_deny),
+                    recording_callee_allow: normalizeList(recording?.callee_allow),
+                    recording_callee_deny: normalizeList(recording?.callee_deny),
+                    recording_samplerate: recording?.samplerate ? String(recording.samplerate) : '',
+                    recording_ptime: recording?.ptime ? String(recording.ptime) : '',
+                    recording_filename_pattern: recording?.filename_pattern || '',
+                };
+            },
+            resetStorageDraft() {
+                this.initStorageDraft();
+            },
+            async saveStorageSettings() {
+                if (this.storageProcessing) {
+                    return;
+                }
+                let recorderFormat = this.normalizeOptionalString(this.storageDraft.recorder_format);
+                if (recorderFormat) {
+                    recorderFormat = recorderFormat.toLowerCase();
+                    if (recorderFormat !== 'wav' && recorderFormat !== 'ogg') {
+                        this.$dispatch('toast', {
+                            title: 'Invalid value',
+                            message: 'Recorder format must be "wav" or "ogg".',
+                        });
+                        return;
+                    }
+                }
+                let callrecordPayload = null;
+                if (this.storageDraft.callrecord_mode === 'local') {
+                    const root = this.normalizeOptionalString(this.storageDraft.callrecord_root);
+                    if (!root) {
+                        this.$dispatch('toast', {
+                            title: 'Missing information',
+                            message: 'Recording root path is required for local storage.',
+                        });
+                        return;
+                    }
+                    callrecordPayload = { mode: 'local', root };
+                } else if (this.storageDraft.callrecord_mode === 'disabled') {
+                    callrecordPayload = { mode: 'disabled' };
+                }
+                if (
+                    this.storageDraft.recording_enabled &&
+                    !(
+                        this.storageDraft.recording_direction_inbound ||
+                        this.storageDraft.recording_direction_outbound ||
+                        this.storageDraft.recording_direction_internal
+                    )
+                ) {
+                    this.$dispatch('toast', {
+                        title: 'Select a direction',
+                        message: 'Choose at least one call direction when recording is enabled.',
+                    });
+                    return;
+                }
+                const recordingDirections = [];
+                if (this.storageDraft.recording_direction_inbound) {
+                    recordingDirections.push('inbound');
+                }
+                if (this.storageDraft.recording_direction_outbound) {
+                    recordingDirections.push('outbound');
+                }
+                if (this.storageDraft.recording_direction_internal) {
+                    recordingDirections.push('internal');
+                }
+                const recordingPayload = {
+                    enabled: !!this.storageDraft.recording_enabled,
+                    auto_start: !!this.storageDraft.recording_auto_start,
+                    caller_allow: this.listFromTextarea(this.storageDraft.recording_caller_allow),
+                    caller_deny: this.listFromTextarea(this.storageDraft.recording_caller_deny),
+                    callee_allow: this.listFromTextarea(this.storageDraft.recording_callee_allow),
+                    callee_deny: this.listFromTextarea(this.storageDraft.recording_callee_deny),
+                    samplerate: this.normalizeOptionalNumber(this.storageDraft.recording_samplerate),
+                    ptime: this.normalizeOptionalNumber(this.storageDraft.recording_ptime),
+                    filename_pattern: this.normalizeOptionalString(this.storageDraft.recording_filename_pattern),
+                };
+                if (recordingDirections.length && recordingDirections.length < 3) {
+                    recordingPayload.directions = recordingDirections;
+                }
+                const body = {
+                    recorder_path: this.normalizeOptionalString(this.storageDraft.recorder_path),
+                    media_cache_path: this.normalizeOptionalString(this.storageDraft.media_cache_path),
+                    recorder_format: recorderFormat,
+                    callrecord: callrecordPayload,
+                    recording_policy: recordingPayload,
+                };
+                this.storageProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/storage`, {
+                        method: 'PATCH',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update storage settings');
+                    }
+                    this.server.storage = data?.storage || {};
+                    this.server.storage_profiles = Array.isArray(data?.storage_profiles) ? data.storage_profiles : [];
+                    this.recordingPolicy = this.server.storage?.recording || null;
+                    const storageMeta = this.server.storage || {};
+                    this.selectedStorageProfile = storageMeta.active_profile || storageMeta.mode || (this.storageProfiles[0]?.id || '');
+                    this.initStorageDraft();
+                    this.$dispatch('toast', {
+                        title: 'Settings saved',
+                        message: data?.message || 'Storage settings saved. Restart required to apply.',
+                    });
+                    this.lastOperation = {
+                        label: 'Storage settings',
+                        timestamp: new Date().toLocaleString(),
+                        status: 'Saved. Restart required.',
+                    };
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Update failed',
+                        message: err?.message || 'Unable to update storage settings.',
+                    });
+                } finally {
+                    this.storageProcessing = false;
+                }
+            },
+            normalizeMultilineList(value) {
+                if (value === undefined || value === null) {
+                    return null;
+                }
+                const entries = String(value)
+                    .split('\n')
+                    .map((line) => line.trim())
+                    .filter((line) => line.length);
+                if (!entries.length) {
+                    return null;
+                }
+                return entries.join('\n');
+            },
+            initSecurityDraft() {
+                this.securityDraft.acl_rules = this.formatAclRules(this.acl.active_rules || []);
+            },
+            resetSecurityDraft() {
+                this.initSecurityDraft();
+            },
+            async saveSecuritySettings() {
+                if (this.securityProcessing) {
+                    return;
+                }
+                const body = {
+                    acl_rules: this.normalizeMultilineList(this.securityDraft.acl_rules),
+                };
+                this.securityProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/security`, {
+                        method: 'PATCH',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update security settings');
+                    }
+                    const acl_rules = Array.isArray(data?.security?.acl_rules) ? data.security.acl_rules : [];
+                    this.acl.active_rules = acl_rules;
+                    this.securityDraft.acl_rules = this.formatAclRules(this.acl.active_rules);
+                    this.$dispatch('toast', {
+                        title: 'Settings saved',
+                        message: data?.message || 'Security settings saved. Restart required to apply.',
+                    });
+                    this.lastOperation = {
+                        label: 'Security settings',
+                        timestamp: new Date().toLocaleString(),
+                        status: 'Saved. Restart required.',
+                    };
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Update failed',
+                        message: err?.message || 'Unable to update security settings.',
+                    });
+                } finally {
+                    this.securityProcessing = false;
+                }
             },
             runAsrTest() {
                 this.asrProbe = {

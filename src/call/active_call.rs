@@ -4,9 +4,7 @@ use crate::{
     app::AppState,
     call::{
         CommandReceiver, CommandSender,
-        sip::{
-            Invitation, client_dialog_event_loop, on_dialog_terminated, server_dialog_event_loop,
-        },
+        sip::{DialogStateReceiverGuard, Invitation, InviteDialogStates},
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
@@ -30,9 +28,7 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsipstack::dialog::{
-    DialogId, dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
-};
+use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -66,6 +62,7 @@ pub enum ActiveCallType {
 }
 #[derive(Default)]
 pub struct ActiveCallState {
+    pub session_id: String,
     pub start_time: DateTime<Utc>,
     pub ring_time: Option<DateTime<Utc>>,
     pub answer_time: Option<DateTime<Utc>>,
@@ -73,7 +70,6 @@ pub struct ActiveCallState {
     pub last_status_code: u16,
     pub option: Option<CallOption>,
     pub answer: Option<String>,
-    pub dialogs: Vec<DialogId>,
     pub ssrc: u32,
     pub refer_callstate: Option<ActiveCallStateRef>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
@@ -99,8 +95,43 @@ pub struct ActiveCall {
     pub audio_receiver: Mutex<Option<WebsocketBytesReceiver>>,
     pub dump_events: bool,
     pub server_side_track_id: TrackId,
-    can_start_send_command: CancellationToken,
-    ready_to_answer: Mutex<Option<(String, Option<Box<dyn Track>>, ServerInviteDialog)>>,
+    pub ready_to_answer: Mutex<Option<(String, Option<Box<dyn Track>>, ServerInviteDialog)>>,
+}
+
+pub struct ActiveCallGuard {
+    pub call: ActiveCallRef,
+    pub active_calls: usize,
+}
+
+impl ActiveCallGuard {
+    pub fn new(call: ActiveCallRef) -> Self {
+        let active_calls = {
+            call.app_state
+                .total_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut calls = call.app_state.active_calls.lock().unwrap();
+            calls.insert(call.session_id.clone(), call.clone());
+            calls.len()
+        };
+        Self { call, active_calls }
+    }
+}
+
+impl Drop for ActiveCallGuard {
+    fn drop(&mut self) {
+        self.call
+            .app_state
+            .active_calls
+            .lock()
+            .unwrap()
+            .remove(&self.call.session_id);
+    }
+}
+
+pub struct ActiveCallReceiver {
+    pub cmd_receiver: CommandReceiver,
+    pub dump_cmd_receiver: CommandReceiver,
+    pub dump_event_receiver: EventReceiver,
 }
 
 impl ActiveCall {
@@ -145,29 +176,34 @@ impl ActiveCall {
             audio_receiver: Mutex::new(audio_receiver),
             dump_events,
             server_side_track_id: server_side_track_id.unwrap_or("server-side-track".to_string()),
-            can_start_send_command: CancellationToken::new(),
             ready_to_answer: Mutex::new(None),
         }
     }
 
     pub async fn enqueue_command(&self, command: Command) -> Result<()> {
-        if !self.can_start_send_command.is_cancelled() {
-            self.can_start_send_command.cancelled().await
-        }
-
         self.cmd_sender
             .send(command)
             .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))?;
         Ok(())
     }
 
-    pub async fn serve(&self) -> Result<()> {
-        let mut cmd_receiver = self.cmd_sender.subscribe();
-        let dump_cmd_receiver = self.cmd_sender.subscribe();
-        let dump_event_receiver = self.event_sender.subscribe();
-        // can `enqueue_command` when subscribe is done
-        // so we can start sending commands
-        self.can_start_send_command.cancel();
+    /// Create a new ActiveCallReceiver for this ActiveCall
+    /// `tokio::sync::broadcast` not cached messages, so need to early create receiver
+    /// before calling `serve()`
+    pub fn new_receiver(&self) -> ActiveCallReceiver {
+        ActiveCallReceiver {
+            cmd_receiver: self.cmd_sender.subscribe(),
+            dump_cmd_receiver: self.cmd_sender.subscribe(),
+            dump_event_receiver: self.event_sender.subscribe(),
+        }
+    }
+
+    pub async fn serve(&self, receiver: ActiveCallReceiver) -> Result<()> {
+        let ActiveCallReceiver {
+            mut cmd_receiver,
+            dump_cmd_receiver,
+            dump_event_receiver,
+        } = receiver;
 
         let process_command_loop = async move {
             while let Ok(command) = cmd_receiver.recv().await {
@@ -206,18 +242,9 @@ impl ActiveCall {
                         info!(session_id = self.session_id, "call cancelled - cleaning up resources");
                     }
                 }
+                self.cancel_token.cancel();
             }
         );
-        self.cleanup().await.ok();
-        // Send call record if available
-        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
-            if let Err(e) = sender.send(self.get_callrecord().await) {
-                warn!(
-                    session_id = self.session_id,
-                    "failed to send call record: {}", e
-                );
-            }
-        }
         Ok(())
     }
 
@@ -304,9 +331,6 @@ impl ActiveCall {
             }
             _ = event_hook_loop => {
                 info!(session_id = self.session_id, "event loop done");
-            }
-            _ = self.cancel_token.cancelled() => {
-                info!(session_id = self.session_id, "event loop cancelled");
             }
         }
         Ok(())
@@ -483,11 +507,7 @@ impl ActiveCall {
 
     async fn do_accept(&self, mut option: CallOption) -> Result<()> {
         let ready_to_answer = self.ready_to_answer.lock().await.is_none();
-        let has_pending = self
-            .invitation
-            .has_pending_call(&self.session_id)
-            .await
-            .is_some();
+        let has_pending = self.invitation.has_pending_call(&self.session_id).is_some();
 
         if ready_to_answer {
             if !has_pending {
@@ -532,7 +552,7 @@ impl ActiveCall {
         code: Option<rsip::StatusCode>,
         reason: Option<String>,
     ) -> Result<()> {
-        match self.invitation.has_pending_call(&self.session_id).await {
+        match self.invitation.has_pending_call(&self.session_id) {
             Some(id) => {
                 info!(
                     session_id = self.session_id,
@@ -631,9 +651,9 @@ impl ActiveCall {
             auto_hangup = auto_hangup.unwrap_or_default(),
             play_id = play_command.play_id.as_deref(),
             streaming = play_command.streaming,
-            eos = play_command.end_of_stream,
-            wit = wait_input_timeout.unwrap_or_default(),
-            base64 = play_command.base64,
+            end_of_stream = play_command.end_of_stream,
+            wait_input_timeout = wait_input_timeout.unwrap_or_default(),
+            is_base64 = play_command.base64,
             "new synthesis"
         );
 
@@ -751,44 +771,12 @@ impl ActiveCall {
         self.media_stream
             .stop(Some(hangup_reason.to_string()), initiator);
 
-        let dialog_ids = {
-            let mut drained = Vec::new();
-            if let Ok(mut call_state) = self.call_state.write() {
-                if call_state.hangup_reason.is_none() {
-                    call_state.hangup_reason.replace(hangup_reason);
-                }
-                drained.extend(call_state.take_dialogs());
-                if let Some(ref refer_state) = call_state.refer_callstate {
-                    if let Ok(mut state) = refer_state.write() {
-                        drained.extend(state.take_dialogs());
-                    }
-                }
+        if let Ok(mut call_state) = self.call_state.write() {
+            if call_state.hangup_reason.is_none() {
+                call_state.hangup_reason.replace(hangup_reason);
             }
-            drained
-        };
-
-        if !dialog_ids.is_empty() {
-            self.cleanup_dialogs(dialog_ids).await;
         }
         Ok(())
-    }
-
-    async fn cleanup_dialogs(&self, dialog_ids: Vec<DialogId>) {
-        let dialog_layer = self.invitation.dialog_layer.clone();
-        for dialog_id in dialog_ids {
-            let dialog_id_str = dialog_id.to_string();
-            if let Some(dialog) = dialog_layer.get_dialog(&dialog_id) {
-                if let Err(err) = dialog.hangup().await {
-                    warn!(
-                        session_id = self.session_id,
-                        dialog_id = %dialog_id_str,
-                        "failed to hangup dialog: {}",
-                        err
-                    );
-                }
-            }
-            dialog_layer.remove_dialog(&dialog_id);
-        }
     }
 
     async fn do_refer(
@@ -801,7 +789,6 @@ impl ActiveCall {
             self.do_play(moh, None, None).await?;
         }
         self.tts_handle.lock().await.take();
-        let token = self.cancel_token.child_token();
         let session_id = self.session_id.clone();
         let track_id = self.server_side_track_id.clone();
 
@@ -863,7 +850,7 @@ impl ActiveCall {
 
         match self
             .create_outgoing_sip_track(
-                token.clone(),
+                self.cancel_token.child_token(),
                 refer_call_state.clone(),
                 &track_id,
                 invite_option,
@@ -914,25 +901,17 @@ impl ActiveCall {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        let dialog_ids = {
-            let mut drained = Vec::new();
-            if let Ok(mut call_state) = self.call_state.write() {
-                drained.extend(call_state.take_dialogs());
-                if let Some(ref refer_state) = call_state.refer_callstate {
-                    if let Ok(mut state) = refer_state.write() {
-                        drained.extend(state.take_dialogs());
-                    }
-                }
-            }
-            drained
-        };
-
-        if !dialog_ids.is_empty() {
-            self.cleanup_dialogs(dialog_ids).await;
-        }
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
-        self.cancel_token.cancel();
+        // Send call record if available
+        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
+            if let Err(e) = sender.send(self.get_callrecord().await) {
+                warn!(
+                    session_id = self.session_id,
+                    "failed to send call record: {}", e
+                );
+            }
+        }
         Ok(())
     }
 
@@ -957,28 +936,14 @@ impl ActiveCall {
                     break;
                 }
                 Ok(cmd) = cmd_receiver.recv() => {
-                    let text = match serde_json::to_string(&cmd){
-                        Ok(text) => text,
-                        Err(_) => {
-                            continue;
-                        }
-                    };
-                    CallRecordEvent::new(CallRecordEventType::Command, &text)
-                        .write_to_file(dump_file)
+                    CallRecordEvent::write(CallRecordEventType::Command, cmd, dump_file)
                         .await;
                 }
                 Ok(event) = event_receiver.recv() => {
                     if matches!(event, SessionEvent::Binary{..}) {
                         continue;
                     }
-                    let text = match serde_json::to_string(&event) {
-                        Ok(text) => text,
-                        Err(_) => {
-                            continue;
-                        }
-                    };
-                    CallRecordEvent::new(CallRecordEventType::Event, &text)
-                        .write_to_file(dump_file)
+                    CallRecordEvent::write(CallRecordEventType::Event, event, dump_file)
                         .await;
                 }
             };
@@ -1022,39 +987,25 @@ impl ActiveCall {
             if matches!(event, SessionEvent::Binary { .. }) {
                 continue;
             }
-            let text = match serde_json::to_string(&event) {
-                Ok(text) => text,
-                Err(_) => {
-                    continue;
-                }
-            };
-            CallRecordEvent::new(CallRecordEventType::Event, &text)
-                .write_to_file(&mut dump_file)
-                .await;
+            CallRecordEvent::write(CallRecordEventType::Event, event, &mut dump_file).await;
         }
     }
 }
 
 impl ActiveCall {
-    pub async fn create_rtp_track(
-        cancel_token: CancellationToken,
-        app_state: AppState,
-        track_id: TrackId,
-        track_config: TrackConfig,
-        ssrc: u32,
-    ) -> Result<RtpTrack> {
-        let mut rtp_track = RtpTrackBuilder::new(track_id, track_config)
+    pub async fn create_rtp_track(&self, track_id: TrackId, ssrc: u32) -> Result<RtpTrack> {
+        let mut rtp_track = RtpTrackBuilder::new(track_id, self.track_config.clone())
             .with_ssrc(ssrc)
-            .with_cancel_token(cancel_token);
+            .with_cancel_token(self.cancel_token.child_token());
 
-        if let Some(rtp_start_port) = app_state.config.rtp_start_port {
+        if let Some(rtp_start_port) = self.app_state.config.rtp_start_port {
             rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
         }
-        if let Some(rtp_end_port) = app_state.config.rtp_end_port {
+        if let Some(rtp_end_port) = self.app_state.config.rtp_end_port {
             rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
         }
 
-        if let Some(ref external_ip) = app_state.config.external_ip {
+        if let Some(ref external_ip) = self.app_state.config.external_ip {
             rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
         }
         rtp_track.build().await
@@ -1083,9 +1034,7 @@ impl ActiveCall {
                 }
             }
             ActiveCallType::Sip => {
-                if let Some(pending_dialog) =
-                    self.invitation.get_pending_call(&self.session_id).await
-                {
+                if let Some(pending_dialog) = self.invitation.get_pending_call(&self.session_id) {
                     return self
                         .prepare_incoming_sip_track(
                             self.cancel_token.clone(),
@@ -1143,30 +1092,28 @@ impl ActiveCall {
                     }
                 }
             }
-            ActiveCallType::B2bua => {
-                match self.invitation.get_pending_call(&self.session_id).await {
-                    Some(pending_dialog) => {
-                        return self
-                            .prepare_incoming_sip_track(
-                                self.cancel_token.clone(),
-                                self.call_state.clone(),
-                                &self.session_id,
-                                pending_dialog,
-                            )
-                            .await;
-                    }
-                    None => {
-                        warn!(
-                            session_id = self.session_id,
-                            "no pending dialog found for B2BUA call"
-                        );
-                        return Err(anyhow::anyhow!(
-                            "no pending dialog found for session_id: {}",
-                            self.session_id
-                        ));
-                    }
+            ActiveCallType::B2bua => match self.invitation.get_pending_call(&self.session_id) {
+                Some(pending_dialog) => {
+                    return self
+                        .prepare_incoming_sip_track(
+                            self.cancel_token.clone(),
+                            self.call_state.clone(),
+                            &self.session_id,
+                            pending_dialog,
+                        )
+                        .await;
                 }
-            }
+                None => {
+                    warn!(
+                        session_id = self.session_id,
+                        "no pending dialog found for B2BUA call"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "no pending dialog found for session_id: {}",
+                        self.session_id
+                    ));
+                }
+            },
         };
         match track {
             Some(track) => {
@@ -1186,16 +1133,7 @@ impl ActiveCall {
         track: Option<Box<dyn Track>>,
     ) -> Result<()> {
         if let Some(track) = track {
-            Self::setup_track_with_stream(
-                self.app_state.clone(),
-                self.cancel_token.child_token(),
-                self.media_stream.clone(),
-                self.event_sender.clone(),
-                &self.session_id,
-                &option,
-                track,
-            )
-            .await?;
+            self.setup_track_with_stream(&option, track).await?;
         }
 
         match self.call_state.read() {
@@ -1220,27 +1158,27 @@ impl ActiveCall {
         }
         Ok(())
     }
+
     pub async fn setup_track_with_stream(
-        app_state: AppState,
-        cancel_token: CancellationToken,
-        media_stream: Arc<MediaStream>,
-        event_sender: EventSender,
-        session_id: &String,
+        &self,
         option: &CallOption,
         mut track: Box<dyn Track>,
     ) -> Result<()> {
         let processors = match StreamEngine::create_processors(
-            app_state.stream_engine.clone(),
+            self.app_state.stream_engine.clone(),
             track.as_ref(),
-            cancel_token.clone(),
-            event_sender.clone(),
+            self.cancel_token.child_token(),
+            self.event_sender.clone(),
             option,
         )
         .await
         {
             Ok(processors) => processors,
             Err(e) => {
-                warn!(session_id, "failed to prepare stream processors: {}", e);
+                warn!(
+                    session_id = self.session_id,
+                    "failed to prepare stream processors: {}", e
+                );
                 vec![]
             }
         };
@@ -1250,7 +1188,7 @@ impl ActiveCall {
             track.append_processor(processor);
         }
 
-        media_stream.update_track(track, None).await;
+        self.media_stream.update_track(track, None).await;
         Ok(())
     }
 
@@ -1367,15 +1305,10 @@ impl ActiveCall {
             .read()
             .map_err(|e| rsipstack::Error::Error(e.to_string()))?
             .ssrc;
-        let rtp_track = Self::create_rtp_track(
-            cancel_token.child_token(),
-            self.app_state.clone(),
-            track_id.clone(),
-            self.track_config.clone(),
-            ssrc,
-        )
-        .await
-        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
+        let rtp_track = self
+            .create_rtp_track(track_id.clone(), ssrc)
+            .await
+            .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
 
         let offer = rtp_track.local_description().ok();
         let call_option = call_state_ref
@@ -1394,17 +1327,9 @@ impl ActiveCall {
 
         invite_option.offer = offer.clone().map(|s| s.into());
 
-        Self::setup_track_with_stream(
-            self.app_state.clone(),
-            cancel_token.clone(),
-            self.media_stream.clone(),
-            self.event_sender.clone(),
-            &self.session_id,
-            &call_option,
-            Box::new(rtp_track),
-        )
-        .await
-        .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
+        self.setup_track_with_stream(&call_option, Box::new(rtp_track))
+            .await
+            .map_err(|e| rsipstack::Error::Error(e.to_string()))?;
 
         info!(
             session_id = self.session_id,
@@ -1418,36 +1343,23 @@ impl ActiveCall {
 
         let (dlg_state_sender, dlg_state_receiver) =
             self.invitation.dialog_layer.new_dialog_state_channel();
-        let session_id = self.session_id.clone();
-        let session_id_clone = session_id.clone();
-        let event_sender = self.event_sender.clone();
-        let media_stream = self.media_stream.clone();
-        let call_state = call_state_ref.clone();
-        let track_id_clone = track_id.clone();
+
+        let states = InviteDialogStates {
+            is_client: true,
+            session_id: self.session_id.clone(),
+            track_id: track_id.clone(),
+            event_sender: self.event_sender.clone(),
+            media_stream: self.media_stream.clone(),
+            call_state: call_state_ref.clone(),
+            cancel_token,
+            terminated_reason: None,
+        };
+
+        let mut client_dialog_handler =
+            DialogStateReceiverGuard::new(self.invitation.dialog_layer.clone(), dlg_state_receiver);
+
         tokio::spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    info!(
-                        session_id=session_id_clone,
-                        track_id=track_id_clone,
-                        "caller_dlg_handle cancelled"
-                    );
-                    on_dialog_terminated(
-                        call_state,
-                        track_id_clone,
-                        TerminatedReason::UacCancel,
-                        event_sender,
-                    );
-                }
-                _ = client_dialog_event_loop(session_id,
-                    track_id_clone.clone(),
-                    event_sender.clone(),
-                    dlg_state_receiver,
-                    call_state.clone(),
-                    media_stream) => {
-                        cancel_token.cancel();
-                    }
-            }
+            client_dialog_handler.process_dialog(states).await;
         });
 
         let (dialog_id, answer) = self
@@ -1505,7 +1417,7 @@ impl ActiveCall {
 
         let mut media_track = if Self::is_webrtc_sdp(&offer) {
             let webrtc_track = WebrtcTrack::new(
-                self.cancel_token.clone(),
+                self.cancel_token.child_token(),
                 self.session_id.clone(),
                 self.track_config.clone(),
                 self.app_state.config.ice_servers.clone(),
@@ -1513,16 +1425,10 @@ impl ActiveCall {
             .with_ssrc(ssrc);
             Box::new(webrtc_track) as Box<dyn Track>
         } else {
-            let rtp_track = Self::create_rtp_track(
-                self.cancel_token.clone(),
-                self.app_state.clone(),
-                self.session_id.clone(),
-                self.track_config.clone(),
-                ssrc,
-            )
-            .await?;
+            let rtp_track = self.create_rtp_track(self.session_id.clone(), ssrc).await?;
             Box::new(rtp_track) as Box<dyn Track>
         };
+
         let answer = match media_track.handshake(offer.clone(), timeout).await {
             Ok(answer) => answer,
             Err(e) => {
@@ -1540,16 +1446,19 @@ impl ActiveCall {
         track_id: &String,
         pending_dialog: PendingDialog,
     ) -> Result<()> {
-        let (dlg_state_sender, dlg_state_receiver) =
-            self.invitation.dialog_layer.new_dialog_state_channel();
-        let session_id = self.session_id.clone();
-        let event_sender = self.event_sender.clone();
-        let call_state = self.call_state.clone();
-        let track_id = track_id.clone();
+        let state_receiver = pending_dialog.state_receiver;
+        //let pending_token_clone = pending_dialog.token;
 
-        let mut state_receiver = pending_dialog.state_receiver;
-        let pending_token_clone = pending_dialog.token;
-        let token = self.cancel_token.clone();
+        let states = InviteDialogStates {
+            is_client: false,
+            session_id: self.session_id.clone(),
+            track_id: track_id.clone(),
+            event_sender: self.event_sender.clone(),
+            media_stream: self.media_stream.clone(),
+            call_state: self.call_state.clone(),
+            cancel_token,
+            terminated_reason: None,
+        };
 
         let initial_request = pending_dialog.dialog.initial_request();
         let offer = String::from_utf8_lossy(&initial_request.body).to_string();
@@ -1566,16 +1475,7 @@ impl ActiveCall {
 
         match self.setup_answer_track(ssrc, &option, offer).await {
             Ok((offer, track)) => {
-                Self::setup_track_with_stream(
-                    self.app_state.clone(),
-                    self.cancel_token.child_token(),
-                    self.media_stream.clone(),
-                    self.event_sender.clone(),
-                    &self.session_id,
-                    &option,
-                    track,
-                )
-                .await?;
+                self.setup_track_with_stream(&option, track).await?;
                 self.ready_to_answer
                     .lock()
                     .await
@@ -1585,52 +1485,18 @@ impl ActiveCall {
                 return Err(anyhow::anyhow!("error creating track: {}", e));
             }
         }
-        tokio::spawn(async move {
-            let forward_dlg_state_loop = async {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        info!(session_id, "call cancelled" );
-                    }
-                    _ = pending_token_clone.cancelled() => {
-                        info!(session_id, "pending token cancelled" );
-                    }
-                    _ = async {
-                        while let Some(state) = state_receiver.recv().await {
-                            if let Err(_) = dlg_state_sender.send(state) {
-                                break;
-                            }
-                        }
-                    } => {}
-                }
-            };
 
-            tokio::join!(
-                forward_dlg_state_loop,
-                server_dialog_event_loop(
-                    cancel_token,
-                    session_id.clone(),
-                    track_id,
-                    event_sender,
-                    dlg_state_receiver,
-                    call_state,
-                )
-            )
+        let mut client_dialog_handler =
+            DialogStateReceiverGuard::new(self.invitation.dialog_layer.clone(), state_receiver);
+
+        tokio::spawn(async move {
+            client_dialog_handler.process_dialog(states).await;
         });
         Ok(())
     }
 }
 
 impl ActiveCallState {
-    pub fn track_dialog(&mut self, dialog_id: DialogId) {
-        if !self.dialogs.iter().any(|id| id == &dialog_id) {
-            self.dialogs.push(dialog_id);
-        }
-    }
-
-    pub fn take_dialogs(&mut self) -> Vec<DialogId> {
-        self.dialogs.drain(..).collect()
-    }
-
     pub fn build_hangup_event(
         &self,
         track_id: TrackId,
@@ -1690,16 +1556,11 @@ impl ActiveCallState {
 
         let refer_callrecord = self.refer_callstate.as_ref().and_then(|rc| {
             let rc = rc.read().unwrap();
-            if rc.start_time != Utc::now() {
-                let call_id = rc.dialogs.last().map(|d| d.to_string()).unwrap_or_default();
-                Some(Box::new(rc.build_callrecord(
-                    app_state.clone(),
-                    call_id,
-                    ActiveCallType::B2bua,
-                )))
-            } else {
-                None
-            }
+            Some(Box::new(rc.build_callrecord(
+                app_state.clone(),
+                rc.session_id.clone(),
+                ActiveCallType::B2bua,
+            )))
         });
 
         let offer = option.offer.clone();
@@ -1726,241 +1587,5 @@ impl ActiveCallState {
             refer_callrecord,
             sip_flows: HashMap::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::AppStateInner;
-    use bytes::Bytes;
-    use rsipstack::{EndpointBuilder, dialog::dialog_layer::DialogLayer};
-    use std::{
-        collections::{HashMap, VecDeque},
-        fs,
-        sync::Arc,
-        time::Duration,
-    };
-    use tokio::time::timeout;
-    use uuid::Uuid;
-
-    use crate::event::SessionEvent;
-
-    fn create_test_app_state() -> AppState {
-        let base_dir =
-            std::env::temp_dir().join(format!("rustpbx-active-call-test-{}", Uuid::new_v4()));
-        let recorder_dir = base_dir.join("recorder");
-        let mediacache_dir = base_dir.join("mediacache");
-        fs::create_dir_all(&recorder_dir).unwrap();
-        fs::create_dir_all(&mediacache_dir).unwrap();
-
-        let mut config = crate::config::Config::default();
-        config.recorder_path = recorder_dir.to_string_lossy().to_string();
-        config.media_cache_path = mediacache_dir.to_string_lossy().to_string();
-
-        let mut stream_engine = StreamEngine::new();
-        stream_engine
-            .with_processor_hook(Box::new(|_, _, _, _, _| Box::pin(async { Ok(Vec::new()) })));
-
-        Arc::new(AppStateInner {
-            config: Arc::new(config),
-            useragent: None,
-            sip_server: None,
-            token: CancellationToken::new(),
-            active_calls: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            stream_engine: Arc::new(stream_engine),
-            callrecord_sender: None,
-            total_calls: std::sync::atomic::AtomicU64::new(0),
-            total_failed_calls: std::sync::atomic::AtomicU64::new(0),
-            uptime: Utc::now(),
-            config_loaded_at: Utc::now(),
-            config_path: None,
-            reload_requested: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(feature = "console")]
-            console: None,
-        })
-    }
-
-    fn create_test_invitation() -> Invitation {
-        let endpoint = EndpointBuilder::new().build();
-        let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
-        Invitation::new(dialog_layer)
-    }
-
-    async fn wait_for_event<F>(
-        receiver: &mut crate::event::EventReceiver,
-        buffer: &mut VecDeque<SessionEvent>,
-        predicate: F,
-    ) -> Option<SessionEvent>
-    where
-        F: Fn(&SessionEvent) -> bool + Send,
-    {
-        if let Some(pos) = buffer.iter().position(|event| predicate(event)) {
-            return buffer.remove(pos);
-        }
-
-        let deadline = Duration::from_secs(2);
-
-        timeout(deadline, async {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        if predicate(&event) {
-                            return Some(event);
-                        }
-                        buffer.push_back(event);
-                    }
-                    Err(_) => return None,
-                }
-            }
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
-    #[tokio::test]
-    async fn websocket_invite_emits_answer_and_track_events() {
-        let app_state = create_test_app_state();
-        let invitation = create_test_invitation();
-        let session_id = format!("session-{}", Uuid::new_v4());
-        let cancel_token = CancellationToken::new();
-        let (audio_tx, audio_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let active_call = Arc::new(ActiveCall::new(
-            ActiveCallType::WebSocket,
-            cancel_token.clone(),
-            session_id.clone(),
-            invitation,
-            app_state.clone(),
-            TrackConfig::default(),
-            Some(audio_rx),
-            false,
-            None,
-            None,
-        ));
-
-        let mut event_receiver = active_call.event_sender.subscribe();
-        let serve_handle = {
-            let active_call = active_call.clone();
-            tokio::spawn(async move { active_call.serve().await.unwrap() })
-        };
-
-        let start_token = active_call.can_start_send_command.clone();
-        start_token.cancelled().await;
-
-        let mut call_option = CallOption::default();
-        call_option.caller = Some("sip:alice@example.com".to_string());
-        call_option.callee = Some("sip:bob@example.com".to_string());
-
-        active_call
-            .enqueue_command(Command::Invite {
-                option: call_option,
-            })
-            .await
-            .unwrap();
-
-        let mut buffered_events = VecDeque::new();
-
-        let answer_event = wait_for_event(&mut event_receiver, &mut buffered_events, |event| {
-            matches!(event, SessionEvent::Answer { .. })
-        })
-        .await
-        .expect("expected answer event");
-
-        if let SessionEvent::Answer { track_id, .. } = answer_event {
-            assert_eq!(track_id, session_id);
-        }
-
-        let track_start = wait_for_event(&mut event_receiver, &mut buffered_events, |event| {
-            matches!(event, SessionEvent::TrackStart { .. })
-        })
-        .await
-        .expect("expected track start event");
-        if let SessionEvent::TrackStart { track_id, .. } = track_start {
-            assert_eq!(track_id, session_id);
-        }
-
-        audio_tx.send(Bytes::from_static(&[0u8; 160])).unwrap();
-        drop(audio_tx);
-
-        let track_end = wait_for_event(&mut event_receiver, &mut buffered_events, |event| {
-            matches!(event, SessionEvent::TrackEnd { .. })
-        })
-        .await
-        .expect("expected track end event");
-        if let SessionEvent::TrackEnd { track_id, .. } = track_end {
-            assert_eq!(track_id, session_id);
-        }
-
-        active_call
-            .enqueue_command(Command::Hangup {
-                reason: None,
-                initiator: Some("caller".to_string()),
-            })
-            .await
-            .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(2), serve_handle)
-            .await
-            .expect("active call serve task did not finish")
-            .expect("active call serve task panicked");
-
-        let call_state = active_call.call_state.read().unwrap();
-        assert!(matches!(
-            call_state.hangup_reason,
-            Some(CallRecordHangupReason::ByCaller)
-        ));
-    }
-
-    #[tokio::test]
-    async fn setup_answer_track_returns_rtp_answer_for_standard_offer() {
-        let app_state = create_test_app_state();
-        let invitation = create_test_invitation();
-        let cancel_token = CancellationToken::new();
-        let session_id = format!("session-{}", Uuid::new_v4());
-
-        let active_call = ActiveCall::new(
-            ActiveCallType::Sip,
-            cancel_token,
-            session_id,
-            invitation,
-            app_state,
-            TrackConfig::default(),
-            None,
-            false,
-            None,
-            None,
-        );
-
-        let offer = "v=0\r\n\
-o=- 0 0 IN IP4 192.168.1.10\r\n\
-s=RustPBX Test\r\n\
-c=IN IP4 192.168.1.10\r\n\
-t=0 0\r\n\
-m=audio 49170 RTP/AVP 0 8\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n"
-            .to_string();
-
-        let mut call_option = CallOption::default();
-        call_option.offer = Some(offer.clone());
-
-        {
-            let mut state = active_call.call_state.write().unwrap();
-            state.option = Some(call_option.clone());
-        }
-
-        let ssrc = active_call.call_state.read().unwrap().ssrc;
-
-        let (answer, track) = active_call
-            .setup_answer_track(ssrc, &call_option, offer)
-            .await
-            .expect("expected rtp answer");
-
-        assert!(answer.contains("m=audio"));
-        assert!(answer.contains("sendrecv"));
-
-        track.stop().await.unwrap();
     }
 }

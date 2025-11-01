@@ -4,13 +4,14 @@ use crate::{
         sip::DialogStateReceiverGuard,
     },
     callrecord::{
-        CallRecord, CallRecordHangupReason, CallRecordPersistArgs, CallRecordSender,
-        apply_record_file_extras, extract_sip_username, extras_map_to_metadata,
+        CallRecord, CallRecordHangupReason, CallRecordMedia, CallRecordPersistArgs,
+        CallRecordSender, apply_record_file_extras, extract_sip_username, extras_map_to_metadata,
         extras_map_to_option, persist_and_dispatch_record, sipflow::SipMessageItem,
     },
     config::{MediaProxyMode, RouteResult},
     event::{EventReceiver, EventSender, create_event_sender},
     media::{
+        recorder::RecorderOption,
         stream::{MediaStream, MediaStreamBuilder},
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
     },
@@ -34,6 +35,7 @@ use rsipstack::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     net::IpAddr,
     str::FromStr,
     sync::Arc,
@@ -168,11 +170,15 @@ impl CallSession {
         use_media_proxy: bool,
         event_sender: EventSender,
         external_addr: Option<IpAddr>,
+        recorder_option: Option<RecorderOption>,
     ) -> Self {
-        let stream = MediaStreamBuilder::new(event_sender)
+        let mut builder = MediaStreamBuilder::new(event_sender)
             .with_id(session_id)
-            .with_cancel_token(cancel_token)
-            .build();
+            .with_cancel_token(cancel_token);
+        if let Some(option) = recorder_option {
+            builder = builder.with_recorder_config(option);
+        }
+        let stream = builder.build();
         let initial = server_dialog.initial_request();
         let original_caller = initial
             .from_header()
@@ -614,6 +620,12 @@ impl ProxyCall {
             .as_ref()
             .map(|ip| ip.parse().ok())
             .flatten();
+        let recorder_option =
+            if self.dialplan.recording.enabled && self.dialplan.recording.auto_start {
+                self.dialplan.recording.recorder_config.clone()
+            } else {
+                None
+            };
         let mut session = CallSession::new(
             self.cancel_token.child_token(),
             self.session_id.clone(),
@@ -621,6 +633,7 @@ impl ProxyCall {
             use_media_proxy,
             self.event_sender.clone(),
             external_addr,
+            recorder_option,
         );
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
@@ -1469,6 +1482,22 @@ impl ProxyCall {
             refer_callrecord: None,
             sip_flows: sip_flows_map,
         };
+
+        if self.dialplan.recording.enabled {
+            if let Some(recorder_config) = self.dialplan.recording.recorder_config.as_ref() {
+                if !recorder_config.recorder_file.is_empty() {
+                    let size = fs::metadata(&recorder_config.recorder_file)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    record.recorder.push(CallRecordMedia {
+                        track_id: "mixed".to_string(),
+                        path: recorder_config.recorder_file.clone(),
+                        size,
+                        extra: None,
+                    });
+                }
+            }
+        }
 
         apply_record_file_extras(&record, &mut extras_map);
         record.extras = extras_map_to_option(&extras_map);
