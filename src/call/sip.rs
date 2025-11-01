@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::{
-    DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
+    Dialog, DialogState, DialogStateReceiver, DialogStateSender, TerminatedReason,
 };
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
@@ -40,22 +40,78 @@ impl DialogStateReceiverGuard {
         state
     }
 
-    pub async fn async_drop(&mut self) {
+    fn take_dialog(&mut self) -> Option<Dialog> {
         let id = match self.dialog_id.take() {
             Some(id) => id,
-            None => return,
+            None => return None,
         };
 
         match self.dialog_layer.get_dialog(&id) {
             Some(dialog) => {
-                info!(%id, "dialog removed on async drop");
+                info!(%id, "dialog removed on  drop");
                 self.dialog_layer.remove_dialog(&id);
+                return Some(dialog);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub async fn drop_async(&mut self) {
+        if let Some(dialog) = self.take_dialog() {
+            if let Err(e) = dialog.hangup().await {
+                warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
+            }
+        }
+    }
+}
+
+impl Drop for DialogStateReceiverGuard {
+    fn drop(&mut self) {
+        if let Some(dialog) = self.take_dialog() {
+            tokio::spawn(async move {
                 if let Err(e) = dialog.hangup().await {
-                    warn!(%id, "error hanging up dialog on async drop: {}", e);
+                    warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
+                }
+            });
+        }
+    }
+}
+
+pub struct ServerDialogGuard {
+    pub dialog_layer: Arc<DialogLayer>,
+    pub id: DialogId,
+}
+
+impl ServerDialogGuard {
+    pub fn new(dialog_layer: Arc<DialogLayer>, id: DialogId) -> Self {
+        Self { dialog_layer, id }
+    }
+}
+
+impl Drop for ServerDialogGuard {
+    fn drop(&mut self) {
+        let dlg = match self.dialog_layer.get_dialog(&self.id) {
+            Some(dlg) => {
+                self.dialog_layer.remove_dialog(&self.id);
+                match dlg {
+                    Dialog::ServerInvite(dlg) => dlg,
+                    _ => return,
                 }
             }
-            None => {}
+            _ => return,
+        };
+        let state = dlg.state();
+        if state.is_terminated() {
+            return;
         }
+        tokio::spawn(async move {
+            if state.can_cancel() {
+                dlg.reject(None, None).ok();
+            } else {
+                dlg.bye().await.ok();
+            }
+        });
     }
 }
 
@@ -250,29 +306,7 @@ impl DialogStateReceiverGuard {
             }
             _ = self.dialog_event_loop(&mut states) => {}
         };
-        self.async_drop().await;
-    }
-}
-
-impl Drop for DialogStateReceiverGuard {
-    fn drop(&mut self) {
-        let id = match self.dialog_id.take() {
-            Some(id) => id,
-            None => return,
-        };
-
-        match self.dialog_layer.get_dialog(&id) {
-            Some(dialog) => {
-                info!(%id, "dialog removed on state receiver drop");
-                self.dialog_layer.remove_dialog(&id);
-                tokio::spawn(async move {
-                    if let Err(e) = dialog.hangup().await {
-                        warn!(%id, "error hanging up dialog on drop: {}", e);
-                    }
-                });
-            }
-            None => {}
-        }
+        self.drop_async().await;
     }
 }
 
