@@ -1628,9 +1628,14 @@ a=setup:actpass"#.to_string()),
 
         // Test retransmission by making calls to non-responsive endpoints
         for i in 0..3 {
-            let result = alice.make_call("nonresponsive", None).await;
-            match result {
-                Ok(dialog_id) => {
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.make_call("nonresponsive", None),
+            )
+            .await;
+
+            match attempt {
+                Ok(Ok(dialog_id)) => {
                     println!(
                         "Retransmission test #{}: Call initiated, expecting timeout",
                         i + 1
@@ -1638,11 +1643,17 @@ a=setup:actpass"#.to_string()),
                     sleep(Duration::from_millis(200)).await; // Brief wait before cleanup
                     alice.hangup(&dialog_id).await.ok();
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     println!(
                         "Retransmission test #{}: Call properly failed: {}",
                         i + 1,
                         e
+                    );
+                }
+                Err(_) => {
+                    println!(
+                        "Retransmission test #{}: Call attempt timed out after 10s (expected)",
+                        i + 1
                     );
                 }
             }

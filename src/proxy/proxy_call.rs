@@ -1,7 +1,7 @@
 use crate::{
     call::{
         DialStrategy, Dialplan, FailureAction, Location, TransactionCookie,
-        sip::DialogStateReceiverGuard,
+        sip::{DialogStateReceiverGuard, ServerDialogGuard},
     },
     callrecord::{
         CallRecord, CallRecordHangupReason, CallRecordMedia, CallRecordPersistArgs,
@@ -19,6 +19,7 @@ use crate::{
     proxy::server::SipServerRef,
 };
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use chrono::Utc;
 use rsip::{StatusCode, Uri, prelude::HeadersExt};
 use rsipstack::{
@@ -111,7 +112,7 @@ impl ProxyCallBuilder {
 
 struct CallSession {
     server_dialog: ServerInviteDialog,
-    callee_dialogs: Vec<DialogId>,
+    callee_dialogs: HashSet<DialogId>,
     last_error: Option<(StatusCode, Option<String>)>,
     connected_callee: Option<String>,
     ring_time: Option<Instant>,
@@ -144,7 +145,6 @@ enum ParallelEvent {
     },
     Accepted {
         idx: usize,
-        dialog_id: DialogId,
         answer: String,
         aor: String,
         caller_uri: String,
@@ -153,7 +153,6 @@ enum ParallelEvent {
         destination: Option<String>,
     },
     Failed {
-        dialog_id: Option<DialogId>,
         code: StatusCode,
         reason: Option<String>,
     },
@@ -192,7 +191,7 @@ impl CallSession {
             .map(|uri| uri.to_string());
         Self {
             server_dialog,
-            callee_dialogs: Vec::new(),
+            callee_dialogs: HashSet::new(),
             last_error: None,
             connected_callee: None,
             ring_time: None,
@@ -213,10 +212,6 @@ impl CallSession {
             routed_contact: None,
             routed_destination: None,
         }
-    }
-
-    fn add_callee_dialog(&mut self, dialog_id: DialogId) {
-        self.callee_dialogs.push(dialog_id);
     }
 
     fn note_invite_details(&mut self, invite: &InviteOption) {
@@ -310,6 +305,13 @@ impl CallSession {
         self.media_stream
             .update_remote_description(&track_id, callee_answer_sdp)
             .await
+    }
+
+    fn add_callee_dialog(&mut self, dialog_id: DialogId) {
+        if self.callee_dialogs.contains(&dialog_id) {
+            return;
+        }
+        self.callee_dialogs.insert(dialog_id);
     }
 
     async fn start_ringing(&mut self, mut answer: String, proxy_call: &ProxyCall) {
@@ -439,17 +441,8 @@ impl CallSession {
         Ok(())
     }
 
-    async fn accept_call(
-        &mut self,
-        dialog_id: DialogId,
-        callee: String,
-        answer: String,
-    ) -> Result<()> {
+    async fn accept_call(&mut self, callee: String, answer: String) -> Result<()> {
         // retain pending dialog id
-        let mut pending_dialog_id = dialog_id.clone();
-        pending_dialog_id.to_tag = String::new();
-        self.callee_dialogs.retain(|id| *id != pending_dialog_id);
-        self.callee_dialogs.push(dialog_id);
         let resolved_callee = self.routed_callee.clone().unwrap_or(callee);
         self.connected_callee = Some(resolved_callee);
         self.answer_time = Some(Instant::now());
@@ -478,40 +471,6 @@ impl CallSession {
             return Err(anyhow!("Failed to send 200 OK: {}", e));
         }
         Ok(())
-    }
-
-    async fn cleanup(&mut self, dialog_layer: &Arc<DialogLayer>) {
-        let callee_count = self.callee_dialogs.len();
-        let call_answered = self.answer_time.is_some();
-        debug!(call_answered, callee_count, "Cleaning up call session");
-
-        // Only send a reject if the call was NOT answered
-        if !call_answered {
-            let (code, reason) = self
-                .last_error
-                .clone()
-                .unwrap_or((StatusCode::Decline, None));
-
-            info!(code = %code, reason = ?reason, id = %self.server_dialog.id(), "Call not answered, sending rejection if possible");
-            if let Err(e) = self
-                .server_dialog
-                .reject(Some(code.clone()), reason.clone())
-            {
-                info!(error = %e, "Failed to send rejection to caller");
-            }
-        }
-        if let Err(e) = self.server_dialog.bye().await {
-            info!(error = %e, "Failed to send BYE to server dialog");
-        }
-        dialog_layer.remove_dialog(&self.server_dialog.id());
-
-        for dialog_id in &self.callee_dialogs {
-            if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
-                if let Err(e) = dialog.hangup().await {
-                    info!(dialog_id = %dialog_id, error = %e, "Failed to send BYE to callee dialog");
-                }
-            }
-        }
     }
 }
 
@@ -643,6 +602,7 @@ impl ProxyCall {
             session.callee_offer = Some(offer_sdp);
         }
         let media_stream = session.media_stream.clone();
+        let dialog_guard = ServerDialogGuard::new(self.dialog_layer.clone(), server_dialog.id());
 
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
             let result = tokio::select! {
@@ -655,7 +615,7 @@ impl ProxyCall {
                 r = self.execute_dialplan(&mut session) => r,
                 r = self.handle_server_events(state_rx) => r,
             };
-            session.cleanup(&self.dialog_layer).await;
+            drop(dialog_guard);
             result
         });
 
@@ -885,13 +845,12 @@ impl ProxyCall {
                 async move {
                     let invite_result = dialog_layer.do_invite(invite_option, state_tx).await;
                     match invite_result {
-                        Ok((dlg, resp_opt)) => {
+                        Ok((_, resp_opt)) => {
                             if let Some(resp) = resp_opt {
                                 if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
                                     let answer = String::from_utf8_lossy(resp.body()).to_string();
                                     let _ = ev_tx_c.send(ParallelEvent::Accepted {
                                         idx,
-                                        dialog_id: dlg.id(),
                                         answer,
                                         aor,
                                         caller_uri: caller_snapshot,
@@ -903,14 +862,12 @@ impl ProxyCall {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
                                     let _ = ev_tx_c.send(ParallelEvent::Failed {
                                         code: resp.status_code,
-                                        dialog_id: Some(dlg.id()),
                                         reason,
                                     });
                                 }
                             } else {
                                 let _ = ev_tx_c.send(ParallelEvent::Failed {
                                     code: StatusCode::RequestTerminated,
-                                    dialog_id: Some(dlg.id()),
                                     reason: Some("Cancelled by callee".to_string()),
                                 });
                             }
@@ -925,11 +882,7 @@ impl ProxyCall {
                                     Some("Invite failed".to_string()),
                                 ),
                             };
-                            let _ = ev_tx_c.send(ParallelEvent::Failed {
-                                code,
-                                reason,
-                                dialog_id: None,
-                            });
+                            let _ = ev_tx_c.send(ParallelEvent::Failed { code, reason });
                         }
                     }
                 }
@@ -955,9 +908,6 @@ impl ProxyCall {
             match event {
                 ParallelEvent::Calling { idx, dialog_id } => {
                     known_dialogs[idx] = Some(dialog_id);
-                    if let Some(id) = &known_dialogs[idx] {
-                        session.add_callee_dialog(id.clone());
-                    }
                 }
                 ParallelEvent::Early { sdp } => {
                     if let Some(answer) = sdp {
@@ -968,7 +918,6 @@ impl ProxyCall {
                 }
                 ParallelEvent::Accepted {
                     idx,
-                    dialog_id,
                     answer,
                     aor,
                     caller_uri,
@@ -976,13 +925,12 @@ impl ProxyCall {
                     contact,
                     destination,
                 } => {
-                    session.add_callee_dialog(dialog_id.clone());
                     session.routed_caller = Some(caller_uri.clone());
                     session.routed_callee = Some(callee_uri.clone());
                     session.routed_contact = Some(contact.clone());
                     session.routed_destination = destination.clone();
                     if accepted_idx.is_none() {
-                        if let Err(e) = session.accept_call(dialog_id, aor, answer).await {
+                        if let Err(e) = session.accept_call(aor, answer).await {
                             warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
                             continue;
                         }
@@ -998,15 +946,8 @@ impl ProxyCall {
                         }
                     }
                 }
-                ParallelEvent::Failed {
-                    code,
-                    reason,
-                    dialog_id,
-                } => {
+                ParallelEvent::Failed { code, reason } => {
                     failures += 1;
-                    if let Some(id) = dialog_id {
-                        session.add_callee_dialog(id);
-                    }
                     session.set_error(code, reason);
                     if failures >= targets.len() && accepted_idx.is_none() {
                         return Err(anyhow!("All parallel targets failed"));
@@ -1167,136 +1108,40 @@ impl ProxyCall {
 
         let mut state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
 
-        tokio::select! {
-            _ = self.handle_callee_state(session, &mut state_rx_guard) => {
-                Ok(())
-            },
-            invite_result = dialog_layer.do_invite(invite_option, state_tx) => {
-                match invite_result {
-                    Ok((dlg, resp)) => {
-                        session.add_callee_dialog(dlg.id());
-                        if let Some(resp) = resp {
-                            if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
-                                let reason = resp.reason_phrase().clone().map(Into::into);
-                                info!(session_id = %self.session_id, code = %resp.status_code, "Invite failed with non-successful response");
-                                match dlg.state() {
-                                    DialogState::Terminated(_, term_reason) => {
-                                        session.callee_terminated(term_reason).await;
-                                    }
-                                    _ => {}
-                                }
-                                return Err((resp.status_code, reason));
-                            }
-                            let answer = String::from_utf8_lossy(resp.body()).to_string();
-                            match session.accept_call(dlg.id(), target.aor.to_string(), answer).await {
-                                Ok(_) => {
-                                    return self.monitor_established_call(session, state_rx_guard).await;
-                                }
-                                _=>{}
-                            }
+        let invite_loop = async {
+            match dialog_layer.do_invite(invite_option, state_tx).await {
+                Ok((_, resp)) => {
+                    if let Some(resp) = resp {
+                        if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
+                            let reason = resp.reason_phrase().clone().map(Into::into);
+                            Err((resp.status_code, reason))
+                        } else {
+                            Ok(())
                         }
-                        Err((StatusCode::RequestTerminated, Some("Cancelled by callee".to_string())))
-                    }
-                    Err(e) => {
-                        debug!(session_id = %self.session_id, "Invite failed: {:?}", e);
-                        Err(match e {
-                            rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
-                            _ => (StatusCode::ServerInternalError, Some("Invite failed".to_string())),
-                        })
+                    } else {
+                        Err((
+                            StatusCode::RequestTerminated,
+                            Some("Cancelled by callee".to_string()),
+                        ))
                     }
                 }
-            }
-        }
-    }
-
-    async fn monitor_established_call(
-        &self,
-        session: &mut CallSession,
-        mut state_rx: DialogStateReceiverGuard,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        while let Some(state) = state_rx.recv().await {
-            match state {
-                DialogState::Terminated(dialog_id, reason) => {
-                    info!(
-                        session_id = %self.session_id,
-                        %dialog_id,
-                        ?reason,
-                        "Established call terminated by callee"
-                    );
-                    session.callee_terminated(reason).await;
-                    return Ok(());
-                }
-                DialogState::Info(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                DialogState::Updated(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                DialogState::Notify(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                other_state => {
-                    debug!(
-                        session_id = %self.session_id,
-                        "Received state in established call: {}",
-                        other_state
-                    );
+                Err(e) => {
+                    debug!(session_id = %self.session_id, "Invite failed: {:?}", e);
+                    Err(match e {
+                        rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
+                        _ => (
+                            StatusCode::ServerInternalError,
+                            Some("Invite failed".to_string()),
+                        ),
+                    })
                 }
             }
-        }
-        debug!(session_id = %self.session_id, "State channel closed for established call");
-        Ok(())
-    }
-
-    async fn handle_callee_state(
-        &self,
-        session: &mut CallSession,
-        state_rx: &mut DialogStateReceiverGuard,
-    ) -> Result<()> {
-        while let Some(state) = state_rx.recv().await {
-            match state {
-                DialogState::Calling(dialog_id) => {
-                    session.add_callee_dialog(dialog_id);
-                }
-                DialogState::Early(dialog_id, response) => {
-                    let answer = String::from_utf8_lossy(response.body()).to_string();
-                    info!(
-                        session_id = %self.session_id,
-                        dialog_id = %dialog_id,
-                        status = ?response.status_code,
-                        answer = %answer,
-                        "Callee dialog is ringing/early"
-                    );
-                    session.start_ringing(answer, self).await;
-                }
-                DialogState::Terminated(dialog_id, reason) => {
-                    info!(
-                        session_id = %self.session_id,
-                        dialog_id = %dialog_id,
-                        reason = ?reason,
-                        "Callee dialog terminated before establishment"
-                    );
-                    session.callee_terminated(reason).await;
-                    break;
-                }
-                DialogState::Info(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                DialogState::Updated(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                DialogState::Notify(_, request) => {
-                    session.callee_dialog_request(request).await.ok();
-                }
-                _ => {
-                    debug!(
-                        session_id = %self.session_id,
-                        "Other callee state received"
-                    );
-                }
-            }
-        }
-        Ok(())
+        };
+        let (_, r) = tokio::join!(
+            state_rx_guard.handle_proxy_call_state(&self, session, target),
+            invite_loop
+        );
+        r
     }
 
     async fn handle_failure(&self, session: &mut CallSession) -> Result<()> {
@@ -1559,6 +1404,90 @@ impl ProxyCall {
 impl Drop for ProxyCall {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+    }
+}
+
+#[async_trait]
+trait ProxyCallDialogStateReceiverGuard {
+    async fn handle_proxy_call_state(
+        &mut self,
+        proxy_call: &ProxyCall,
+        session: &mut CallSession,
+        target: &Location,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
+    async fn handle_proxy_call_state(
+        &mut self,
+        proxy_call: &ProxyCall,
+        session: &mut CallSession,
+        target: &Location,
+    ) -> Result<()> {
+        while let Some(state) = self.recv().await {
+            match state {
+                DialogState::Terminated(dialog_id, reason) => {
+                    info!(
+                        session_id = proxy_call.session_id,
+                        %dialog_id,
+                        ?reason,
+                        "Established call terminated by callee"
+                    );
+                    session.add_callee_dialog(dialog_id);
+                    session.callee_terminated(reason).await;
+                    return Ok(());
+                }
+                DialogState::Calling(dialog_id) => {
+                    session.add_callee_dialog(dialog_id);
+                }
+                DialogState::Early(dialog_id, response) => {
+                    let answer = String::from_utf8_lossy(response.body()).to_string();
+                    info!(
+                        session_id = proxy_call.session_id,
+                        %dialog_id,
+                        status = ?response.status_code,
+                        %answer,
+                        "Callee dialog is ringing/early"
+                    );
+                    session.start_ringing(answer, proxy_call).await;
+                }
+                DialogState::Confirmed(dialog_id, response) => {
+                    info!(
+                        session_id = proxy_call.session_id,
+                        %dialog_id,
+                        status = ?response.status_code,
+                        "Callee dialog confirmed"
+                    );
+                    session.add_callee_dialog(dialog_id);
+                    let answer = String::from_utf8_lossy(response.body()).to_string();
+                    if let Err(e) = session.accept_call(target.aor.to_string(), answer).await {
+                        warn!(
+                            session_id = proxy_call.session_id,
+                            error = %e,
+                            "Failed to accept call on confirmed callee dialog"
+                        );
+                        break;
+                    }
+                }
+                DialogState::Info(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
+                }
+                DialogState::Updated(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
+                }
+                DialogState::Notify(_, request) => {
+                    session.callee_dialog_request(request).await.ok();
+                }
+                other_state => {
+                    debug!(
+                        session_id = proxy_call.session_id,
+                        "Received state in established call: {}", other_state
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
