@@ -28,6 +28,8 @@ pub use active_call::ActiveCallState;
 pub use active_call::ActiveCallType;
 pub use cookie::TransactionCookie;
 pub use user::SipUser;
+#[cfg(test)]
+pub mod tests;
 
 pub type CommandSender = tokio::sync::broadcast::Sender<Command>;
 pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;

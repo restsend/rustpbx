@@ -362,6 +362,8 @@ pub struct ProxyConfig {
     pub recording: Option<RecordingPolicy>,
     #[serde(skip)]
     pub recorder_root: Option<String>,
+    #[serde(skip)]
+    pub recorder_format: RecorderFormat,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     pub sip_flow_max_items: Option<usize>,
@@ -484,6 +486,7 @@ impl Default for ProxyConfig {
             default: None,
             recording: None,
             recorder_root: None,
+            recorder_format: RecorderFormat::default(),
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,
         }

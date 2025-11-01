@@ -32,6 +32,13 @@ pub fn router(app_state: AppState) -> Router<AppState> {
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     let ua_stats = match state.useragent {
         Some(ref ua) => {
+            let pending_dialogs = ua
+                .invitation
+                .pending_dialogs
+                .lock()
+                .map(|ps| ps.len())
+                .unwrap_or(0);
+
             let tx_stats = ua.endpoint.inner.get_stats();
             serde_json::json!({
                 "transactions": serde_json::json!({
@@ -39,6 +46,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
                     "finished": tx_stats.finished_transactions,
                     "waiting_ack": tx_stats.waiting_ack,
                 }),
+                "pending": pending_dialogs,
                 "dialogs": ua.dialog_layer.len()
             })
         }
@@ -72,7 +80,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
         "useragent": ua_stats,
         "sipserver": sipserver_stats,
-        "runnings": state.active_calls.lock().await.len(),
+        "runnings": state.active_calls.lock().unwrap().len(),
     });
     Json(health).into_response()
 }
@@ -84,7 +92,7 @@ async fn shutdown_handler(State(state): State<AppState>, client_ip: ClientAddr) 
 }
 
 async fn list_calls(State(state): State<AppState>) -> Response {
-    let active_calls = state.active_calls.lock().await;
+    let active_calls = state.active_calls.lock().unwrap();
     let result = serde_json::json!({
         "total": active_calls.len(),
         "calls": active_calls.iter().map(|(id, call)| {
@@ -105,6 +113,25 @@ async fn list_calls(State(state): State<AppState>) -> Response {
     });
     Json(result).into_response()
 }
+trait DialogInfo {
+    fn to_json(&self, source: &str) -> serde_json::Value;
+}
+
+impl DialogInfo for rsipstack::dialog::dialog::Dialog {
+    fn to_json(&self, source: &str) -> serde_json::Value {
+        let state = match &self {
+            rsipstack::dialog::dialog::Dialog::ClientInvite(dlg) => dlg.state(),
+            rsipstack::dialog::dialog::Dialog::ServerInvite(dlg) => dlg.state(),
+        };
+        serde_json::json!({
+            "id": self.id().to_string(),
+            "from": self.from().to_string(),
+            "to": self.to().to_string(),
+            "state": state.to_string(),
+            "source": source,
+        })
+    }
+}
 
 async fn list_dialogs(State(state): State<AppState>) -> Response {
     let mut result = Vec::new();
@@ -112,21 +139,15 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
         let ids = sip_server.inner.dialog_layer.all_dialog_ids();
         for id in ids {
             if let Some(dialog) = sip_server.inner.dialog_layer.get_dialog(&id) {
-                let state = match &dialog {
-                    rsipstack::dialog::dialog::Dialog::ClientInvite(dlg) => dlg.state(),
-                    rsipstack::dialog::dialog::Dialog::ServerInvite(dlg) => dlg.state(),
-                };
-                result.push(serde_json::json!({
-                    "id": dialog.id().to_string(),
-                    "from": dialog.from().to_string(),
-                    "to": dialog.to().to_string(),
-                    "state": state.to_string(),
-                }));
-            } else {
-                result.push(serde_json::json!({
-                    "id": id.to_string(),
-                    "error": "Dialog not found",
-                }));
+                result.push(dialog.to_json("sipserver"));
+            }
+        }
+    }
+    if let Some(ref useragent) = state.useragent {
+        let ids = useragent.dialog_layer.all_dialog_ids();
+        for id in ids {
+            if let Some(dialog) = useragent.dialog_layer.get_dialog(&id) {
+                result.push(dialog.to_json("useragent"));
             }
         }
     }
@@ -138,7 +159,7 @@ async fn kill_call(
     Path(id): Path<String>,
     client_ip: ClientAddr,
 ) -> Response {
-    if let Some(call) = state.active_calls.lock().await.remove(&id) {
+    if let Some(call) = state.active_calls.lock().unwrap().remove(&id) {
         call.cancel_token.cancel();
         info!(id, %client_ip, "call killed");
     }

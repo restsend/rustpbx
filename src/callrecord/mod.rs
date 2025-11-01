@@ -65,22 +65,24 @@ pub enum CallRecordEventType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CallRecordEvent<'a> {
+pub struct CallRecordEvent {
     pub r#type: CallRecordEventType,
     pub timestamp: u64,
-    pub content: &'a str,
+    pub content: String,
 }
 
-impl<'a> CallRecordEvent<'a> {
-    pub fn new(r#type: CallRecordEventType, content: &'a str) -> Self {
-        Self {
+impl CallRecordEvent {
+    pub async fn write<T: Serialize>(r#type: CallRecordEventType, obj: T, file: &mut File) {
+        let content = match serde_json::to_string(&obj) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let event = Self {
             r#type,
             timestamp: crate::get_timestamp(),
             content,
-        }
-    }
-    pub async fn write_to_file(&self, file: &mut File) {
-        match serde_json::to_string(self) {
+        };
+        match serde_json::to_string(&event) {
             Ok(line) => {
                 file.write_all(format!("{}\n", line).as_bytes()).await.ok();
             }
@@ -88,6 +90,7 @@ impl<'a> CallRecordEvent<'a> {
         }
     }
 }
+
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

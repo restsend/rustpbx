@@ -214,7 +214,7 @@ async fn test_bob_call_alice_webhook_accept() -> Result<()> {
 
             // 7. Alice accepts the call immediately after webhook validation
             if let Some(dialog_id_str) = alice_dialog_id_received {
-                if let Some(pending_call) = alice_ua_arc.invitation.get_pending_call(&dialog_id_str).await {
+                if let Some(pending_call) = alice_ua_arc.invitation.get_pending_call(&dialog_id_str) {
                     info!("Alice accepting call with dialog_id: {}", dialog_id_str);
 
                     let answer_sdp = b"v=0\r\no=alice 654321 654321 IN IP4 127.0.0.1\r\ns=Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49171 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";

@@ -482,6 +482,7 @@ impl RtpTrack {
             %remote_addr,
             %remote_rtcp_addr,
             ?codec_type,
+            ssrc = self.ssrc,
             "set remote description"
         );
 
@@ -1222,6 +1223,7 @@ impl Track for RtpTrack {
         tokio::spawn(async move {
             select! {
                 _ = token.cancelled() => {
+                    debug!(track_id, "RTP processor task cancelled");
                 },
                 _ = Self::send_rtcp_reports(inner.clone(),track_id.clone(), token.clone(), &rtcp_socket, ssrc, ssrc_cname) => {
                 }

@@ -86,11 +86,12 @@ mod wait_input_timeout_tests {
         // Set wait_input_timeout
         *active_call.wait_input_timeout.lock().await = Some(timeout_ms);
 
+        let receiver = active_call.new_receiver();
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
                 tokio::select! {
-                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.serve(receiver) => {},
                 }
             })
         };
@@ -161,11 +162,12 @@ mod wait_input_timeout_tests {
             play_id: None,
         })?;
 
+        let receiver = active_call.new_receiver();
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
                 tokio::select! {
-                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.serve(receiver) => {},
                     _ = active_call_clone.media_stream.serve() => {},
                 }
             })
@@ -224,11 +226,12 @@ mod wait_input_timeout_tests {
             play_id: None,
         })?;
 
+        let receiver = active_call.new_receiver();
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
                 tokio::select! {
-                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.serve(receiver) => {},
                     _ = active_call_clone.media_stream.serve() => {},
                 }
             })
@@ -288,11 +291,12 @@ mod wait_input_timeout_tests {
             play_id: None,
         })?;
 
+        let receiver = active_call.new_receiver();
         let serve_handle = {
             let active_call_clone = active_call.clone();
             tokio::spawn(async move {
                 tokio::select! {
-                    _ = active_call_clone.serve() => {},
+                    _ = active_call_clone.serve(receiver) => {},
                     _ = active_call_clone.media_stream.serve() => {},
                 }
             })

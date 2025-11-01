@@ -1,5 +1,5 @@
 use crate::app::AppStateInner;
-use crate::config::{CallRecordConfig, ProxyConfig, UserBackendConfig};
+use crate::config::{CallRecordConfig, Config, ProxyConfig, UserBackendConfig};
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
@@ -14,7 +14,7 @@ use argon2::password_hash::{PasswordHasher, SaltString};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::sea_query::Condition;
@@ -24,7 +24,8 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::sync::Arc;
+use std::{fs, sync::Arc};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -98,6 +99,9 @@ impl From<UserModel> for UserView {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/settings", get(page_settings))
+        .route("/settings/config/platform", patch(update_platform_settings))
+        .route("/settings/config/storage", patch(update_storage_settings))
+        .route("/settings/config/security", patch(update_security_settings))
         .route(
             "/settings/departments",
             post(query_departments).put(create_department),
@@ -148,6 +152,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         "metrics": JsonValue::Null,
     });
     let mut operations: Vec<JsonValue> = Vec::new();
+    let mut console_meta = JsonValue::Null;
 
     let mut proxy_stats_value = JsonValue::Null;
     let mut useragent_stats_value = JsonValue::Null;
@@ -340,6 +345,17 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             }),
         );
 
+        console_meta = config
+            .console
+            .as_ref()
+            .map(|cfg| {
+                json!({
+                    "base_path": cfg.base_path,
+                    "allow_registration": cfg.allow_registration,
+                })
+            })
+            .unwrap_or(JsonValue::Null);
+
         let recording_meta = config
             .recording
             .as_ref()
@@ -380,6 +396,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         "operations".to_string(),
         JsonValue::Array(operations.clone()),
     );
+    data.insert("console".to_string(), console_meta);
 
     JsonValue::Object(data)
 }
@@ -532,23 +549,41 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     spool_profile.insert("recorder_path", json!(&config.recorder_path));
     spool_profile.insert("recorder_format", json!(config.recorder_format.extension()));
     spool_profile.insert("media_cache_path", json!(&config.media_cache_path));
+    if let Some(policy) = config.recording.as_ref() {
+        if let Ok(policy_value) = serde_json::to_value(policy) {
+            spool_profile.insert("recording", policy_value);
+        }
+    }
 
     let active_profile_id = callrecord_profile.id.clone();
     let active_description = callrecord_profile.description.clone();
     let storage_mode = mode.clone();
 
-    let storage_meta = json!({
-        "mode": storage_mode,
-        "active_profile": active_profile_id,
-        "description": active_description,
-        "recorder_path": &config.recorder_path,
-        "recorder_format": config.recorder_format.extension(),
-        "media_cache_path": &config.media_cache_path,
-    });
+    let mut storage_meta = serde_json::Map::new();
+    storage_meta.insert("mode".to_string(), json!(storage_mode));
+    storage_meta.insert("active_profile".to_string(), json!(active_profile_id));
+    storage_meta.insert("description".to_string(), json!(active_description));
+    storage_meta.insert("recorder_path".to_string(), json!(&config.recorder_path));
+    storage_meta.insert(
+        "recorder_format".to_string(),
+        json!(config.recorder_format.extension()),
+    );
+    storage_meta.insert(
+        "media_cache_path".to_string(),
+        json!(&config.media_cache_path),
+    );
+    storage_meta.insert(
+        "recording".to_string(),
+        config
+            .recording
+            .as_ref()
+            .and_then(|policy| serde_json::to_value(policy).ok())
+            .unwrap_or(JsonValue::Null),
+    );
 
     let profiles = vec![callrecord_profile.into_json(), spool_profile.into_json()];
 
-    (storage_meta, profiles)
+    (JsonValue::Object(storage_meta), profiles)
 }
 
 async fn query_departments(
@@ -1219,4 +1254,530 @@ fn backend_kind(backend: &UserBackendConfig) -> String {
         UserBackendConfig::Database { .. } => "database".to_string(),
         UserBackendConfig::Extension { .. } => "extension".to_string(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlatformSettingsPayload {
+    #[serde(default)]
+    log_level: Option<Option<String>>,
+    #[serde(default)]
+    log_file: Option<Option<String>>,
+    #[serde(default)]
+    external_ip: Option<Option<String>>,
+    #[serde(default)]
+    rtp_start_port: Option<Option<u16>>,
+    #[serde(default)]
+    rtp_end_port: Option<Option<u16>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct StorageSettingsPayload {
+    #[serde(default)]
+    recorder_path: Option<Option<String>>,
+    #[serde(default)]
+    media_cache_path: Option<Option<String>>,
+    #[serde(default)]
+    recorder_format: Option<Option<String>>,
+    #[serde(default)]
+    callrecord: Option<Option<CallRecordStoragePayload>>,
+    #[serde(default)]
+    recording_policy: Option<Option<RecordingPolicyPayload>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum CallRecordStoragePayload {
+    Disabled,
+    Local {
+        #[serde(default)]
+        root: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecordingPolicyPayload {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    directions: Option<Vec<String>>,
+    #[serde(default)]
+    caller_allow: Option<Vec<String>>,
+    #[serde(default)]
+    caller_deny: Option<Vec<String>>,
+    #[serde(default)]
+    callee_allow: Option<Vec<String>>,
+    #[serde(default)]
+    callee_deny: Option<Vec<String>>,
+    #[serde(default)]
+    auto_start: Option<bool>,
+    #[serde(default)]
+    filename_pattern: Option<Option<String>>,
+    #[serde(default)]
+    samplerate: Option<Option<u32>>,
+    #[serde(default)]
+    ptime: Option<Option<u32>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SecuritySettingsPayload {
+    #[serde(default)]
+    acl_rules: Option<Option<String>>,
+}
+
+pub async fn update_platform_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<PlatformSettingsPayload>,
+) -> Response {
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+
+    if let Some(level_opt) = payload.log_level {
+        if let Some(level) = normalize_opt_string(level_opt) {
+            doc["log_level"] = value(level);
+        } else {
+            doc.remove("log_level");
+        }
+        modified = true;
+    }
+
+    if let Some(file_opt) = payload.log_file {
+        if let Some(path) = normalize_opt_string(file_opt) {
+            doc["log_file"] = value(path);
+        } else {
+            doc.remove("log_file");
+        }
+        modified = true;
+    }
+
+    if let Some(ext_opt) = payload.external_ip {
+        if let Some(ip) = normalize_opt_string(ext_opt) {
+            doc["external_ip"] = value(ip);
+        } else {
+            doc.remove("external_ip");
+        }
+        modified = true;
+    }
+
+    if let Some(start_opt) = payload.rtp_start_port {
+        if let Some(port) = start_opt {
+            if port == 0 {
+                return json_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "rtp_start_port must be greater than 0",
+                );
+            }
+            doc["rtp_start_port"] = value(i64::from(port));
+        } else {
+            doc.remove("rtp_start_port");
+        }
+        modified = true;
+    }
+
+    if let Some(end_opt) = payload.rtp_end_port {
+        if let Some(port) = end_opt {
+            if port == 0 {
+                return json_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "rtp_end_port must be greater than 0",
+                );
+            }
+            doc["rtp_end_port"] = value(i64::from(port));
+        } else {
+            doc.remove("rtp_end_port");
+        }
+        modified = true;
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
+        if start > end {
+            return json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "rtp_start_port must be less than or equal to rtp_end_port",
+            );
+        }
+    }
+
+    if modified {
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    Json(json!({
+        "status": "ok",
+        "requires_restart": true,
+        "message": "Platform settings saved. Restart RustPBX to apply changes.",
+        "platform": {
+            "log_level": config.log_level,
+            "log_file": config.log_file,
+        },
+        "rtp": {
+            "external_ip": config.external_ip,
+            "start_port": config.rtp_start_port,
+            "end_port": config.rtp_end_port,
+        }
+    }))
+    .into_response()
+}
+
+pub async fn update_storage_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<StorageSettingsPayload>,
+) -> Response {
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+
+    if let Some(path_opt) = payload.recorder_path {
+        if let Some(path) = normalize_opt_string(path_opt) {
+            doc["recorder_path"] = value(path);
+        } else {
+            doc.remove("recorder_path");
+        }
+        modified = true;
+    }
+
+    if let Some(cache_opt) = payload.media_cache_path {
+        if let Some(path) = normalize_opt_string(cache_opt) {
+            doc["media_cache_path"] = value(path);
+        } else {
+            doc.remove("media_cache_path");
+        }
+        modified = true;
+    }
+
+    if let Some(format_opt) = payload.recorder_format {
+        match format_opt {
+            Some(format_value) => {
+                let normalized = format_value.trim().to_ascii_lowercase();
+                if normalized.is_empty() {
+                    doc.remove("recorder_format");
+                } else if normalized == "wav" || normalized == "ogg" {
+                    doc["recorder_format"] = value(normalized);
+                } else {
+                    return json_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "recorder_format must be either 'wav' or 'ogg'",
+                    );
+                }
+            }
+            None => {
+                doc.remove("recorder_format");
+            }
+        }
+        modified = true;
+    }
+
+    if let Some(callrecord_opt) = payload.callrecord {
+        match callrecord_opt {
+            Some(CallRecordStoragePayload::Disabled) | None => {
+                doc.remove("callrecord");
+            }
+            Some(CallRecordStoragePayload::Local { root }) => {
+                let Some(root_path) = normalize_opt_string(root) else {
+                    return json_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "callrecord.local.root is required",
+                    );
+                };
+                let mut table = Table::new();
+                table["type"] = value("local");
+                table["root"] = value(root_path);
+                doc["callrecord"] = Item::Table(table);
+            }
+        }
+        modified = true;
+    }
+
+    if let Some(policy_opt) = payload.recording_policy {
+        match policy_opt {
+            Some(policy_payload) => {
+                let mut table = Table::new();
+                table["enabled"] = value(policy_payload.enabled.unwrap_or(false));
+
+                if let Some(directions) = policy_payload.directions {
+                    if directions.is_empty() {
+                        table.remove("directions");
+                    } else {
+                        set_string_array(&mut table, "directions", directions);
+                    }
+                }
+
+                if let Some(allow) = policy_payload.caller_allow {
+                    if allow.is_empty() {
+                        table.remove("caller_allow");
+                    } else {
+                        set_string_array(&mut table, "caller_allow", allow);
+                    }
+                }
+
+                if let Some(deny) = policy_payload.caller_deny {
+                    if deny.is_empty() {
+                        table.remove("caller_deny");
+                    } else {
+                        set_string_array(&mut table, "caller_deny", deny);
+                    }
+                }
+
+                if let Some(allow) = policy_payload.callee_allow {
+                    if allow.is_empty() {
+                        table.remove("callee_allow");
+                    } else {
+                        set_string_array(&mut table, "callee_allow", allow);
+                    }
+                }
+
+                if let Some(deny) = policy_payload.callee_deny {
+                    if deny.is_empty() {
+                        table.remove("callee_deny");
+                    } else {
+                        set_string_array(&mut table, "callee_deny", deny);
+                    }
+                }
+
+                if let Some(auto_start) = policy_payload.auto_start {
+                    table["auto_start"] = value(auto_start);
+                }
+
+                match policy_payload.filename_pattern {
+                    Some(Some(pattern)) => {
+                        let trimmed = pattern.trim();
+                        if trimmed.is_empty() {
+                            table.remove("filename_pattern");
+                        } else {
+                            table["filename_pattern"] = value(trimmed);
+                        }
+                    }
+                    Some(None) => {
+                        table.remove("filename_pattern");
+                    }
+                    None => {}
+                }
+
+                match policy_payload.samplerate {
+                    Some(Some(rate)) => {
+                        table["samplerate"] = value(i64::from(rate));
+                    }
+                    Some(None) => {
+                        table.remove("samplerate");
+                    }
+                    None => {}
+                }
+
+                match policy_payload.ptime {
+                    Some(Some(ptime)) => {
+                        table["ptime"] = value(i64::from(ptime));
+                    }
+                    Some(None) => {
+                        table.remove("ptime");
+                    }
+                    None => {}
+                }
+
+                doc["recording"] = Item::Table(table);
+            }
+            None => {
+                doc.remove("recording");
+            }
+        }
+        modified = true;
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if modified {
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    let (storage_meta, storage_profiles) = build_storage_profiles(&config);
+
+    Json(json!({
+        "status": "ok",
+        "requires_restart": true,
+        "message": "Storage settings saved. Restart RustPBX to apply changes.",
+        "storage": storage_meta,
+        "storage_profiles": storage_profiles,
+    }))
+    .into_response()
+}
+
+pub async fn update_security_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<SecuritySettingsPayload>,
+) -> Response {
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+
+    if let Some(acl_opt) = payload.acl_rules {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        match acl_opt {
+            Some(raw) => {
+                let rules = parse_lines_to_vec(&raw);
+                if rules.is_empty() {
+                    table.remove("acl_rules");
+                } else {
+                    set_string_array(table, "acl_rules", rules);
+                }
+            }
+            None => {
+                table.remove("acl_rules");
+            }
+        }
+        modified = true;
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if modified {
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    let acl_rules = match config.proxy.as_ref() {
+        Some(proxy_cfg) => proxy_cfg.acl_rules.clone().unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    Json(json!({
+        "status": "ok",
+        "requires_restart": true,
+        "message": "Security settings saved. Restart RustPBX to apply changes.",
+        "security": {
+            "acl_rules": acl_rules,
+        }
+    }))
+    .into_response()
+}
+
+fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
+    let Some(app_state) = state.app_state() else {
+        return Err(json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Application state is unavailable.",
+        ));
+    };
+    let Some(path) = app_state.config_path.clone() else {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "Configuration file path is unknown. Start the service with --conf to enable editing.",
+        ));
+    };
+    Ok(path)
+}
+
+fn load_document(path: &str) -> Result<DocumentMut, Response> {
+    let contents = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read configuration file: {}", err),
+            ));
+        }
+    };
+
+    contents.parse::<DocumentMut>().map_err(|err| {
+        json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Configuration file is not valid TOML: {}", err),
+        )
+    })
+}
+
+fn persist_document(path: &str, contents: String) -> Result<(), Response> {
+    fs::write(path, contents).map_err(|err| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write configuration file: {}", err),
+        )
+    })
+}
+
+fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
+    toml::from_str::<Config>(contents).map_err(|err| {
+        json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Configuration validation failed: {}", err),
+        )
+    })
+}
+
+fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
+    if !doc[key].is_table() {
+        doc[key] = Item::Table(Table::new());
+    }
+    doc[key].as_table_mut().expect("table")
+}
+
+fn parse_lines_to_vec(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
+}
+
+fn set_string_array(table: &mut Table, key: &str, values: Vec<String>) {
+    let mut array = Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    table[key] = Item::Value(Value::Array(array));
+}
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({
+            "status": "error",
+            "message": message.into(),
+        })),
+    )
+        .into_response()
 }
