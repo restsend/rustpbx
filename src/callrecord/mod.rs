@@ -116,6 +116,8 @@ pub struct CallRecord {
     pub refer_callrecord: Option<Box<CallRecord>>,
     #[serde(skip_serializing, skip_deserializing, default)]
     pub sip_flows: HashMap<String, Vec<SipMessageItem>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub sip_leg_roles: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +223,18 @@ pub fn apply_record_file_extras(record: &CallRecord, extras: &mut HashMap<String
         let entries: Vec<Value> = record
             .sip_flows
             .keys()
-            .map(|leg| json!({ "leg": leg, "path": default_sip_flow_file_name(record, leg) }))
+            .map(|leg| {
+                let mut entry = JsonMap::new();
+                entry.insert("leg".to_string(), Value::String(leg.clone()));
+                entry.insert(
+                    "path".to_string(),
+                    Value::String(default_sip_flow_file_name(record, leg)),
+                );
+                if let Some(role) = record.sip_leg_roles.get(leg) {
+                    entry.insert("role".to_string(), Value::String(role.clone()));
+                }
+                Value::Object(entry)
+            })
             .collect();
         extras.insert("sip_flow_files".to_string(), Value::Array(entries));
     }
@@ -564,7 +577,15 @@ impl CallRecordManager {
         let mut extras = record.extras.take().unwrap_or_default();
         let entries: Vec<Value> = files
             .iter()
-            .map(|(leg, path)| json!({ "leg": leg, "path": path }))
+            .map(|(leg, path)| {
+                let mut entry = JsonMap::new();
+                entry.insert("leg".to_string(), Value::String(leg.clone()));
+                entry.insert("path".to_string(), Value::String(path.clone()));
+                if let Some(role) = record.sip_leg_roles.get(leg) {
+                    entry.insert("role".to_string(), Value::String(role.clone()));
+                }
+                Value::Object(entry)
+            })
             .collect();
         extras.insert("sip_flow_files".to_string(), Value::Array(entries));
         record.extras = Some(extras);
@@ -1118,23 +1139,57 @@ fn normalize_endpoint_uri(value: &str) -> Option<String> {
 
 fn build_signaling_payload(record: &CallRecord) -> Option<Value> {
     let mut legs = Vec::new();
-    legs.push(call_leg_payload("primary", record));
 
-    if let Some(refer) = record.refer_callrecord.as_ref() {
-        legs.push(call_leg_payload("b2bua", refer));
+    if !record.sip_leg_roles.is_empty() {
+        for (sip_call_id, role) in record.sip_leg_roles.iter() {
+            let leg_record = match role.as_str() {
+                "primary" => Some(record),
+                "b2bua" => record.refer_callrecord.as_deref(),
+                _ => None,
+            };
+
+            let payload = match leg_record {
+                Some(inner) => call_leg_payload(role, inner, Some(sip_call_id)),
+                None => minimal_leg_payload(role, sip_call_id),
+            };
+
+            legs.push(payload);
+        }
     }
 
-    Some(json!({
-        "is_b2bua": record.refer_callrecord.is_some(),
-        "legs": legs,
-    }))
+    if legs.is_empty() {
+        legs.push(call_leg_payload("primary", record, None));
+        if let Some(refer) = record.refer_callrecord.as_ref() {
+            legs.push(call_leg_payload("b2bua", refer, None));
+        }
+    } else if record.refer_callrecord.is_some()
+        && !record.sip_leg_roles.values().any(|role| role == "b2bua")
+    {
+        if let Some(refer) = record.refer_callrecord.as_ref() {
+            legs.push(call_leg_payload("b2bua", refer, None));
+        }
+    }
+
+    if legs.is_empty() {
+        None
+    } else {
+        Some(json!({
+            "is_b2bua": record.refer_callrecord.is_some(),
+            "legs": legs,
+        }))
+    }
 }
 
-fn call_leg_payload(role: &str, record: &CallRecord) -> Value {
+fn call_leg_payload(role: &str, record: &CallRecord, sip_call_id: Option<&String>) -> Value {
+    let call_id = sip_call_id
+        .cloned()
+        .unwrap_or_else(|| record.call_id.clone());
+
     json!({
         "role": role,
         "call_type": record.call_type.clone(),
-        "call_id": record.call_id.clone(),
+        "call_id": call_id,
+        "session_id": record.call_id.clone(),
         "caller": record.caller.clone(),
         "callee": record.callee.clone(),
         "status_code": record.status_code,
@@ -1146,6 +1201,13 @@ fn call_leg_payload(role: &str, record: &CallRecord) -> Value {
         "ring_time": record.ring_time.clone(),
         "answer_time": record.answer_time.clone(),
         "end_time": record.end_time.clone(),
+    })
+}
+
+fn minimal_leg_payload(role: &str, sip_call_id: &str) -> Value {
+    json!({
+        "role": role,
+        "call_id": sip_call_id,
     })
 }
 

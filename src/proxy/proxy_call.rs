@@ -1292,11 +1292,20 @@ impl ProxyCall {
         extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
 
         let mut sip_flows_map: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
+        let server_dialog_id = session.server_dialog.id();
         let mut call_ids: HashSet<String> = HashSet::new();
-        call_ids.insert(session.server_dialog.id().call_id);
+        call_ids.insert(server_dialog_id.call_id.clone());
 
         for dialog_id in &session.callee_dialogs {
             call_ids.insert(dialog_id.call_id.clone());
+        }
+
+        let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
+        sip_leg_roles.insert(server_dialog_id.call_id.clone(), "primary".to_string());
+        for dialog_id in &session.callee_dialogs {
+            sip_leg_roles
+                .entry(dialog_id.call_id.clone())
+                .or_insert_with(|| "b2bua".to_string());
         }
 
         for call_id in call_ids.iter() {
@@ -1326,6 +1335,7 @@ impl ProxyCall {
             dump_event_file: None,
             refer_callrecord: None,
             sip_flows: sip_flows_map,
+            sip_leg_roles,
         };
 
         if self.dialplan.recording.enabled {

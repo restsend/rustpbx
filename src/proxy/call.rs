@@ -619,9 +619,12 @@ impl CallModule {
         let leg_call_id = dialog_call_id(&dialog_id).unwrap_or_else(|| dialog_id.to_string());
         if let Some(items) = self.inner.server.drain_sip_flow(&leg_call_id) {
             if !items.is_empty() {
-                sip_flows.insert(leg_call_id, items);
+                sip_flows.insert(leg_call_id.clone(), items);
             }
         }
+
+        let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
+        sip_leg_roles.insert(leg_call_id.clone(), "primary".to_string());
 
         let mut record = CallRecord {
             call_type: crate::call::ActiveCallType::Sip,
@@ -642,6 +645,7 @@ impl CallModule {
             dump_event_file: None,
             refer_callrecord: None,
             sip_flows,
+            sip_leg_roles,
         };
 
         apply_record_file_extras(&record, &mut extras_map);

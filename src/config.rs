@@ -291,6 +291,17 @@ pub enum CallRecordConfig {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+pub struct TranscriptConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub samplerate: Option<u32>,
+    #[serde(default)]
+    pub default_language: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
@@ -367,6 +378,9 @@ pub struct ProxyConfig {
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     pub sip_flow_max_items: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub transcript: Option<TranscriptConfig>,
 }
 
 pub enum RouteResult {
@@ -489,6 +503,7 @@ impl Default for ProxyConfig {
             recorder_format: RecorderFormat::default(),
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,
+            transcript: None,
         }
     }
 }

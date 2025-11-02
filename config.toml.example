@@ -50,6 +50,12 @@ generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 
+[proxy.transcript]
+endpoint = "http://localhost:8000"
+# samplerate = 16000
+# default_language = "en-US"
+# timeout_secs = 30
+
 # ACL rules
 acl_rules = [
     # "allow 10.0.0.0/8",
