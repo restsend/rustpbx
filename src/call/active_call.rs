@@ -1586,6 +1586,7 @@ impl ActiveCallState {
             recorder,
             refer_callrecord,
             sip_flows: HashMap::new(),
+            sip_leg_roles: HashMap::new(),
         }
     }
 }
