@@ -13,7 +13,7 @@ use tokio::{
     net::TcpStream,
     sync::{Notify, mpsc},
 };
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{self, Message, client::IntoClientRequest},
@@ -347,7 +347,7 @@ impl SynthesisClient for StreamingClient {
 
 pub struct NonStreamingClient {
     option: SynthesisOption,
-    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::UnboundedSender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 impl NonStreamingClient {
@@ -365,12 +365,12 @@ impl SynthesisClient for NonStreamingClient {
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::unbounded_channel();
         self.tx.replace(tx);
         let client_option = self.option.clone();
         let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
 
-        let stream = ReceiverStream::new(rx)
+        let stream = UnboundedReceiverStream::new(rx)
             .flat_map_unordered(max_concurrent_tasks, move |(text, cmd_seq, option)| {
                 let option = client_option.merge_with(option);
                 let task_id = Uuid::new_v4().to_string();
@@ -410,7 +410,7 @@ impl SynthesisClient for NonStreamingClient {
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
-            tx.send((text.to_string(), cmd_seq, option)).await?;
+            tx.send((text.to_string(), cmd_seq, option))?;
         } else {
             return Err(anyhow!("Aliyun TTS Task: not connected"));
         }
@@ -429,7 +429,7 @@ impl AliyunTtsClient {
         if streaming {
             Ok(Box::new(StreamingClient::new(option.clone())))
         } else {
-            Ok(Box::new(NonStreamingClient::new(option.clone())))
+        Ok(Box::new(NonStreamingClient::new(option.clone())))
         }
     }
 }

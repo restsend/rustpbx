@@ -9,18 +9,17 @@ use futures::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 
-const CHANNEL_MAX_SIZE: usize = 10;
 /// https://github.com/ruzhila/voiceapi
 /// A simple and clean voice transcription/synthesis API with sherpa-onnx
 ///
 #[derive(Debug)]
 pub struct VoiceApiTtsClient {
     option: SynthesisOption,
-    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::UnboundedSender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 #[allow(dead_code)]
@@ -155,11 +154,11 @@ impl SynthesisClient for VoiceApiTtsClient {
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
-        let (tx, rx) = mpsc::channel(CHANNEL_MAX_SIZE);
+        let (tx, rx) = mpsc::unbounded_channel();
         self.tx = Some(tx);
         let client_option = self.option.clone();
         let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
-        let stream = ReceiverStream::new(rx).flat_map_unordered(
+        let stream = UnboundedReceiverStream::new(rx).flat_map_unordered(
             max_concurrent_tasks,
             move |(text, cmd_seq, option)| {
                 // each reequest have its own session_id
@@ -190,7 +189,7 @@ impl SynthesisClient for VoiceApiTtsClient {
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
-            tx.send((text.to_string(), cmd_seq, option)).await?;
+            tx.send((text.to_string(), cmd_seq, option))?;
         } else {
             return Err(anyhow::anyhow!("VoiceAPI TTS: missing client sender"));
         };
