@@ -448,7 +448,7 @@ impl TencentCloudTtsClient {
         if streaming {
             Ok(Box::new(StreamingClient::new(option.clone())))
         } else {
-        Ok(Box::new(RealTimeClient::new(option.clone())))
+            Ok(Box::new(RealTimeClient::new(option.clone())))
         }
     }
 }

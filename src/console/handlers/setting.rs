@@ -121,7 +121,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub async fn page_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let settings = build_settings_payload(&state).await;
 
@@ -131,6 +131,17 @@ pub async fn page_settings(
             "nav_active": "settings",
             "settings": settings,
             "settings_data": settings,
+            "username": user.username,
+            "email": user.email,
+            "current_user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_superuser": user.is_superuser,
+                "is_staff": user.is_staff,
+                "is_active": user.is_active,
+            },
+            "user_is_superuser": user.is_superuser,
         }),
     )
 }
@@ -809,9 +820,12 @@ async fn delete_department(
 
 async fn query_users(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(query): Json<forms::ListQuery<QueryUserFilters>>,
 ) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    }
     let db = state.db();
     let mut selector = UserEntity::find().order_by_asc(UserColumn::Username);
     if let Some(filters) = query.filters.as_ref() {
@@ -875,8 +889,11 @@ async fn query_users(
 async fn get_user(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    }
     match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => Json(UserView::from(model)).into_response(),
         Ok(None) => (
@@ -897,9 +914,12 @@ async fn get_user(
 
 async fn create_user(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    }
     let email = payload.email.trim();
     let username = payload.username.trim();
     if email.is_empty() || username.is_empty() {
@@ -983,9 +1003,12 @@ async fn create_user(
 async fn update_user(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    }
     let model = match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
         Ok(None) => {
@@ -1073,8 +1096,11 @@ async fn update_user(
 async fn delete_user(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    }
     let model = match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
         Ok(None) => {
