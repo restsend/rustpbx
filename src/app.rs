@@ -108,15 +108,20 @@ impl AppStateInner {
                 }
             }
         }
-        let recorder_file = root.join(session_id);
-        if recorder_file.extension().is_none() {
-            recorder_file
-                .with_extension(self.config.recorder_format.extension())
-                .to_string_lossy()
-                .to_string()
-        } else {
-            recorder_file.to_string_lossy().to_string()
+        let mut recorder_file = root.join(session_id);
+        let desired_ext = self.config.recorder_format.extension();
+        let has_desired_ext = recorder_file
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case(desired_ext))
+            .unwrap_or(false);
+
+        if !has_desired_ext {
+            // Ensure the on-disk filename matches the configured recorder format extension.
+            recorder_file.set_extension(desired_ext);
         }
+
+        recorder_file.to_string_lossy().to_string()
     }
 }
 

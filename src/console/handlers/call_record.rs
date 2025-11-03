@@ -7,8 +7,9 @@ use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use anyhow::{Context as AnyhowContext, Result as AnyResult};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{self, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -27,7 +28,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 const BILLING_STATUS_CHARGED: &str = "charged";
@@ -131,6 +133,7 @@ struct VoiceApiFileResponse {
     #[serde(default)]
     elapsed: Option<f64>,
     #[serde(default)]
+    #[allow(unused)]
     data_length: Option<u64>,
     #[serde(default)]
     audio_duration: Option<f64>,
@@ -147,6 +150,7 @@ struct VoiceApiSegment {
     #[serde(default)]
     text: String,
     #[serde(default)]
+    #[allow(unused)]
     finished: Option<bool>,
     #[serde(default)]
     idx: Option<u32>,
@@ -172,6 +176,190 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/call-records/{id}/transcript",
             get(get_call_record_transcript).post(trigger_call_record_transcript),
         )
+        .route("/call-records/{id}/recording", get(stream_call_recording))
+}
+async fn stream_call_recording(
+    AxumPath(pk): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    headers: HeaderMap,
+) -> Response {
+    let db = state.db();
+    let record = match CallRecordEntity::find_by_id(pk).one(db).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(id = pk, "failed to load call record for playback: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let cdr_data = load_cdr_data(&state, &record).await;
+    let recording_path = match select_recording_path(&record, cdr_data.as_ref()) {
+        Some(path) => path,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Recording file not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let file_meta = match tokio::fs::metadata(&recording_path).await {
+        Ok(meta) if meta.is_file() => meta,
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Recording file not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let file_len = file_meta.len();
+    if file_len == 0 {
+        return (
+            StatusCode::NO_CONTENT,
+            Json(json!({ "message": "Recording file is empty" })),
+        )
+            .into_response();
+    }
+
+    let range_header = headers
+        .get(http::header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    let (status, start, end) =
+        match range_header.and_then(|value| parse_range_header(value, file_len)) {
+            Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
+            None if range_header.is_some() => {
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+                response.headers_mut().insert(
+                    http::header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{}", file_len))
+                        .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
+                );
+                return response;
+            }
+            _ => (StatusCode::OK, 0, file_len.saturating_sub(1)),
+        };
+
+    let mut file = match tokio::fs::File::open(&recording_path).await {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(path = %recording_path, "failed to open recording file: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to open recording file" })),
+            )
+                .into_response();
+        }
+    };
+
+    if start > 0 {
+        if let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await {
+            warn!(path = %recording_path, "failed to seek recording file: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to read recording file" })),
+            )
+                .into_response();
+        }
+    }
+
+    let bytes_to_send = end.saturating_sub(start) + 1;
+    let stream = ReaderStream::new(file.take(bytes_to_send));
+
+    let body = Body::from_stream(stream);
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    let headers_mut = response.headers_mut();
+    headers_mut.insert(
+        http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    headers_mut.insert(
+        http::header::CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes_to_send.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+
+    if status == StatusCode::PARTIAL_CONTENT {
+        headers_mut.insert(
+            http::header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, file_len))
+                .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
+        );
+    }
+
+    let file_name = Path::new(&recording_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("recording");
+    let mime = guess_audio_mime(file_name);
+    let safe_file_name = file_name.replace('"', "'");
+    if let Ok(mime_value) = HeaderValue::from_str(mime) {
+        headers_mut.insert(http::header::CONTENT_TYPE, mime_value);
+    }
+
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("inline; filename=\"{}\"", safe_file_name))
+    {
+        headers_mut.insert(http::header::CONTENT_DISPOSITION, disposition);
+    }
+
+    response
+}
+
+fn parse_range_header(range: &str, file_len: u64) -> Option<(u64, u64)> {
+    let value = range.strip_prefix("bytes=")?;
+    let range_value = value.split(',').next()?.trim();
+    if range_value.is_empty() {
+        return None;
+    }
+
+    let mut parts = range_value.splitn(2, '-');
+    let start_part = parts.next().unwrap_or("");
+    let end_part = parts.next().unwrap_or("");
+
+    if start_part.is_empty() {
+        let suffix_len = end_part.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        if suffix_len >= file_len {
+            return Some((0, file_len.saturating_sub(1)));
+        }
+        let start_pos = file_len - suffix_len;
+        return Some((start_pos, file_len.saturating_sub(1)));
+    }
+
+    let start_pos = start_part.parse::<u64>().ok()?;
+    if start_pos >= file_len {
+        return None;
+    }
+
+    if end_part.is_empty() {
+        return Some((start_pos, file_len.saturating_sub(1)));
+    }
+
+    let end_pos = end_part.parse::<u64>().ok()?;
+    if end_pos < start_pos || end_pos >= file_len {
+        return None;
+    }
+
+    Some((start_pos, end_pos))
 }
 
 async fn page_call_records(
@@ -255,10 +443,32 @@ async fn query_call_records(
         }
     };
 
+    let mut inline_recordings: Vec<Option<String>> = Vec::with_capacity(pagination.items.len());
+    for record in &pagination.items {
+        let has_recording_url = record
+            .recording_url
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        if has_recording_url {
+            inline_recordings.push(None);
+            continue;
+        }
+
+        let inline_url = match load_cdr_data(&state, record).await {
+            Some(cdr_data) => select_recording_path(record, Some(&cdr_data))
+                .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id))),
+            None => None,
+        };
+
+        inline_recordings.push(inline_url);
+    }
+
     let items: Vec<Value> = pagination
         .items
         .iter()
-        .map(|record| build_record_payload(record, &related, &state))
+        .zip(inline_recordings.iter())
+        .map(|(record, inline)| build_record_payload(record, &related, &state, inline.as_deref()))
         .collect();
 
     let summary = match build_summary(db, condition).await {
@@ -1436,6 +1646,7 @@ fn build_record_payload(
     record: &CallRecordModel,
     related: &RelatedContext,
     state: &ConsoleState,
+    inline_recording_url: Option<&str>,
 ) -> Value {
     let tags = extract_tags(&record.tags);
     let extension_number = record
@@ -1478,12 +1689,7 @@ fn build_record_payload(
     let caller_uri = record.caller_uri.clone();
     let callee_uri = record.callee_uri.clone();
 
-    let recording = record.recording_url.as_ref().map(|url| {
-        json!({
-            "url": url,
-            "duration_secs": record.recording_duration_secs,
-        })
-    });
+    let recording = build_recording_payload(state, record, inline_recording_url);
 
     let rewrite_caller_original =
         json_lookup_nested_str(&record.metadata, &["rewrite", "caller_original"]);
@@ -1540,6 +1746,49 @@ fn build_record_payload(
             "destination": rewrite_destination,
         },
     })
+}
+
+fn build_recording_payload(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+    inline_recording_url: Option<&str>,
+) -> Option<Value> {
+    let raw = record
+        .recording_url
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+
+    let url = if let Some(raw_value) = raw {
+        if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
+            raw_value.to_string()
+        } else {
+            state.url_for(&format!("/call-records/{}/recording", record.id))
+        }
+    } else if let Some(fallback) = inline_recording_url {
+        fallback.to_string()
+    } else {
+        return None;
+    };
+
+    Some(json!({
+        "url": url,
+        "duration_secs": record.recording_duration_secs,
+    }))
+}
+
+fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel) -> Option<String> {
+    let raw = record
+        .recording_url
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())?;
+
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        Some(raw.to_string())
+    } else {
+        Some(state.url_for(&format!("/call-records/{}/recording", record.id)))
+    }
 }
 
 async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
@@ -2008,7 +2257,10 @@ fn build_detail_payload(
     cdr: Option<&CdrData>,
     transcript: Option<&StoredTranscript>,
 ) -> Value {
-    let record_payload = build_record_payload(record, related, state);
+    let inline_recording_url = select_recording_path(record, cdr)
+        .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
+    let record_payload =
+        build_record_payload(record, related, state, inline_recording_url.as_deref());
     let participants = build_participants(record, related);
     let billing_summary = record_payload
         .get("billing")
@@ -2090,6 +2342,11 @@ fn build_detail_payload(
         (Value::Null, Value::Null)
     };
 
+    let mut download_recording = derive_recording_download_url(state, record);
+    if download_recording.is_none() {
+        download_recording = inline_recording_url.clone();
+    }
+
     json!({
         "back_url": state.url_for("/call-records"),
         "record": record_payload,
@@ -2107,7 +2364,7 @@ fn build_detail_payload(
             "result": record.billing_result.clone().unwrap_or(Value::Null),
         }),
         "actions": json!({
-            "download_recording": record.recording_url,
+            "download_recording": download_recording,
             "download_metadata": metadata_download,
             "download_sip_flow": sip_flow_download,
             "transcript_url": state.url_for(&format!("/call-records/{}/transcript", record.id)),
@@ -2699,7 +2956,7 @@ mod tests {
         let related = load_related_context(&db, &[record.clone()])
             .await
             .expect("related context");
-        let payload = build_record_payload(&record, &related, &state);
+        let payload = build_record_payload(&record, &related, &state, None);
         assert_eq!(payload["id"], 1);
         assert!(payload.get("billing").is_some());
     }

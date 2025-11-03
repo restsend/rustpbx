@@ -1,7 +1,10 @@
 use super::middleware::clientaddr::ClientAddr;
 use crate::{
     app::AppState,
-    call::{ActiveCall, ActiveCallType, Command, active_call::{ActiveCallGuard, CallParams}},
+    call::{
+        ActiveCall, ActiveCallType, Command,
+        active_call::{ActiveCallGuard, CallParams},
+    },
     event::SessionEvent,
     media::track::TrackConfig,
 };
@@ -154,10 +157,10 @@ pub async fn call_handler(
                 }
             }
         };
-        let guard = ActiveCallGuard::new(active_call.clone());
-        info!(session_id, %client_ip, active_calls = guard.active_calls, ?call_type,"new call started");
-        let receiver = active_call.new_receiver();
-        
+    let guard = ActiveCallGuard::new(active_call.clone());
+    info!(session_id, %client_ip, active_calls = guard.active_calls, ?call_type,"new call started");
+    let receiver = active_call.new_receiver();
+
         let (r,_) = join!{
             active_call.serve(receiver),
             async {
