@@ -39,7 +39,7 @@ pub struct SynthesisHandle {
 struct EmitEntry {
     chunks: VecDeque<Bytes>,
     finished: bool,
-    finishe_at: Instant,
+    finish_at: Instant,
 }
 
 struct Metadata {
@@ -99,14 +99,25 @@ impl TtsTask {
         match self.client.start().await {
             Ok(s) => stream = s,
             Err(e) => {
-                error!(self.session_id, self.track_id, self.play_id, "failed to start tts task: {}", e);
+                error!(
+                    session_id = %self.session_id,
+                    track_id = %self.track_id,
+                    play_id = ?self.play_id,
+                    provider = %self.client.provider(),
+                    error = %e,
+                    "failed to start tts task"
+                );
                 return Err(e);
             }
         };
 
-        debug!(
-            self.session_id,
-            self.track_id, self.play_id, "tts task started"
+        info!(
+            session_id = %self.session_id,
+            track_id = %self.track_id,
+            play_id = ?self.play_id,
+            streaming = self.streaming,
+            provider = %self.client.provider(),
+            "tts task started"
         );
         let start_time = crate::get_timestamp();
         // seqence number of next tts command in stream, used for non streaming mode
@@ -130,7 +141,17 @@ impl TtsTask {
                     let graceful = self.graceful.load(Ordering::Relaxed);
                     let emitted_bytes = self.metadatas.get(&self.cur_seq).map(|entry| entry.emitted_bytes).unwrap_or(0);
                     let total_bytes = self.metadatas.get(&self.cur_seq).map(|entry| entry.total_bytes).unwrap_or(0);
-                    debug!(self.session_id, self.play_id, self.cur_seq, emitted_bytes, total_bytes, graceful, self.streaming, "tts task cancelled");
+                    debug!(
+                        session_id = %self.session_id,
+                        track_id = %self.track_id,
+                        play_id = ?self.play_id,
+                        cur_seq = self.cur_seq,
+                        emitted_bytes,
+                        total_bytes,
+                        graceful,
+                        streaming = self.streaming,
+                        "tts task cancelled"
+                    );
                     self.handle_interrupt();
                     // quit if on streaming mode (graceful only work for non streaming mode)
                     //         or graceful not set, this is ordinary cancel
@@ -169,15 +190,16 @@ impl TtsTask {
                         }
 
                         if first_entry.chunks.is_empty(){
-                            let elapsed = first_entry.finishe_at.elapsed();
+                            let elapsed = first_entry.finish_at.elapsed();
                             if self.streaming && cmd_finished && (tts_finished || elapsed > Duration::from_secs(10)) {
                                 debug!(
-                                    self.session_id,
-                                    self.track_id,
-                                    self.play_id,
+                                    session_id = %self.session_id,
+                                    track_id = %self.track_id,
+                                    play_id = ?self.play_id,
                                     tts_finished,
-                                    elapsed = elapsed.as_millis(),
-                                    "tts streaming finished");
+                                    elapsed_ms = elapsed.as_millis(),
+                                    "tts streaming finished"
+                                );
                                 tts_finished = true;
                                 self.emit_q.clear();
                                 continue;
@@ -186,13 +208,14 @@ impl TtsTask {
                             if !self.streaming && (first_entry.finished || elapsed > Duration::from_secs(3))
                             {
                                 debug!(
-                                    self.session_id,
-                                    self.track_id,
-                                    self.play_id,
-                                    self.cur_seq,
+                                    session_id = %self.session_id,
+                                    track_id = %self.track_id,
+                                    play_id = ?self.play_id,
+                                    cur_seq = self.cur_seq,
                                     entry_finished = first_entry.finished,
-                                    elapsed = elapsed.as_millis(),
-                                    "tts entry finished");
+                                    elapsed_ms = elapsed.as_millis(),
+                                    "tts entry finished"
+                                );
 
                                 self.emit_q.pop_front();
                                 self.cur_seq += 1;
@@ -228,12 +251,23 @@ impl TtsTask {
                     };
 
                     if let Err(e) = self.processor_chain.process_frame(&mut frame) {
-                        warn!(self.track_id, self.session_id, "error processing frame: {}", e);
+                        warn!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            error = %e,
+                            "error processing audio frame"
+                        );
                         break;
                     }
 
                     if let Err(_) = self.packet_sender.send(frame) {
-                        warn!(self.track_id, self.session_id, "track already closed");
+                        warn!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            "track packet sender closed, stopping task"
+                        );
                         break;
                     }
                 }
@@ -244,8 +278,15 @@ impl TtsTask {
                     }
 
                     // set finished if command sender is exhausted or end_of_stream is true
-                    if cmd.is_none() || cmd.unwrap().end_of_stream {
-                        debug!(self.session_id, self.track_id, self.play_id, cmd_seq, "tts command finished");
+                    if cmd.is_none() || cmd.as_ref().map(|c| c.end_of_stream).unwrap_or(false) {
+                        debug!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            cmd_seq = ?cmd_seq,
+                            end_of_stream = cmd.as_ref().map(|c| c.end_of_stream).unwrap_or(true),
+                            "tts command finished"
+                        );
                         cmd_finished = true;
                         self.client.stop().await?;
                     }
@@ -254,7 +295,12 @@ impl TtsTask {
                     if let Some((cmd_seq, res)) = item {
                         self.handle_event(cmd_seq, res).await
                     }else{
-                        debug!(self.session_id, self.track_id, self.play_id, "tts event finished");
+                        debug!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            "tts event stream finished"
+                        );
                         tts_finished = true;
                     }
                 }
@@ -265,16 +311,20 @@ impl TtsTask {
             (a + entry.emitted_bytes, b + entry.total_bytes)
         });
 
+        let duration_ms = (crate::get_timestamp() - start_time) as f64 / 1000.0;
         info!(
-            self.session_id,
-            self.play_id,
-            self.cur_seq,
-            cmd_seq,
+            session_id = %self.session_id,
+            track_id = %self.track_id,
+            play_id = ?self.play_id,
+            cur_seq = self.cur_seq,
+            cmd_seq = ?cmd_seq,
             cmd_finished,
             tts_finished,
-            self.streaming,
+            streaming = self.streaming,
             emitted_bytes,
             total_bytes,
+            duration_ms,
+            provider = %self.client.provider(),
             "tts task finished"
         );
 
@@ -296,14 +346,15 @@ impl TtsTask {
         let play_id = self.play_id.clone();
         let streaming = self.streaming;
         debug!(
-            session_id,
-            self.track_id,
-            play_id,
-            cmd_seq,
-            text = cmd.text.chars().take(10).collect::<String>(),
-            cmd.base64,
-            cmd.end_of_stream,
-            "tts track: received cmd",
+            session_id = %session_id,
+            track_id = %self.track_id,
+            play_id = ?play_id,
+            cmd_seq = ?cmd_seq,
+            text_preview = %cmd.text.chars().take(20).collect::<String>(),
+            text_length = cmd.text.len(),
+            base64 = cmd.base64,
+            end_of_stream = cmd.end_of_stream,
+            "tts track: received command"
         );
         let text = &cmd.text;
 
@@ -335,12 +386,12 @@ impl TtsTask {
                 }
                 Err(e) => {
                     warn!(
-                        session_id,
-                        track_id,
-                        play_id,
-                        cmd_seq,
-                        error = e.to_string(),
-                        "failed to decode base64"
+                        session_id = %session_id,
+                        track_id = %track_id,
+                        play_id = ?play_id,
+                        cmd_seq = ?cmd_seq,
+                        error = %e,
+                        "failed to decode base64 text"
                     );
                     emit_entry.map(|entry| entry.finished = true);
                 }
@@ -358,8 +409,14 @@ impl TtsTask {
             .await
         {
             warn!(
-                session_id,
-                play_id, cmd_seq, "failed to synthesize text: {}", e
+                session_id = %session_id,
+                track_id = %track_id,
+                play_id = ?play_id,
+                cmd_seq = ?cmd_seq,
+                text_length = text.len(),
+                provider = %self.client.provider(),
+                error = %e,
+                "failed to synthesize text"
             );
         }
     }
@@ -382,8 +439,13 @@ impl TtsTask {
             match cache::retrieve_from_cache_with_buffer(&cache_key, &mut self.cache_buffer).await {
                 Ok(()) => {
                     debug!(
-                        self.session_id,
-                        self.track_id, self.play_id, cmd_seq, cmd.text, "using cached audio"
+                        session_id = %self.session_id,
+                        track_id = %self.track_id,
+                        play_id = ?self.play_id,
+                        cmd_seq,
+                        cache_key = %cache_key,
+                        text_preview = %cmd.text.chars().take(20).collect::<String>(),
+                        "using cached audio"
                     );
                     let bytes = self.cache_buffer.split().freeze();
                     let len = bytes.len();
@@ -410,7 +472,15 @@ impl TtsTask {
                     return true;
                 }
                 Err(e) => {
-                    warn!(self.session_id, "error retrieving cached audio: {}", e);
+                    warn!(
+                        session_id = %self.session_id,
+                        track_id = %self.track_id,
+                        play_id = ?self.play_id,
+                        cmd_seq,
+                        cache_key = %cache_key,
+                        error = %e,
+                        "error retrieving cached audio"
+                    );
                 }
             }
         }
@@ -444,7 +514,7 @@ impl TtsTask {
                 ) as u64);
                 self.get_emit_entry_mut(assume_seq).map(|entry| {
                     entry.chunks.push_back(chunk.clone());
-                    entry.finishe_at += duration;
+                    entry.finish_at += duration;
                 });
             }
             Ok(SynthesisEvent::Subtitles(subtitles)) => {
@@ -453,16 +523,16 @@ impl TtsTask {
                 });
             }
             Ok(SynthesisEvent::Finished) => {
-                debug!(
-                    self.session_id,
-                    self.track_id,
-                    self.play_id,
-                    self.streaming,
-                    "tts result of cmd seq: {:?} completely received",
-                    cmd_seq
-                );
-
                 let entry = self.metadatas.entry(assume_seq).or_default();
+                debug!(
+                    session_id = %self.session_id,
+                    track_id = %self.track_id,
+                    play_id = ?self.play_id,
+                    cmd_seq = ?cmd_seq,
+                    streaming = self.streaming,
+                    total_bytes = entry.total_bytes,
+                    "tts synthesis completed for command sequence"
+                );
                 self.event_sender
                     .send(SessionEvent::Metrics {
                         timestamp: crate::get_timestamp(),
@@ -489,7 +559,25 @@ impl TtsTask {
                     if let Err(e) =
                         cache::store_in_cache_vectored(&entry.cache_key, &entry.chunks).await
                     {
-                        warn!(self.session_id, "failed to store cached audio: {}", e);
+                        warn!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            cmd_seq = ?cmd_seq,
+                            cache_key = %entry.cache_key,
+                            error = %e,
+                            "failed to store audio in cache"
+                        );
+                    } else {
+                        debug!(
+                            session_id = %self.session_id,
+                            track_id = %self.track_id,
+                            play_id = ?self.play_id,
+                            cmd_seq = ?cmd_seq,
+                            cache_key = %entry.cache_key,
+                            total_bytes = entry.total_bytes,
+                            "stored audio in cache"
+                        );
                     }
                     entry.chunks.clear();
                 }
@@ -499,12 +587,12 @@ impl TtsTask {
             }
             Err(e) => {
                 warn!(
-                    self.session_id,
-                    self.track_id,
-                    self.play_id,
-                    "tts of cmd seq: {:?} failed to receive event: {}",
-                    cmd_seq,
-                    e
+                    session_id = %self.session_id,
+                    track_id = %self.track_id,
+                    play_id = ?self.play_id,
+                    cmd_seq = ?cmd_seq,
+                    error = %e,
+                    "tts synthesis event error"
                 );
                 // set finished to true if cmd_seq failed
                 self.get_emit_entry_mut(assume_seq)
@@ -518,13 +606,13 @@ impl TtsTask {
     fn get_emit_entry_mut(&mut self, cmd_seq: usize) -> Option<&mut EmitEntry> {
         // ignore if cmd_seq is less than cur_seq
         if cmd_seq < self.cur_seq {
-            warn!(
-                self.session_id,
-                self.track_id,
-                self.play_id,
-                "tts result of cmd seq: {:?} is ignored, current: {}",
+            debug!(
+                session_id = %self.session_id,
+                track_id = %self.track_id,
+                play_id = ?self.play_id,
                 cmd_seq,
-                self.cur_seq
+                cur_seq = self.cur_seq,
+                "ignoring timeout tts result"
             );
             return None;
         }
@@ -535,7 +623,7 @@ impl TtsTask {
             self.emit_q.resize_with(i + 1, || EmitEntry {
                 chunks: VecDeque::new(),
                 finished: false,
-                finishe_at: Instant::now(),
+                finish_at: Instant::now(),
             });
         }
         Some(&mut self.emit_q[i])
@@ -720,7 +808,13 @@ impl Track for TtsTrack {
             graceful: self.graceful.clone(),
             ssrc: self.ssrc,
         };
-        debug!(self.session_id, self.track_id, "tts task started");
+        debug!(
+            session_id = %self.session_id,
+            track_id = %self.track_id,
+            play_id = ?self.play_id,
+            streaming = self.streaming,
+            "spawning tts task"
+        );
         tokio::spawn(async move { task.run().await });
         Ok(())
     }
