@@ -25,8 +25,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 #[cfg(feature = "opus")]
-use crc32fast::Hasher;
-#[cfg(feature = "opus")]
 use opus::{Application, Channels, Encoder};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -144,9 +142,7 @@ impl OggStreamWriter {
         page.extend_from_slice(&segments);
         page.extend_from_slice(packet);
 
-        let mut hasher = Hasher::new();
-        hasher.update(&page);
-        let checksum = hasher.finalize();
+        let checksum = ogg_crc32(&page);
         page[22..26].copy_from_slice(&checksum.to_le_bytes());
 
         file.write_all(&page).await?;
@@ -176,6 +172,23 @@ impl OggStreamWriter {
         tags.extend_from_slice(&0u32.to_le_bytes()); // user comment list length
         tags
     }
+}
+
+#[cfg(feature = "opus")]
+fn ogg_crc32(data: &[u8]) -> u32 {
+    const POLY: u32 = 0x04C11DB7;
+    let mut crc: u32 = 0;
+    for &byte in data {
+        crc ^= (byte as u32) << 24;
+        for _ in 0..8 {
+            if (crc & 0x8000_0000) != 0 {
+                crc = (crc << 1) ^ POLY;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
 }
 
 impl RecorderFormat {

@@ -952,7 +952,10 @@ pub async fn persist_call_record(
     let sip_trunk_id = args.sip_trunk_id;
     let route_id = args.route_id;
     let sip_gateway = args.sip_gateway.clone();
-    let recording_url = args.recording_url.clone();
+    let recording_url = args
+        .recording_url
+        .clone()
+        .or_else(|| record.recorder.first().map(|media| media.path.clone()));
     let recording_duration_secs = args.recording_duration_secs;
     let tags = args.tags.clone();
     let analytics = args.analytics.clone();

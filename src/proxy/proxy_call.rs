@@ -1354,6 +1354,8 @@ impl ProxyCall {
             }
         }
 
+        let recording_path_for_db = record.recorder.first().map(|media| media.path.clone());
+
         apply_record_file_extras(&record, &mut extras_map);
         record.extras = extras_map_to_option(&extras_map);
 
@@ -1385,6 +1387,7 @@ impl ProxyCall {
         persist_args.sip_trunk_id = sip_trunk_id;
         persist_args.sip_gateway = sip_gateway;
         persist_args.metadata = metadata_value;
+        persist_args.recording_url = recording_path_for_db;
 
         let (persist_error, send_error) = persist_and_dispatch_record(
             self.server.database.as_ref(),

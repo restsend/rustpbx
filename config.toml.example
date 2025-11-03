@@ -7,7 +7,7 @@ log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 recorder_path = "/tmp/recorders"
 # recorder_format can be "wav" (default) or "ogg" (requires enabling the 'opus' feature)
-recorder_format = "wav"
+recorder_format = "ogg"
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 
@@ -81,35 +81,13 @@ users = [
 type = "extension"
 database_url = "sqlite://rustpbx.sqlite3"
 
-# To use in-memory credentials instead of database-backed extensions, replace the entry above:
-# [[proxy.user_backends]]
-# type = "memory"
-# users = [
-#     { username = "bob", password = "123456" },
-#     { username = "alice", password = "123456" },
-# ]
-
-# Configure multiple backends and they will be queried in order of appearance:
-# [[proxy.user_backends]]
-# type = "extension"
-# database_url = "sqlite://rustpbx.sqlite3"
-#
-# [[proxy.user_backends]]
-# type = "memory"
-# users = [{ username = "carol", password = "123456" }]
-
-# Example trunks/routes override when using database source
-# [proxy.trunks]
-# example_trunk.dest = "sip:127.0.0.1:5060"
-#
-# [[proxy.routes]]
-# name = "sample"
-# priority = 10
-#
-
 [callrecord]
 type = "local"
 root = "/tmp/cdr"
+
+[recording]
+enabled = true
+auto_start = true
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
