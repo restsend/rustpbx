@@ -15,7 +15,7 @@ use tokio::{
     net::TcpStream,
     sync::{Notify, mpsc},
 };
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -27,7 +27,6 @@ use uuid::Uuid;
 const HOST: &str = "tts.cloud.tencent.com";
 const NON_STREAMING_PATH: &str = "/stream_ws";
 const STREAMING_PATH: &str = "/stream_wsv2";
-const CHANNEL_MAX_SIZE: usize = 10;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -268,7 +267,7 @@ where
 pub struct RealTimeClient {
     option: SynthesisOption,
     //item: (text, option), drop tx if `end_of_stream`
-    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::UnboundedSender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 impl RealTimeClient {
@@ -288,11 +287,11 @@ impl SynthesisClient for RealTimeClient {
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         // Tencent cloud alow 10 - 20 concurrent websocket connections for default setting, dependent on voice type
         // set the number more higher will lead to waiting for unordered results longer
-        let (tx, rx) = mpsc::channel(CHANNEL_MAX_SIZE);
+        let (tx, rx) = mpsc::unbounded_channel();
         self.tx = Some(tx);
         let client_option = self.option.clone();
         let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
-        let stream = ReceiverStream::new(rx)
+        let stream = UnboundedReceiverStream::new(rx)
             .flat_map_unordered(max_concurrent_tasks, move |(text, cmd_seq, option)| {
                 // each reequest have its own session_id
                 let session_id = Uuid::new_v4().to_string();
@@ -318,7 +317,7 @@ impl SynthesisClient for RealTimeClient {
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
             let text = strip_emoji_chars(text);
-            tx.send((text, cmd_seq, option)).await?;
+            tx.send((text, cmd_seq, option))?;
         } else {
             return Err(anyhow::anyhow!("TencentCloud TTS: missing client sender"));
         };
@@ -449,7 +448,7 @@ impl TencentCloudTtsClient {
         if streaming {
             Ok(Box::new(StreamingClient::new(option.clone())))
         } else {
-            Ok(Box::new(RealTimeClient::new(option.clone())))
+        Ok(Box::new(RealTimeClient::new(option.clone())))
         }
     }
 }
