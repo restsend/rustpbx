@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
@@ -33,7 +33,7 @@ const TERMINATORS: [char; 3] = ['.', '?', '!'];
 // https://developers.deepgram.com/docs/tts-rest
 pub struct RestClient {
     option: SynthesisOption,
-    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::UnboundedSender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 #[derive(Serialize)]
@@ -109,11 +109,11 @@ impl SynthesisClient for RestClient {
     async fn start(
         &mut self,
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::unbounded_channel();
         self.tx = Some(tx);
         let max_concurrent_tasks = self.option.max_concurrent_tasks.unwrap_or(1);
         let client_option = self.option.clone();
-        let stream = ReceiverStream::new(rx).flat_map_unordered(
+        let stream = UnboundedReceiverStream::new(rx).flat_map_unordered(
             max_concurrent_tasks,
             move |(text, cmd_seq, cmd_option)| {
                 let option = client_option.merge_with(cmd_option);
@@ -141,7 +141,7 @@ impl SynthesisClient for RestClient {
         option: Option<SynthesisOption>,
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
-            tx.send((text.to_string(), cmd_seq, option)).await?;
+            tx.send((text.to_string(), cmd_seq, option))?;
         } else {
             return Err(anyhow::anyhow!("Deepgram TTS: missing client sender"));
         };

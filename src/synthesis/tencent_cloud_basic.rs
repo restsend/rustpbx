@@ -12,14 +12,13 @@ use rand::Rng;
 use ring::hmac;
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use unic_emoji::char::is_emoji;
 use urlencoding;
 use uuid::Uuid;
 
 const HOST: &str = "tts.tencentcloudapi.com";
 const PATH: &str = "/";
-const CHANNEL_MAX_SIZE: usize = 10;
 
 #[derive(Debug, Deserialize)]
 struct Response {
@@ -129,11 +128,11 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
     ) -> Result<BoxStream<'static, (Option<usize>, Result<SynthesisEvent>)>> {
         // Tencent cloud alow 10 - 20 concurrent websocket connections for default setting, dependent on voice type
         // set the number more higher will lead to waiting for unordered results longer
-        let (tx, rx) = mpsc::channel(CHANNEL_MAX_SIZE);
+        let (tx, rx) = mpsc::unbounded_channel();
         self.tx = Some(tx);
         let client_option = self.option.clone();
         let max_concurrent_tasks = client_option.max_concurrent_tasks.unwrap_or(1);
-        let stream = ReceiverStream::new(rx)
+        let stream = UnboundedReceiverStream::new(rx)
             .flat_map_unordered(max_concurrent_tasks, move |(text, seq, option)| {
                 // each reequest have its own session_id
                 let session_id = Uuid::new_v4().to_string();
@@ -184,7 +183,7 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
     ) -> Result<()> {
         if let Some(tx) = &self.tx {
             let text = strip_emoji_chars(text);
-            tx.send((text, cmd_seq, option)).await?;
+            tx.send((text, cmd_seq, option))?;
         } else {
             return Err(anyhow::anyhow!("TencentCloud TTS: missing client sender"));
         };
@@ -203,7 +202,7 @@ impl SynthesisClient for TencentCloudTtsBasicClient {
 pub struct TencentCloudTtsBasicClient {
     option: SynthesisOption,
     //item: (text, option), drop tx if `end_of_stream`
-    tx: Option<mpsc::Sender<(String, Option<usize>, Option<SynthesisOption>)>>,
+    tx: Option<mpsc::UnboundedSender<(String, Option<usize>, Option<SynthesisOption>)>>,
 }
 
 impl TencentCloudTtsBasicClient {
