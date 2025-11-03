@@ -429,7 +429,7 @@ impl AliyunTtsClient {
         if streaming {
             Ok(Box::new(StreamingClient::new(option.clone())))
         } else {
-        Ok(Box::new(NonStreamingClient::new(option.clone())))
+            Ok(Box::new(NonStreamingClient::new(option.clone())))
         }
     }
 }

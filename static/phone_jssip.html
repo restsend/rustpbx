@@ -185,8 +185,7 @@
                     <h3>Registration</h3>
                     <div class="form-group">
                         <label for="server">SIP Server (WebSocket URL):</label>
-                        <input type="text" id="server" value="ws://localhost:8080/ws"
-                            placeholder="ws://localhost:8080/ws">
+                        <input type="text" id="server" data-default-path="/ws" placeholder="ws://localhost:8080/ws">
                     </div>
                     <div class="form-group">
                         <label for="username">Username:</label>
@@ -298,6 +297,21 @@
             iceServersInput.addEventListener('input', () => {
                 iceServersManuallyEdited = true;
             });
+        }
+
+        const defaultServerUrl = (() => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host || 'localhost:8080';
+            const pathRaw = (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
+            const path = pathRaw.startsWith('/') ? pathRaw : `/${pathRaw}`;
+            return `${protocol}//${host}${path}`;
+        })();
+
+        if (serverInput) {
+            serverInput.placeholder = defaultServerUrl;
+            if (!serverInput.value || serverInput.value === 'ws://localhost:8080/ws' || serverInput.value === 'wss://localhost:8080/ws') {
+                serverInput.value = defaultServerUrl;
+            }
         }
 
         function formatMs(ms) {
