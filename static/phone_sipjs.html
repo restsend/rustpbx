@@ -57,13 +57,23 @@
             font-weight: bold;
         }
 
-        input,
+        input[type="text"],
+        input[type="password"],
+        input[type="url"],
+        input[type="tel"],
+        input[type="number"],
+        textarea,
         button {
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
             width: 100%;
             box-sizing: border-box;
+        }
+
+        input[type="checkbox"] {
+            width: auto;
+            margin-right: 8px;
         }
 
         input::placeholder,
@@ -86,6 +96,12 @@
         button:disabled {
             background: #ccc;
             cursor: not-allowed;
+        }
+
+        label.checkbox-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .status {
@@ -184,6 +200,12 @@
                         <label for="displayName">Display Name:</label>
                         <input type="text" id="displayName" value="Alice" placeholder="Alice">
                     </div>
+                    <div class="form-group">
+                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE
+                            servers</label>
+                        <textarea id="iceServers" rows="3"
+                            style="width:100%;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                    </div>
                     <button id="registerBtn">Register</button>
                     <button id="unregisterBtn" disabled>Unregister</button>
                     <div id="registrationStatus"></div>
@@ -192,7 +214,9 @@
                 <div class="section">
                     <h3>Logs</h3>
                     <div class="logs" id="logs"></div>
-                    <button onclick="clearLogs()">Clear Logs</button>
+                    <div style="margin-top:8px;">
+                        <button onclick="clearLogs()">Clear Logs</button>
+                    </div>
                 </div>
             </div>
 
@@ -221,9 +245,10 @@
                 </div>
 
                 <div class="section">
-                    <h3>Audio</h3>
-                    <audio id="remoteAudio" autoplay></audio>
-                    <audio id="localAudio" muted autoplay></audio>
+                    <h3>ICE Stats</h3>
+                    <div class="logs" id="iceStats" style="height:220px;"><em>No ICE data yet.</em></div>
+                    <audio id="remoteAudio" autoplay style="display:none;"></audio>
+                    <audio id="localAudio" muted autoplay style="display:none;"></audio>
                 </div>
             </div>
         </div>
@@ -259,6 +284,11 @@
         const remoteAudio = document.getElementById('remoteAudio');
         const localAudio = document.getElementById('localAudio');
         const logs = document.getElementById('logs');
+        const iceStatsPanel = document.getElementById('iceStats');
+        const iceEnable = document.getElementById('iceEnable');
+        const iceServersInput = document.getElementById('iceServers');
+        let lastOutgoingCallLabel = null;
+        let iceServersManuallyEdited = false;
 
         // Event listeners
         registerBtn.addEventListener('click', register);
@@ -270,6 +300,12 @@
         answerBtn.addEventListener('click', answerCall);
         rejectBtn.addEventListener('click', rejectCall);
 
+        if (iceServersInput) {
+            iceServersInput.addEventListener('input', () => {
+                iceServersManuallyEdited = true;
+            });
+        }
+
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
             logs.innerHTML += `[${timestamp}] ${message}<br>`;
@@ -279,11 +315,204 @@
 
         function clearLogs() {
             logs.innerHTML = '';
+            resetIceStats();
         }
 
         function showStatus(message, type = 'info') {
             registrationStatus.className = `status ${type}`;
             registrationStatus.textContent = message;
+        }
+
+        function resetIceStats(message = '<em>No ICE data yet.</em>') {
+            if (iceStatsPanel) {
+                iceStatsPanel.innerHTML = message;
+            }
+        }
+
+        resetIceStats();
+
+        async function loadDefaultIceServers() {
+            if (!iceServersInput || iceServersManuallyEdited) {
+                return;
+            }
+            try {
+                const response = await fetch('/iceservers', { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`status ${response.status}`);
+                }
+                const payload = await response.json();
+                const servers = Array.isArray(payload)
+                    ? payload
+                    : (payload && Array.isArray(payload.iceServers))
+                        ? payload.iceServers
+                        : payload
+                            ? [payload]
+                            : null;
+                if (!servers || !servers.length) {
+                    throw new Error('empty ICE server list');
+                }
+                if (iceServersManuallyEdited) {
+                    return;
+                }
+                iceServersInput.value = JSON.stringify(servers);
+                if (iceEnable) {
+                    iceEnable.checked = true;
+                }
+                log('Loaded ICE servers from /iceservers');
+            } catch (error) {
+                log(`Failed to load /iceservers: ${error.message}`);
+            }
+        }
+
+        function formatMs(ms) {
+            if (ms == null) return '--';
+            if (ms < 1000) return ms + ' ms';
+            return (ms / 1000).toFixed(2) + ' s';
+        }
+
+        function monitorIceGathering(session, label = 'session') {
+            try {
+                if (!session || session._iceMonitorAttached) return;
+                const sdh = session.sessionDescriptionHandler;
+                if (!sdh || !sdh.peerConnection) {
+                    return;
+                }
+
+                const pc = sdh.peerConnection;
+                session._iceMonitorAttached = true;
+
+                const statsLabel = session._iceLabel || label;
+                session._iceCandidates = [];
+                session._iceGatherDuration = null;
+
+                if (iceStatsPanel) {
+                    iceStatsPanel.innerHTML = `<div><strong>Call:</strong> ${statsLabel}</div><div><strong>Candidates:</strong> 0</div><div><strong>Status:</strong> waiting for candidates</div>`;
+                }
+
+                let start = null;
+                let end = null;
+                let inactivityTimer = null;
+
+                function renderStats(statusText) {
+                    if (!iceStatsPanel) return;
+                    const parts = [
+                        `<div><strong>Call:</strong> ${statsLabel}</div>`,
+                        `<div><strong>Candidates:</strong> ${session._iceCandidates.length}</div>`
+                    ];
+                    if (session._iceGatherDuration != null) {
+                        parts.push(`<div><strong>Gathering time:</strong> ${formatMs(session._iceGatherDuration)}</div>`);
+                    }
+                    if (statusText) {
+                        parts.push(`<div><strong>Status:</strong> ${statusText}</div>`);
+                    }
+                    if (session._iceCandidates.length) {
+                        const rows = session._iceCandidates.map((c, i) => {
+                            const addressPort = [c.address || '', c.port ? `:${c.port}` : ''].join('');
+                            return `${i + 1}. ${c.type || 'unknown'} ${addressPort.trim()} (+${formatMs(c.ts)})`;
+                        });
+                        parts.push('<hr>');
+                        parts.push(rows.join('<br>'));
+                    }
+                    iceStatsPanel.innerHTML = parts.join('');
+                }
+
+                function concludeGathering(reason) {
+                    if (end) return;
+                    end = Date.now();
+                    session._iceGatherDuration = start ? (end - start) : null;
+                    const readableReason = reason ? reason.replace(/_/g, ' ') : 'completed';
+                    log(`${statsLabel} - ICE gathering finished (${readableReason})${session._iceGatherDuration != null ? `, duration=${formatMs(session._iceGatherDuration)}` : ''}`);
+                    renderStats(readableReason);
+                    if (inactivityTimer) {
+                        clearTimeout(inactivityTimer);
+                        inactivityTimer = null;
+                    }
+                }
+
+                function parseCandidate(candStr, candObj) {
+                    const out = { raw: candStr };
+                    try {
+                        if (candObj) {
+                            out.address = candObj.address || candObj.ip || null;
+                            out.port = candObj.port || null;
+                            out.type = candObj.type || null;
+                            out.protocol = candObj.protocol || null;
+                        }
+                        if (!out.address && typeof candStr === 'string') {
+                            const ipMatch = candStr.match(/ (\d+\.\d+\.\d+\.\d+) (\d+) /);
+                            if (ipMatch) {
+                                out.address = ipMatch[1];
+                                out.port = ipMatch[2];
+                            }
+                            const typeMatch = candStr.match(/ typ (\w+)/);
+                            if (typeMatch) {
+                                out.type = typeMatch[1];
+                            }
+                        }
+                    } catch (error) {
+                        // parsing best-effort; fall back to raw candidate
+                    }
+                    return out;
+                }
+
+                pc.addEventListener('icecandidate', (event) => {
+                    if (event && event.candidate) {
+                        const now = Date.now();
+                        if (!start) {
+                            start = now;
+                            log(`${statsLabel} - ICE gathering started`);
+                        }
+                        const parsed = parseCandidate(event.candidate.candidate, event.candidate);
+                        const entry = {
+                            ts: start ? now - start : 0,
+                            candidate: parsed.raw,
+                            type: parsed.type,
+                            address: parsed.address,
+                            port: parsed.port
+                        };
+                        session._iceCandidates.push(entry);
+                        log(`${statsLabel} - candidate #${session._iceCandidates.length}: ${parsed.type || 'unknown'} ${parsed.address || ''}${parsed.port ? `:${parsed.port}` : ''} (+${formatMs(entry.ts)})`);
+                        renderStats('gathering');
+                        if (inactivityTimer) clearTimeout(inactivityTimer);
+                        inactivityTimer = setTimeout(() => concludeGathering('inactivity timeout'), 2500);
+                    } else {
+                        if (!end && start) {
+                            concludeGathering('null candidate');
+                        } else if (!start) {
+                            concludeGathering('no candidates');
+                        }
+                    }
+                });
+
+                pc.addEventListener('icegatheringstatechange', () => {
+                    const state = pc.iceGatheringState;
+                    log(`${statsLabel} - iceGatheringState -> ${state}`);
+                    if (state === 'gathering' && !start) {
+                        start = Date.now();
+                        renderStats('gathering');
+                    }
+                    if (state === 'complete' && start && !end) {
+                        concludeGathering('ice gathering complete');
+                    }
+                });
+
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    const state = pc.iceConnectionState;
+                    log(`${statsLabel} - iceConnectionState -> ${state}`);
+                    if ((state === 'connected' || state === 'completed') && start && !end) {
+                        concludeGathering('ice connection completed');
+                    }
+                });
+
+                pc.addEventListener('connectionstatechange', () => {
+                    const state = pc.connectionState;
+                    log(`${statsLabel} - connectionState -> ${state}`);
+                });
+
+                renderStats('waiting for candidates');
+            } catch (e) {
+                log(`monitorIceGathering error: ${e.message}`);
+            }
         }
 
         function setupMediaElements(session) {
@@ -299,15 +528,12 @@
                 peerConnection.getReceivers().forEach(receiver => {
                     if (receiver.track && receiver.track.kind === 'audio') {
                         remoteStream.addTrack(receiver.track);
-                        log('Added remote audio track');
                     }
                 });
 
                 if (remoteStream.getTracks().length > 0) {
                     remoteAudio.srcObject = remoteStream;
-                    log('Remote audio stream set');
-                } else {
-                    log('No remote audio tracks found');
+                    log('Remote audio stream attached');
                 }
 
                 const senders = peerConnection.getSenders();
@@ -316,13 +542,12 @@
                     senders.forEach(sender => {
                         if (sender.track && sender.track.kind === 'audio') {
                             localStream.addTrack(sender.track);
-                            log('Added local audio track');
                         }
                     });
 
                     if (localStream.getTracks().length > 0) {
                         localAudio.srcObject = localStream;
-                        log('Local audio stream set');
+                        log('Local audio stream attached');
                     }
                 }
             } catch (error) {
@@ -368,6 +593,26 @@
                     }
                 }
             };
+
+            // wire ICE servers configuration if enabled
+            try {
+                if (iceEnable && iceEnable.checked) {
+                    let parsed = null;
+                    try {
+                        parsed = JSON.parse(iceServersInput.value);
+                    } catch (e) {
+                        parsed = [{ urls: 'stun:stun.l.google.com:19302' }];
+                    }
+                    userAgentOptions.sessionDescriptionHandlerFactoryOptions = {
+                        peerConnectionConfiguration: { iceServers: parsed }
+                    };
+                    log(`Using custom ICE servers: ${JSON.stringify(userAgentOptions.sessionDescriptionHandlerFactoryOptions.peerConnectionConfiguration)}`);
+                } else {
+                    log('ICE servers disabled (using default)');
+                }
+            } catch (e) {
+                log(`Error applying ICE servers config: ${e.message}`);
+            }
 
             userAgent = new SIP.UserAgent(userAgentOptions);
             const registererOptions = {};
@@ -431,6 +676,8 @@
             currentSession = null;
             registerer = null;
             userAgent = null;
+            lastOutgoingCallLabel = null;
+            resetIceStats();
         }
 
         function makeCall() {
@@ -456,7 +703,14 @@
             };
 
             const inviter = new SIP.Inviter(userAgent, targetURI, inviteOptions);
-            log(`Making call to ${targetURI}...`);
+            log(`Calling ${targetURI.toString()}`);
+            const outgoingLabel = (targetURI && targetURI.user) ? targetURI.user : target.replace(/^sip:/, '');
+            lastOutgoingCallLabel = outgoingLabel || 'unknown';
+            inviter._iceLabel = `outgoing:${lastOutgoingCallLabel}`;
+            resetIceStats(`<div><strong>Call:</strong> ${inviter._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
+
+            // prepare timing container
+            inviter._timing = { inviteSent: Date.now() };
 
             inviter.delegate = {
                 onBye: (bye) => {
@@ -465,6 +719,8 @@
                 },
                 onSessionDescriptionHandler: () => {
                     setupMediaElements(inviter);
+                    // start monitoring ICE gathering when peerConnection available
+                    try { monitorIceGathering(inviter, inviter._iceLabel); } catch (e) { }
                 }
             };
 
@@ -482,6 +738,14 @@
                     case SIP.SessionState.Established:
                         callInfo.textContent = `Connected to ${target}`;
                         setupMediaElements(inviter);
+                        // handshake timing: from inviteSent to established
+                        try {
+                            if (inviter._timing && inviter._timing.inviteSent) {
+                                const dur = Date.now() - inviter._timing.inviteSent;
+                                const handshakePeer = lastOutgoingCallLabel || target;
+                                log(`Outgoing handshake time to ${handshakePeer}: ${formatMs(dur)}`);
+                            }
+                        } catch (e) { log(`handshake timing error: ${e.message}`); }
                         break;
                     case SIP.SessionState.Terminating:
                         log('Call terminating...');
@@ -504,13 +768,19 @@
 
         function showIncomingCall(invitation) {
             currentSession = invitation;
+            // record when INVITE was received
+            invitation._timing = invitation._timing || {};
+            invitation._timing.incomingReceived = Date.now();
             const caller = invitation.remoteIdentity.displayName || invitation.remoteIdentity.uri.user;
             callerInfo.textContent = `Incoming call from: ${caller}`;
             incomingCallDiv.classList.add('active');
+            invitation._iceLabel = `incoming:${caller || 'unknown'}`;
+            resetIceStats(`<div><strong>Call:</strong> ${invitation._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
 
             invitation.delegate = {
                 onSessionDescriptionHandler: () => {
                     setupMediaElements(invitation);
+                    try { monitorIceGathering(invitation, invitation._iceLabel); } catch (e) { }
                 }
             };
 
@@ -523,6 +793,14 @@
                         callInfo.textContent = `Connected to ${caller}`;
                         callControls.classList.add('active');
                         setupMediaElements(invitation);
+                        try {
+                            const t = invitation._timing || {};
+                            const base = t.answerTime || t.incomingReceived;
+                            if (base) {
+                                const dur = Date.now() - base;
+                                log(`Incoming handshake time from ${caller}: ${formatMs(dur)}`);
+                            }
+                        } catch (e) { log(`handshake timing error: ${e.message}`); }
                         break;
                     case SIP.SessionState.Terminated:
                         endCall();
@@ -533,7 +811,7 @@
 
         function answerCall() {
             if (currentSession) {
-                log('Answering call...');
+                log('Answering incoming call');
                 const options = {
                     sessionDescriptionHandlerOptions: {
                         constraints: {
@@ -542,13 +820,16 @@
                         }
                     }
                 };
+                // record answer time to measure handshake
+                currentSession._timing = currentSession._timing || {};
+                currentSession._timing.answerTime = Date.now();
                 currentSession.accept(options);
             }
         }
 
         function rejectCall() {
             if (currentSession) {
-                log('Rejecting call...');
+                log('Rejecting incoming call');
                 currentSession.reject();
                 incomingCallDiv.classList.remove('active');
                 currentSession = null;
@@ -557,7 +838,7 @@
 
         function hangup() {
             if (currentSession) {
-                log('Hanging up...');
+                log('Hanging up call');
                 try {
                     switch (currentSession.state) {
                         case SIP.SessionState.Initial:
@@ -590,6 +871,7 @@
             isOnHold = false;
             muteBtn.textContent = 'Mute';
             holdBtn.textContent = 'Hold';
+            lastOutgoingCallLabel = null;
 
             // Clean up audio streams
             if (remoteAudio.srcObject) {
@@ -600,6 +882,8 @@
                 localAudio.srcObject.getTracks().forEach(track => track.stop());
                 localAudio.srcObject = null;
             }
+
+            resetIceStats();
         }
 
         function toggleMute() {
@@ -625,20 +909,18 @@
         function toggleHold() {
             if (currentSession) {
                 if (isOnHold) {
-                    log('Unholding call...');
                     currentSession.unhold().then(() => {
                         isOnHold = false;
                         holdBtn.textContent = 'Hold';
-                        log('Call unholded');
+                        log('Call is resumed from hold');
                     }).catch(error => {
                         log(`Failed to unhold: ${error.message}`);
                     });
                 } else {
-                    log('Holding call...');
                     currentSession.hold().then(() => {
                         isOnHold = true;
                         holdBtn.textContent = 'Unhold';
-                        log('Call held');
+                        log('Call is on hold');
                     }).catch(error => {
                         log(`Failed to hold: ${error.message}`);
                     });
@@ -647,6 +929,7 @@
         }
 
         // Initialize
+        loadDefaultIceServers();
         log('SIP Phone initialized');
     </script>
 </body>

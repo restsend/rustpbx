@@ -57,7 +57,12 @@
             font-weight: bold;
         }
 
-        input,
+        input[type="text"],
+        input[type="password"],
+        input[type="url"],
+        input[type="tel"],
+        input[type="number"],
+        textarea,
         button {
             padding: 10px;
             border: 1px solid #ddd;
@@ -66,10 +71,21 @@
             box-sizing: border-box;
         }
 
+        input[type="checkbox"] {
+            width: auto;
+            margin-right: 8px;
+        }
+
         input::placeholder,
         textarea::placeholder {
             color: rgba(148, 163, 184, 0.7);
             opacity: 1;
+        }
+
+        label.checkbox-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         button {
@@ -184,6 +200,12 @@
                         <label for="displayName">Display Name:</label>
                         <input type="text" id="displayName" value="Bob" placeholder="Bob">
                     </div>
+                    <div class="form-group">
+                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE
+                            servers</label>
+                        <textarea id="iceServers" rows="3"
+                            style="width:100%;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                    </div>
                     <button id="registerBtn">Register</button>
                     <button id="unregisterBtn" disabled>Unregister</button>
                     <div id="registrationStatus"></div>
@@ -192,7 +214,9 @@
                 <div class="section">
                     <h3>Logs</h3>
                     <div class="logs" id="logs"></div>
-                    <button onclick="clearLogs()">Clear Logs</button>
+                    <div style="margin-top:8px;">
+                        <button onclick="clearLogs()">Clear Logs</button>
+                    </div>
                 </div>
             </div>
 
@@ -221,9 +245,12 @@
                 </div>
 
                 <div class="section">
-                    <h3>Audio</h3>
-                    <audio id="remoteAudio" autoplay></audio>
-                    <audio id="localAudio" muted autoplay></audio>
+                    <h3>ICE Stats</h3>
+                    <div class="logs" id="iceStats" style="height:220px;">
+                        <em>No ICE data yet.</em>
+                    </div>
+                    <audio id="remoteAudio" autoplay style="display:none;"></audio>
+                    <audio id="localAudio" muted autoplay style="display:none;"></audio>
                 </div>
             </div>
         </div>
@@ -260,6 +287,240 @@
         const remoteAudio = document.getElementById('remoteAudio');
         const localAudio = document.getElementById('localAudio');
         const logs = document.getElementById('logs');
+        const iceStatsPanel = document.getElementById('iceStats');
+        const iceEnable = document.getElementById('iceEnable');
+        const iceServersInput = document.getElementById('iceServers');
+        let lastOutgoingCallTime = null;
+        let lastOutgoingCallLabel = null;
+        let iceServersManuallyEdited = false;
+
+        if (iceServersInput) {
+            iceServersInput.addEventListener('input', () => {
+                iceServersManuallyEdited = true;
+            });
+        }
+
+        function formatMs(ms) {
+            if (ms == null) return '--';
+            if (ms < 1000) return ms + ' ms';
+            return (ms / 1000).toFixed(2) + ' s';
+        }
+
+        function resetIceStats(message = '<em>No ICE data yet.</em>') {
+            if (iceStatsPanel) {
+                iceStatsPanel.innerHTML = message;
+            }
+        }
+
+        resetIceStats();
+
+        async function loadDefaultIceServers() {
+            if (!iceServersInput || iceServersManuallyEdited) {
+                return;
+            }
+            try {
+                const response = await fetch('/iceservers', { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`status ${response.status}`);
+                }
+                const payload = await response.json();
+                const servers = Array.isArray(payload)
+                    ? payload
+                    : (payload && Array.isArray(payload.iceServers))
+                        ? payload.iceServers
+                        : payload
+                            ? [payload]
+                            : null;
+                if (!servers || !servers.length) {
+                    throw new Error('empty ICE server list');
+                }
+                if (iceServersManuallyEdited) {
+                    return;
+                }
+                iceServersInput.value = JSON.stringify(servers);
+                if (iceEnable) {
+                    iceEnable.checked = true;
+                }
+                log('Loaded ICE servers from /iceservers');
+            } catch (error) {
+                log(`Failed to load /iceservers: ${error.message}`);
+            }
+        }
+
+        const ICE_INACTIVITY_TIMEOUT = 2500;
+
+        function getIceTracker(session, label = 'session') {
+            if (!session) {
+                return null;
+            }
+            if (!session._iceTracker) {
+                session._iceTracker = {
+                    label,
+                    candidates: [],
+                    startedAt: null,
+                    endedAt: null,
+                    inactivityTimer: null,
+                    gatherDuration: null,
+                    status: 'waiting for candidates'
+                };
+            } else if (label && session._iceTracker.label !== label) {
+                session._iceTracker.label = label;
+            }
+
+            session._iceCandidates = session._iceTracker.candidates;
+            return session._iceTracker;
+        }
+
+        function updateIceStatsDisplay(session, statusText) {
+            if (!iceStatsPanel) {
+                return;
+            }
+            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
+            if (!tracker) {
+                return;
+            }
+            if (statusText) {
+                tracker.status = statusText;
+            }
+
+            const parts = [
+                `<div><strong>Call:</strong> ${tracker.label}</div>`,
+                `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`
+            ];
+            if (tracker.gatherDuration != null) {
+                parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
+            }
+            if (tracker.status) {
+                parts.push(`<div><strong>Status:</strong> ${tracker.status}</div>`);
+            }
+            if (tracker.candidates.length) {
+                const rows = tracker.candidates.map((c, i) => {
+                    const primaryAddress = c.address ? `${c.address}${c.port ? `:${c.port}` : ''}` : 'address unavailable';
+                    const relayInfo = c.relatedAddress ? ` via ${c.relatedAddress}${c.relatedPort ? `:${c.relatedPort}` : ''}` : '';
+                    return `${i + 1}. ${c.type || 'unknown'} ${primaryAddress}${relayInfo ? ` (${relayInfo.trim()})` : ''} (+${formatMs(c.ts)})`;
+                });
+                parts.push('<hr>');
+                parts.push(rows.join('<br>'));
+            }
+
+            iceStatsPanel.innerHTML = parts.join('');
+        }
+
+        function parseIceCandidate(candidateString, candidateObject) {
+            const out = { raw: candidateString };
+            try {
+                if (candidateObject) {
+                    out.address = candidateObject.address || candidateObject.ip || null;
+                    out.port = typeof candidateObject.port === 'number' ? candidateObject.port : parseInt(candidateObject.port, 10) || null;
+                    out.type = candidateObject.type || null;
+                    out.protocol = candidateObject.protocol || null;
+                }
+                if (typeof candidateString === 'string' && candidateString.length) {
+                    const parts = candidateString.trim().split(/\s+/);
+                    if (!out.address && parts.length >= 6) {
+                        out.address = parts[4] || null;
+                        const parsedPort = parseInt(parts[5], 10);
+                        out.port = out.port || (Number.isNaN(parsedPort) ? null : parsedPort);
+                    }
+                    if (!out.type) {
+                        const typeIndex = parts.indexOf('typ');
+                        if (typeIndex > -1 && parts[typeIndex + 1]) {
+                            out.type = parts[typeIndex + 1];
+                        }
+                    }
+                    if (!out.protocol && parts.length >= 3) {
+                        out.protocol = parts[2];
+                    }
+                    const raddrIndex = parts.indexOf('raddr');
+                    const rportIndex = parts.indexOf('rport');
+                    if (!out.relatedAddress && raddrIndex > -1 && parts[raddrIndex + 1]) {
+                        out.relatedAddress = parts[raddrIndex + 1];
+                    }
+                    if (!out.relatedPort && rportIndex > -1 && parts[rportIndex + 1]) {
+                        const parsedRport = parseInt(parts[rportIndex + 1], 10);
+                        out.relatedPort = Number.isNaN(parsedRport) ? null : parsedRport;
+                    }
+                }
+            } catch (error) {
+                // ignore parsing errors, we fall back to raw candidate
+            }
+            return out;
+        }
+
+        function concludeIceGathering(session, reason) {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.endedAt) {
+                return;
+            }
+            tracker.endedAt = Date.now();
+            tracker.gatherDuration = tracker.startedAt ? (tracker.endedAt - tracker.startedAt) : null;
+            const readableReason = reason ? reason.replace(/_/g, ' ') : 'completed';
+            tracker.status = readableReason;
+            session._iceGatherDuration = tracker.gatherDuration;
+            log(`${tracker.label} - ICE gathering finished (${readableReason})${tracker.gatherDuration != null ? `, duration=${formatMs(tracker.gatherDuration)}` : ''}`);
+            if (tracker.inactivityTimer) {
+                clearTimeout(tracker.inactivityTimer);
+                tracker.inactivityTimer = null;
+            }
+            updateIceStatsDisplay(session);
+        }
+
+        function scheduleIceInactivityTimeout(session) {
+            const tracker = session && session._iceTracker;
+            if (!tracker) {
+                return;
+            }
+            if (tracker.inactivityTimer) {
+                clearTimeout(tracker.inactivityTimer);
+            }
+            tracker.inactivityTimer = setTimeout(() => concludeIceGathering(session, 'inactivity timeout'), ICE_INACTIVITY_TIMEOUT);
+        }
+
+        function handleSessionIceCandidate(session, candidateObj) {
+            if (!session || !candidateObj) {
+                concludeIceGathering(session, 'no candidate');
+                return;
+            }
+
+            const label = session._iceLabel || `${session.direction || 'session'}`;
+            const tracker = getIceTracker(session, label);
+            const candidateString = candidateObj.candidate || '';
+
+            if (!candidateString) {
+                concludeIceGathering(session, 'null candidate');
+                return;
+            }
+
+            const now = Date.now();
+            if (!tracker.startedAt) {
+                tracker.startedAt = now;
+                tracker.status = 'gathering';
+                log(`${tracker.label} - ICE gathering started`);
+            }
+
+            const parsed = parseIceCandidate(candidateString, candidateObj);
+            const entry = {
+                ts: tracker.startedAt ? now - tracker.startedAt : 0,
+                candidate: parsed.raw,
+                type: parsed.type,
+                address: parsed.address,
+                port: parsed.port,
+                relatedAddress: parsed.relatedAddress,
+                relatedPort: parsed.relatedPort
+            };
+
+            if (entry.candidate && tracker.candidates.some((c) => c.candidate === entry.candidate)) {
+                scheduleIceInactivityTimeout(session);
+                updateIceStatsDisplay(session, 'gathering');
+                return;
+            }
+
+            tracker.candidates.push(entry);
+            const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
+            log(`${tracker.label} - candidate #${tracker.candidates.length}: ${parsed.type || 'unknown'} ${addrText} (+${formatMs(entry.ts)})`);
+            updateIceStatsDisplay(session, 'gathering');
+            scheduleIceInactivityTimeout(session);
+        }
 
         registerBtn.addEventListener('click', register);
         unregisterBtn.addEventListener('click', unregister);
@@ -279,6 +540,7 @@
 
         function clearLogs() {
             logs.innerHTML = '';
+            resetIceStats();
         }
 
         function showStatus(message, type = 'info') {
@@ -335,6 +597,24 @@
                 register: true
             };
 
+            // apply ICE servers if enabled
+            try {
+                if (iceEnable && iceEnable.checked) {
+                    let parsed = null;
+                    try {
+                        parsed = JSON.parse(iceServersInput.value);
+                    } catch (e) {
+                        parsed = [{ urls: 'stun:stun.l.google.com:19302' }];
+                    }
+                    configuration.pcConfig = { iceServers: parsed };
+                    log(`Using custom ICE servers: ${JSON.stringify(configuration.pcConfig)}`);
+                } else {
+                    log('ICE servers disabled (using default)');
+                }
+            } catch (e) {
+                log(`Error applying ICE servers for UA: ${e.message}`);
+            }
+
             ua = new JsSIP.UA(configuration);
 
             ua.on('connected', () => {
@@ -383,21 +663,76 @@
 
                 const isIncoming = data.originator === 'remote';
                 incomingCallDiv.classList.remove('active');
+                const remoteIdentity = session.remote_identity || {};
+                const remoteUser = remoteIdentity.display_name || (remoteIdentity.uri && remoteIdentity.uri.user) || '';
+                const outgoingName = lastOutgoingCallLabel || callTargetInput.value.trim() || remoteUser || 'unknown';
+                const incomingName = remoteUser || 'unknown';
+                session._iceLabel = isIncoming ? `incoming:${incomingName}` : `outgoing:${outgoingName}`;
+                resetIceStats(`<div><strong>Call:</strong> ${session._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
+
+                session._timing = {};
+                if (data.originator === 'local') {
+                    session._timing.callSent = lastOutgoingCallTime || Date.now();
+                } else {
+                    session._timing.incomingReceived = Date.now();
+                }
+
                 currentSession = session;
                 bindSessionEvents(session, isIncoming);
 
                 if (isIncoming) {
-                    const caller = session.remote_identity.display_name || session.remote_identity.uri.user;
+                    const caller = incomingName;
                     callerInfo.textContent = `Incoming call from: ${caller}`;
                     incomingCallDiv.classList.add('active');
                     log(`Incoming call from ${caller}`);
                 } else {
-                    callInfo.textContent = `Calling ${callTargetInput.value || session.remote_identity.uri.user}...`;
+                    callInfo.textContent = `Calling ${outgoingName}...`;
                     callControls.classList.add('active');
                 }
             });
 
             ua.start();
+        }
+
+        function monitorIceGatheringJs(session, pc, label = 'session') {
+            try {
+                if (!pc || session._iceMonitorAttached) return;
+                session._iceMonitorAttached = true;
+
+                const tracker = getIceTracker(session, label);
+                const statsLabel = tracker.label;
+                updateIceStatsDisplay(session, tracker.status);
+
+                pc.addEventListener('icegatheringstatechange', () => {
+                    const state = pc.iceGatheringState;
+                    log(`${statsLabel} - iceGatheringState -> ${state}`);
+                    if (state === 'gathering' && !tracker.startedAt) {
+                        tracker.startedAt = Date.now();
+                        tracker.status = 'gathering';
+                        updateIceStatsDisplay(session);
+                    }
+                    if (state === 'complete' && tracker.startedAt && !tracker.endedAt) {
+                        concludeIceGathering(session, 'ice gathering complete');
+                    }
+                });
+
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    const state = pc.iceConnectionState;
+                    log(`${statsLabel} - iceConnectionState -> ${state}`);
+                    if ((state === 'connected' || state === 'completed') && tracker.startedAt && !tracker.endedAt) {
+                        concludeIceGathering(session, 'ice connection completed');
+                    }
+                });
+
+                pc.addEventListener('connectionstatechange', () => {
+                    const state = pc.connectionState;
+                    log(`${statsLabel} - connectionState -> ${state}`);
+                });
+
+                updateIceStatsDisplay(session, tracker.status);
+            } catch (e) {
+                log(`monitorIceGatheringJs error: ${e.message}`);
+            }
         }
 
         function unregister() {
@@ -443,8 +778,11 @@
                 mediaConstraints: { audio: true, video: false },
                 rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
             };
-
+            // record approximate time when we initiate the outgoing call request
+            lastOutgoingCallTime = Date.now();
+            lastOutgoingCallLabel = target;
             ua.call(destination, options);
+            log('Invite sent successfully');
             callBtn.disabled = true;
         }
 
@@ -460,6 +798,9 @@
             };
 
             try {
+                // record answer time to compute handshake
+                currentSession._timing = currentSession._timing || {};
+                currentSession._timing.answerTime = Date.now();
                 currentSession.answer(options);
                 incomingCallDiv.classList.remove('active');
                 callControls.classList.add('active');
@@ -545,28 +886,50 @@
             callBtn.disabled = true;
 
             session.on('progress', () => {
-                log('Call is in progress');
+                log('Call state: Establishing');
                 if (!isIncoming) {
                     callInfo.textContent = 'Ringing...';
                 }
             });
 
             session.on('accepted', () => {
-                log('Call accepted');
+                log('Call state: Accepted');
             });
 
             session.on('confirmed', () => {
-                log('Call confirmed');
+                log('Call state: Established');
                 callInfo.textContent = `Connected to ${session.remote_identity.display_name || session.remote_identity.uri.user}`;
             });
 
+            // log handshake timings when call is confirmed/established
+            session.on('confirmed', () => {
+                try {
+                    const t = session._timing || {};
+                    const remoteUser = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    if (t.callSent) {
+                        const dur = Date.now() - t.callSent;
+                        log(`Outgoing handshake time to ${remoteUser}: ${formatMs(dur)}`);
+                    } else {
+                        const base = t.answerTime || t.incomingReceived;
+                        if (base) {
+                            const dur = Date.now() - base;
+                            log(`Incoming handshake time from ${remoteUser}: ${formatMs(dur)}`);
+                        }
+                    }
+                } catch (e) { log(`handshake timing error: ${e.message}`); }
+            });
+
             session.on('ended', (data) => {
-                log(`Call ended: ${data.cause}`);
+                const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
+                const cause = data && data.cause ? ` (${data.cause})` : '';
+                log(`${directionLabel} call state: Terminated${cause}`);
                 endCall();
             });
 
             session.on('failed', (data) => {
-                log(`Call failed: ${data.cause}`);
+                const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
+                const cause = data && data.cause ? ` (${data.cause})` : '';
+                log(`${directionLabel} call state: Failed${cause}`);
                 showStatus(`Call failed: ${data.cause}`, 'error');
                 endCall();
             });
@@ -597,6 +960,18 @@
 
             session.on('peerconnection', (data) => {
                 attachMedia(data.peerconnection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, data.peerconnection, label);
+                } catch (e) { }
+            });
+            session.on('icecandidate', (event) => {
+                try {
+                    handleSessionIceCandidate(session, event ? event.candidate : null);
+                } catch (error) {
+                    log(`handleSessionIceCandidate error: ${error.message}`);
+                }
             });
         }
 
@@ -652,6 +1027,7 @@
             muteBtn.textContent = 'Mute';
             holdBtn.textContent = 'Hold';
             callBtn.disabled = !isRegistered;
+            resetIceStats();
         }
 
         function resetRegistrationState() {
@@ -669,6 +1045,7 @@
             }
         });
 
+        loadDefaultIceServers();
         log('SIP Phone initialized');
     </script>
 </body>
