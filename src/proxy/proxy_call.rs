@@ -998,7 +998,7 @@ impl ProxyCall {
             None
         };
 
-        let local_contact = self.local_contact_uri();
+        let enforced_contact = self.local_contact_uri();
         let invite_option = InviteOption {
             caller_display_name: caller_display_name.cloned(),
             callee: target.aor.clone(),
@@ -1006,7 +1006,7 @@ impl ProxyCall {
             content_type,
             offer,
             destination: target.destination.clone(),
-            contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
+            contact: enforced_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
             headers: self.dialplan.build_invite_headers(&target),
             ..Default::default()
@@ -1043,6 +1043,11 @@ impl ProxyCall {
         } else {
             invite_option
         };
+
+        if let Some(contact_uri) = enforced_contact {
+            // Preserve the PBX contact even if routing logic rewrites the From header.
+            invite_option.contact = contact_uri;
+        }
 
         let callee_uri = &invite_option.callee;
         let callee_realm = callee_uri.host().to_string();
