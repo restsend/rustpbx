@@ -337,7 +337,7 @@
                                 </template>
                                 <template x-if="asrProcessing">
                                     <div class="rounded border border-slate-200 bg-white px-3 py-2">Submitting recording
-                                        to VoiceAPI…</div>
+                                        to sensevoice-cli ...</div>
                                 </template>
                                 <template x-if="!transcriptLoading && !asrProcessing && canRequestTranscript()">
                                     <div
@@ -377,8 +377,19 @@
                         <div class="mt-4 flex flex-col gap-4 lg:flex-row">
                             <div class="lg:w-7/12 lg:min-w-0 space-y-3">
                                 <div class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
-                                    <div class="max-h-[520px] overflow-y-auto">
+                                    <div class="max-h-[520px] overflow-y-auto overflow-x-hidden">
                                         <table class="min-w-full divide-y divide-slate-200 text-sm">
+                                            <thead
+                                                class="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                                <tr>
+                                                    <template x-for="column in sipFlowColumns"
+                                                        :key="'head-' + column.id">
+                                                        <th class="px-3 py-2 text-left"
+                                                            :class="column.id === 'pbx' ? 'text-center' : (column.id === 'callee' ? 'text-right' : 'text-left')"
+                                                            x-text="column.label"></th>
+                                                    </template>
+                                                </tr>
+                                            </thead>
                                             <tbody class="bg-white">
                                                 <template x-if="sipFlowEntries.length">
                                                     <template x-for="entry in sipFlowEntries"
@@ -406,20 +417,9 @@
                                                                         <div
                                                                             class="space-y-0.5 text-[11px] text-slate-600">
                                                                             <template
-                                                                                x-if="column.id === 'pbx' && isB2bua(entry)">
-                                                                                <div
-                                                                                    class="mb-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                                                                                    <span
-                                                                                        x-text="entry.leg_role_label || 'B2BUA leg'"></span>
-                                                                                    <span x-show="entry.leg_label"
-                                                                                        class="font-mono"
-                                                                                        x-text="entry.leg_label"></span>
-                                                                                </div>
-                                                                            </template>
-                                                                            <template
                                                                                 x-if="column.id === (entry.lane_display || entry.lane_from)">
                                                                                 <div class="flex items-start gap-1.5"
-                                                                                    :class="laneCell(entry, column.id) === 'to' ? 'justify-end text-right' : 'text-left'">
+                                                                                    :class="laneContentClass(entry, column.id)">
                                                                                     <template
                                                                                         x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'left'">
                                                                                         <span
@@ -1423,13 +1423,36 @@
                 if (!arrow) {
                     return 'none';
                 }
+                const lane = this.normalizeLaneId(columnId);
                 if (cellType === 'from') {
+                    if (lane === 'callee' && arrow === '←') {
+                        return 'right';
+                    }
                     return arrow === '→' ? 'right' : 'left';
                 }
                 if (cellType === 'to') {
-                    return arrow === '→' ? 'left' : 'right';
+                    return arrow === '→' ? 'right' : 'left';
                 }
                 return 'none';
+            },
+            laneContentClass(entry, columnId) {
+                const lane = this.normalizeLaneId(columnId);
+                const cellType = this.laneCell(entry, columnId);
+                if (lane === 'callee') {
+                    if (cellType === 'to') {
+                        return 'justify-end text-right';
+                    }
+                    if (cellType === 'from') {
+                        return 'text-left';
+                    }
+                }
+                if (cellType === 'to') {
+                    return 'justify-end text-right';
+                }
+                if (cellType === 'from') {
+                    return 'text-left';
+                }
+                return 'text-left';
             },
             normalizeLaneId(value) {
                 const normalized = (value || '').toString().trim().toLowerCase();
