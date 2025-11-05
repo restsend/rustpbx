@@ -438,7 +438,7 @@ fn create_router(state: AppState) -> Router {
 
     // Merge call and WebSocket handlers with static file serving
     let call_routes = crate::handler::router(state.clone()).with_state(state.clone());
-
+    #[allow(unused_mut)]
     let mut router = router
         .route("/", get(index_handler))
         .nest_service("/static", static_files_service)

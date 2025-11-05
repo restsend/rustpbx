@@ -38,7 +38,7 @@ use webrtc::{
         },
     },
     rtp::{
-        codecs::{g7xx::G7xxPayloader, opus::OpusPayloader},
+        codecs::g7xx::G7xxPayloader,
         packet::Packet,
         packetizer::{Packetizer, new_packetizer},
         sequence::{Sequencer, new_random_sequencer},
@@ -495,7 +495,7 @@ impl RtpTrack {
 
         let payloader = match codec_type {
             #[cfg(feature = "opus")]
-            CodecType::Opus => Box::<OpusPayloader>::default()
+            CodecType::Opus => Box::<webrtc::rtp::codecs::opus::OpusPayloader>::default()
                 as Box<dyn webrtc::rtp::packetizer::Payloader + Send + Sync>,
             _ => Box::<G7xxPayloader>::default()
                 as Box<dyn webrtc::rtp::packetizer::Payloader + Send + Sync>,

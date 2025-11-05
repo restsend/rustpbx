@@ -21,7 +21,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use rsip::{StatusCode, Uri, prelude::HeadersExt};
+use rsip::{Param, StatusCode, Uri, headers::UntypedHeader, prelude::HeadersExt};
 use rsipstack::{
     dialog::{
         DialogId,
@@ -32,6 +32,7 @@ use rsipstack::{
     },
     rsip_ext::RsipResponseExt,
     transaction::transaction::Transaction,
+    transport::SipConnection,
 };
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
@@ -549,6 +550,39 @@ impl ProxyCall {
         false
     }
 
+    fn sync_server_dialog_remote_target(&self, server_dialog: &ServerInviteDialog) {
+        let request = server_dialog.initial_request();
+        if let Some((uri, remote_contact)) = compute_remote_target_from_request(request) {
+            if let Some(dialog) = self.dialog_layer.get_dialog(&server_dialog.id()) {
+                dialog.set_remote_target(uri, Some(remote_contact));
+            }
+        }
+    }
+
+    fn update_remote_target_from_response(&self, dialog_id: &DialogId, response: &rsip::Response) {
+        let contact_header = match response.contact_header() {
+            Ok(header) => header,
+            Err(_) => return,
+        };
+
+        let remote_contact =
+            rsip::headers::untyped::Contact::from(contact_header.value().to_string());
+        let uri = match remote_contact.uri() {
+            Ok(uri) => uri,
+            Err(_) => return,
+        };
+
+        if let Some(dialog) = self.dialog_layer.get_dialog(dialog_id) {
+            info!(
+                session_id = %self.session_id,
+                dialog_id = %dialog_id,
+                remote_uri = %uri,
+                "Updating server dialog remote target from response Contact header"
+            );
+            dialog.set_remote_target(uri, Some(remote_contact));
+        }
+    }
+
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
         let (state_tx, state_rx) = mpsc::unbounded_channel();
         let local_contact = self.local_contact_uri();
@@ -558,6 +592,7 @@ impl ProxyCall {
             None,
             local_contact.clone(),
         )?;
+        self.sync_server_dialog_remote_target(&server_dialog);
         // Extract initial offer SDP
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
@@ -1419,6 +1454,31 @@ impl ProxyCall {
     }
 }
 
+fn compute_remote_target_from_request(
+    request: &rsip::Request,
+) -> Option<(Uri, rsip::headers::untyped::Contact)> {
+    let via = request.via_header().ok()?;
+    let (via_transport, via_received) = SipConnection::parse_target_from_via(via).ok()?;
+    let contact_header = request.contact_header().ok()?;
+
+    let original_contact =
+        rsip::headers::untyped::Contact::from(contact_header.value().to_string());
+    let mut uri = original_contact.uri().ok()?;
+
+    uri.host_with_port = via_received;
+    uri.params.retain(|p| !matches!(p, Param::Transport(_)));
+    if via_transport != rsip::transport::Transport::Udp {
+        uri.params.push(Param::Transport(via_transport));
+    }
+
+    let remote_contact = original_contact
+        .clone()
+        .with_uri(uri.clone())
+        .unwrap_or(original_contact);
+
+    Some((uri, remote_contact))
+}
+
 impl Drop for ProxyCall {
     fn drop(&mut self) {
         self.cancel_token.cancel();
@@ -1460,6 +1520,7 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                     session.add_callee_dialog(dialog_id);
                 }
                 DialogState::Early(dialog_id, response) => {
+                    proxy_call.update_remote_target_from_response(&dialog_id, &response);
                     let answer = String::from_utf8_lossy(response.body()).to_string();
                     info!(
                         session_id = proxy_call.session_id,
@@ -1477,6 +1538,7 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                         status = ?response.status_code,
                         "Callee dialog confirmed"
                     );
+                    proxy_call.update_remote_target_from_response(&dialog_id, &response);
                     session.add_callee_dialog(dialog_id);
                     let answer = String::from_utf8_lossy(response.body()).to_string();
                     if let Err(e) = session.accept_call(target.aor.to_string(), answer).await {
@@ -1526,8 +1588,10 @@ fn resolve_call_status(session: &CallSession) -> String {
 mod tests {
     use std::net::SocketAddr;
 
+    use super::compute_remote_target_from_request;
     use crate::call::Dialplan;
-    use rsip::Headers;
+    use rsip::headers::UntypedHeader;
+    use rsip::{Headers, Param};
     use rsipstack::{
         EndpointBuilder,
         dialog::{dialog_layer::DialogLayer, invitation::InviteOption},
@@ -1600,5 +1664,112 @@ mod tests {
             _ => false,
         }));
         Ok(())
+    }
+
+    #[test]
+    fn test_compute_remote_target_rewrites_using_received_rport() {
+        let request = rsip::Request {
+            method: rsip::Method::Invite,
+            uri: rsip::Uri::try_from("sip:bob@example.com").expect("uri"),
+            version: rsip::Version::V2,
+            headers: vec![
+                rsip::headers::Via::new(
+                    "SIP/2.0/UDP proxy.example.com:5060;branch=z9hG4bK-1;received=198.51.100.5;rport=5090",
+                )
+                .into(),
+                rsip::headers::Contact::new(
+                    "<sip:alice@10.0.0.5:5060;transport=udp>",
+                )
+                .into(),
+                rsip::headers::From::new("Alice <sip:alice@example.com>;tag=from-tag").into(),
+                rsip::headers::To::new("Bob <sip:bob@example.com>").into(),
+                rsip::headers::CallId::new("callid-1").into(),
+                rsip::headers::CSeq::new("1 INVITE").into(),
+                rsip::headers::MaxForwards::new("70").into(),
+            ]
+            .into(),
+            body: Vec::new(),
+        };
+
+        let (uri, contact) =
+            compute_remote_target_from_request(&request).expect("computed remote target");
+
+        assert_eq!(uri.host_with_port.host.to_string(), "198.51.100.5");
+        assert_eq!(
+            uri.host_with_port.port.as_ref().map(|p| p.to_string()),
+            Some("5090".to_string())
+        );
+        assert!(!uri.params.iter().any(|p| matches!(p, Param::Transport(_))));
+
+        let contact_uri = contact.uri().expect("contact uri");
+        assert_eq!(contact_uri.host_with_port.host.to_string(), "198.51.100.5");
+        assert_eq!(
+            contact_uri
+                .host_with_port
+                .port
+                .as_ref()
+                .map(|p| p.to_string()),
+            Some("5090".to_string())
+        );
+        assert!(
+            !contact_uri
+                .params
+                .iter()
+                .any(|p| matches!(p, Param::Transport(_)))
+        );
+    }
+
+    #[test]
+    fn test_compute_remote_target_adds_transport_param_when_needed() {
+        let request = rsip::Request {
+            method: rsip::Method::Invite,
+            uri: rsip::Uri::try_from("sip:bob@example.com").expect("uri"),
+            version: rsip::Version::V2,
+            headers: vec![
+                rsip::headers::Via::new(
+                    "SIP/2.0/TCP proxy.example.com:5060;branch=z9hG4bK-2;received=203.0.113.9;rport=5070",
+                )
+                .into(),
+                rsip::headers::Contact::new("<sip:alice@10.0.0.5>").into(),
+                rsip::headers::From::new("Alice <sip:alice@example.com>;tag=from-tag").into(),
+                rsip::headers::To::new("Bob <sip:bob@example.com>").into(),
+                rsip::headers::CallId::new("callid-2").into(),
+                rsip::headers::CSeq::new("1 INVITE").into(),
+                rsip::headers::MaxForwards::new("70").into(),
+            ]
+            .into(),
+            body: Vec::new(),
+        };
+
+        let (uri, contact) =
+            compute_remote_target_from_request(&request).expect("computed remote target");
+
+        assert_eq!(uri.host_with_port.host.to_string(), "203.0.113.9");
+        assert_eq!(
+            uri.host_with_port.port.as_ref().map(|p| p.to_string()),
+            Some("5070".to_string())
+        );
+        assert!(
+            uri.params
+                .iter()
+                .any(|p| matches!(p, Param::Transport(rsip::transport::Transport::Tcp)))
+        );
+
+        let contact_uri = contact.uri().expect("contact uri");
+        assert_eq!(contact_uri.host_with_port.host.to_string(), "203.0.113.9");
+        assert_eq!(
+            contact_uri
+                .host_with_port
+                .port
+                .as_ref()
+                .map(|p| p.to_string()),
+            Some("5070".to_string())
+        );
+        assert!(
+            contact_uri
+                .params
+                .iter()
+                .any(|p| matches!(p, Param::Transport(rsip::transport::Transport::Tcp)))
+        );
     }
 }

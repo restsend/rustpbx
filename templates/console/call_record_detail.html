@@ -108,9 +108,7 @@
                     </svg>
                     <span x-text="transcript.available || transcriptVisible ? 'Ready' : 'Pending'"></span>
                 </div>
-                <p class="mt-1 text-xs text-slate-500"
-                    x-text="transcript.available || transcriptVisible ? 'Generated '+(transcript.generated_at || '') : 'Request on demand to analyse conversation outcome.'">
-                </p>
+                <p class="mt-1 text-xs text-slate-500" x-text="transcriptGeneratedLabel()"></p>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
@@ -143,7 +141,7 @@
                         @click="detailTab = 'overview'">
                         <div class="flex flex-col">
                             <span class="text-sm">Overview</span>
-                            <span class="text-[11px] font-normal text-slate-400">Participants, media, notes</span>
+                            <span class="text-[11px] font-normal text-slate-400">Participants, media, transcript</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -152,7 +150,16 @@
                         @click="detailTab = 'diagnostics'">
                         <div class="flex flex-col">
                             <span class="text-sm">Diagnostics</span>
-                            <span class="text-[11px] font-normal text-slate-400">ASR, SIP flow, metrics</span>
+                            <span class="text-[11px] font-normal text-slate-400">SIP flow, metrics</span>
+                        </div>
+                    </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="detailTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="detailTab === 'notes'" aria-controls="call-record-tab-notes"
+                        @click="detailTab = 'notes'">
+                        <div class="flex flex-col">
+                            <span class="text-sm">Notes &amp; Billing</span>
+                            <span class="text-[11px] font-normal text-slate-400">Tags, notes, billing</span>
                         </div>
                     </button>
                 </nav>
@@ -160,19 +167,8 @@
 
             <div x-show="detailTab === 'overview'" x-cloak x-transition.opacity class="space-y-4"
                 id="call-record-tab-overview" role="tabpanel" tabindex="0">
+
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Recording & participants</h2>
-                    <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
-                        the original media stream.</p>
-                    <template x-if="record.recording && record.recording.url">
-                        <audio class="mt-4 w-full" controls preload="none" :src="record.recording.url"></audio>
-                    </template>
-                    <template x-if="!record.recording || !record.recording.url">
-                        <div
-                            class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
-                            No media recording stored for this session.
-                        </div>
-                    </template>
                     <div class="mt-6 grid gap-3 sm:grid-cols-2">
                         <template x-for="participant in participants" :key="participant.role">
                             <div class="rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
@@ -202,7 +198,353 @@
                         </template>
                     </div>
                 </div>
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-base font-semibold text-slate-900">Recording & participants</h2>
+                    <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
+                        the original media stream.</p>
+                    <template x-if="record.recording && record.recording.url">
+                        <audio class="mt-4 w-full" controls preload="none" :src="record.recording.url"></audio>
+                    </template>
+                    <template x-if="!record.recording || !record.recording.url">
+                        <div
+                            class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                            No media recording stored for this session.
+                        </div>
+                    </template>
+                    <div class="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">Transcript</h3>
+                                <p class="text-xs text-slate-500">Generate speech-to-text to accelerate QA and
+                                    analytics.</p>
+                                <div class="mt-2 flex items-center gap-2 text-xs font-semibold"
+                                    :class="transcriptStatusTone(transcriptStatus)">
+                                    <svg x-cloak
+                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'ready'"
+                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4L15 6" />
+                                    </svg>
+                                    <svg x-cloak
+                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'processing'"
+                                        class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
+                                        stroke="currentColor" stroke-width="1.6">
+                                        <circle class="opacity-25" cx="10" cy="10" r="8" stroke-width="1.5"></circle>
+                                        <path class="opacity-75" fill="currentColor"
+                                            d="M10 2a8 8 0 0 1 8 8h-2a6 6 0 0 0-6-6V2Z" />
+                                    </svg>
+                                    <svg x-cloak
+                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'failed'"
+                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14L14 6" />
+                                    </svg>
+                                    <svg x-cloak
+                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'pending'"
+                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                    </svg>
+                                    <span x-text="transcriptStatusLabel(transcriptStatus)"></span>
+                                </div>
+                                <p class="text-[11px] text-slate-400" x-text="transcriptStatusDescription()"></p>
+                            </div>
+                            <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end sm:justify-end">
+                                <div class="w-full sm:w-48">
+                                    <label
+                                        class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                        Language
+                                    </label>
+                                    <div class="relative">
+                                        <select
+                                            class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:cursor-not-allowed disabled:opacity-60"
+                                            x-model="selectedLanguage"
+                                            @change="updateSelectedLanguage($event.target.value)"
+                                            :disabled="asrProcessing || transcriptLoading">
+                                            <template x-for="option in languageOptions" :key="option.value">
+                                                <option :value="option.value" x-text="option.label"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button type="button"
+                                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    :disabled="asrProcessing || transcriptLoading || !canRequestTranscript()"
+                                    :aria-disabled="asrProcessing || transcriptLoading || !canRequestTranscript()"
+                                    :title="!canRequestTranscript() ? (transcriptCapabilityIssues()[0] || 'SenseVoice CLI is not ready.') : ''"
+                                    @click="requestTranscript(transcriptVisible && transcriptStatus !== 'processing')">
+                                    <svg x-cloak x-show="!(asrProcessing || transcriptLoading)" class="h-4 w-4"
+                                        viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                                    </svg>
+                                    <svg x-cloak x-show="asrProcessing || transcriptLoading"
+                                        class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
+                                        stroke="currentColor" stroke-width="1.5">
+                                        <circle class="opacity-25" cx="10" cy="10" r="7" stroke-width="1.5"></circle>
+                                        <path class="opacity-75" fill="currentColor"
+                                            d="M10 3a7 7 0 0 1 7 7h-1.8a5.2 5.2 0 0 0-5.2-5.2V3Z" />
+                                    </svg>
+                                    <span x-text="transcriptButtonLabel()"></span>
+                                </button>
+                            </div>
+                        </div>
+                        <template x-if="transcriptError">
+                            <div class="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600"
+                                x-text="transcriptError"></div>
+                        </template>
+                        <template x-if="transcriptVisible">
+                            <div class="mt-4 space-y-3 text-sm text-slate-600">
+                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                                    <span>Language</span>
+                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                        x-text="languageLabel(selectedLanguage)"></span>
+                                    <span x-show="formatGeneratedTimestamp(transcript.generated_at)"
+                                        x-text="formatGeneratedTimestamp(transcript.generated_at)"></span>
+                                </div>
+                                <template x-if="transcriptTimeline().length">
+                                    <div class="max-h-96 space-y-3 overflow-y-auto pr-2">
+                                        <template x-for="item in transcriptTimeline()" :key="item.key">
+                                            <div class="flex" :class="transcriptAlignmentClass(item.side)">
+                                                <div class="flex max-w-xl flex-col gap-1 rounded-lg border px-3 py-2 text-sm text-slate-700 shadow-sm"
+                                                    :class="transcriptCardTone(item.side)">
+                                                    <div
+                                                        class="flex items-center justify-between text-[11px] text-slate-500">
+                                                        <span class="font-semibold text-slate-600"
+                                                            x-text="item.label"></span>
+                                                        <span class="font-mono"
+                                                            x-text="formatSegmentRange(item.segment.start, item.segment.end)"></span>
+                                                    </div>
+                                                    <p class="leading-relaxed text-slate-800"
+                                                        x-text="item.segment.text"></p>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                                <template x-if="!transcriptTimeline().length">
+                                    <div
+                                        class="rounded border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                                        Transcript generated without segment breakdown.
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                        <template x-if="!transcriptVisible">
+                            <div class="mt-4 space-y-2 text-xs text-slate-500">
+                                <template x-if="transcriptLoading">
+                                    <div class="rounded border border-slate-200 bg-white px-3 py-2">Loading transcript…
+                                    </div>
+                                </template>
+                                <template x-if="asrProcessing">
+                                    <div class="rounded border border-slate-200 bg-white px-3 py-2">Submitting recording
+                                        to VoiceAPI…</div>
+                                </template>
+                                <template x-if="!transcriptLoading && !asrProcessing && canRequestTranscript()">
+                                    <div
+                                        class="rounded border border-dashed border-slate-200 px-4 py-3 text-center text-xs text-slate-400">
+                                        No transcript generated yet.
+                                    </div>
+                                </template>
+                                <template x-if="!canRequestTranscript()">
+                                    <div
+                                        class="space-y-1 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                                        <p class="font-semibold">SenseVoice CLI is not ready.</p>
+                                        <template x-for="reason in transcriptCapabilityIssues()" :key="reason">
+                                            <p x-text="reason"></p>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
 
+            </div>
+
+            <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4"
+                id="call-record-tab-diagnostics" role="tabpanel" tabindex="0">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Interaction insights</h2>
+                            <p class="text-xs text-slate-500">Inspect SIP signalling timeline to speed up
+                                troubleshooting.</p>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-500">Compare caller, PBX, and callee lanes. Click a row to inspect
+                            the raw SIP payload.</p>
+                        <div class="mt-4 flex flex-col gap-4 lg:flex-row">
+                            <div class="lg:w-7/12 lg:min-w-0 space-y-3">
+                                <div class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                                    <div class="max-h-[520px] overflow-y-auto">
+                                        <table class="min-w-full divide-y divide-slate-200 text-sm">
+                                            <tbody class="bg-white">
+                                                <template x-if="sipFlowEntries.length">
+                                                    <template x-for="entry in sipFlowEntries"
+                                                        :key="'sip-' + entry.sequence">
+                                                        <tr class="cursor-pointer transition" :class="selectedSipEntry && selectedSipEntry.sequence === entry.sequence
+                                                                ? 'bg-sky-50 ring-1 ring-inset ring-sky-300'
+                                                                : 'hover:bg-slate-50'" @click="selectSipEntry(entry)">
+                                                            <template x-for="column in sipFlowColumns"
+                                                                :key="column.id + '-' + entry.sequence">
+                                                                <td
+                                                                    class="align-top px-3 py-2 whitespace-normal break-words">
+                                                                    <template x-if="column.id === 'time'">
+                                                                        <div class="space-y-0.5 text-xs text-slate-600">
+                                                                            <div class="font-mono text-[12px] font-semibold text-slate-700"
+                                                                                x-text="formatRelativeToStart(entry)">
+                                                                            </div>
+                                                                            <div class="text-[10px] font-mono text-slate-400"
+                                                                                x-text="entry.offset || ''"></div>
+                                                                            <div class="text-[10px] uppercase tracking-wide text-slate-400"
+                                                                                x-text="(entry.flow_direction || entry.direction || '') ? (entry.flow_direction || entry.direction || '').toUpperCase() : ''">
+                                                                            </div>
+                                                                        </div>
+                                                                    </template>
+                                                                    <template x-if="column.id !== 'time'">
+                                                                        <div
+                                                                            class="space-y-0.5 text-[11px] text-slate-600">
+                                                                            <template
+                                                                                x-if="column.id === 'pbx' && isB2bua(entry)">
+                                                                                <div
+                                                                                    class="mb-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                                                                    <span
+                                                                                        x-text="entry.leg_role_label || 'B2BUA leg'"></span>
+                                                                                    <span x-show="entry.leg_label"
+                                                                                        class="font-mono"
+                                                                                        x-text="entry.leg_label"></span>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="column.id === (entry.lane_display || entry.lane_from)">
+                                                                                <div class="flex items-start gap-1.5"
+                                                                                    :class="laneCell(entry, column.id) === 'to' ? 'justify-end text-right' : 'text-left'">
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'left'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'left'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <div class="space-y-1"
+                                                                                        :class="laneCell(entry, column.id) === 'to' ? 'text-right' : 'text-left'">
+                                                                                        <span
+                                                                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold"
+                                                                                            :class="laneCell(entry, column.id) === 'to' ? 'bg-slate-100 text-slate-600' : 'bg-slate-200 text-slate-700'">
+                                                                                            <span
+                                                                                                x-text="entry.method || entry.status_code || '—'"></span>
+                                                                                            <span
+                                                                                                x-show="entry.status_code && entry.method && entry.method !== String(entry.status_code)"
+                                                                                                class="text-emerald-600"
+                                                                                                x-text="entry.status_code"></span>
+                                                                                        </span>
+                                                                                        <div class="leading-snug break-words"
+                                                                                            x-text="formatSummary(entry.summary)">
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'right'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                    <template
+                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'right'">
+                                                                                        <span
+                                                                                            class="text-base leading-none text-slate-400"
+                                                                                            x-text="cellArrow(entry, column.id)"></span>
+                                                                                    </template>
+                                                                                </div>
+                                                                            </template>
+                                                                            <template
+                                                                                x-if="laneCell(entry, column.id) === 'self'">
+                                                                                <div
+                                                                                    class="mx-auto h-1.5 w-1.5 rounded-full bg-slate-400">
+                                                                                </div>
+                                                                            </template>
+                                                                        </div>
+                                                                    </template>
+                                                                </td>
+                                                            </template>
+                                                        </tr>
+                                                    </template>
+                                                </template>
+                                                <template x-if="!sipFlowEntries.length">
+                                                    <tr>
+                                                        <td class="px-4 py-6 text-center text-xs text-slate-400"
+                                                            :colspan="sipFlowColumns.length">
+                                                            No SIP trace captured for this session.
+                                                        </td>
+                                                    </tr>
+                                                </template>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="h-full rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                                    <template x-if="selectedSipEntry">
+                                        <div class="flex h-full flex-col">
+                                            <div
+                                                class="flex flex-col gap-2 border-b border-slate-200 pb-3 text-sm text-slate-600">
+                                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                                    <span
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-700">
+                                                        <span
+                                                            x-text="selectedSipEntry.method || selectedSipEntry.status_code || 'Message'"></span>
+                                                        <span
+                                                            x-show="selectedSipEntry.status_code && selectedSipEntry.method && selectedSipEntry.method !== String(selectedSipEntry.status_code)"
+                                                            class="text-emerald-600"
+                                                            x-text="selectedSipEntry.status_code"></span>
+                                                    </span>
+                                                    <span class="font-mono text-[13px] text-slate-700"
+                                                        x-text="formatDateTimeWithMs(selectedSipEntry.timestamp)"></span>
+                                                    <span class="font-mono text-[11px] text-slate-400"
+                                                        x-text="formatRelativeToStart(selectedSipEntry)"></span>
+                                                </div>
+                                                <div
+                                                    class="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                                    <span x-text="selectedSipEntry.from_label"></span>
+                                                    <span class="text-base leading-none text-slate-300"
+                                                        x-text="selectedSipEntry.arrow === 'right' ? '→' : '←'"></span>
+                                                    <span x-text="selectedSipEntry.to_label"></span>
+                                                    <span x-show="selectedSipEntry.leg_role_label"
+                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
+                                                        x-text="selectedSipEntry.leg_role_label"></span>
+                                                    <span x-show="selectedSipEntry.leg_label"
+                                                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 font-mono text-[10px] text-slate-500"
+                                                        x-text="selectedSipEntry.leg_label"></span>
+                                                </div>
+                                                <div class="text-sm font-semibold text-slate-700"
+                                                    x-text="selectedSipEntry.summary"></div>
+                                            </div>
+                                            <div class="mt-3 flex-1 overflow-auto">
+                                                <pre
+                                                    class="h-96 max-w-full overflow-auto whitespace-pre rounded bg-slate-950/90 p-3 text-[11px] leading-relaxed text-emerald-100"><code x-text="selectedSipEntry.raw || 'No raw payload captured.'"></code></pre>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    <template x-if="!selectedSipEntry">
+                                        <div class="flex h-full items-center justify-center text-xs text-slate-400">
+                                            Select a SIP message to inspect its raw payload.
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div x-show="detailTab === 'notes'" x-cloak x-transition.opacity class="space-y-4"
+                id="call-record-tab-notes" role="tabpanel" tabindex="0">
                 <div class="grid gap-4 lg:grid-cols-2">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -213,10 +555,10 @@
                             <div class="flex items-center gap-2">
                                 <input type="text" x-model.trim="tagInput"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Add tag">
+                                    placeholder="Add tag" @keyup.enter.prevent="addTag">
                                 <button type="button"
-                                    class="inline-flex items-center rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
-                                    @click="addTag">Add</button>
+                                    class="inline-flex items-center rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    :disabled="tagSaving || !tagInput" @click="addTag">Add</button>
                             </div>
                         </div>
                         <div class="mt-3 flex flex-wrap gap-2">
@@ -224,8 +566,9 @@
                                 <span
                                     class="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">
                                     <span x-text="tag"></span>
-                                    <button type="button" class="text-slate-400 transition hover:text-rose-500"
-                                        @click="removeTag(index)">
+                                    <button type="button"
+                                        class="text-slate-400 transition hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
+                                        :disabled="tagSaving" @click="removeTag(index)">
                                         <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                             stroke-width="1.6">
                                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -239,6 +582,8 @@
                                     yet</span>
                             </template>
                         </div>
+                        <p class="mt-2 text-xs text-rose-500" x-show="tagError" x-text="tagError"></p>
+                        <p class="mt-2 text-xs text-slate-400" x-show="tagSaving">Saving tags…</p>
                     </div>
 
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
@@ -249,23 +594,27 @@
                                     sentiment.</p>
                             </div>
                             <button type="button"
-                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
-                                @click="saveNotes">
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="noteSaving" @click="saveNotes">
                                 <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                     stroke-width="1.6">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 10h8M6 14h5M6 6h8" />
                                 </svg>
-                                Save note
+                                <span x-text="noteSaving ? 'Saving…' : 'Save note'"></span>
                             </button>
                         </div>
                         <textarea x-model="noteDraft" rows="6"
                             class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="Add internal remark or follow-up task..."></textarea>
+                        <p class="mt-2 text-xs text-rose-500" x-show="noteError" x-text="noteError"></p>
+                        <p class="mt-1 text-xs text-slate-400" x-show="noteSaving">Saving note…</p>
                         <p class="mt-2 text-xs text-slate-400" x-show="notes.updated_at">
                             Last updated <span x-text="formatDateTime(notes.updated_at)"></span>
+                            <span x-show="notes.updated_by">&middot; by <span x-text="notes.updated_by"></span></span>
                         </p>
                     </div>
+
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 lg:col-span-2">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
@@ -349,341 +698,6 @@
                     </div>
                 </div>
             </div>
-
-            <div x-show="detailTab === 'diagnostics'" x-cloak x-transition.opacity class="space-y-4"
-                id="call-record-tab-diagnostics" role="tabpanel" tabindex="0">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                            <h2 class="text-base font-semibold text-slate-900">Interaction insights</h2>
-                            <p class="text-xs text-slate-500">Switch between speech analytics and SIP signalling for
-                                faster troubleshooting.</p>
-                        </div>
-                        <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                            <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
-                                role="tablist" aria-label="Diagnostics insight tabs">
-                                <button type="button"
-                                    class="flex-1 rounded-md px-3 py-2 transition text-left sm:flex-none"
-                                    :class="insightTab === 'transcription' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                                    :aria-selected="insightTab === 'transcription'"
-                                    aria-controls="call-record-diagnostics-transcription"
-                                    @click="insightTab = 'transcription'">
-                                    ASR transcription
-                                </button>
-                                <button type="button"
-                                    class="flex-1 rounded-md px-3 py-2 transition text-left sm:flex-none"
-                                    :class="insightTab === 'sip-flow' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                                    :aria-selected="insightTab === 'sip-flow'"
-                                    aria-controls="call-record-diagnostics-sip" @click="insightTab = 'sip-flow'">
-                                    SIP message flow
-                                </button>
-                            </nav>
-                        </div>
-                    </div>
-
-                    <div x-show="insightTab === 'transcription'" x-cloak x-transition.opacity class="space-y-4"
-                        id="call-record-diagnostics-transcription" role="tabpanel" tabindex="0">
-                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                            <p class="text-xs text-slate-500">Generate speech-to-text to accelerate QA and analytics.
-                            </p>
-                            <button type="button"
-                                class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                                :disabled="asrProcessing || transcriptLoading"
-                                @click="requestTranscript(transcriptVisible && transcriptStatus !== 'processing')">
-                                <svg x-cloak x-show="!(asrProcessing || transcriptLoading)" class="h-4 w-4"
-                                    viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                </svg>
-                                <svg x-cloak x-show="asrProcessing || transcriptLoading" class="h-4 w-4 animate-spin"
-                                    viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
-                                    <circle class="opacity-25" cx="10" cy="10" r="7" stroke-width="1.5"></circle>
-                                    <path class="opacity-75" fill="currentColor"
-                                        d="M10 3a7 7 0 0 1 7 7h-1.8a5.2 5.2 0 0 0-5.2-5.2V3Z" />
-                                </svg>
-                                <span x-text="transcriptButtonLabel()"></span>
-                            </button>
-                        </div>
-
-                        <template x-if="transcriptError">
-                            <div class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600"
-                                x-text="transcriptError"></div>
-                        </template>
-
-                        <template x-if="transcriptVisible">
-                            <div class="space-y-3 text-sm text-slate-600">
-                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                                    <span>Language</span>
-                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                        x-text="transcript.language || '—'"></span>
-                                    <span x-show="transcript.generated_at"
-                                        x-text="'Generated ' + formatDateTime(transcript.generated_at)"></span>
-                                </div>
-                                <div class="space-y-2">
-                                    <template x-for="segment in (transcript.segments || [])"
-                                        :key="segment.start + segment.speaker">
-                                        <div class="rounded-lg border border-slate-200 p-3 text-xs">
-                                            <div class="flex items-center justify-between text-slate-400">
-                                                <span class="font-semibold text-slate-600"
-                                                    x-text="segment.speaker"></span>
-                                                <span x-text="segment.start"></span>
-                                            </div>
-                                            <p class="mt-1 text-slate-700" x-text="segment.text"></p>
-                                        </div>
-                                    </template>
-                                    <template x-if="!(transcript.segments || []).length">
-                                        <div
-                                            class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
-                                            Transcript generated without segment breakdown.
-                                        </div>
-                                    </template>
-                                </div>
-                                <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700"
-                                    x-text="transcript.text || 'Transcript ready.'"></div>
-                            </div>
-                        </template>
-                        <template x-if="!transcriptVisible && !asrProcessing && !transcriptLoading">
-                            <div
-                                class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
-                                No transcript generated yet.
-                            </div>
-                        </template>
-                        <template x-if="transcriptLoading">
-                            <div
-                                class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                                Loading transcript…
-                            </div>
-                        </template>
-                        <template x-if="asrProcessing">
-                            <div
-                                class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                                Submitting recording to VoiceAPI…
-                            </div>
-                        </template>
-                    </div>
-
-                    <div x-show="insightTab === 'sip-flow'" x-cloak x-transition.opacity
-                        id="call-record-diagnostics-sip" role="tabpanel" tabindex="0">
-                        <p class="text-xs text-slate-500">Compare caller, PBX, and callee lanes. Click a row to inspect
-                            the raw SIP payload.</p>
-                        <div class="mt-4 flex flex-col gap-4 lg:flex-row">
-                            <div class="lg:w-7/12 lg:min-w-0 space-y-3">
-                                <div class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
-                                    <div class="max-h-[520px] overflow-y-auto">
-                                        <div class="mt-2 flex items-center gap-2 text-2xl font-semibold"
-                                            :class="transcriptStatusTone(transcriptStatus)">
-                                            <svg x-cloak
-                                                x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'ready'"
-                                                class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="1.8">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M5 12l5 5L20 7" />
-                                            </svg>
-                                            <svg x-cloak
-                                                x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'processing'"
-                                                class="h-6 w-6 animate-spin" viewBox="0 0 24 24" fill="none"
-                                                stroke="currentColor" stroke-width="1.6">
-                                                <circle class="opacity-25" cx="12" cy="12" r="9" stroke-width="1.6">
-                                                </circle>
-                                                <path class="opacity-75" fill="currentColor"
-                                                    d="M12 3a9 9 0 0 1 9 9h-2.2a6.8 6.8 0 0 0-6.8-6.8V3Z" />
-                                            </svg>
-                                            <svg x-cloak
-                                                x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'failed'"
-                                                class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="1.8">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M7 7l10 10M7 17L17 7" />
-                                            </svg>
-                                            <svg x-cloak
-                                                x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'pending'"
-                                                class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="1.8">
-                                                <path stroke-linecap="round" stroke-linejoin="round"
-                                                    d="M12 5v14m7-7H5" />
-                                            </svg>
-                                            <span x-text="transcriptStatusLabel(transcriptStatus)"></span>
-                                        </div>
-                                        <p class="mt-1 text-xs text-slate-500" x-text="transcriptStatusDescription()">
-                                        </p>
-                                        </thead>
-                                        <tbody class="bg-white">
-                                            <template x-if="sipFlowEntries.length">
-                                                <template x-for="entry in sipFlowEntries"
-                                                    :key="'sip-' + entry.sequence">
-                                                    <tr class="cursor-pointer transition" :class="selectedSipEntry && selectedSipEntry.sequence === entry.sequence
-                                                                ? 'bg-sky-50 ring-1 ring-inset ring-sky-300'
-                                                                : 'hover:bg-slate-50'" @click="selectSipEntry(entry)">
-                                                        <template x-for="column in sipFlowColumns"
-                                                            :key="column.id + '-' + entry.sequence">
-                                                            <td
-                                                                class="align-top px-3 py-3 whitespace-normal break-words">
-                                                                <template x-if="column.id === 'time'">
-                                                                    <div class="space-y-1 text-xs text-slate-600">
-                                                                        <div class="font-mono text-[12px] font-semibold text-slate-700"
-                                                                            x-text="formatRelativeToStart(entry)">
-                                                                        </div>
-                                                                        <div class="text-[10px] font-mono text-slate-400"
-                                                                            x-text="entry.offset || ''"></div>
-                                                                        <div class="text-[10px] uppercase tracking-wide text-slate-400"
-                                                                            x-text="(entry.flow_direction || entry.direction || '') ? (entry.flow_direction || entry.direction || '').toUpperCase() : ''">
-                                                                        </div>
-                                                                    </div>
-                                                                </template>
-                                                                <template x-if="column.id !== 'time'">
-                                                                    <div class="space-y-1 text-[11px] text-slate-600">
-                                                                        <template
-                                                                            x-if="column.id === 'pbx' && isB2bua(entry)">
-                                                                            <div
-                                                                                class="mb-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                                                                                <span
-                                                                                    x-text="entry.leg_role_label || 'B2BUA leg'"></span>
-                                                                                <span x-show="entry.leg_label"
-                                                                                    class="font-mono"
-                                                                                    x-text="entry.leg_label"></span>
-                                                                            </div>
-                                                                        </template>
-                                                                        <template
-                                                                            x-if="column.id === (entry.lane_display || entry.lane_from)">
-                                                                            <div class="flex items-start gap-2"
-                                                                                :class="laneCell(entry, column.id) === 'to' ? 'justify-end text-right' : 'text-left'">
-                                                                                <template
-                                                                                    x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'left'">
-                                                                                    <span
-                                                                                        class="text-base leading-none text-slate-400"
-                                                                                        x-text="cellArrow(entry, column.id)"></span>
-                                                                                </template>
-                                                                                <template
-                                                                                    x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'left'">
-                                                                                    <span
-                                                                                        class="text-base leading-none text-slate-400"
-                                                                                        x-text="cellArrow(entry, column.id)"></span>
-                                                                                </template>
-                                                                                <div class="space-y-1"
-                                                                                    :class="laneCell(entry, column.id) === 'to' ? 'text-right' : 'text-left'">
-                                                                                    <span
-                                                                                        class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold"
-                                                                                        :class="laneCell(entry, column.id) === 'to' ? 'bg-slate-100 text-slate-600' : 'bg-slate-200 text-slate-700'">
-                                                                                        <span
-                                                                                            x-text="entry.method || entry.status_code || '—'"></span>
-                                                                                        <span
-                                                                                            x-show="entry.status_code && entry.method && entry.method !== String(entry.status_code)"
-                                                                                            class="text-emerald-600"
-                                                                                            x-text="entry.status_code"></span>
-                                                                                    </span>
-                                                                                    <div class="leading-snug break-words"
-                                                                                        x-text="formatSummary(entry.summary)">
-                                                                                    </div>
-                                                                                </div>
-                                                                                <template
-                                                                                    x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'right'">
-                                                                                    <span
-                                                                                        class="text-base leading-none text-slate-400"
-                                                                                        x-text="cellArrow(entry, column.id)"></span>
-                                                                                </template>
-                                                                                <template
-                                                                                    x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'right'">
-                                                                                    <span
-                                                                                        class="text-base leading-none text-slate-400"
-                                                                                        x-text="cellArrow(entry, column.id)"></span>
-                                                                                </template>
-                                                                            </div>
-                                                                        </template>
-                                                                        <template
-                                                                            x-if="column.id !== (entry.lane_display || entry.lane_from) && laneCell(entry, column.id) === 'from'">
-                                                                            <div
-                                                                                class="flex items-center justify-center text-base leading-none text-slate-300">
-                                                                                <span
-                                                                                    x-text="cellArrow(entry, column.id)"></span>
-                                                                            </div>
-                                                                        </template>
-                                                                        <template
-                                                                            x-if="column.id !== (entry.lane_display || entry.lane_from) && laneCell(entry, column.id) === 'to'">
-                                                                            <div
-                                                                                class="flex items-center justify-center text-base leading-none text-slate-300">
-                                                                                <span
-                                                                                    x-text="cellArrow(entry, column.id)"></span>
-                                                                            </div>
-                                                                        </template>
-                                                                        <template
-                                                                            x-if="laneCell(entry, column.id) === 'self'">
-                                                                            <div
-                                                                                class="mx-auto h-1.5 w-1.5 rounded-full bg-slate-400">
-                                                                            </div>
-                                                                        </template>
-                                                                    </div>
-                                                                </template>
-                                                            </td>
-                                                        </template>
-                                                    </tr>
-                                                </template>
-                                            </template>
-                                            <template x-if="!sipFlowEntries.length">
-                                                <tr>
-                                                    <td class="px-4 py-6 text-center text-xs text-slate-400"
-                                                        :colspan="sipFlowColumns.length">
-                                                        No SIP trace captured for this session.
-                                                    </td>
-                                                </tr>
-                                            </template>
-                                        </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="flex-1 min-w-0">
-                                <div class="h-full rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                                    <template x-if="selectedSipEntry">
-                                        <div class="flex h-full flex-col">
-                                            <div
-                                                class="flex flex-col gap-2 border-b border-slate-200 pb-3 text-sm text-slate-600">
-                                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                                    <span
-                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-700">
-                                                        <span
-                                                            x-text="selectedSipEntry.method || selectedSipEntry.status_code || 'Message'"></span>
-                                                        <span
-                                                            x-show="selectedSipEntry.status_code && selectedSipEntry.method && selectedSipEntry.method !== String(selectedSipEntry.status_code)"
-                                                            class="text-emerald-600"
-                                                            x-text="selectedSipEntry.status_code"></span>
-                                                    </span>
-                                                    <span class="font-mono text-[13px] text-slate-700"
-                                                        x-text="formatDateTimeWithMs(selectedSipEntry.timestamp)"></span>
-                                                    <span class="font-mono text-[11px] text-slate-400"
-                                                        x-text="formatRelativeToStart(selectedSipEntry)"></span>
-                                                </div>
-                                                <div
-                                                    class="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                                                    <span x-text="selectedSipEntry.from_label"></span>
-                                                    <span class="text-base leading-none text-slate-300"
-                                                        x-text="selectedSipEntry.arrow === 'right' ? '→' : '←'"></span>
-                                                    <span x-text="selectedSipEntry.to_label"></span>
-                                                    <span x-show="selectedSipEntry.leg_role_label"
-                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                                        x-text="selectedSipEntry.leg_role_label"></span>
-                                                    <span x-show="selectedSipEntry.leg_label"
-                                                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 font-mono text-[10px] text-slate-500"
-                                                        x-text="selectedSipEntry.leg_label"></span>
-                                                </div>
-                                                <div class="text-sm font-semibold text-slate-700"
-                                                    x-text="selectedSipEntry.summary"></div>
-                                            </div>
-                                            <div class="mt-3 flex-1 overflow-auto">
-                                                <pre
-                                                    class="h-96 max-w-full overflow-auto whitespace-pre rounded bg-slate-950/90 p-3 text-[11px] leading-relaxed text-emerald-100"><code x-text="selectedSipEntry.raw || 'No raw payload captured.'"></code></pre>
-                                            </div>
-                                        </div>
-                                    </template>
-                                    <template x-if="!selectedSipEntry">
-                                        <div class="flex h-full items-center justify-center text-xs text-slate-400">
-                                            Select a SIP message to inspect its raw payload.
-                                        </div>
-                                    </template>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </section>
     </div>
 </div>
@@ -737,8 +751,13 @@
                     ? data.transcript
                     : { available: false, segments: [] };
                 this.transcriptPreview = data.transcript_preview || null;
+                this.transcriptCapabilities = data.transcript_capabilities || {};
                 this.actions = data.actions || {};
                 this.backUrl = data.back_url || '/console/call-records';
+                const fallbackUpdateUrl = this.determineRecordUrl(this.record.id);
+                this.updateUrl = (this.actions && this.actions.update_record)
+                    ? this.actions.update_record
+                    : fallbackUpdateUrl;
                 this.transcriptUrl = this.determineTranscriptUrl(
                     this.actions ? this.actions.transcript_url : '',
                     this.record.id,
@@ -746,9 +765,16 @@
                 this.applyTranscriptPayload({
                     status: initialTranscript?.status || this.record.transcript_status,
                     transcript: initialTranscript,
-                });
-                this.notes = data.notes || { text: '', updated_at: null };
+                }, { resetLanguage: true });
+                const initialNotes = (data.notes && typeof data.notes === 'object') ? data.notes : {};
+                this.notes = {
+                    text: initialNotes.text || '',
+                    updated_at: initialNotes.updated_at || null,
+                    updated_by: initialNotes.updated_by || null,
+                };
                 this.noteDraft = this.notes.text || '';
+                this.tagError = '';
+                this.noteError = '';
                 this.participants = Array.isArray(data.participants) ? data.participants : [];
                 this.billing = data.billing || {
                     summary: (this.record && this.record.billing) || {},
@@ -760,24 +786,9 @@
                 }
                 this.durationHint = this.record.ended_at ? `Ended ${this.formatDateTime(this.record.ended_at)}` : 'No hangup timestamp recorded';
                 this.detailTab = 'overview';
-                this.insightTab = (this.transcriptVisible || (this.transcript && this.transcript.available))
-                    ? 'transcription'
-                    : (this.sipFlowEntries.length ? 'sip-flow' : 'transcription');
                 if (this.record.has_transcript && !this.transcriptVisible && this.transcriptUrl) {
                     this.fetchTranscript();
                 }
-                this.$watch('insightTab', (value) => {
-                    if (
-                        value === 'transcription'
-                        && this.record.has_transcript
-                        && !this.transcriptVisible
-                        && !this.transcriptLoading
-                        && !this.asrProcessing
-                        && this.transcriptUrl
-                    ) {
-                        this.fetchTranscript();
-                    }
-                });
             },
             record: {},
             sipFlowEntries: [],
@@ -787,11 +798,13 @@
             mediaMetrics: {},
             transcript: {},
             transcriptPreview: null,
+            transcriptCapabilities: {},
             transcriptVisible: false,
             transcriptStatus: 'pending',
             transcriptError: null,
             transcriptLoading: false,
             transcriptUrl: '',
+            updateUrl: '',
             notes: {},
             noteDraft: '',
             participants: [],
@@ -800,35 +813,324 @@
             backUrl: '/console/call-records',
             billing: {},
             tagInput: '',
+            tagSaving: false,
+            tagError: '',
+            noteSaving: false,
+            noteError: '',
             asrProcessing: false,
             durationHint: '',
             detailTab: 'overview',
-            insightTab: 'transcription',
             copiedCallId: null,
             copyTimer: null,
-            addTag() {
+            selectedLanguage: 'auto',
+            languageOptions: [],
+            languageSelectionDirty: false,
+            async addTag() {
                 const value = (this.tagInput || '').trim();
                 if (!value) {
                     return;
                 }
-                const tags = Array.isArray(this.record.tags) ? this.record.tags : [];
-                if (!tags.includes(value)) {
-                    tags.push(value);
-                    this.record.tags = tags;
+                const current = Array.isArray(this.record.tags) ? [...this.record.tags] : [];
+                if (current.includes(value)) {
+                    this.tagInput = '';
+                    return;
                 }
+                const next = [...current, value];
+                this.record.tags = next;
                 this.tagInput = '';
-            },
-            removeTag(index) {
-                const tags = Array.isArray(this.record.tags) ? [...this.record.tags] : [];
-                if (index >= 0 && index < tags.length) {
-                    tags.splice(index, 1);
-                    this.record.tags = tags;
+                this.tagError = '';
+                this.tagSaving = true;
+                try {
+                    const payload = await this.updateRecord({ tags: next });
+                    this.applyUpdatePayload(payload, { syncNoteDraft: false });
+                } catch (err) {
+                    console.error('Failed to add tag', err);
+                    this.record.tags = current;
+                    this.tagError = (err && err.message) ? err.message : 'Failed to update tags';
+                } finally {
+                    this.tagSaving = false;
                 }
             },
-            saveNotes() {
-                this.notes = this.notes || {};
-                this.notes.text = this.noteDraft || '';
-                this.notes.updated_at = new Date().toISOString();
+            async removeTag(index) {
+                const current = Array.isArray(this.record.tags) ? [...this.record.tags] : [];
+                if (index < 0 || index >= current.length) {
+                    return;
+                }
+                const next = [...current];
+                next.splice(index, 1);
+                this.record.tags = next;
+                this.tagError = '';
+                this.tagSaving = true;
+                try {
+                    const payload = await this.updateRecord({ tags: next });
+                    this.applyUpdatePayload(payload, { syncNoteDraft: false });
+                } catch (err) {
+                    console.error('Failed to remove tag', err);
+                    this.record.tags = current;
+                    this.tagError = (err && err.message) ? err.message : 'Failed to update tags';
+                } finally {
+                    this.tagSaving = false;
+                }
+            },
+            async saveNotes() {
+                const text = this.noteDraft || '';
+                const previousNotes = {
+                    text: (this.notes && this.notes.text) || '',
+                    updated_at: (this.notes && this.notes.updated_at) || null,
+                    updated_by: (this.notes && this.notes.updated_by) || null,
+                };
+                this.noteError = '';
+                this.noteSaving = true;
+                try {
+                    const payload = await this.updateRecord({ note: { text } });
+                    this.applyUpdatePayload(payload);
+                } catch (err) {
+                    console.error('Failed to save note', err);
+                    this.noteError = (err && err.message) ? err.message : 'Failed to save note';
+                    this.notes = previousNotes;
+                } finally {
+                    this.noteSaving = false;
+                }
+            },
+            applyUpdatePayload(payload = {}, options = {}) {
+                const syncNoteDraft = options.syncNoteDraft !== false;
+                if (payload && payload.record && Array.isArray(payload.record.tags)) {
+                    this.record.tags = payload.record.tags;
+                }
+                if (payload && Object.prototype.hasOwnProperty.call(payload, 'notes')) {
+                    if (payload.notes && typeof payload.notes === 'object') {
+                        this.notes = {
+                            text: payload.notes.text || '',
+                            updated_at: payload.notes.updated_at || null,
+                            updated_by: payload.notes.updated_by || null,
+                        };
+                    } else {
+                        this.notes = { text: '', updated_at: null, updated_by: null };
+                    }
+                    if (syncNoteDraft) {
+                        this.noteDraft = this.notes.text || '';
+                    }
+                }
+            },
+            updateSelectedLanguage(value) {
+                const normalized = this.normalizeLanguage(value) || 'auto';
+                this.selectedLanguage = normalized;
+                this.languageSelectionDirty = true;
+                if (this.record) {
+                    this.record.transcript_language = normalized;
+                }
+                this.languageOptions = this.buildLanguageOptions();
+            },
+            buildLanguageOptions() {
+                const seen = new Set();
+                const order = [];
+                const push = (input) => {
+                    const normalized = this.normalizeLanguage(input);
+                    if (!normalized) {
+                        return;
+                    }
+                    if (seen.has(normalized)) {
+                        return;
+                    }
+                    seen.add(normalized);
+                    order.push(normalized);
+                };
+                push('auto');
+                const defaults = ['en', 'zh', 'yue', 'ja', 'ko'];
+                defaults.forEach(push);
+                const capabilityLanguages = this.transcriptCapabilities?.sensevoice_cli?.languages;
+                if (Array.isArray(capabilityLanguages)) {
+                    capabilityLanguages.forEach(push);
+                }
+                push(this.record?.transcript_language);
+                push(this.transcript?.language);
+                push(this.selectedLanguage);
+                return order.map((value) => ({
+                    value,
+                    label: this.languageLabel(value),
+                }));
+            },
+            normalizeLanguage(value) {
+                if (value === null || value === undefined) {
+                    return '';
+                }
+                if (typeof value === 'object') {
+                    return '';
+                }
+                const text = String(value).trim();
+                if (!text) {
+                    return '';
+                }
+                return text.toLowerCase();
+            },
+            languageLabel(value) {
+                const normalized = this.normalizeLanguage(value);
+                if (!normalized) {
+                    return '—';
+                }
+                const labels = {
+                    auto: 'Auto detect',
+                    en: 'English (en)',
+                    zh: 'Chinese (zh)',
+                    yue: 'Cantonese (yue)',
+                    ja: 'Japanese (ja)',
+                    ko: 'Korean (ko)',
+                    es: 'Spanish (es)',
+                    fr: 'French (fr)',
+                    de: 'German (de)',
+                    pt: 'Portuguese (pt)',
+                    ru: 'Russian (ru)',
+                    vi: 'Vietnamese (vi)',
+                    th: 'Thai (th)',
+                    id: 'Indonesian (id)',
+                };
+                if (labels[normalized]) {
+                    return labels[normalized];
+                }
+                return normalized.toUpperCase();
+            },
+            transcriptGeneratedLabel() {
+                if (!(this.transcript?.available || this.transcriptVisible)) {
+                    return 'Request on demand to analyse conversation outcome.';
+                }
+                const formatted = this.formatGeneratedTimestamp(this.transcript?.generated_at);
+                if (formatted) {
+                    return formatted;
+                }
+                return 'Transcript ready.';
+            },
+            canRequestTranscript() {
+                const capability = this.transcriptCapabilities && this.transcriptCapabilities.sensevoice_cli;
+                if (capability && capability.ready) {
+                    return true;
+                }
+                return Boolean(this.record && this.record.has_transcript);
+            },
+            transcriptCapabilityIssues() {
+                const capability = this.transcriptCapabilities && this.transcriptCapabilities.sensevoice_cli;
+                if (!capability) {
+                    return [];
+                }
+                if (Array.isArray(capability.missing)) {
+                    return capability.missing;
+                }
+                return [];
+            },
+            transcriptTimeline() {
+                const segments = Array.isArray(this.transcript?.segments) ? this.transcript.segments : [];
+                if (!segments.length) {
+                    return [];
+                }
+                const enriched = segments.map((segment, index) => {
+                    const startValue = Number(segment?.start);
+                    const endValue = Number(segment?.end);
+                    const rawChannel = segment ? segment.channel : null;
+                    let channelKey = 'mono';
+                    if (rawChannel !== null && rawChannel !== undefined && rawChannel !== '') {
+                        const numericChannel = Number(rawChannel);
+                        channelKey = Number.isFinite(numericChannel) ? numericChannel : 'mono';
+                    }
+                    let side = 'mono';
+                    if (channelKey !== 'mono') {
+                        const numeric = Number(channelKey);
+                        if (Number.isFinite(numeric)) {
+                            if (numeric === 0) {
+                                side = 'left';
+                            } else if (numeric === 1) {
+                                side = 'right';
+                            } else {
+                                side = numeric % 2 === 0 ? 'left' : 'right';
+                            }
+                        }
+                    }
+                    const label = segment?.speaker || this.channelLabel(channelKey);
+                    const start = Number.isFinite(startValue) ? startValue : null;
+                    const end = Number.isFinite(endValue) ? endValue : null;
+                    return {
+                        key: `timeline-${index}-${segment?.idx ?? index}-${start ?? ''}`,
+                        segment,
+                        side,
+                        label,
+                        start,
+                        end,
+                    };
+                });
+                enriched.sort((a, b) => {
+                    if (a.start === null && b.start === null) {
+                        return 0;
+                    }
+                    if (a.start === null) {
+                        return 1;
+                    }
+                    if (b.start === null) {
+                        return -1;
+                    }
+                    if (a.start === b.start) {
+                        return 0;
+                    }
+                    return a.start - b.start;
+                });
+                return enriched;
+            },
+            transcriptAlignmentClass(side) {
+                if (side === 'right') {
+                    return 'justify-end';
+                }
+                if (side === 'mono') {
+                    return 'justify-center';
+                }
+                return 'justify-start';
+            },
+            transcriptCardTone(side) {
+                if (side === 'right') {
+                    return 'border-emerald-200 bg-emerald-50/80';
+                }
+                if (side === 'left') {
+                    return 'border-sky-200 bg-sky-50/80';
+                }
+                return 'border-slate-200 bg-white/90';
+            },
+            channelLabel(key) {
+                if (key === 'mono' || key === null || key === undefined) {
+                    return 'Mono channel';
+                }
+                const numeric = Number(key);
+                if (!Number.isFinite(numeric)) {
+                    return `Channel ${key}`;
+                }
+                if (numeric === 0) {
+                    return 'Left channel';
+                }
+                if (numeric === 1) {
+                    return 'Right channel';
+                }
+                return `Channel ${numeric + 1}`;
+            },
+            formatSegmentTimestamp(value) {
+                if (value === undefined || value === null) {
+                    return '';
+                }
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) {
+                    return String(value);
+                }
+                return `${numeric.toFixed(1)}s`;
+            },
+            formatSegmentRange(start, end) {
+                const startText = this.formatSegmentTimestamp(start);
+                const endText = this.formatSegmentTimestamp(end);
+                const hasStart = Boolean(startText);
+                const hasEnd = end !== undefined && end !== null && end !== '' && Boolean(endText);
+                if (hasStart && hasEnd) {
+                    if (startText === endText) {
+                        return startText;
+                    }
+                    return `${startText} → ${endText}`;
+                }
+                if (!hasStart && hasEnd) {
+                    return endText;
+                }
+                return startText;
             },
             async requestTranscript(force = false) {
                 if (!this.transcriptUrl) {
@@ -856,9 +1158,14 @@
                 if (force) {
                     payload.force = true;
                 }
-                const preferredLanguage = this.record?.transcript_language || this.transcript?.language;
-                if (preferredLanguage) {
-                    payload.language = preferredLanguage;
+                let selectedLanguage = this.normalizeLanguage(this.selectedLanguage);
+                if (!selectedLanguage) {
+                    selectedLanguage = this.normalizeLanguage(
+                        this.record?.transcript_language || this.transcript?.language,
+                    );
+                }
+                if (selectedLanguage && selectedLanguage !== 'auto') {
+                    payload.language = selectedLanguage;
                 }
                 try {
                     const response = await fetch(this.transcriptUrl, {
@@ -919,7 +1226,11 @@
                     this.transcriptLoading = false;
                 }
             },
-            applyTranscriptPayload(payload = {}) {
+            applyTranscriptPayload(payload = {}, options = {}) {
+                const { resetLanguage = false } = options;
+                const previousTranscript = this.transcript || {};
+                const previousGeneratedAt = previousTranscript?.generated_at || null;
+                const previousRecordLanguage = this.normalizeLanguage(this.record?.transcript_language);
                 const transcript = (payload.transcript && typeof payload.transcript === 'object')
                     ? payload.transcript
                     : { available: false, segments: [] };
@@ -935,9 +1246,55 @@
                     if (typeof transcript.available === 'boolean') {
                         this.record.has_transcript = transcript.available;
                     }
-                    if (transcript.language) {
-                        this.record.transcript_language = transcript.language;
+                }
+                const currentGeneratedAt = transcript?.generated_at || null;
+                const isNewTranscript = Boolean(
+                    currentGeneratedAt && currentGeneratedAt !== previousGeneratedAt,
+                );
+                const candidateLanguage = this.normalizeLanguage(transcript.language)
+                    || previousRecordLanguage
+                    || this.normalizeLanguage(this.selectedLanguage)
+                    || 'auto';
+                const shouldSyncLanguage = resetLanguage
+                    || !this.selectedLanguage
+                    || this.selectedLanguage === ''
+                    || isNewTranscript
+                    || (!this.languageSelectionDirty
+                        && (transcript.available || normalized === 'completed'));
+                if (shouldSyncLanguage) {
+                    this.selectedLanguage = candidateLanguage || 'auto';
+                    this.languageSelectionDirty = false;
+                }
+                if (this.record) {
+                    this.record.transcript_language = this.selectedLanguage || 'auto';
+                }
+                this.languageOptions = this.buildLanguageOptions();
+            },
+            async updateRecord(update) {
+                if (!update || typeof update !== 'object') {
+                    throw new Error('No update payload provided.');
+                }
+                if (!this.updateUrl) {
+                    throw new Error('Update endpoint unavailable.');
+                }
+                try {
+                    const response = await fetch(this.updateUrl, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                        },
+                        body: JSON.stringify(update),
+                    });
+                    if (!response.ok) {
+                        throw new Error(await this.extractErrorMessage(response));
                     }
+                    return await response.json();
+                } catch (err) {
+                    if (err instanceof Error) {
+                        throw err;
+                    }
+                    throw new Error('Failed to update call record');
                 }
             },
             async extractErrorMessage(response) {
@@ -978,6 +1335,14 @@
                 const base = this.normalizeConsoleUrl(this.backUrl || '/console/call-records');
                 const trimmed = base.endsWith('/') ? base.slice(0, -1) : base;
                 return this.normalizeConsoleUrl(`${trimmed}/${recordId}/transcript`);
+            },
+            determineRecordUrl(recordId) {
+                if (!recordId) {
+                    return '';
+                }
+                const base = this.normalizeConsoleUrl(this.backUrl || '/console/call-records');
+                const trimmed = base.endsWith('/') ? base.slice(0, -1) : base;
+                return this.normalizeConsoleUrl(`${trimmed}/${encodeURIComponent(recordId)}`);
             },
             normalizeConsoleUrl(value) {
                 const candidate = (value || '').toString().trim();
@@ -1419,6 +1784,13 @@
                 if (status === 'failed') {
                     return 'Previous transcription failed. Retry to run again.';
                 }
+                if (!this.canRequestTranscript()) {
+                    const reasons = this.transcriptCapabilityIssues();
+                    if (reasons.length) {
+                        return reasons[0];
+                    }
+                    return 'SenseVoice CLI is not ready.';
+                }
                 return 'Request on demand to analyse conversation outcome.';
             },
             transcriptStatusIcon(status, hasTranscript = false, visible = false) {
@@ -1476,18 +1848,55 @@
                 }
                 return `${pad(minutes)}:${pad(secs)}`;
             },
+            formatGeneratedTimestamp(value) {
+                if (!value) {
+                    return '';
+                }
+                const formatted = this.formatDateTime(value);
+                if (!formatted || formatted === '—') {
+                    return '';
+                }
+                return `Generated ${formatted}`;
+            },
             formatDateTime(value) {
                 if (!value) {
                     return '—';
                 }
                 try {
-                    const date = new Date(value);
+                    let input = value;
+                    if (typeof input === 'string') {
+                        input = input.trim();
+                    }
+                    if (!input) {
+                        return '—';
+                    }
+                    let date = new Date(input);
+                    if (Number.isNaN(date.getTime()) && typeof input === 'string') {
+                        const normalized = input.replace(
+                            /(T\d{2}:\d{2}:\d{2}\.)(\d+)(Z|[+-]\d{2}:\d{2})$/,
+                            (_, prefix, fraction, suffix) => `${prefix}${fraction.slice(0, 3)}${suffix}`,
+                        );
+                        if (normalized !== input) {
+                            date = new Date(normalized);
+                        }
+                    }
                     if (Number.isNaN(date.getTime())) {
+                        return typeof input === 'string' ? input : '—';
+                    }
+                    return new Intl.DateTimeFormat(undefined, {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: false,
+                    }).format(date);
+                } catch (err) {
+                    if (typeof value === 'string') {
                         return value;
                     }
-                    return date.toLocaleString();
-                } catch (err) {
-                    return value;
+                    return '—';
                 }
             },
             formatJson(value) {

@@ -1,3 +1,4 @@
+use super::utils::{build_sensevoice_download_command, command_exists, model_file_path};
 use crate::app::AppStateInner;
 use crate::config::{CallRecordConfig, Config, ProxyConfig, UserBackendConfig};
 use crate::console::handlers::forms;
@@ -24,7 +25,8 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::{fs, sync::Arc};
+use std::{fs, sync::Arc, time::Duration as StdDuration};
+use tokio::time::timeout;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
 
@@ -103,6 +105,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/settings/config/storage", patch(update_storage_settings))
         .route("/settings/config/security", patch(update_security_settings))
         .route(
+            "/settings/asr/sensevoice/download",
+            post(download_sensevoice_model),
+        )
+        .route(
             "/settings/departments",
             post(query_departments).put(create_department),
         )
@@ -170,7 +176,20 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
     if let Some(app_state) = state.app_state() {
         let config_arc = app_state.config.clone();
-        let config = config_arc.as_ref();
+        let mut loaded_config: Option<Config> = None;
+
+        if let Some(path) = app_state.config_path.as_ref() {
+            match Config::load(path) {
+                Ok(cfg) => {
+                    loaded_config = Some(cfg);
+                }
+                Err(err) => {
+                    warn!(config_path = %path, ?err, "failed to reload config from disk");
+                }
+            }
+        }
+
+        let config = loaded_config.as_ref().unwrap_or(config_arc.as_ref());
 
         let uptime_duration = now - app_state.uptime;
         let uptime_seconds = uptime_duration.num_seconds().max(0);
@@ -341,11 +360,58 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
         let (storage_meta, storage_profiles) = build_storage_profiles(config);
 
+        let mut sensevoice_meta = JsonValue::Null;
+        if let Some(transcript_cfg) = config
+            .proxy
+            .as_ref()
+            .and_then(|cfg| cfg.transcript.as_ref())
+        {
+            let configured_path = transcript_cfg
+                .models_path
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+            let environment_path = std::env::var("MODEL_PATH")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let effective_path = environment_path.clone().or(configured_path.clone());
+            let model_path_buf = effective_path.as_ref().map(|base| model_file_path(base));
+
+            let mut model_ready = false;
+            if let Some(ref path_buf) = model_path_buf {
+                if let Ok(meta) = tokio::fs::metadata(path_buf).await {
+                    model_ready = meta.is_file();
+                }
+            }
+
+            let model_file = model_path_buf
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+
+            sensevoice_meta = json!({
+                "command": transcript_cfg
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "sensevoice-cli".to_string()),
+                "samplerate": transcript_cfg.samplerate,
+                "default_language": transcript_cfg.default_language.clone(),
+                "timeout_secs": transcript_cfg.timeout_secs,
+                "models_path": configured_path,
+                "effective_models_path": effective_path,
+                "hf_endpoint": transcript_cfg.hf_endpoint.clone(),
+                "model_ready": model_ready,
+                "model_file": model_file,
+            });
+        }
+
         data.insert("storage".to_string(), storage_meta.clone());
         data.insert(
             "storage_profiles".to_string(),
             JsonValue::Array(storage_profiles.clone()),
         );
+        data.insert("sensevoice".to_string(), sensevoice_meta);
 
         data.insert(
             "server".to_string(),
@@ -388,6 +454,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             }),
         );
         data.insert("recording".to_string(), JsonValue::Null);
+        data.insert("sensevoice".to_string(), JsonValue::Null);
     }
 
     let stats = json!({
@@ -1350,6 +1417,16 @@ pub(crate) struct SecuritySettingsPayload {
     acl_rules: Option<Option<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct SenseVoiceDownloadPayload {
+    #[serde(default)]
+    models_path: Option<String>,
+    #[serde(default)]
+    hf_endpoint: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+}
+
 pub async fn update_platform_settings(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
@@ -1717,6 +1794,196 @@ pub async fn update_security_settings(
         "security": {
             "acl_rules": acl_rules,
         }
+    }))
+    .into_response()
+}
+
+pub async fn download_sensevoice_model(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<SenseVoiceDownloadPayload>,
+) -> Response {
+    let Some(app_state) = state.app_state() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Application state is unavailable.",
+        );
+    };
+
+    let Some(config_path) = app_state.config_path.clone() else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Configuration file path is unknown. Start the service with --conf to enable editing.",
+        );
+    };
+
+    let Some(proxy_cfg) = app_state.config.proxy.as_ref() else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Proxy configuration is unavailable.",
+        );
+    };
+
+    let Some(transcript_cfg) = proxy_cfg.transcript.as_ref() else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "SenseVoice CLI transcription is not configured.",
+        );
+    };
+
+    let transcript_cfg = transcript_cfg.clone();
+
+    let command = normalize_opt_string(payload.command.clone())
+        .or_else(|| transcript_cfg.command.clone())
+        .unwrap_or_else(|| "sensevoice-cli".to_string());
+
+    if !command_exists(&command) {
+        return json_error(
+            StatusCode::FAILED_DEPENDENCY,
+            format!(
+                "sensevoice-cli is not available (looked for '{}'). Install via `cargo install sensevoice-cli` or configure proxy.transcript.command.",
+                command
+            ),
+        );
+    }
+
+    let models_path = normalize_opt_string(payload.models_path.clone())
+        .or_else(|| transcript_cfg.models_path.clone())
+        .or_else(|| {
+            std::env::var("MODEL_PATH")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+
+    let models_path = match models_path {
+        Some(path) => path,
+        None => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "SenseVoice models_path is required. Set MODEL_PATH or proxy.transcript.models_path first.",
+            );
+        }
+    };
+
+    if let Err(err) = tokio::fs::create_dir_all(&models_path).await {
+        warn!(path = %models_path, ?err, "failed to prepare models directory");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Failed to prepare models directory '{}': {}",
+                models_path, err
+            ),
+        );
+    }
+
+    let hf_endpoint =
+        normalize_opt_string(payload.hf_endpoint.clone()).or(transcript_cfg.hf_endpoint.clone());
+
+    let timeout_secs = transcript_cfg.timeout_secs.unwrap_or(600);
+
+    let output_result = if timeout_secs > 0 {
+        let mut cmd =
+            build_sensevoice_download_command(&command, &models_path, hf_endpoint.as_deref());
+        match timeout(StdDuration::from_secs(timeout_secs), cmd.output()).await {
+            Ok(result) => result,
+            Err(_) => {
+                return json_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "sensevoice-cli download timed out after {} seconds",
+                        timeout_secs
+                    ),
+                );
+            }
+        }
+    } else {
+        build_sensevoice_download_command(&command, &models_path, hf_endpoint.as_deref())
+            .output()
+            .await
+    };
+
+    let output = match output_result {
+        Ok(output) => output,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to execute sensevoice-cli: {}", err),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr_preview = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .chars()
+            .take(400)
+            .collect::<String>();
+        return json_error(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "sensevoice-cli exited with status {}: {}",
+                output.status.code().unwrap_or(-1),
+                stderr_preview
+            ),
+        );
+    }
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let proxy_table = ensure_table_mut(&mut doc, "proxy");
+    if !proxy_table["transcript"].is_table() {
+        proxy_table["transcript"] = Item::Table(Table::new());
+    }
+    let transcript_table = proxy_table["transcript"].as_table_mut().expect("table");
+    transcript_table["command"] = value(command.clone());
+    transcript_table["models_path"] = value(models_path.clone());
+    match hf_endpoint {
+        Some(ref endpoint) => {
+            transcript_table["hf_endpoint"] = value(endpoint.clone());
+        }
+        None => {
+            transcript_table.remove("hf_endpoint");
+        }
+    }
+
+    let doc_text = doc.to_string();
+    if let Err(resp) = parse_config_from_str(&doc_text) {
+        return resp;
+    }
+
+    if let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
+
+    let model_file = model_file_path(&models_path);
+    let model_ready = tokio::fs::metadata(&model_file)
+        .await
+        .map(|meta| meta.is_file())
+        .unwrap_or(false);
+
+    let stdout_preview = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .take(4000)
+        .collect::<String>();
+    let stderr_preview = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(4000)
+        .collect::<String>();
+
+    Json(json!({
+        "status": "ok",
+        "message": "SenseVoice model download completed.",
+        "models_path": models_path,
+        "model_file": model_file.display().to_string(),
+        "model_ready": model_ready,
+        "stdout": stdout_preview,
+        "stderr": stderr_preview,
     }))
     .into_response()
 }

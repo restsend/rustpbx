@@ -132,7 +132,12 @@ async fn serve_sip_client(cli: Cli, id: u32, state: Arc<AppState>) -> Result<()>
 
     let vad = match cli.vad {
         Some(ref vad_model) => Some(VADOption {
+            #[cfg(feature = "vad_silero")]
             r#type: vad_model.try_into().unwrap_or(VadType::Silero),
+            #[cfg(not(feature = "vad_silero"))]
+            r#type: vad_model
+                .try_into()
+                .unwrap_or(VadType::Other("nop".to_string())),
             ..Default::default()
         }),
         None => None,
@@ -341,7 +346,12 @@ async fn serve_webrtc_client(
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let vad = match cli.vad {
         Some(ref vad_model) => Some(VADOption {
+            #[cfg(feature = "vad_silero")]
             r#type: vad_model.try_into().unwrap_or(VadType::Silero),
+            #[cfg(not(feature = "vad_silero"))]
+            r#type: vad_model
+                .try_into()
+                .unwrap_or(VadType::Other("nop".to_string())),
             ..Default::default()
         }),
         None => None,

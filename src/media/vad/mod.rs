@@ -17,6 +17,7 @@ mod tests;
 mod webrtc;
 use std::sync::Mutex;
 
+#[allow(unused)]
 pub(crate) struct SessionPool<T, F>
 where
     F: Fn() -> Result<T> + Send + Sync + 'static,
@@ -26,6 +27,7 @@ where
     factory: F,
 }
 
+#[allow(unused)]
 impl<T, F> SessionPool<T, F>
 where
     F: Fn() -> Result<T> + Send + Sync + 'static,
@@ -327,6 +329,17 @@ impl VadProcessor {
     ) -> Result<Box<dyn Processor>> {
         let vad: Box<dyn VadEngine> = match option.r#type {
             VadType::Ten => Box::new(ten::TenVad::new(option.clone())?),
+            _ => Box::new(NopVad::new()?),
+        };
+        Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
+    }
+
+    pub fn create_nop(
+        _token: CancellationToken,
+        event_sender: EventSender,
+        option: VADOption,
+    ) -> Result<Box<dyn Processor>> {
+        let vad: Box<dyn VadEngine> = match option.r#type {
             _ => Box::new(NopVad::new()?),
         };
         Ok(Box::new(VadProcessor::new(vad, event_sender, option)?))
