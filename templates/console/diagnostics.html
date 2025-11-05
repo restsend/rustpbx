@@ -190,6 +190,13 @@
                                 <span class="font-semibold text-slate-700">Ran at:</span>
                                 <span x-text="formatDateTime(webrtcTest.result.timestamp)"></span>
                                 <span
+                                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                                    :class="webrtcStatusBadge(webrtcTest.result.status)">
+                                    <span class="h-1.5 w-1.5 rounded-full"
+                                        :class="webrtcStatusDot(webrtcTest.result.status)"></span>
+                                    <span x-text="webrtcStatusLabel(webrtcTest.result.status)"></span>
+                                </span>
+                                <span
                                     class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500"
                                     x-text="webrtcTest.result.iceSource === 'server' ? 'Server ICE' : 'Fallback ICE'"></span>
                             </div>
@@ -206,7 +213,7 @@
                                                     <div class="text-[10px] text-slate-400"
                                                         x-text="'User ' + server.username"></div>
                                                 </template>
-                                                <template x-if="server.credential">
+                                                <template x-if="server.credentialSupplied">
                                                     <div class="text-[10px] text-slate-400">Credential supplied</div>
                                                 </template>
                                             </div>
@@ -237,6 +244,55 @@
                                     </div>
                                 </div>
                             </div>
+                            <template x-if="webrtcTest.result.errorDetail">
+                                <div
+                                    class="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                                    <div class="font-semibold text-amber-800">ICE gathering issue</div>
+                                    <div class="mt-1 break-words" x-text="webrtcTest.result.errorDetail"></div>
+                                </div>
+                            </template>
+                            <template x-if="webrtcTest.result.diagnostics">
+                                <div
+                                    class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+                                    <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        Diagnostics
+                                    </div>
+                                    <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                                        <div>ICE gathering state:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.gatherStatus || 'unknown'"></span>
+                                        </div>
+                                        <div>ICE connection state:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.iceConnectionState || 'unknown'"></span>
+                                        </div>
+                                        <div>Peer connection state:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.connectionState || 'unknown'"></span>
+                                        </div>
+                                        <div>Signaling state:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.signalingState || 'unknown'"></span>
+                                        </div>
+                                        <div>Gather elapsed:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="formatMs(webrtcTest.result.diagnostics.gatherElapsedMs)"></span>
+                                        </div>
+                                        <div>First candidate:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="formatMs(webrtcTest.result.diagnostics.firstCandidateMs)"></span>
+                                        </div>
+                                        <div>Local SDP size:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.localDescriptionSize ? webrtcTest.result.diagnostics.localDescriptionSize + ' chars' : '—'"></span>
+                                        </div>
+                                        <div>ICE servers mode:
+                                            <span class="font-mono text-slate-700"
+                                                x-text="webrtcTest.result.diagnostics.usingServerList ? 'Server list' : 'Fallback STUN'"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
                             <template x-if="webrtcTest.result.candidates.length">
                                 <div class="space-y-2">
                                     <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1438,8 +1494,6 @@
         </section>
 
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/jssip@3.10.0/dist/jssip.min.js" defer></script>
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('testingConsole', (payload) => {
@@ -2058,6 +2112,7 @@
                             const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
                             let firstCandidateMs = null;
                             const allCandidates = [];
+                            const gatherTimeoutMs = 10000;
                             pc = new RTCPeerConnection(config);
                             try {
                                 dataChannel = pc.createDataChannel('rustpbx-probe');
@@ -2071,8 +2126,8 @@
                                         return;
                                     }
                                     settled = true;
-                                    reject(new Error('ICE gathering timed out after 10 seconds.'));
-                                }, 10000);
+                                    reject(new Error(`ICE gathering timed out after ${Math.round(gatherTimeoutMs / 1000)} seconds.`));
+                                }, gatherTimeoutMs);
                                 const finish = () => {
                                     if (settled) {
                                         return;
@@ -2114,7 +2169,12 @@
                             });
                             const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
                             await pc.setLocalDescription(offer);
-                            await gatherPromise;
+                            let gatherError = null;
+                            try {
+                                await gatherPromise;
+                            } catch (err) {
+                                gatherError = err;
+                            }
                             const ended = typeof performance !== 'undefined' ? performance.now() : Date.now();
                             const totalMs = Math.max(1, Math.round(ended - started));
                             const typeCounts = allCandidates.reduce((acc, item) => {
@@ -2135,11 +2195,46 @@
                                 ? servers.map((server) => ({
                                     urls: Array.isArray(server.urls) ? server.urls : [],
                                     username: server.username || null,
-                                    credential: Boolean(server.credential),
+                                    credentialSupplied: Boolean(server.credential),
                                 }))
                                 : [];
-                            this.webrtcTest.result = {
+                            const safeState = (getter) => {
+                                try {
+                                    return getter();
+                                } catch (err) {
+                                    return null;
+                                }
+                            };
+                            const connectionState = safeState(() =>
+                                pc && typeof pc.connectionState === 'string'
+                                    ? pc.connectionState
+                                    : (pc ? pc.connectionState : null),
+                            );
+                            const iceConnectionState = safeState(() => (pc ? pc.iceConnectionState : null));
+                            const signalingState = safeState(() => (pc ? pc.signalingState : null));
+                            const localDescriptionSize = safeState(() => {
+                                if (pc && pc.localDescription && typeof pc.localDescription.sdp === 'string') {
+                                    return pc.localDescription.sdp.length;
+                                }
+                                return null;
+                            });
+                            const status = gatherError ? 'timeout' : 'completed';
+                            const diagnostics = {
+                                gatherStatus: pc ? pc.iceGatheringState : null,
+                                iceConnectionState,
+                                connectionState,
+                                signalingState,
+                                gatherElapsedMs: totalMs,
+                                firstCandidateMs: firstCandidateMs !== null ? Math.round(firstCandidateMs) : null,
+                                candidateTotal: allCandidates.length,
+                                localDescriptionSize,
+                                usingServerList,
+                            };
+                            const resultPayload = {
                                 timestamp: new Date().toISOString(),
+                                status,
+                                errorMessage: gatherError ? gatherError.message : null,
+                                errorDetail: null,
                                 iceSource: usingServerList ? 'server' : 'fallback',
                                 iceServers: normalizedServers,
                                 timeToFirstCandidateMs: firstCandidateMs !== null ? Math.round(firstCandidateMs) : null,
@@ -2148,7 +2243,34 @@
                                 candidateTotal: allCandidates.length,
                                 typeSummary,
                                 addresses: uniqueAddresses,
+                                diagnostics,
                             };
+                            if (gatherError) {
+                                const serverSummary = normalizedServers.length
+                                    ? normalizedServers
+                                        .map((server, index) => {
+                                            const urls = server.urls.join(', ') || '<missing-urls>';
+                                            const auth = server.username ? ` user=${server.username}` : '';
+                                            const cred = server.credentialSupplied ? ' credential=true' : '';
+                                            return `[${index + 1}] ${urls}${auth}${cred}`;
+                                        })
+                                        .join('; ')
+                                    : 'none';
+                                const detailParts = [
+                                    gatherError.message || 'ICE gathering failed.',
+                                    `servers=${serverSummary}`,
+                                    `states[gather=${diagnostics.gatherStatus || 'unknown'}, ice=${diagnostics.iceConnectionState || 'unknown'}, conn=${diagnostics.connectionState || 'unknown'}, signaling=${diagnostics.signalingState || 'unknown'}]`,
+                                    `candidates=${allCandidates.length}`,
+                                    `elapsed=${totalMs}ms`,
+                                    `mode=${usingServerList ? 'server' : 'fallback'}`,
+                                ];
+                                const detailString = detailParts.join(' · ');
+                                this.webrtcTest.error = detailString;
+                                resultPayload.errorDetail = detailString;
+                            } else {
+                                this.webrtcTest.error = null;
+                            }
+                            this.webrtcTest.result = resultPayload;
                         } catch (err) {
                             this.webrtcTest.error = err?.message || 'WebRTC probe failed.';
                             this.webrtcTest.result = null;
@@ -2814,6 +2936,42 @@
                         const seconds = ms / 1000;
                         const precision = seconds >= 10 ? 1 : 2;
                         return `${seconds.toFixed(precision)} s`;
+                    },
+                    webrtcStatusLabel(value) {
+                        switch ((value || '').toLowerCase()) {
+                            case 'completed':
+                                return 'Completed';
+                            case 'timeout':
+                                return 'Timeout';
+                            case 'failed':
+                                return 'Failed';
+                            default:
+                                return 'Unknown';
+                        }
+                    },
+                    webrtcStatusBadge(value) {
+                        switch ((value || '').toLowerCase()) {
+                            case 'completed':
+                                return 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
+                            case 'timeout':
+                                return 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
+                            case 'failed':
+                                return 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
+                            default:
+                                return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+                        }
+                    },
+                    webrtcStatusDot(value) {
+                        switch ((value || '').toLowerCase()) {
+                            case 'completed':
+                                return 'bg-emerald-500';
+                            case 'timeout':
+                                return 'bg-amber-500';
+                            case 'failed':
+                                return 'bg-rose-500';
+                            default:
+                                return 'bg-slate-400';
+                        }
                     },
                     formatList(value) {
                         if (!value || (Array.isArray(value) && !value.length)) {
