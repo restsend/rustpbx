@@ -832,6 +832,14 @@ async fn trigger_call_record_transcript(
 
     let elapsed_secs = start_instant.elapsed().as_secs_f64();
 
+    info!(
+        call_id = %record.call_id,
+        %command,
+        args = %command_args.join(" "),
+        elapsed_secs,
+        "sensevoice-cli transcription completed successfully"
+    );
+
     let transcript_bytes = match tokio::fs::read(&transcript_path).await {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -922,20 +930,10 @@ async fn trigger_call_record_transcript(
     }
 
     if stored_segments.is_empty() {
-        warn!(call_id = %record.call_id, "sensevoice-cli returned empty transcript segments");
-        let _ = (CallRecordActiveModel {
-            id: Set(record.id),
-            transcript_status: Set("failed".to_string()),
-            updated_at: Set(Utc::now()),
-            ..Default::default()
-        })
-        .update(db)
-        .await;
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "message": "sensevoice-cli did not return transcript data" })),
-        )
-            .into_response();
+        info!(
+            call_id = %record.call_id,
+            "sensevoice-cli returned no transcript segments; treating as empty transcript"
+        );
     }
 
     let average_rtf = if rtfs.is_empty() {
