@@ -14,6 +14,7 @@ pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
 pub mod user;
+mod utils;
 
 pub fn bad_request(message: impl Into<String>) -> axum::response::Response {
     let text = message.into();

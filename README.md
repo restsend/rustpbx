@@ -47,7 +47,12 @@ brew install opus
 ```bash
 git clone https://github.com/restsend/rustpbx
 cd rustpbx
+# full features (silero, opus)
 cargo build --release
+
+# without onnxruntime(silero)
+# webrtc vad + console
+cargo build -r --no-default-features --features vad_webrtc,console
 ```
 
 ### Configuration

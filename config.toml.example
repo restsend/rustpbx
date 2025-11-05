@@ -51,10 +51,14 @@ routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 
 [proxy.transcript]
-endpoint = "http://localhost:8000"
+command = "sensevoice-cli"
+# models_path = "/var/lib/sensevoice"
+# hf_endpoint = "https://huggingface.co"
+# extra_args = ["--format", "json"]
+# model = "medium"
 # samplerate = 16000
-# default_language = "en-US"
-# timeout_secs = 30
+# default_language = "zh"
+# timeout_secs = 60
 
 # ACL rules
 acl_rules = [

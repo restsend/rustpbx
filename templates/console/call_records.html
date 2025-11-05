@@ -446,40 +446,38 @@
                                     </div>
                                 </td>
                                 <td class="px-4 py-2">
-                                    <div class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                        :class="transcriptStatusClasses(record.transcript_status, record.has_transcript)"
-                                        :title="transcriptStatusLabel(record.transcript_status, record.has_transcript)">
-                                        <svg x-cloak
-                                            x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'ready'"
-                                            class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l3 3 7-7" />
-                                        </svg>
-                                        <svg x-cloak
-                                            x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'processing'"
-                                            class="h-3 w-3 animate-spin" viewBox="0 0 20 20" fill="none"
-                                            stroke="currentColor" stroke-width="1.5">
-                                            <circle class="opacity-25" cx="10" cy="10" r="7" stroke="currentColor"
-                                                stroke-width="1.5"></circle>
-                                            <path class="opacity-75" fill="currentColor"
-                                                d="M10 3a7 7 0 0 1 7 7h-1.8a5.2 5.2 0 0 0-5.2-5.2V3Z" />
-                                        </svg>
-                                        <svg x-cloak
-                                            x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'failed'"
-                                            class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round"
-                                                d="M6 6l8 8M6 14l8-8" />
-                                        </svg>
-                                        <svg x-cloak
-                                            x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'pending'"
-                                            class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.6">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                        </svg>
-                                        <span
-                                            x-text="transcriptStatusLabel(record.transcript_status, record.has_transcript)"></span>
-                                    </div>
+                                    <template
+                                        x-if="transcriptStatusIcon(record.transcript_status, record.has_transcript) !== 'pending'">
+                                        <div class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                            :class="transcriptStatusClasses(record.transcript_status, record.has_transcript)"
+                                            :title="transcriptStatusLabel(record.transcript_status, record.has_transcript)">
+                                            <svg x-cloak
+                                                x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'ready'"
+                                                class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M5 10l3 3 7-7" />
+                                            </svg>
+                                            <svg x-cloak
+                                                x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'processing'"
+                                                class="h-3 w-3 animate-spin" viewBox="0 0 20 20" fill="none"
+                                                stroke="currentColor" stroke-width="1.5">
+                                                <circle class="opacity-25" cx="10" cy="10" r="7" stroke="currentColor"
+                                                    stroke-width="1.5"></circle>
+                                                <path class="opacity-75" fill="currentColor"
+                                                    d="M10 3a7 7 0 0 1 7 7h-1.8a5.2 5.2 0 0 0-5.2-5.2V3Z" />
+                                            </svg>
+                                            <svg x-cloak
+                                                x-show="transcriptStatusIcon(record.transcript_status, record.has_transcript) === 'failed'"
+                                                class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M6 6l8 8M6 14l8-8" />
+                                            </svg>
+                                            <span
+                                                x-text="transcriptStatusLabel(record.transcript_status, record.has_transcript)"></span>
+                                        </div>
+                                    </template>
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="flex flex-col gap-1 text-xs">

@@ -17,6 +17,7 @@ pub async fn ami_auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    #[allow(unused_mut)]
     let mut allowed = state.config.ami.as_ref().map_or(false, |ami| {
         ami.is_allowed(client_ip.ip().to_string().as_str())
     });

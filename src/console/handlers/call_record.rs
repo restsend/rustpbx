@@ -2,7 +2,7 @@ use crate::callrecord::{
     CallRecord,
     sipflow::{SipFlowDirection, SipMessageItem},
 };
-use crate::config::CallRecordConfig;
+use crate::config::{CallRecordConfig, TranscriptConfig};
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use anyhow::{Context as AnyhowContext, Result as AnyResult};
 use axum::{
@@ -13,8 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use reqwest::{Client, multipart};
+use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
 use sea_orm::sea_query::{Expr, Order};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
@@ -26,11 +25,14 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
+
+use super::utils::{build_sensevoice_transcribe_command, command_exists, model_file_path};
 
 const BILLING_STATUS_CHARGED: &str = "charged";
 const BILLING_STATUS_INCLUDED: &str = "included";
@@ -83,6 +85,22 @@ struct TranscriptRequest {
     language: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCallRecordPayload {
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    note: Option<UpdateCallRecordNote>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCallRecordNote {
+    #[serde(default)]
+    text: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredTranscript {
     version: u8,
@@ -129,37 +147,27 @@ struct StoredTranscriptAnalysis {
 }
 
 #[derive(Debug, Deserialize)]
-struct VoiceApiFileResponse {
+struct SenseVoiceCliSegment {
     #[serde(default)]
-    elapsed: Option<f64>,
+    start_sec: Option<f64>,
     #[serde(default)]
-    #[allow(unused)]
-    data_length: Option<u64>,
+    end_sec: Option<f64>,
     #[serde(default)]
-    audio_duration: Option<f64>,
-    #[serde(default)]
-    rtf: Option<f64>,
-    #[serde(default)]
-    asr_model: Option<String>,
-    #[serde(default)]
-    segments: Vec<VoiceApiSegment>,
+    text: String,
+    #[serde(default, rename = "tags")]
+    _tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct VoiceApiSegment {
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    #[allow(unused)]
-    finished: Option<bool>,
-    #[serde(default)]
-    idx: Option<u32>,
-    #[serde(default)]
-    start: Option<f64>,
-    #[serde(default)]
-    end: Option<f64>,
+struct SenseVoiceCliChannel {
     #[serde(default)]
     channel: Option<u32>,
+    #[serde(default)]
+    duration_sec: Option<f64>,
+    #[serde(default)]
+    rtf: Option<f64>,
+    #[serde(default)]
+    segments: Vec<SenseVoiceCliSegment>,
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -170,7 +178,9 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         )
         .route(
             "/call-records/{id}",
-            get(page_call_record_detail).delete(delete_call_record),
+            get(page_call_record_detail)
+                .patch(update_call_record)
+                .delete(delete_call_record),
         )
         .route(
             "/call-records/{id}/transcript",
@@ -596,11 +606,11 @@ async fn trigger_call_record_transcript(
         .as_ref()
         .and_then(|cfg| cfg.transcript.as_ref())
     {
-        Some(cfg) if !cfg.endpoint.trim().is_empty() => cfg.clone(),
-        _ => {
+        Some(cfg) => cfg.clone(),
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "message": "VoiceAPI transcript endpoint is not configured" })),
+                Json(json!({ "message": "SenseVoice CLI transcription is not configured" })),
             )
                 .into_response();
         }
@@ -637,6 +647,77 @@ async fn trigger_call_record_transcript(
             .into_response();
     }
 
+    let asr_model = Some("sensevoice-cli".to_string());
+    let command = transcript_cfg
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+        .unwrap_or("sensevoice-cli")
+        .to_string();
+
+    if !command_exists(&command) {
+        return (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({
+                "message": format!(
+                    "sensevoice-cli is not available (looked for '{}'). Install via `cargo install sensevoice-cli` or configure proxy.transcript.command.",
+                    command
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let models_path = match resolve_models_path(&transcript_cfg) {
+        Some(path) => path,
+        None => {
+            return (
+                StatusCode::FAILED_DEPENDENCY,
+                Json(json!({
+                    "message": "SenseVoice model path is not configured. Set MODEL_PATH or proxy.transcript.models_path and download the model before transcribing.",
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let model_file = model_file_path(&models_path);
+    if tokio::fs::metadata(&model_file).await.is_err() {
+        return (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(json!({
+                "message": format!(
+                    "SenseVoice model not found at {}. Download it from Settings → ASR integrations before retrying.",
+                    model_file.display()
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let transcript_path = if let Some(cdr_ref) = cdr_data.as_ref() {
+        let mut path = PathBuf::from(&cdr_ref.cdr_path);
+        path.set_extension("transcript.json");
+        path.to_string_lossy().into_owned()
+    } else {
+        let mut path = PathBuf::from(&recording_path);
+        path.set_extension("transcript.json");
+        path.to_string_lossy().into_owned()
+    };
+
+    if let Some(parent) = Path::new(&transcript_path).parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            warn!(dir = %parent.display(), "failed to ensure transcript directory: {}", err);
+        }
+    }
+
+    if tokio::fs::metadata(&transcript_path).await.is_ok() {
+        if let Err(err) = tokio::fs::remove_file(&transcript_path).await {
+            warn!(file = %transcript_path, "failed to remove existing transcript before transcription: {}", err);
+        }
+    }
+
     let now = Utc::now();
     if let Err(err) = (CallRecordActiveModel {
         id: Set(record.id),
@@ -656,9 +737,88 @@ async fn trigger_call_record_transcript(
     }
     record.transcript_status = "processing".to_string();
     record.updated_at = now;
+    let mut cmd: tokio::process::Command = build_sensevoice_transcribe_command(
+        &command,
+        &recording_path,
+        Some(models_path.as_str()),
+        Some(transcript_path.as_str()),
+    );
+    let command_args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
 
-    let endpoint = transcript_cfg.endpoint.trim().trim_end_matches('/');
-    if endpoint.is_empty() {
+    let start_instant = Instant::now();
+    let output_result = if let Some(timeout_secs) = transcript_cfg.timeout_secs {
+        match timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(call_id = %record.call_id, timeout_secs, "sensevoice-cli timed out");
+                let _ = (CallRecordActiveModel {
+                    id: Set(record.id),
+                    transcript_status: Set("failed".to_string()),
+                    updated_at: Set(Utc::now()),
+                    ..Default::default()
+                })
+                .update(db)
+                .await;
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(json!({
+                        "message": format!(
+                            "sensevoice-cli timed out after {} seconds",
+                            timeout_secs
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        cmd.output().await
+    };
+
+    let output = match output_result {
+        Ok(output) => output,
+        Err(err) => {
+            warn!(call_id = %record.call_id, "sensevoice-cli failed to execute: {}", err);
+            let _ = (CallRecordActiveModel {
+                id: Set(record.id),
+                transcript_status: Set("failed".to_string()),
+                updated_at: Set(Utc::now()),
+                ..Default::default()
+            })
+            .update(db)
+            .await;
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "message": format!("Failed to execute sensevoice-cli: {}", err) })),
+            )
+                .into_response();
+        }
+    };
+
+    if !output.status.success() {
+        let stderr_full = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr_preview = stderr_full.chars().take(160).collect::<String>();
+        let mut client_message = "sensevoice-cli transcription failed".to_string();
+        let mut status_code = StatusCode::BAD_GATEWAY;
+
+        if stderr_full.to_ascii_lowercase().contains("unsupported")
+            && stderr_full.to_ascii_lowercase().contains("codec")
+        {
+            client_message = "SenseVoice CLI cannot process this recording codec. Convert the audio to PCM (16 kHz) or enable a supported codec before retrying.".to_string();
+            status_code = StatusCode::UNPROCESSABLE_ENTITY;
+        }
+        warn!(
+            call_id = %record.call_id,
+            %command,
+            args = %command_args.join(" "),
+            code = output.status.code(),
+            stderr = %stderr_preview,
+            "sensevoice-cli exited with failure"
+        );
         let _ = (CallRecordActiveModel {
             id: Set(record.id),
             transcript_status: Set("failed".to_string()),
@@ -667,67 +827,20 @@ async fn trigger_call_record_transcript(
         })
         .update(db)
         .await;
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "message": "Transcript endpoint is invalid" })),
-        )
-            .into_response();
+        return (status_code, Json(json!({ "message": client_message }))).into_response();
     }
 
-    let mut client_builder = Client::builder();
-    if let Some(timeout) = transcript_cfg.timeout_secs {
-        client_builder = client_builder.timeout(Duration::from_secs(timeout));
-    }
-    let client = client_builder.build().unwrap_or_else(|_| Client::new());
+    let elapsed_secs = start_instant.elapsed().as_secs_f64();
 
-    let audio_bytes = match tokio::fs::read(&recording_path).await {
+    let transcript_bytes = match tokio::fs::read(&transcript_path).await {
         Ok(bytes) => bytes,
         Err(err) => {
-            warn!(path = %recording_path, "failed to read recording file: {}", err);
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to read recording file" })),
-            )
-                .into_response();
-        }
-    };
-
-    let file_name = Path::new(&recording_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("recording.wav");
-
-    let mime_type = guess_audio_mime(file_name);
-    let file_name_owned = file_name.to_string();
-    let audio_part = match multipart::Part::bytes(audio_bytes.clone())
-        .file_name(file_name_owned.clone())
-        .mime_str(mime_type)
-    {
-        Ok(part) => part,
-        Err(_) => multipart::Part::bytes(audio_bytes.clone()).file_name(file_name_owned.clone()),
-    };
-
-    let mut form = multipart::Form::new().part("file", audio_part);
-    if let Some(rate) = transcript_cfg.samplerate {
-        form = form.text("samplerate", rate.to_string());
-    }
-    if let Some(lang) = language.as_ref() {
-        form = form.text("language", lang.clone());
-    }
-
-    let url = format!("{}/asr_file", endpoint);
-    let response = match client.post(&url).multipart(form).send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            warn!(call_id = %record.call_id, "failed to call VoiceAPI: {}", err);
+            warn!(
+                call_id = %record.call_id,
+                file = %transcript_path,
+                "sensevoice-cli succeeded but transcript file missing: {}",
+                err
+            );
             let _ = (CallRecordActiveModel {
                 id: Set(record.id),
                 transcript_status: Set("failed".to_string()),
@@ -738,35 +851,26 @@ async fn trigger_call_record_transcript(
             .await;
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": "Failed to contact VoiceAPI" })),
+                Json(json!({ "message": "SenseVoice CLI did not produce transcript data" })),
             )
                 .into_response();
         }
     };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        warn!(call_id = %record.call_id, status = %status, "VoiceAPI returned error: {}", body);
-        let _ = (CallRecordActiveModel {
-            id: Set(record.id),
-            transcript_status: Set("failed".to_string()),
-            updated_at: Set(Utc::now()),
-            ..Default::default()
-        })
-        .update(db)
-        .await;
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "message": "VoiceAPI transcription failed" })),
-        )
-            .into_response();
-    }
-
-    let payload_json = match response.json::<VoiceApiFileResponse>().await {
-        Ok(payload) => payload,
+    let cli_output: Vec<SenseVoiceCliChannel> = match serde_json::from_slice(&transcript_bytes) {
+        Ok(parsed) => parsed,
         Err(err) => {
-            warn!(call_id = %record.call_id, "failed to parse VoiceAPI response: {}", err);
+            let preview = String::from_utf8_lossy(&transcript_bytes)
+                .chars()
+                .take(160)
+                .collect::<String>();
+            warn!(
+                call_id = %record.call_id,
+                error = %err,
+                file = %transcript_path,
+                preview = %preview,
+                "failed to parse sensevoice-cli transcript file"
+            );
             let _ = (CallRecordActiveModel {
                 id: Set(record.id),
                 transcript_status: Set("failed".to_string()),
@@ -777,38 +881,48 @@ async fn trigger_call_record_transcript(
             .await;
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": "Invalid VoiceAPI response" })),
+                Json(json!({ "message": "Invalid sensevoice-cli output" })),
             )
                 .into_response();
         }
     };
-
-    let VoiceApiFileResponse {
-        elapsed,
-        data_length: _,
-        audio_duration,
-        rtf,
-        asr_model,
-        segments,
-    } = payload_json;
 
     let mut stored_segments: Vec<StoredTranscriptSegment> = Vec::new();
-    for segment in segments.into_iter() {
-        let text = segment.text.trim().to_string();
-        if text.is_empty() {
-            continue;
+    let mut idx_counter: u32 = 0;
+    let mut max_end = 0.0_f64;
+    let mut rtfs: Vec<f64> = Vec::new();
+    let mut durations: Vec<f64> = Vec::new();
+
+    for channel in cli_output.into_iter() {
+        if let Some(rtf_value) = channel.rtf {
+            rtfs.push(rtf_value);
         }
-        stored_segments.push(StoredTranscriptSegment {
-            idx: segment.idx,
-            text,
-            start: segment.start,
-            end: segment.end,
-            channel: segment.channel,
-        });
+        if let Some(duration_value) = channel.duration_sec {
+            durations.push(duration_value);
+        }
+        for segment in channel.segments.into_iter() {
+            let text = segment.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(end) = segment.end_sec {
+                if end > max_end {
+                    max_end = end;
+                }
+            }
+            stored_segments.push(StoredTranscriptSegment {
+                idx: Some(idx_counter),
+                text: text.to_string(),
+                start: segment.start_sec,
+                end: segment.end_sec,
+                channel: channel.channel,
+            });
+            idx_counter += 1;
+        }
     }
 
     if stored_segments.is_empty() {
-        warn!(call_id = %record.call_id, "VoiceAPI returned empty transcript segments");
+        warn!(call_id = %record.call_id, "sensevoice-cli returned empty transcript segments");
         let _ = (CallRecordActiveModel {
             id: Set(record.id),
             transcript_status: Set("failed".to_string()),
@@ -819,10 +933,23 @@ async fn trigger_call_record_transcript(
         .await;
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "message": "VoiceAPI did not return transcript data" })),
+            Json(json!({ "message": "sensevoice-cli did not return transcript data" })),
         )
             .into_response();
     }
+
+    let average_rtf = if rtfs.is_empty() {
+        None
+    } else {
+        Some(rtfs.iter().copied().sum::<f64>() / rtfs.len() as f64)
+    };
+
+    let audio_duration = durations.into_iter().fold(None, |acc: Option<f64>, value| {
+        Some(acc.map_or(value, |current| current.max(value)))
+    });
+
+    let elapsed = Some(elapsed_secs);
+    let rtf = average_rtf;
 
     let mut dedup = HashSet::new();
     let mut text_parts: Vec<String> = Vec::new();
@@ -857,10 +984,13 @@ async fn trigger_call_record_transcript(
         asr_model,
     };
 
-    let language_final = language.clone().or(record.transcript_language.clone());
+    let language_final = language
+        .clone()
+        .or(record.transcript_language.clone())
+        .or(transcript_cfg.default_language.clone());
     let stored_transcript = StoredTranscript {
         version: 1,
-        source: "voiceapi".to_string(),
+        source: "sensevoice-cli".to_string(),
         generated_at: Utc::now(),
         language: language_final.clone(),
         duration_secs,
@@ -871,22 +1001,6 @@ async fn trigger_call_record_transcript(
     };
 
     let excerpt = transcript_excerpt(&transcript_text, 240);
-
-    let transcript_path = if let Some(cdr_ref) = cdr_data.as_ref() {
-        let mut path = PathBuf::from(&cdr_ref.cdr_path);
-        path.set_extension("transcript.json");
-        path.to_string_lossy().into_owned()
-    } else {
-        let mut path = PathBuf::from(&recording_path);
-        path.set_extension("transcript.json");
-        path.to_string_lossy().into_owned()
-    };
-
-    if let Some(parent) = Path::new(&transcript_path).parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            warn!(dir = %parent.display(), "failed to ensure transcript directory: {}", err);
-        }
-    }
 
     match serde_json::to_string_pretty(&stored_transcript) {
         Ok(serialized) => {
@@ -1160,6 +1274,165 @@ async fn page_call_record_detail(
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
         }),
     )
+}
+
+async fn update_call_record(
+    AxumPath(pk): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<UpdateCallRecordPayload>,
+) -> Response {
+    if payload.tags.is_none() && payload.note.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "message": "No updates supplied" })),
+        )
+            .into_response();
+    }
+
+    let db = state.db();
+    let mut record = match CallRecordEntity::find_by_id(pk).one(db).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(
+                call_record_id = pk,
+                "failed to load call record for update: {}", err
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut active: CallRecordActiveModel = record.clone().into();
+    let mut changed = false;
+
+    if let Some(tags_input) = payload.tags.as_ref() {
+        let normalized = normalize_string_list(Some(tags_input));
+        let new_tags_value = if normalized.is_empty() {
+            None
+        } else {
+            Some(Value::Array(
+                normalized
+                    .iter()
+                    .map(|value| Value::String(value.clone()))
+                    .collect(),
+            ))
+        };
+        let tags_changed = match (&record.tags, &new_tags_value) {
+            (None, None) => false,
+            (Some(old), Some(new)) => old != new,
+            _ => true,
+        };
+        if tags_changed {
+            active.tags = Set(new_tags_value.clone());
+            record.tags = new_tags_value;
+            changed = true;
+        }
+    }
+
+    let mut metadata_value = record.metadata.clone();
+    if let Some(note_payload) = payload.note.as_ref() {
+        let mut metadata_map = match metadata_value.as_ref() {
+            Some(Value::Object(map)) => map.clone(),
+            Some(_) => {
+                warn!(
+                    call_record_id = pk,
+                    "unexpected metadata format; resetting for note update"
+                );
+                JsonMap::new()
+            }
+            None => JsonMap::new(),
+        };
+
+        let text = note_payload
+            .text
+            .as_ref()
+            .map(|value| value.trim())
+            .unwrap_or("")
+            .to_string();
+
+        if text.is_empty() {
+            if metadata_map.remove("console_note").is_some() {
+                metadata_value = if metadata_map.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(metadata_map.clone()))
+                };
+                active.metadata = Set(metadata_value.clone());
+                changed = true;
+            }
+        } else {
+            let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+            let updated_by = {
+                let username = user.username.trim();
+                if username.is_empty() {
+                    user.email.clone()
+                } else {
+                    user.username.clone()
+                }
+            };
+            let note_value = json!({
+                "text": text,
+                "updated_at": updated_at,
+                "updated_by": updated_by,
+            });
+            let existing_equal = metadata_map
+                .get("console_note")
+                .map(|value| value == &note_value)
+                .unwrap_or(false);
+            if !existing_equal {
+                metadata_map.insert("console_note".to_string(), note_value);
+                metadata_value = Some(Value::Object(metadata_map.clone()));
+                active.metadata = Set(metadata_value.clone());
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        let response = json!({
+            "status": "noop",
+            "record": {
+                "id": record.id,
+                "tags": extract_tags(&record.tags),
+            },
+            "notes": build_console_note_payload(&metadata_value),
+        });
+        return Json(response).into_response();
+    }
+
+    active.updated_at = Set(Utc::now());
+    let updated_record = match active.update(db).await {
+        Ok(model) => model,
+        Err(err) => {
+            warn!(call_record_id = pk, "failed to update call record: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to update call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let response = json!({
+        "status": "ok",
+        "record": {
+            "id": updated_record.id,
+            "tags": extract_tags(&updated_record.tags),
+        },
+        "notes": build_console_note_payload(&updated_record.metadata),
+    });
+    Json(response).into_response()
 }
 
 async fn delete_call_record(
@@ -1883,7 +2156,7 @@ async fn load_stored_transcript(
         match read_transcript_file(&path).await {
             Ok(mut transcript) => {
                 if transcript.source.trim().is_empty() {
-                    transcript.source = "voiceapi".to_string();
+                    transcript.source = "sensevoice-cli".to_string();
                 }
                 return Ok(Some(transcript));
             }
@@ -1894,6 +2167,21 @@ async fn load_stored_transcript(
     }
 
     Ok(None)
+}
+
+fn resolve_models_path(cfg: &TranscriptConfig) -> Option<String> {
+    if let Ok(env_path) = std::env::var("MODEL_PATH") {
+        let trimmed = env_path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    cfg.models_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
 }
 
 async fn read_transcript_file(path: &str) -> AnyResult<StoredTranscript> {
@@ -2277,6 +2565,67 @@ fn build_detail_payload(
         })
         .unwrap_or(Value::Null);
 
+    let transcript_capabilities = {
+        let mut configured = false;
+        let mut command: Option<String> = None;
+        let mut command_exists_flag = false;
+        let mut models_path: Option<String> = None;
+        let mut model_exists_flag = false;
+        let mut issues: Vec<String> = Vec::new();
+
+        if let Some(app) = state.app_state() {
+            if let Some(proxy_cfg) = app.config.proxy.as_ref() {
+                if let Some(transcript_cfg) = proxy_cfg.transcript.as_ref() {
+                    configured = true;
+                    let resolved_command = transcript_cfg
+                        .command
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("sensevoice-cli");
+                    command = Some(resolved_command.to_string());
+                    command_exists_flag = command_exists(resolved_command);
+
+                    if let Some(path) = resolve_models_path(transcript_cfg) {
+                        models_path = Some(path.clone());
+                        let model_path = model_file_path(&path);
+                        model_exists_flag = model_path.exists();
+                        if !model_exists_flag {
+                            issues.push(format!(
+                                "SenseVoice model not found at {}.",
+                                model_path.display()
+                            ));
+                        }
+                    } else {
+                        issues.push("SenseVoice models_path is not configured.".to_string());
+                    }
+
+                    if !command_exists_flag {
+                        issues.push("sensevoice-cli binary not found on server PATH.".to_string());
+                    }
+                } else {
+                    issues.push("SenseVoice CLI transcription is not configured.".to_string());
+                }
+            } else {
+                issues.push("Proxy configuration unavailable.".to_string());
+            }
+        } else {
+            issues.push("Application state unavailable.".to_string());
+        }
+
+        json!({
+            "sensevoice_cli": {
+                "configured": configured,
+                "command": command,
+                "command_exists": command_exists_flag,
+                "models_path": models_path,
+                "model_exists": model_exists_flag,
+                "ready": configured && command_exists_flag && model_exists_flag,
+                "missing": issues,
+            }
+        })
+    };
+
     let media_metrics = json!({
         "audio_codec": json_lookup_str(&record.metadata, "audio_codec"),
         "rtp_packets": json_lookup_number(&record.analytics, "rtp_packets"),
@@ -2353,8 +2702,8 @@ fn build_detail_payload(
         "sip_flow": sip_flow_value,
         "media_metrics": media_metrics,
         "transcript": transcript_payload,
-    "transcript_preview": transcript_preview,
-        "notes": Value::Null,
+        "transcript_preview": transcript_preview,
+        "notes": build_console_note_payload(&record.metadata),
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
@@ -2363,11 +2712,13 @@ fn build_detail_payload(
             "snapshot": record.billing_snapshot.clone().unwrap_or(Value::Null),
             "result": record.billing_result.clone().unwrap_or(Value::Null),
         }),
+        "transcript_capabilities": transcript_capabilities,
         "actions": json!({
             "download_recording": download_recording,
             "download_metadata": metadata_download,
             "download_sip_flow": sip_flow_download,
             "transcript_url": state.url_for(&format!("/call-records/{}/transcript", record.id)),
+            "update_record": state.url_for(&format!("/call-records/{}", record.id)),
         }),
     })
 }
@@ -2708,6 +3059,39 @@ fn extract_tags(tags: &Option<Value>) -> Vec<String> {
             .filter(|value| !value.is_empty())
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ConsoleNote {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    updated_by: Option<String>,
+}
+
+fn extract_console_note(metadata: &Option<Value>) -> Option<ConsoleNote> {
+    let value = metadata
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .and_then(|map| map.get("console_note"))?
+        .clone();
+    let mut note: ConsoleNote = serde_json::from_value(value).ok()?;
+    note.text = note.text.trim().to_string();
+    Some(note)
+}
+
+fn build_console_note_payload(metadata: &Option<Value>) -> Value {
+    match extract_console_note(metadata) {
+        Some(note) => json!({
+            "text": note.text,
+            "updated_at": note.updated_at,
+            "updated_by": note.updated_by,
+        }),
+        None => Value::Null,
     }
 }
 

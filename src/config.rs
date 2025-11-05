@@ -293,7 +293,12 @@ pub enum CallRecordConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct TranscriptConfig {
-    pub endpoint: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub models_path: Option<String>,
+    #[serde(default)]
+    pub hf_endpoint: Option<String>,
     #[serde(default)]
     pub samplerate: Option<u32>,
     #[serde(default)]

@@ -4,7 +4,6 @@ use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp,
     collections::HashMap,
     path::Path,
     sync::{
@@ -478,7 +477,7 @@ impl Recorder {
             chunk_size
         );
 
-        let frame_samples = cmp::max(1, (writer.sample_rate() / 50) as usize);
+        let frame_samples = std::cmp::max(1, (writer.sample_rate() / 50) as usize);
         let frame_step = frame_samples * 2; // stereo samples
         let mut pending: Vec<i16> = Vec::new();
 

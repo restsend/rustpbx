@@ -81,6 +81,7 @@ impl Default for StreamEngine {
         engine.register_vad(VadType::WebRTC, VadProcessor::create_webrtc);
         #[cfg(feature = "vad_ten")]
         engine.register_vad(VadType::Ten, VadProcessor::create_ten);
+        engine.register_vad(VadType::Other("nop".to_string()), VadProcessor::create_nop);
 
         engine.register_asr(
             TranscriptionType::TencentCloud,
