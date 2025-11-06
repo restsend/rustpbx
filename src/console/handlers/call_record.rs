@@ -1,14 +1,15 @@
 use crate::callrecord::{
     CallRecord,
     sipflow::{SipFlowDirection, SipMessageItem},
+    storage::{self, CdrStorage},
 };
-use crate::config::{CallRecordConfig, TranscriptConfig};
+use crate::config::TranscriptConfig;
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use anyhow::{Context as AnyhowContext, Result as AnyResult};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{self, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -23,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
 use std::{
     collections::{HashMap, HashSet},
+    env,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -31,6 +34,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
+use urlencoding::encode;
+use uuid::Uuid;
 
 use super::utils::{build_sensevoice_transcribe_command, command_exists, model_file_path};
 
@@ -74,6 +79,12 @@ struct QueryCallRecordFilters {
     tags: Option<Vec<String>>,
     #[serde(default)]
     billing_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct DownloadRequest {
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -185,6 +196,14 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/call-records/{id}/transcript",
             get(get_call_record_transcript).post(trigger_call_record_transcript),
+        )
+        .route(
+            "/call-records/{id}/metadata",
+            get(download_call_record_metadata),
+        )
+        .route(
+            "/call-records/{id}/sip-flow",
+            get(download_call_record_sip_flow),
         )
         .route("/call-records/{id}/recording", get(stream_call_recording))
 }
@@ -370,6 +389,237 @@ fn parse_range_header(range: &str, file_len: u64) -> Option<(u64, u64)> {
     }
 
     Some((start_pos, end_pos))
+}
+
+fn safe_download_filename(path: &str, fallback: &str) -> String {
+    let candidate = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+
+    let sanitized: String = candidate
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+
+    if sanitized.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+async fn download_call_record_metadata(
+    AxumPath(pk): AxumPath<i64>,
+    Query(params): Query<DownloadRequest>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match CallRecordEntity::find_by_id(pk).one(db).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(id = pk, "failed to load call record metadata: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let cdr_data = match load_cdr_data(&state, &model).await {
+        Some(data) => data,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Metadata file not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(requested) = params
+        .path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if requested != cdr_data.cdr_path {
+            warn!(
+                id = pk,
+                requested_path = requested,
+                actual_path = %cdr_data.cdr_path,
+                "metadata download path mismatch"
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Metadata file not found" })),
+            )
+                .into_response();
+        }
+    }
+
+    let filename = safe_download_filename(&cdr_data.cdr_path, &format!("call-record-{}.json", pk));
+
+    let raw = cdr_data.raw_content;
+    let len_header = raw.len().to_string();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&len_header) {
+        headers.insert(http::header::CONTENT_LENGTH, value);
+    }
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+    {
+        headers.insert(http::header::CONTENT_DISPOSITION, disposition);
+    }
+
+    (headers, Body::from(raw)).into_response()
+}
+
+async fn download_call_record_sip_flow(
+    AxumPath(pk): AxumPath<i64>,
+    Query(params): Query<DownloadRequest>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let model = match CallRecordEntity::find_by_id(pk).one(db).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(id = pk, "failed to load call record sip flow: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let cdr_data = match load_cdr_data(&state, &model).await {
+        Some(data) => data,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "SIP flow file not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let requested_path = params
+        .path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+
+    let selected_path = if let Some(path) = requested_path {
+        if cdr_data
+            .sip_flow_paths
+            .iter()
+            .any(|entry| entry.path == path)
+        {
+            path.to_string()
+        } else {
+            warn!(
+                id = pk,
+                requested_path = path,
+                "sip flow path not registered for record"
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "SIP flow file not found" })),
+            )
+                .into_response();
+        }
+    } else if let Some(entry) = cdr_data.sip_flow_paths.first() {
+        entry.path.clone()
+    } else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "SIP flow file not found" })),
+        )
+            .into_response();
+    };
+
+    let mut bytes: Option<Vec<u8>> = None;
+
+    if let Some(storage_ref) = cdr_data.storage.as_ref() {
+        match storage_ref.read_bytes(&selected_path).await {
+            Ok(data) => bytes = Some(data),
+            Err(err) => {
+                warn!(path = %selected_path, "failed to download sip flow from storage: {}", err);
+            }
+        }
+    }
+
+    if bytes.is_none() {
+        match tokio::fs::read(&selected_path).await {
+            Ok(data) => bytes = Some(data),
+            Err(err) => {
+                warn!(path = %selected_path, "failed to read sip flow file: {}", err);
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "message": "SIP flow file not found" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let data = bytes.unwrap_or_default();
+    let filename =
+        safe_download_filename(&selected_path, &format!("call-record-{}-sip-flow.json", pk));
+    let len_header = data.len().to_string();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&len_header) {
+        headers.insert(http::header::CONTENT_LENGTH, value);
+    }
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+    {
+        headers.insert(http::header::CONTENT_DISPOSITION, disposition);
+    }
+
+    (headers, Body::from(data)).into_response()
 }
 
 async fn page_call_records(
@@ -696,7 +946,9 @@ async fn trigger_call_record_transcript(
             .into_response();
     }
 
-    let transcript_path = if let Some(cdr_ref) = cdr_data.as_ref() {
+    let storage = cdr_data.as_ref().and_then(|cdr| cdr.storage.clone());
+
+    let transcript_storage_path = if let Some(cdr_ref) = cdr_data.as_ref() {
         let mut path = PathBuf::from(&cdr_ref.cdr_path);
         path.set_extension("transcript.json");
         path.to_string_lossy().into_owned()
@@ -706,17 +958,38 @@ async fn trigger_call_record_transcript(
         path.to_string_lossy().into_owned()
     };
 
-    if let Some(parent) = Path::new(&transcript_path).parent() {
+    let local_transcript_path = match storage.as_ref() {
+        Some(storage_ref) => storage_ref
+            .local_full_path(&transcript_storage_path)
+            .unwrap_or_else(|| {
+                let mut temp_path = env::temp_dir();
+                temp_path.push(format!(
+                    "rustpbx-{}-{}.transcript.json",
+                    record.call_id,
+                    Uuid::new_v4()
+                ));
+                temp_path
+            }),
+        None => PathBuf::from(&transcript_storage_path),
+    };
+
+    if let Some(parent) = local_transcript_path.parent() {
         if let Err(err) = tokio::fs::create_dir_all(parent).await {
             warn!(dir = %parent.display(), "failed to ensure transcript directory: {}", err);
         }
     }
 
-    if tokio::fs::metadata(&transcript_path).await.is_ok() {
-        if let Err(err) = tokio::fs::remove_file(&transcript_path).await {
-            warn!(file = %transcript_path, "failed to remove existing transcript before transcription: {}", err);
+    if tokio::fs::metadata(&local_transcript_path).await.is_ok() {
+        if let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
+            warn!(
+                file = %local_transcript_path.display(),
+                "failed to remove existing transcript before transcription: {}",
+                err
+            );
         }
     }
+
+    let transcript_output_path = local_transcript_path.to_string_lossy().into_owned();
 
     let now = Utc::now();
     if let Err(err) = (CallRecordActiveModel {
@@ -741,7 +1014,7 @@ async fn trigger_call_record_transcript(
         &command,
         &recording_path,
         Some(models_path.as_str()),
-        Some(transcript_path.as_str()),
+        Some(transcript_output_path.as_str()),
     );
     let command_args: Vec<String> = cmd
         .as_std()
@@ -840,12 +1113,12 @@ async fn trigger_call_record_transcript(
         "sensevoice-cli transcription completed successfully"
     );
 
-    let transcript_bytes = match tokio::fs::read(&transcript_path).await {
+    let transcript_bytes = match tokio::fs::read(&local_transcript_path).await {
         Ok(bytes) => bytes,
         Err(err) => {
             warn!(
                 call_id = %record.call_id,
-                file = %transcript_path,
+                file = %local_transcript_path.display(),
                 "sensevoice-cli succeeded but transcript file missing: {}",
                 err
             );
@@ -875,7 +1148,7 @@ async fn trigger_call_record_transcript(
             warn!(
                 call_id = %record.call_id,
                 error = %err,
-                file = %transcript_path,
+                file = %local_transcript_path.display(),
                 preview = %preview,
                 "failed to parse sensevoice-cli transcript file"
             );
@@ -1000,25 +1273,8 @@ async fn trigger_call_record_transcript(
 
     let excerpt = transcript_excerpt(&transcript_text, 240);
 
-    match serde_json::to_string_pretty(&stored_transcript) {
-        Ok(serialized) => {
-            if let Err(err) = tokio::fs::write(&transcript_path, serialized).await {
-                warn!(file = %transcript_path, "failed to write transcript file: {}", err);
-                let _ = (CallRecordActiveModel {
-                    id: Set(record.id),
-                    transcript_status: Set("failed".to_string()),
-                    updated_at: Set(Utc::now()),
-                    ..Default::default()
-                })
-                .update(db)
-                .await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "message": "Failed to persist transcript" })),
-                )
-                    .into_response();
-            }
-        }
+    let serialized_transcript = match serde_json::to_vec_pretty(&stored_transcript) {
+        Ok(bytes) => bytes,
         Err(err) => {
             warn!(call_id = %record.call_id, "failed to serialize transcript: {}", err);
             let _ = (CallRecordActiveModel {
@@ -1035,12 +1291,77 @@ async fn trigger_call_record_transcript(
             )
                 .into_response();
         }
-    }
+    };
+
+    let transcript_metadata_path = if let Some(storage_ref) = storage.as_ref() {
+        match storage_ref
+            .write_bytes(&transcript_storage_path, &serialized_transcript)
+            .await
+        {
+            Ok(stored_path) => {
+                if !storage_ref.is_local() {
+                    if let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
+                        if err.kind() != ErrorKind::NotFound {
+                            warn!(
+                                file = %local_transcript_path.display(),
+                                "failed to remove transient transcript file: {}",
+                                err
+                            );
+                        }
+                    }
+                }
+                stored_path
+            }
+            Err(err) => {
+                warn!(
+                    call_id = %record.call_id,
+                    path = %transcript_storage_path,
+                    "failed to persist transcript via call record storage: {}",
+                    err
+                );
+                let _ = (CallRecordActiveModel {
+                    id: Set(record.id),
+                    transcript_status: Set("failed".to_string()),
+                    updated_at: Set(Utc::now()),
+                    ..Default::default()
+                })
+                .update(db)
+                .await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": "Failed to persist transcript" })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        if let Err(err) = tokio::fs::write(&local_transcript_path, &serialized_transcript).await {
+            warn!(
+                file = %local_transcript_path.display(),
+                "failed to write transcript file: {}",
+                err
+            );
+            let _ = (CallRecordActiveModel {
+                id: Set(record.id),
+                transcript_status: Set("failed".to_string()),
+                updated_at: Set(Utc::now()),
+                ..Default::default()
+            })
+            .update(db)
+            .await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to persist transcript" })),
+            )
+                .into_response();
+        }
+        local_transcript_path.to_string_lossy().into_owned()
+    };
 
     update_cdr_with_transcript(
         cdr_data.as_ref(),
         &stored_transcript,
-        &transcript_path,
+        &transcript_metadata_path,
         &excerpt,
     )
     .await;
@@ -1052,7 +1373,7 @@ async fn trigger_call_record_transcript(
     metadata_map.insert(
         "transcript".to_string(),
         json!({
-            "file": transcript_path,
+            "file": transcript_metadata_path,
             "language": language_final,
             "generated_at": stored_transcript.generated_at.to_rfc3339(),
             "duration_secs": stored_transcript.duration_secs,
@@ -1200,7 +1521,7 @@ async fn page_call_record_detail(
     };
 
     let mut sip_flow_items: Vec<LeggedSipMessage> = if let Some(ref cdr) = cdr_data {
-        load_sip_flow_from_files(&cdr.sip_flow_paths).await
+        load_sip_flow_from_files(cdr.storage.as_ref(), &cdr.sip_flow_paths).await
     } else {
         Vec::new()
     };
@@ -1715,6 +2036,17 @@ struct RelatedContext {
     sip_trunks: HashMap<i64, SipTrunkModel>,
 }
 
+fn resolve_cdr_storage(state: &ConsoleState) -> Option<CdrStorage> {
+    let app = state.app_state()?;
+    match storage::resolve_storage(app.config.callrecord.as_ref()) {
+        Ok(storage) => storage,
+        Err(err) => {
+            warn!("failed to resolve call record storage: {}", err);
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SipFlowFileRef {
     leg: Option<String>,
@@ -1909,8 +2241,10 @@ fn friendly_leg_role_label(role: &str) -> &'static str {
 
 struct CdrData {
     record: CallRecord,
+    raw_content: String,
     sip_flow_paths: Vec<SipFlowFileRef>,
     cdr_path: String,
+    storage: Option<CdrStorage>,
 }
 
 fn build_record_payload(
@@ -2063,56 +2397,53 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
 }
 
 async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
-    let root = state.app_state().and_then(|app| {
-        let config = app.config.clone();
-        config.callrecord.as_ref().and_then(|cfg| match cfg {
-            CallRecordConfig::Local { root } => Some(root.clone()),
-            _ => None,
-        })
-    });
+    let storage = resolve_cdr_storage(state);
 
-    let metadata_path = extract_cdr_path_from_metadata(&record.metadata);
     let mut candidates: Vec<String> = Vec::new();
-
-    if let Some(path) = metadata_path {
-        if Path::new(&path).is_absolute() {
-            candidates.push(path);
-        } else if let Some(ref root_path) = root {
-            candidates.push(join_root_path(root_path, &path));
-        } else {
-            candidates.push(path);
-        }
+    if let Some(path) = extract_cdr_path_from_metadata(&record.metadata) {
+        candidates.push(path);
     }
 
     if candidates.is_empty() {
-        if let Some(ref root_path) = root {
-            let fallback = default_cdr_file_name_for_model(record);
-            candidates.push(join_root_path(root_path, &fallback));
-        }
+        candidates.push(default_cdr_file_name_for_model(record));
     }
 
     for candidate in candidates {
-        match tokio::fs::read_to_string(&candidate).await {
-            Ok(content) => match serde_json::from_str::<CallRecord>(&content) {
+        let mut content: Option<String> = None;
+
+        if let Some(ref storage_ref) = storage {
+            match storage_ref.read_to_string(&candidate).await {
+                Ok(value) => content = Some(value),
+                Err(err) => {
+                    warn!(call_id = %record.call_id, path = %candidate, "failed to load CDR from storage: {}", err);
+                }
+            }
+        }
+
+        if content.is_none() {
+            match tokio::fs::read_to_string(&candidate).await {
+                Ok(value) => content = Some(value),
+                Err(err) => {
+                    warn!(call_id = %record.call_id, path = %candidate, "failed to read CDR file: {}", err);
+                }
+            }
+        }
+
+        if let Some(raw) = content {
+            match serde_json::from_str::<CallRecord>(&raw) {
                 Ok(parsed) => {
-                    let base_dir = Path::new(&candidate).parent().map(|p| p.to_path_buf());
-                    let sip_flow_paths = extract_sip_flow_paths_from_cdr(
-                        &parsed,
-                        root.as_deref(),
-                        base_dir.as_deref(),
-                    );
+                    let sip_flow_paths = extract_sip_flow_paths_from_cdr(&parsed);
                     return Some(CdrData {
                         record: parsed,
+                        raw_content: raw,
                         sip_flow_paths,
                         cdr_path: candidate,
+                        storage: storage.clone(),
                     });
                 }
                 Err(err) => {
                     warn!(call_id = %record.call_id, path = %candidate, "failed to parse CDR file: {}", err);
                 }
-            },
-            Err(err) => {
-                warn!(call_id = %record.call_id, path = %candidate, "failed to read CDR file: {}", err);
             }
         }
     }
@@ -2140,18 +2471,14 @@ async fn load_stored_transcript(
         }
     }
 
-    candidates
-        .iter_mut()
-        .for_each(|candidate| *candidate = absolutize_transcript_path(candidate, cdr));
-
     candidates.retain(|candidate| !candidate.trim().is_empty());
     candidates.dedup();
 
-    for path in candidates {
-        if tokio::fs::metadata(&path).await.is_err() {
-            continue;
-        }
-        match read_transcript_file(&path).await {
+    let storage = cdr.and_then(|data| data.storage.as_ref());
+
+    for candidate in candidates {
+        let path = candidate.trim();
+        match read_transcript_file(storage, path).await {
             Ok(mut transcript) => {
                 if transcript.source.trim().is_empty() {
                     transcript.source = "sensevoice-cli".to_string();
@@ -2182,7 +2509,18 @@ fn resolve_models_path(cfg: &TranscriptConfig) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-async fn read_transcript_file(path: &str) -> AnyResult<StoredTranscript> {
+async fn read_transcript_file(
+    storage: Option<&CdrStorage>,
+    path: &str,
+) -> AnyResult<StoredTranscript> {
+    if let Some(storage_ref) = storage {
+        if let Ok(content) = storage_ref.read_to_string(path).await {
+            let transcript: StoredTranscript = serde_json::from_str(&content)
+                .with_context(|| format!("parse transcript file {}", path))?;
+            return Ok(transcript);
+        }
+    }
+
     let content = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("read transcript file {}", path))?;
@@ -2211,22 +2549,6 @@ fn transcript_file_from_metadata(metadata: &Option<Value>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn absolutize_transcript_path(path: &str, cdr: Option<&CdrData>) -> String {
-    if path.trim().is_empty() {
-        return String::new();
-    }
-    let candidate = Path::new(path.trim());
-    if candidate.is_absolute() {
-        return candidate.to_string_lossy().into_owned();
-    }
-    if let Some(cdr_data) = cdr {
-        if let Some(parent) = Path::new(&cdr_data.cdr_path).parent() {
-            return parent.join(candidate).to_string_lossy().into_owned();
-        }
-    }
-    candidate.to_string_lossy().into_owned()
-}
-
 fn extract_cdr_path_from_metadata(metadata: &Option<Value>) -> Option<String> {
     metadata
         .as_ref()
@@ -2244,19 +2566,7 @@ fn default_cdr_file_name_for_model(record: &CallRecordModel) -> String {
     )
 }
 
-fn join_root_path(root: &str, relative: &str) -> String {
-    let trimmed = relative.trim_start_matches(|c| c == '/' || c == '\\');
-    PathBuf::from(root)
-        .join(trimmed)
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn extract_sip_flow_paths_from_cdr(
-    record: &CallRecord,
-    root: Option<&str>,
-    base_dir: Option<&Path>,
-) -> Vec<SipFlowFileRef> {
+fn extract_sip_flow_paths_from_cdr(record: &CallRecord) -> Vec<SipFlowFileRef> {
     let mut paths = Vec::new();
     if let Some(extras) = record.extras.as_ref() {
         if let Some(value) = extras.get("sip_flow_files") {
@@ -2277,60 +2587,11 @@ fn extract_sip_flow_paths_from_cdr(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if Path::new(trimmed).is_absolute() {
-                            paths.push(SipFlowFileRef {
-                                leg: leg.clone(),
-                                leg_role: leg_role.clone(),
-                                path: trimmed.to_string(),
-                            });
-                            continue;
-                        }
-
-                        let relative = trimmed.trim_start_matches(|c| c == '/' || c == '\\');
-
-                        if let Some(root_path) = root {
-                            let candidate = join_root_path(root_path, relative);
-                            if Path::new(&candidate).exists() {
-                                paths.push(SipFlowFileRef {
-                                    leg: leg.clone(),
-                                    leg_role: leg_role.clone(),
-                                    path: candidate,
-                                });
-                                continue;
-                            }
-                        }
-
-                        if let Some(dir) = base_dir {
-                            let candidate_path = dir.join(relative);
-                            if candidate_path.exists() {
-                                paths.push(SipFlowFileRef {
-                                    leg: leg.clone(),
-                                    leg_role: leg_role.clone(),
-                                    path: candidate_path.to_string_lossy().into_owned(),
-                                });
-                                continue;
-                            }
-                        }
-
-                        if let Some(root_path) = root {
-                            paths.push(SipFlowFileRef {
-                                leg: leg.clone(),
-                                leg_role: leg_role.clone(),
-                                path: join_root_path(root_path, relative),
-                            });
-                        } else if let Some(dir) = base_dir {
-                            paths.push(SipFlowFileRef {
-                                leg: leg.clone(),
-                                leg_role: leg_role.clone(),
-                                path: dir.join(relative).to_string_lossy().into_owned(),
-                            });
-                        } else {
-                            paths.push(SipFlowFileRef {
-                                leg: leg.clone(),
-                                leg_role: leg_role.clone(),
-                                path: trimmed.to_string(),
-                            });
-                        }
+                        paths.push(SipFlowFileRef {
+                            leg: leg.clone(),
+                            leg_role: leg_role.clone(),
+                            path: trimmed.to_string(),
+                        });
                     }
                 }
             }
@@ -2480,7 +2741,14 @@ async fn update_cdr_with_transcript(
 
     match serde_json::to_string_pretty(&record) {
         Ok(serialized) => {
-            if let Err(err) = tokio::fs::write(&cdr_data.cdr_path, serialized).await {
+            if let Some(storage_ref) = cdr_data.storage.as_ref() {
+                if let Err(err) = storage_ref
+                    .write_bytes(&cdr_data.cdr_path, serialized.as_bytes())
+                    .await
+                {
+                    warn!(file = %cdr_data.cdr_path, "failed to write CDR with transcript metadata: {}", err);
+                }
+            } else if let Err(err) = tokio::fs::write(&cdr_data.cdr_path, serialized).await {
                 warn!(file = %cdr_data.cdr_path, "failed to write CDR with transcript metadata: {}", err);
             }
         }
@@ -2490,10 +2758,13 @@ async fn update_cdr_with_transcript(
     }
 }
 
-async fn load_sip_flow_from_files(paths: &[SipFlowFileRef]) -> Vec<LeggedSipMessage> {
+async fn load_sip_flow_from_files(
+    storage: Option<&CdrStorage>,
+    paths: &[SipFlowFileRef],
+) -> Vec<LeggedSipMessage> {
     let mut all_items = Vec::new();
     for entry in paths {
-        let mut items = read_sip_flow_file(&entry.path).await;
+        let mut items = read_sip_flow_file(storage, &entry.path).await;
         let leg = entry.leg.clone();
         let leg_role = entry.leg_role.clone();
         for item in items.drain(..) {
@@ -2678,13 +2949,23 @@ fn build_detail_payload(
     let sip_flow_value = Value::Object(sip_flow_map);
 
     let (metadata_download, sip_flow_download) = if let Some(data) = cdr {
-        let metadata = Value::String(data.cdr_path.clone());
+        let metadata_url = state.url_for(&format!(
+            "/call-records/{}/metadata?path={}",
+            record.id,
+            encode(&data.cdr_path)
+        ));
         let flow = data
             .sip_flow_paths
             .first()
-            .map(|entry| Value::String(entry.path.clone()))
+            .map(|entry| {
+                Value::String(state.url_for(&format!(
+                    "/call-records/{}/sip-flow?path={}",
+                    record.id,
+                    encode(&entry.path)
+                )))
+            })
             .unwrap_or(Value::Null);
-        (metadata, flow)
+        (Value::String(metadata_url), flow)
     } else {
         (Value::Null, Value::Null)
     };
@@ -2767,7 +3048,7 @@ async fn load_sip_flow_from_metadata(record: &CallRecordModel) -> Vec<LeggedSipM
         return Vec::new();
     }
 
-    load_sip_flow_from_files(&paths).await
+    load_sip_flow_from_files(None, &paths).await
 }
 
 fn extract_sip_flow_paths(record: &CallRecordModel) -> Vec<SipFlowFileRef> {
@@ -2804,7 +3085,13 @@ fn extract_sip_flow_paths(record: &CallRecordModel) -> Vec<SipFlowFileRef> {
     paths
 }
 
-async fn read_sip_flow_file(path: &str) -> Vec<SipMessageItem> {
+async fn read_sip_flow_file(storage: Option<&CdrStorage>, path: &str) -> Vec<SipMessageItem> {
+    if let Some(storage_ref) = storage {
+        if let Ok(bytes) = storage_ref.read_bytes(path).await {
+            return parse_sip_flow_bytes(path, &bytes);
+        }
+    }
+
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(err) => {
@@ -2828,6 +3115,24 @@ async fn read_sip_flow_file(path: &str) -> Vec<SipMessageItem> {
         }
     }
 
+    items
+}
+
+fn parse_sip_flow_bytes(path: &str, bytes: &[u8]) -> Vec<SipMessageItem> {
+    let mut items = Vec::new();
+    let content = String::from_utf8_lossy(bytes);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SipMessageItem>(trimmed) {
+            Ok(item) => items.push(item),
+            Err(err) => {
+                warn!("failed to parse sip flow entry from '{}': {}", path, err);
+            }
+        }
+    }
     items
 }
 

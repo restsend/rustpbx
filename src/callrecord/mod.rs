@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub mod sipflow;
+pub mod storage;
 #[cfg(test)]
 mod tests;
 
@@ -218,6 +219,14 @@ pub fn default_sip_flow_file_name(record: &CallRecord, leg: &str) -> String {
     )
 }
 
+pub fn default_transcript_file_name(record: &CallRecord) -> String {
+    format!(
+        "{}_{}.transcript.json",
+        record.start_time.format("%Y%m%d-%H%M%S"),
+        record.call_id
+    )
+}
+
 pub fn apply_record_file_extras(record: &CallRecord, extras: &mut HashMap<String, Value>) {
     if !record.sip_flows.is_empty() {
         let entries: Vec<Value> = record
@@ -326,6 +335,15 @@ pub trait CallRecordFormatter: Send + Sync {
             format!("{}/{}", trimmed_root, file_name)
         }
     }
+    fn format_transcript_path(&self, root: &str, record: &CallRecord) -> String {
+        let trimmed_root = root.trim_end_matches('/');
+        let file_name = default_transcript_file_name(record);
+        if trimmed_root.is_empty() {
+            file_name
+        } else {
+            format!("{}/{}", trimmed_root, file_name)
+        }
+    }
     fn format_media_path(
         &self,
         root: &str,
@@ -350,6 +368,60 @@ pub trait CallRecordFormatter: Send + Sync {
 
 pub struct DefaultCallRecordFormatter;
 impl CallRecordFormatter for DefaultCallRecordFormatter {}
+
+pub fn build_object_store_from_s3(
+    vendor: &S3Vendor,
+    bucket: &str,
+    region: &str,
+    access_key: &str,
+    secret_key: &str,
+    endpoint: &str,
+) -> Result<Arc<dyn ObjectStore>> {
+    let store: Arc<dyn ObjectStore> = match vendor {
+        S3Vendor::AWS => {
+            let builder = AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .with_region(region)
+                .with_access_key_id(access_key)
+                .with_secret_access_key(secret_key);
+
+            let instance = if !endpoint.is_empty() {
+                builder.with_endpoint(endpoint).build()?
+            } else {
+                builder.build()?
+            };
+            Arc::new(instance)
+        }
+        S3Vendor::GCP => {
+            let instance = GoogleCloudStorageBuilder::new()
+                .with_bucket_name(bucket)
+                .with_service_account_key(secret_key)
+                .build()?;
+            Arc::new(instance)
+        }
+        S3Vendor::Azure => {
+            let instance = MicrosoftAzureBuilder::new()
+                .with_container_name(bucket)
+                .with_account(access_key)
+                .with_access_key(secret_key)
+                .build()?;
+            Arc::new(instance)
+        }
+        S3Vendor::Aliyun | S3Vendor::Tencent | S3Vendor::Minio | S3Vendor::DigitalOcean => {
+            let instance = AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .with_region(region)
+                .with_access_key_id(access_key)
+                .with_secret_access_key(secret_key)
+                .with_endpoint(endpoint)
+                .with_virtual_hosted_style_request(false)
+                .build()?;
+            Arc::new(instance)
+        }
+    };
+
+    Ok(store)
+}
 
 pub struct CallRecordManager {
     pub sender: CallRecordSender,
@@ -446,30 +518,21 @@ impl CallRecordManager {
             let mut record = record;
             let sip_flows = mem::take(&mut record.sip_flows);
             let start_time = Instant::now();
-            let result = match (config.as_ref(), sip_flows) {
-                (CallRecordConfig::Local { root }, flows) => {
-                    Self::save_local_record(formatter.clone(), root, &mut record, flows).await
+            let result = match config.as_ref() {
+                CallRecordConfig::Local { root } => {
+                    Self::save_local_record(formatter.clone(), root, &mut record, sip_flows).await
                 }
-                (
-                    CallRecordConfig::S3 {
-                        vendor,
-                        bucket,
-                        region,
-                        access_key,
-                        secret_key,
-                        endpoint,
-                        root,
-                        with_media,
-                        keep_media_copy,
-                    },
-                    flows,
-                ) => {
-                    if !flows.is_empty() {
-                        warn!(
-                            legs = flows.len(),
-                            "SIP flow export for S3 target is not implemented; dropping entries"
-                        );
-                    }
+                CallRecordConfig::S3 {
+                    vendor,
+                    bucket,
+                    region,
+                    access_key,
+                    secret_key,
+                    endpoint,
+                    root,
+                    with_media,
+                    keep_media_copy,
+                } => {
                     Self::save_with_s3_like(
                         formatter.clone(),
                         vendor,
@@ -482,24 +545,16 @@ impl CallRecordManager {
                         with_media,
                         keep_media_copy,
                         &record,
+                        sip_flows,
                     )
                     .await
                 }
-                (
-                    CallRecordConfig::Http {
-                        url,
-                        headers,
-                        with_media,
-                        keep_media_copy,
-                    },
-                    flows,
-                ) => {
-                    if !flows.is_empty() {
-                        warn!(
-                            legs = flows.len(),
-                            "SIP flow export for HTTP target is not implemented; dropping entries"
-                        );
-                    }
+                CallRecordConfig::Http {
+                    url,
+                    headers,
+                    with_media,
+                    keep_media_copy,
+                } => {
                     Self::save_with_http(
                         formatter.clone(),
                         url,
@@ -507,6 +562,7 @@ impl CallRecordManager {
                         with_media,
                         keep_media_copy,
                         &record,
+                        sip_flows,
                     )
                     .await
                 }
@@ -609,6 +665,7 @@ impl CallRecordManager {
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
+        sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
         let client = reqwest::Client::new();
         // Serialize call record to JSON
@@ -670,6 +727,29 @@ impl CallRecordManager {
             }
         }
 
+        if !sip_flows.is_empty() {
+            // Process SIP flows
+            for (leg, entries) in sip_flows {
+                if entries.is_empty() {
+                    continue;
+                }
+
+                let mut buffer = Vec::new();
+                for entry in entries {
+                    let line = serde_json::to_vec(&entry)?;
+                    buffer.extend_from_slice(&line);
+                    buffer.push(b'\n');
+                }
+
+                let file_name = default_sip_flow_file_name(record, &leg);
+                let field_name = format!("sip_flow_{}", sanitize_filename_component(&leg));
+                let part = reqwest::multipart::Part::bytes(buffer)
+                    .file_name(file_name)
+                    .mime_str("application/x-ndjson")?;
+                form = form.part(field_name, part);
+            }
+        }
+
         let mut request = client.post(url).multipart(form);
         if let Some(headers_map) = headers {
             for (key, value) in headers_map {
@@ -710,51 +790,10 @@ impl CallRecordManager {
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
+        sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
-        // Create object store based on vendor
-        let object_store: Arc<dyn ObjectStore> = match vendor {
-            S3Vendor::AWS => {
-                let builder = AmazonS3Builder::new()
-                    .with_bucket_name(bucket)
-                    .with_region(region)
-                    .with_access_key_id(access_key)
-                    .with_secret_access_key(secret_key);
-
-                let store = if !endpoint.is_empty() {
-                    builder.with_endpoint(endpoint).build()?
-                } else {
-                    builder.build()?
-                };
-                Arc::new(store)
-            }
-            S3Vendor::GCP => {
-                let store = GoogleCloudStorageBuilder::new()
-                    .with_bucket_name(bucket)
-                    .with_service_account_key(secret_key) // For GCP, secret_key is the service account key
-                    .build()?;
-                Arc::new(store)
-            }
-            S3Vendor::Azure => {
-                let store = MicrosoftAzureBuilder::new()
-                    .with_container_name(bucket)
-                    .with_account(access_key)
-                    .with_access_key(secret_key)
-                    .build()?;
-                Arc::new(store)
-            }
-            S3Vendor::Aliyun | S3Vendor::Tencent | S3Vendor::Minio | S3Vendor::DigitalOcean => {
-                // These vendors are S3-compatible, use AmazonS3Builder with custom endpoint
-                let store = AmazonS3Builder::new()
-                    .with_bucket_name(bucket)
-                    .with_region(region)
-                    .with_access_key_id(access_key)
-                    .with_secret_access_key(secret_key)
-                    .with_endpoint(endpoint)
-                    .with_virtual_hosted_style_request(false) // Use path-style for compatibility
-                    .build()?;
-                Arc::new(store)
-            }
-        };
+        let object_store =
+            build_object_store_from_s3(vendor, bucket, region, access_key, secret_key, endpoint)?;
 
         // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
@@ -769,7 +808,29 @@ impl CallRecordManager {
                 warn!("Failed to upload call record: {}", e);
             }
         }
-        let mut uploaded_files = vec![(json_path.to_string(), json_path.clone())];
+        if !sip_flows.is_empty() {
+            for (leg, entries) in sip_flows {
+                if entries.is_empty() {
+                    continue;
+                }
+                let flow_path =
+                    ObjectPath::from(formatter.format_sip_flow_path(root, record, &leg));
+                let mut buffer = Vec::new();
+                for entry in entries {
+                    let line = serde_json::to_vec(&entry)?;
+                    buffer.extend_from_slice(&line);
+                    buffer.push(b'\n');
+                }
+                match object_store.put(&flow_path, buffer.into()).await {
+                    Ok(r) => {
+                        info!("Upload sip flow file: {:?}", r);
+                    }
+                    Err(e) => {
+                        warn!(path = %flow_path, "Failed to upload sip flow file: {}", e);
+                    }
+                }
+            }
+        }
         // Upload media files if with_media is true
         if with_media.unwrap_or(false) {
             let mut media_files = vec![];
@@ -804,7 +865,6 @@ impl CallRecordManager {
                     }
                 }
             }
-            uploaded_files.extend(media_files);
         }
         // Optionally delete local media files if keep_media_copy is false
         if keep_media_copy.unwrap_or(false) {
