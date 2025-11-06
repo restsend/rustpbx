@@ -84,24 +84,24 @@
             </div>
         </header>
 
-        <section class="grid gap-4 sm:grid-cols-4">
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+        <section class="grid gap-3 sm:grid-cols-4">
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Duration</div>
-                <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="formatDuration(record.duration_secs)">
+                <div class="mt-1 text-xl font-semibold text-slate-900" x-text="formatDuration(record.duration_secs)">
                 </div>
                 <p class="mt-1 text-xs text-slate-500" x-text="durationHint"></p>
             </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Quality (MOS)</div>
-                <div class="mt-2 text-2xl font-semibold" :class="qualityTone(record.quality?.mos)"
+                <div class="mt-1 text-xl font-semibold" :class="qualityTone(record.quality?.mos)"
                     x-text="formatNumber(record.quality?.mos)"></div>
                 <p class="mt-1 text-xs text-slate-500">Packet loss <span class="font-semibold"
                         x-text="formatNumber(record.quality?.packet_loss) + '%'"></span> · Jitter <span
                         class="font-semibold" x-text="formatNumber(record.quality?.jitter_ms) + ' ms'"></span></p>
             </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Transcript</div>
-                <div class="mt-2 flex items-center gap-2 text-2xl font-semibold"
+                <div class="mt-1 flex items-center gap-1.5 text-xl font-semibold"
                     :class="transcript.available || transcriptVisible ? 'text-emerald-600' : 'text-slate-400'">
                     <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M5 12l5 5L20 7" />
@@ -110,15 +110,15 @@
                 </div>
                 <p class="mt-1 text-xs text-slate-500" x-text="transcriptGeneratedLabel()"></p>
             </div>
-            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
-                <div class="mt-2 flex items-center justify-between gap-2">
-                    <span class="text-2xl font-semibold text-slate-900"
+                <div class="mt-1 flex items-center justify-between gap-1.5">
+                    <span class="text-xl font-semibold text-slate-900"
                         x-text="formatBillingAmount(record.billing)"></span>
                     <span class="text-xs font-semibold uppercase text-slate-400"
                         x-text="(record.billing && record.billing.currency) ? record.billing.currency : ''"></span>
                 </div>
-                <div class="mt-2 inline-flex items-center gap-2">
+                <div class="mt-1 inline-flex items-center gap-1.5">
                     <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                         :class="billingStatusClasses(record.billing?.status)">
                         <span x-text="billingStatusLabel(record.billing?.status)"></span>
@@ -131,34 +131,34 @@
             </div>
         </section>
 
-        <section class="space-y-5">
-            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
+        <section class="space-y-4">
+            <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
+                <nav class="inline-flex w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
                     role="tablist" aria-label="Call record detail tabs">
-                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
                         :class="detailTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="detailTab === 'overview'" aria-controls="call-record-tab-overview"
                         @click="detailTab = 'overview'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Overview</span>
+                            <span class="text-[13px]">Overview</span>
                             <span class="text-[11px] font-normal text-slate-400">Participants, media, transcript</span>
                         </div>
                     </button>
-                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
                         :class="detailTab === 'diagnostics' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="detailTab === 'diagnostics'" aria-controls="call-record-tab-diagnostics"
                         @click="detailTab = 'diagnostics'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Diagnostics</span>
+                            <span class="text-[13px]">Diagnostics</span>
                             <span class="text-[11px] font-normal text-slate-400">SIP flow, metrics</span>
                         </div>
                     </button>
-                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                    <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
                         :class="detailTab === 'notes' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="detailTab === 'notes'" aria-controls="call-record-tab-notes"
                         @click="detailTab = 'notes'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Notes &amp; Billing</span>
+                            <span class="text-[13px]">Notes &amp; Billing</span>
                             <span class="text-[11px] font-normal text-slate-400">Tags, notes, billing</span>
                         </div>
                     </button>

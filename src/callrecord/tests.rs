@@ -48,6 +48,7 @@ async fn test_save_with_http_without_media() {
         &with_media,
         &None, // keep_media_copy is irrelevant here
         &record,
+        HashMap::new(),
     )
     .await;
 
@@ -117,6 +118,7 @@ async fn test_save_with_http_with_media() {
         &with_media,
         &None, // keep_media_copy is irrelevant here
         &record,
+        HashMap::new(),
     )
     .await;
 
@@ -174,6 +176,7 @@ async fn test_save_with_http_with_custom_headers() {
         &with_media,
         &None, // keep_media_copy is irrelevant here
         &record,
+        HashMap::new(),
     )
     .await;
 
@@ -231,6 +234,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
         &with_media,
         &None,
         &record,
+        HashMap::new(),
     )
     .await;
 
@@ -299,6 +303,7 @@ async fn test_save_with_s3_like_memory_store() {
         &with_media,
         &keep_media_copy,
         &record,
+        HashMap::new(),
     )
     .await;
 
@@ -387,6 +392,7 @@ async fn test_save_with_s3_like_with_media() {
             &with_media,
             &keep_media_copy,
             &record,
+            HashMap::new(),
         )
         .await;
 

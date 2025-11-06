@@ -240,10 +240,10 @@
                                     :class="route.disabled ? 'opacity-70 bg-slate-50' : ''">
                                     <td class="w-72 px-4 py-3">
                                         <div class="flex flex-col gap-2">
+                                            <a :href="detailUrl(route)"
+                                                class="text-sm font-semibold text-slate-900 transition hover:text-sky-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                                                x-text="routeLabel(route)"></a>
                                             <div class="flex flex-wrap items-center gap-2">
-                                                <a :href="detailUrl(route)"
-                                                    class="text-sm font-semibold text-slate-900 transition hover:text-sky-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-                                                    x-text="routeLabel(route)"></a>
                                                 <span
                                                     class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
                                                     :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'">

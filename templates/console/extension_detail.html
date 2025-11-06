@@ -130,9 +130,18 @@
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             SIP password
-                            <input type="text" x-model.trim="form.sip_password" maxlength="160"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Leave blank to keep current or auto-generate">
+                            <div class="relative">
+                                <input
+                                    :type="sipPasswordVisible ? 'text' : (hasExistingSipPassword() ? 'text' : 'password')"
+                                    :readonly="!sipPasswordVisible && hasExistingSipPassword()"
+                                    x-model="sipPasswordInput" @input="onSipPasswordInput" maxlength="160"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 pr-20 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="Leave blank to keep current or auto-generate">
+                                <button type="button"
+                                    class="absolute inset-y-0 right-2 inline-flex items-center text-xs font-semibold uppercase tracking-wide text-slate-500 transition hover:text-slate-700"
+                                    @click="toggleSipPasswordVisibility" x-text="sipPasswordVisible ? 'Hide' : 'Show'"
+                                    :aria-pressed="sipPasswordVisible"></button>
+                            </div>
                             <span class="text-xs font-normal text-slate-400">Provide a strong password. Leave blank to
                                 keep
                                 the existing secret.</span>
@@ -370,7 +379,8 @@
                                                     </div>
                                                 </td>
                                                 <td class="px-3 py-2 align-top">
-                                                    <span class="block text-xs"
+                                                    <span class="block max-w-xs truncate text-xs"
+                                                        :title="record.user_agent || undefined"
                                                         x-text="record.user_agent || '—'"></span>
                                                 </td>
                                             </tr>
@@ -448,6 +458,10 @@
                 };
             };
 
+            const existingSipPassword = typeof options.model?.sip_password === 'string'
+                ? options.model.sip_password
+                : '';
+
             return {
                 basePath: options.basePath || '/console',
                 mode: options.mode || 'create',
@@ -478,6 +492,10 @@
                     call_forwarding_timeout: options.model?.call_forwarding_timeout || 30,
                     notes: options.model?.notes || '',
                 },
+                sipPasswordVisible: false,
+                sipPasswordDirty: false,
+                sipPasswordStored: existingSipPassword,
+                sipPasswordInput: existingSipPassword && (options.mode || 'create') === 'edit' ? '****' : '',
                 selectedDepartments: [],
                 forwardingModes: [
                     { value: 'none', label: 'No forwarding', description: 'Ring this extension only.' },
@@ -651,7 +669,7 @@
                         'extension': this.form.extension.trim(),
                         'display_name': this.form.display_name.trim(),
                         'email': this.form.email.trim(),
-                        'sip_password': this.form.sip_password.trim() || undefined,
+                        'sip_password': this.sipPasswordPayload(),
                         'login_disabled': this.form.login_allowed ? false : true,
                         'voicemail_disabled': this.form.voicemail_enabled ? false : true,
                         'allow_guest_calls': this.form.public_call_allowed === true,
@@ -706,6 +724,36 @@
                     } finally {
                         this.saving = false;
                     }
+                },
+                hasExistingSipPassword() {
+                    return !!this.sipPasswordStored;
+                },
+                toggleSipPasswordVisibility() {
+                    if (!this.sipPasswordVisible) {
+                        if (!this.sipPasswordDirty && this.hasExistingSipPassword()) {
+                            this.sipPasswordInput = this.sipPasswordStored;
+                        }
+                        this.sipPasswordVisible = true;
+                        return;
+                    }
+
+                    this.sipPasswordVisible = false;
+                    if (!this.sipPasswordDirty && this.hasExistingSipPassword()) {
+                        this.sipPasswordInput = '****';
+                    }
+                },
+                onSipPasswordInput() {
+                    if (!this.sipPasswordDirty) {
+                        this.sipPasswordDirty = true;
+                    }
+                    this.form.sip_password = this.sipPasswordInput;
+                },
+                sipPasswordPayload() {
+                    if (!this.sipPasswordDirty) {
+                        return undefined;
+                    }
+                    const trimmed = this.sipPasswordInput.trim();
+                    return trimmed.length ? trimmed : undefined;
                 },
             };
         });
