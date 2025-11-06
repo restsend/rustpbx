@@ -30,74 +30,67 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 ### Prerequisites
 - Rust 1.75 or later
 - Cargo package manager
-- opus, alsa
-- pkg-config
+- `pkg-config`, `libasound2-dev`, `libopus-dev`
 
-Linux: 
+Linux:
 ```bash
 apt-get install -y libasound2-dev libopus-dev
 ```
 
-Mac:
+macOS:
 ```bash
 brew install opus
 ```
 
-### Installation
+### Install & Build
 ```bash
 git clone https://github.com/restsend/rustpbx
 cd rustpbx
-# full features (silero, opus)
 cargo build --release
-
-# without onnxruntime(silero)
-# webrtc vad + console
-cargo build -r --no-default-features --features vad_webrtc,console
 ```
 
-### Configuration
-```bash
-cp config.toml.example config.toml
-# Edit config.toml with your settings
-```
+> For a minimal footprint you can disable heavy features: 
+> `cargo build -r --no-default-features --features vad_webrtc,console`
 
-### Running
-```bash
-cargo run --bin rustpbx -- --conf config.toml
-```
+### UserAgent Quick Start (Browser LLM voice demo)
+1. Create a lightweight UA configuration (`config.ua.toml`) that exposes the WebRTC console and proxies LLM traffic:
+  ```bash
+  cat > config.ua.toml <<'EOF'
+  http_addr = "0.0.0.0:8080"
+  log_level = "info"
+  [ua]
+  addr = "0.0.0.0"
+  udp_port = 13050
+  EOF
+  ```
+2. Start RustPBX in UA mode and serve the console assets:
+  ```bash
+  cargo run --bin rustpbx -- --conf config.ua.toml
+  ```
+3. Open `http://localhost:8080` → **WebRTC Interface**. Under **LLM** select your model, toggle streaming if needed, and click **Start Session**. You can now hold a full duplex voice conversation with the LLM through your browser.
 
-### Web Interface
-Access the web interface at `http://localhost:8080` to test voice agent features and manage calls.
-
-## 🐳 Docker Deployment
-
-### Quick Start with Docker
-
-1. **Pull the Docker image:**
-```bash
-docker pull ghcr.io/restsend/rustpbx:latest
-```
-2. **Create config.toml:**
-> Proxy and UserAgent both worked.
->
-
-```bash
-# Create config.toml
-cat > config.toml << EOF
+### PBX Quick Start (SQLite + console admin)
+1. Create a PBX configuration (`config.pbx.toml`) pointing to SQLite and enabling call records:
+  ```bash
+cat > config.pbx.toml <<'EOF'
 http_addr = "0.0.0.0:8080"
-log_level = "info"
+log_level = "debug"
+#log_file = "/tmp/rustpbx.log"
 recorder_path = "/tmp/recorders"
-recorder_format = "wav" # or "ogg" when built with --features opus
+# recorder_format can be "wav" (default) or "ogg" (requires enabling the 'opus' feature)
+recorder_format = "ogg"
 media_cache_path = "/tmp/mediacache"
-database_url = "sqlite://./db/rustpbx.sqlite3"
+database_url = "sqlite://rustpbx.sqlite3"
 
-[ua]
-addr="0.0.0.0"
-udp_port=13050
+# external IP address for SIP signaling and media
+# if server is behind NAT, set your public IP here (without port)
+# external_ip = "1.2.3.4"
 
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"
+# allow self-service administrator signup after the first account
+allow_registration = false
 
 [proxy]
 modules = ["acl", "auth", "registrar", "call"]
@@ -106,12 +99,20 @@ udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
 media_proxy = "auto"
+# Base directory for generated routing/trunk/ACL files
+generated_dir = "./config"
+routes_files = ["config/routes/*.toml"]
+trunks_files = ["config/trunks/*.toml"]
+
+[proxy.transcript]
+command = "sensevoice-cli"
 
 # ACL rules
 acl_rules = [
-    "allow 10.0.0.0/8",
     "allow all",
+    "deny all"
 ]
+acl_files = ["config/acl/*.toml"]
 
 [[proxy.user_backends]]
 type = "memory"
@@ -122,12 +123,56 @@ users = [
 
 [[proxy.user_backends]]
 type = "extension"
+database_url = "sqlite://rustpbx.sqlite3"
 
 [callrecord]
 type = "local"
-root = "/tmp/cdr"
+root = "/tmp/recorders"
+
+[recording]
+enabled = true
+auto_start = true
+
 EOF
+  ```
+2. Launch the PBX:
+  ```bash
+  cargo run --bin rustpbx -- --conf config.pbx.toml
+  ```
+3. In a separate shell create your first super admin for the console:
+  ```bash
+  cargo run --bin rustpbx -- --conf config.pbx.toml \
+    --super-user admin --super-password change-me-now
+  ```
+4. Sign in at `http://localhost:8080/console/`, add extensions, and register your SIP endpoints against `udp://localhost:15060`.
+5. Verify call recordings and transcripts under **Call Records** once calls complete.
+
+## Console Screenshots
+### extensions
+![Console extensions view](./docs/screenshots/extensions.png)
+### call records
+![Console call logs](./docs/screenshots/call-logs.png)
+### settings
+![Console settings](./docs/screenshots/settings.png)
+### call record with transcript
+![Console call detail(transcript)](./docs/screenshots/call-detail-transcript.png)
+### call record with message flow
+![Console call detail(message flow)](./docs/screenshots/call-detail-sipflow.png)
+### route editor
+![Console route editor](./docs/screenshots/route-editor.png)
+### webrtc phone
+![Console webrtc phone](./docs/screenshots/web-dailer.png)
+
+## 🐳 Docker Deployment
+
+### Quick Start with Docker
+
+1. **Pull the Docker image:**
+```bash
+docker pull ghcr.io/restsend/rustpbx:latest
 ```
+2. **Create config.toml:**
+>  copy from config.toml.example
 
 4. **Run with Docker:**
 ```bash
@@ -141,7 +186,7 @@ docker run -d \
   -v $(pwd)/db:/app/db \
   -v $(pwd)/config.toml:/app/config.toml \
   -v $(pwd)/config:/app/config \
-  -v $(pwd)/recordings:/tmp/recorders \
+  -v $(pwd)/recorders:/tmp/recorders \
   ghcr.io/restsend/rustpbx:latest \
   --conf /app/config.toml
 ```
