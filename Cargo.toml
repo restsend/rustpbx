@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 description = "A SIP PBX implementation in Rust"
@@ -19,6 +19,9 @@ g729 = ["dep:g729-sys"]
 console = ["dep:minijinja"]
 default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729", "console"]
 not_vad = []
+perfcli-bin = []
+text2wav-bin = []
+wav2text-bin = []
 
 [dependencies]
 anyhow = "1.0.100"
@@ -126,3 +129,23 @@ path = "examples/webrtc-demo/src/main.rs"
 [[example]]
 name = "voice-demo"
 path = "examples/voice_demo.rs"
+
+
+[[bin]]
+name = "rustpbx"
+path = "src/bin/rustpbx.rs"
+
+[[bin]]
+name = "perfcli"
+path = "src/bin/perfcli.rs"
+required-features = ["perfcli-bin"]
+
+[[bin]]
+name = "text2wav"
+path = "src/bin/text2wav.rs"
+required-features = ["text2wav-bin"]
+
+[[bin]]
+name = "wav2text"
+path = "src/bin/wav2text.rs"
+required-features = ["wav2text-bin"]
