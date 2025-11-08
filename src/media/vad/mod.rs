@@ -84,7 +84,23 @@ impl Default for VADOption {
         Self {
             #[cfg(feature = "vad_webrtc")]
             r#type: VadType::WebRTC,
-            #[cfg(not(any(feature = "vad_webrtc", feature = "vad_silero")))]
+            #[cfg(all(
+                not(feature = "vad_webrtc"),
+                not(feature = "vad_ten"),
+                feature = "vad_silero"
+            ))]
+            r#type: VadType::Silero,
+            #[cfg(all(
+                not(feature = "vad_webrtc"),
+                not(feature = "vad_silero"),
+                feature = "vad_ten"
+            ))]
+            r#type: VadType::Ten,
+            #[cfg(all(
+                not(feature = "vad_webrtc"),
+                not(feature = "vad_silero"),
+                not(feature = "vad_ten"),
+            ))]
             r#type: VadType::Other("nop".to_string()),
             samplerate: 16000,
             // Python defaults: min_speech_duration_ms=250, min_silence_duration_ms=100, speech_pad_ms=30
@@ -192,7 +208,7 @@ impl VadProcessorInner {
         };
 
         let samples = samples.to_owned();
-        let result = self.vad.process(frame);
+        let result = tokio::task::block_in_place(|| self.vad.process(frame));
         if let Some((is_speaking, timestamp)) = result {
             if is_speaking || self.triggered {
                 let current_buf = SpeechBuf { samples, timestamp };

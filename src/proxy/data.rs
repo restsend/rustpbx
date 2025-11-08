@@ -294,6 +294,16 @@ impl ProxyDataContext {
         })
     }
 
+    pub async fn set_acl_rules(&self, mut rules: Vec<String>) {
+        if rules.is_empty() {
+            rules = vec!["allow all".to_string(), "deny all".to_string()];
+        }
+
+        let total = rules.len();
+        *self.acl_rules.write().await = rules;
+        info!(total = total, "acl rules snapshot updated at runtime");
+    }
+
     async fn export_trunks_to_toml(
         &self,
         default_dir: &Path,
