@@ -142,7 +142,7 @@ EOF
 3. In a separate shell create your first super admin for the console:
   ```bash
   cargo run --bin rustpbx -- --conf config.pbx.toml \
-    --super-user admin --super-password change-me-now
+    --super-username admin --super-password change-me-now
   ```
 4. Sign in at `http://localhost:8080/console/`, add extensions, and register your SIP endpoints against `udp://localhost:15060`.
 5. Verify call recordings and transcripts under **Call Records** once calls complete.
@@ -192,7 +192,7 @@ docker run -d \
 ```
  - Create super user via cli(**optional**)
 ```bash
-docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-user=YOUR --super-password=PASS
+docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-username=YOUR --super-password=PASS
 ```
 
 1. **Access the service:**
