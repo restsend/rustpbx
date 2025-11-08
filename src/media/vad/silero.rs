@@ -1,7 +1,6 @@
-use super::{SessionPool, VADOption, VadEngine};
+use super::{VADOption, VadEngine};
 use crate::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use ort::session::{Session, builder::GraphOptimizationLevel};
 
 pub struct SileroVad {
@@ -9,7 +8,7 @@ pub struct SileroVad {
     buffer: PcmBuf,
     last_timestamp: u64,
     chunk_size: usize,
-    session: Option<Session>,
+    session: Session,
     state: ndarray::Array3<f32>,
 }
 
@@ -24,9 +23,6 @@ fn create_silero_session() -> Result<Session> {
         .commit_from_memory(MODEL)
         .map_err(Into::into)
 }
-
-static SILERO_SESSION_POOL: Lazy<SessionPool<Session, fn() -> Result<Session>>> =
-    Lazy::new(|| SessionPool::new(128, create_silero_session as fn() -> Result<Session>));
 
 impl SileroVad {
     pub fn new(config: VADOption) -> Result<Self> {
@@ -44,10 +40,10 @@ impl SileroVad {
         };
 
         // Acquire session from global pool (create if empty)
-        let session = SILERO_SESSION_POOL.pop_or_create()?;
+        let session = create_silero_session()?;
 
         Ok(Self {
-            session: Some(session),
+            session,
             state: ndarray::Array3::<f32>::zeros((2, 1, 128)),
             config,
             buffer: Vec::new(),
@@ -72,8 +68,7 @@ impl SileroVad {
             "sr" => sr_value,
             "state" => state_value,
         ];
-        let session = self.session.as_mut().expect("Silero session missing");
-        let outputs = session.run(inputs)?;
+        let outputs = self.session.run(inputs)?;
         let (_probability_shape, probability_data) = outputs
             .get("output")
             .ok_or_else(|| ort::Error::new("Output 'output' not found"))?
@@ -129,13 +124,5 @@ impl VadEngine for SileroVad {
         }
 
         None
-    }
-}
-
-impl Drop for SileroVad {
-    fn drop(&mut self) {
-        if let Some(session) = self.session.take() {
-            SILERO_SESSION_POOL.push(session);
-        }
     }
 }

@@ -481,17 +481,37 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
 async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize) {
     if let Some(server) = app_state.sip_server.as_ref() {
-        let (context, embedded) = {
-            let embedded = server
+        let context = server.inner.data_context.clone();
+        let snapshot = context.acl_rules_snapshot().await;
+
+        let embedded = if let Some(path) = app_state.config_path.as_ref() {
+            match Config::load(path) {
+                Ok(cfg) => cfg
+                    .proxy
+                    .as_ref()
+                    .and_then(|proxy| proxy.acl_rules.as_ref().map(|rules| rules.len()))
+                    .unwrap_or(0),
+                Err(err) => {
+                    warn!(config_path = %path, ?err, "failed to reload config for acl snapshot");
+                    server
+                        .inner
+                        .proxy_config
+                        .acl_rules
+                        .as_ref()
+                        .map(|rules| rules.len())
+                        .unwrap_or(0)
+                }
+            }
+        } else {
+            server
                 .inner
                 .proxy_config
                 .acl_rules
                 .as_ref()
                 .map(|rules| rules.len())
-                .unwrap_or(0);
-            (server.inner.data_context.clone(), embedded)
+                .unwrap_or(0)
         };
-        let snapshot = context.acl_rules_snapshot().await;
+
         (snapshot, embedded)
     } else if let Some(proxy_cfg) = app_state.config.proxy.as_ref() {
         let rules = proxy_cfg.acl_rules.clone().unwrap_or_default();
@@ -1787,10 +1807,20 @@ pub async fn update_security_settings(
         None => Vec::new(),
     };
 
+    if let Some(app_state) = state.app_state() {
+        if let Some(server) = app_state.sip_server.as_ref() {
+            server
+                .inner
+                .data_context
+                .set_acl_rules(acl_rules.clone())
+                .await;
+        }
+    }
+
     Json(json!({
         "status": "ok",
-        "requires_restart": true,
-        "message": "Security settings saved. Restart RustPBX to apply changes.",
+        "requires_restart": false,
+        "message": "Security settings saved and applied.",
         "security": {
             "acl_rules": acl_rules,
         }
