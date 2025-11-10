@@ -1,5 +1,5 @@
 use axum::extract::{ConnectInfo, FromRequestParts};
-use http::{StatusCode, request::Parts};
+use http::{HeaderMap, StatusCode, Uri, request::Parts};
 use std::{
     fmt::{self, Formatter},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -20,6 +20,44 @@ impl ClientAddr {
     pub fn ip(&self) -> IpAddr {
         self.addr.ip()
     }
+
+    pub fn from_http_parts(
+        uri: &Uri,
+        headers: &HeaderMap,
+        connect_info: Option<SocketAddr>,
+    ) -> Self {
+        let is_secure = match uri.scheme_str() {
+            Some("wss") | Some("https") => true,
+            _ => headers
+                .get("x-forwarded-proto")
+                .map_or(false, |v| v == "https"),
+        };
+
+        let mut remote_addr = connect_info
+            .unwrap_or_else(|| SocketAddr::from((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)));
+
+        for header in [
+            "x-client-ip",
+            "x-forwarded-for",
+            "x-real-ip",
+            "cf-connecting-ip",
+        ] {
+            if let Some(value) = headers.get(header) {
+                if let Ok(ip) = value.to_str() {
+                    let first_ip = ip.split(',').next().unwrap_or(ip).trim();
+                    if let Ok(parsed_ip) = first_ip.parse::<IpAddr>() {
+                        remote_addr.set_ip(parsed_ip);
+                    }
+                    break;
+                }
+            }
+        }
+
+        ClientAddr {
+            addr: remote_addr,
+            is_secure,
+        }
+    }
 }
 
 impl<S> FromRequestParts<S> for ClientAddr
@@ -29,47 +67,16 @@ where
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let is_secure = match parts.uri.scheme_str() {
-            Some("wss") | Some("https") => true,
-            _ => parts
-                .headers
-                .get("x-forwarded-proto")
-                .map_or(false, |v| v == "https"),
-        };
-        let mut remote_addr = match parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-            Some(ConnectInfo(addr)) => addr.clone(),
-            None => {
-                return Ok(ClientAddr {
-                    addr: SocketAddr::from((IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)),
-                    is_secure,
-                });
-            }
-        };
+        let connect_info = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| *addr);
 
-        for header in [
-            "x-client-ip",
-            "x-forwarded-for",
-            "x-real-ip",
-            "cf-connecting-ip",
-        ] {
-            if let Some(value) = parts.headers.get(header) {
-                if let Ok(ip) = value.to_str() {
-                    // Handle comma-separated IPs (e.g. X-Forwarded-For can have multiple)
-                    let first_ip = ip.split(',').next().unwrap_or(ip).trim();
-                    match first_ip.parse::<IpAddr>() {
-                        Ok(parsed_ip) => {
-                            remote_addr.set_ip(parsed_ip);
-                        }
-                        Err(_) => {}
-                    }
-                    break;
-                }
-            }
-        }
-        Ok(ClientAddr {
-            addr: remote_addr,
-            is_secure,
-        })
+        Ok(ClientAddr::from_http_parts(
+            &parts.uri,
+            &parts.headers,
+            connect_info,
+        ))
     }
 }
 

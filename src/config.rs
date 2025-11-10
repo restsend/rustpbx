@@ -355,6 +355,7 @@ pub struct ProxyConfig {
     pub ua_black_list: Option<Vec<String>>,
     pub max_concurrency: Option<usize>,
     pub registrar_expires: Option<u32>,
+    pub ensure_user: Option<bool>,
     #[serde(default = "default_user_backends")]
     pub user_backends: Vec<UserBackendConfig>,
     #[serde(default)]
@@ -492,6 +493,7 @@ impl Default for ProxyConfig {
             ws_port: None,
             max_concurrency: None,
             registrar_expires: Some(60),
+            ensure_user: Some(true),
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyMode::default(),

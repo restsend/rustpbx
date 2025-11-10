@@ -181,11 +181,15 @@ impl ProxyModule for AuthModule {
         }
 
         let tx_user = SipUser::try_from(&*tx)?;
-
         if cookie.is_from_trunk() {
             cookie.set_user(tx_user.clone());
             return Ok(ProxyAction::Continue);
         }
+        let source = tx_user
+            .destination
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(backend) = self.server.auth_backend.as_ref() {
             match backend.authenticate(&tx.original).await {
@@ -195,7 +199,7 @@ impl ProxyModule for AuthModule {
                     return Ok(ProxyAction::Continue);
                 }
                 Err(e) => {
-                    info!(error=%e, key = %tx.key, "auth_backend authenticate failed");
+                    info!(error=%e, key = %tx.key, %source, "auth_backend authenticate failed");
                 }
                 _ => {}
             }
@@ -207,45 +211,35 @@ impl ProxyModule for AuthModule {
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
                 }
+                let to_header = tx.original.to_header()?.uri()?;
+                let callee_user = to_header.user().unwrap_or_else(|| "");
+                let callee_realm = to_header.host().to_string();
 
                 if tx.original.method == rsip::Method::Invite {
-                    if let Ok(to_header) = tx.original.to_header() {
-                        if let Ok(to_uri) = to_header.uri() {
-                            if let Some(callee_user_raw) = to_uri.user() {
-                                let callee_user = callee_user_raw.to_string();
-                                let callee_realm = to_uri.host().to_string();
-                                let realm_ref = if callee_realm.is_empty() {
-                                    None
-                                } else {
-                                    Some(callee_realm.as_str())
-                                };
-                                match self
-                                    .server
-                                    .user_backend
-                                    .get_user(&callee_user, realm_ref)
-                                    .await
-                                {
-                                    Ok(Some(callee_profile))
-                                        if callee_profile.allow_guest_calls =>
-                                    {
-                                        info!(
-                                            caller = %tx_user.username,
-                                            extension = %callee_user,
-                                            "Allowing guest call without authentication"
-                                        );
-                                        cookie.set_user(tx_user.clone());
-                                        return Ok(ProxyAction::Continue);
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        info!(
-                                            extension = %callee_user,
-                                            error = %e,
-                                            "Failed to evaluate guest call permission"
-                                        );
-                                    }
-                                }
-                            }
+                    match self
+                        .server
+                        .user_backend
+                        .get_user(&callee_user, Some(&callee_realm))
+                        .await
+                    {
+                        Ok(Some(callee_profile)) if callee_profile.allow_guest_calls => {
+                            info!(
+                                caller = %tx_user.username,
+                                extension = %callee_user,
+                                %source,
+                                "Allowing guest call without authentication"
+                            );
+                            cookie.set_user(tx_user.clone());
+                            return Ok(ProxyAction::Continue);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            info!(
+                                extension = %callee_user,
+                                error = %e,
+                                %source,
+                                "Failed to evaluate guest call permission"
+                            );
                         }
                     }
                 }
@@ -253,41 +247,42 @@ impl ProxyModule for AuthModule {
                 let from_uri = tx.original.from_header()?.uri()?;
                 let request_host = tx.original.uri().host().to_string();
                 let realm = self.server.proxy_config.select_realm(request_host.as_str());
-                // Check which type of authentication was attempted or send both challenges
-                let has_proxy_auth_header =
-                    rsip::header_opt!(tx.original.headers.iter(), Header::ProxyAuthorization)
-                        .is_some();
-                if has_proxy_auth_header {
-                    // Send proxy challenge if proxy auth was attempted
-                    let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
-                    info!(
-                        from = from_uri.to_string(),
-                        realm = realm,
-                        ?proxy_auth,
-                        "Proxy authentication failed, sending proxy challenge"
-                    );
-                    let headers = vec![Header::ProxyAuthenticate(proxy_auth)];
-                    tx.reply_with(rsip::StatusCode::ProxyAuthenticationRequired, headers, None)
+
+                if self.server.proxy_config.ensure_user.unwrap_or_default() {
+                    match self
+                        .server
+                        .user_backend
+                        .get_user(&from_uri.user().unwrap_or_else(|| ""), Some(&realm))
                         .await
-                        .ok();
-                } else {
-                    // Send WWW challenge if WWW auth was attempted
-                    let www_auth = self.create_www_auth_challenge(&realm)?;
-                    info!(
-                        from = from_uri.to_string(),
-                        realm = realm,
-                        ?www_auth,
-                        "WWW authentication failed, sending WWW challenge"
-                    );
-                    let headers = vec![Header::WwwAuthenticate(www_auth)];
-                    tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
-                        .await
-                        .ok();
+                    {
+                        Ok(Some(_)) => {}
+                        _ => {
+                            info!(
+                                from = %from_uri,
+                                %source,
+                                "User not found, don't send authentication challenge"
+                            );
+                            return Ok(ProxyAction::Abort);
+                        }
+                    };
                 }
+
+                let www_auth = self.create_www_auth_challenge(&realm)?;
+                info!(
+                    from = from_uri.to_string(),
+                    realm = realm,
+                    www_auth = www_auth.value(),
+                    %source,
+                    "WWW authentication failed, sending WWW challenge"
+                );
+                let headers = vec![Header::WwwAuthenticate(www_auth)];
+                tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
+                    .await
+                    .ok();
                 Ok(ProxyAction::Abort)
             }
             Err(e) => {
-                info!(error=%e, key = %tx.key, "Authentication error");
+                info!(error=%e, key = %tx.key, %source, "Authentication error");
                 Err(e)
             }
         }

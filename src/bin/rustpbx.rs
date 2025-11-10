@@ -2,7 +2,10 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
-use rustpbx::{app::AppStateBuilder, config::Config, preflight, version};
+use rustpbx::{
+    app::AppStateBuilder, config::Config, handler::middleware::request_log::AccessLogEventFormat,
+    preflight, version,
+};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -201,9 +204,7 @@ async fn main() -> Result<()> {
         file_layer = Some(
             tracing_subscriber::fmt::layer()
                 .with_timer(LocalTime::rfc_3339())
-                .with_file(true)
-                .with_line_number(true)
-                .with_target(true)
+                .event_format(AccessLogEventFormat::new(LocalTime::rfc_3339()))
                 .with_ansi(false)
                 .with_writer(non_blocking),
         );
@@ -211,9 +212,7 @@ async fn main() -> Result<()> {
         fmt_layer = Some(
             tracing_subscriber::fmt::layer()
                 .with_timer(LocalTime::rfc_3339())
-                .with_file(true)
-                .with_line_number(true)
-                .with_target(true),
+                .event_format(AccessLogEventFormat::new(LocalTime::rfc_3339())),
         );
     }
 

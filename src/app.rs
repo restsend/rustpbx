@@ -19,6 +19,7 @@ use anyhow::Result;
 use axum::{
     Router,
     extract::WebSocketUpgrade,
+    middleware,
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -450,5 +451,7 @@ fn create_router(state: AppState) -> Router {
         router = router.merge(crate::console::router(console_state));
     }
 
-    router
+    router.layer(middleware::from_fn(
+        crate::handler::middleware::request_log::log_requests,
+    ))
 }

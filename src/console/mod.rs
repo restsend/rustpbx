@@ -8,7 +8,6 @@ use minijinja::{Environment, path_loader};
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock, Weak};
-use tracing::debug;
 
 pub mod auth;
 mod handlers;
@@ -93,19 +92,15 @@ impl ConsoleState {
             }
         }
 
-        let start_time = std::time::Instant::now();
         let mut tmpl_env = Environment::new();
         tmpl_env.set_loader(path_loader("templates"));
 
-        let r = RenderTemplate {
+        RenderTemplate {
             tmpl_env: &tmpl_env,
             template_name: template,
             context: &ctx,
         }
-        .into_response();
-        let elapsed = start_time.elapsed();
-        debug!("rendered template '{}' in {:?}", template, elapsed);
-        r
+        .into_response()
     }
 
     pub fn db(&self) -> &DatabaseConnection {
