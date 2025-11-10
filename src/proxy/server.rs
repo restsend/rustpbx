@@ -19,7 +19,7 @@ use crate::{
     },
 };
 use anyhow::{Result, anyhow};
-use rsip::prelude::HeadersExt;
+use rsip::prelude::{HeadersExt, UntypedHeader};
 use rsip::{Auth, Param, Transport};
 use rsipstack::{
     EndpointBuilder,
@@ -64,7 +64,7 @@ pub struct SipServerInner {
     pub endpoint: Endpoint,
     pub dialog_layer: Arc<DialogLayer>,
     pub create_route_invite: Option<FnCreateRouteInvite>,
-    pub ignore_out_of_dialog_option: bool,
+    pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub sip_flow: Option<SipFlow>,
 }
@@ -93,7 +93,7 @@ pub struct SipServerBuilder {
     create_route_invite: Option<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
-    ignore_out_of_dialog_option: bool,
+    ignore_out_of_dialog_request: bool,
     locator_events: Option<LocatorEventSender>,
 }
 
@@ -115,7 +115,7 @@ impl SipServerBuilder {
             create_route_invite: None,
             database: None,
             data_context: None,
-            ignore_out_of_dialog_option: true,
+            ignore_out_of_dialog_request: true,
             locator_events: None,
         }
     }
@@ -125,8 +125,8 @@ impl SipServerBuilder {
         self
     }
 
-    pub fn with_ignore_out_of_dialog_option(mut self, ignore: bool) -> Self {
-        self.ignore_out_of_dialog_option = ignore;
+    pub fn with_ignore_out_of_dialog_request(mut self, ignore: bool) -> Self {
+        self.ignore_out_of_dialog_request = ignore;
         self
     }
 
@@ -424,7 +424,7 @@ impl SipServerBuilder {
             dialog_layer,
             dialplan_inspector: dialplan_inspector,
             create_route_invite: self.create_route_invite,
-            ignore_out_of_dialog_option: self.ignore_out_of_dialog_option,
+            ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             sip_flow: Some(sip_flow),
         });
@@ -579,7 +579,7 @@ impl SipServer {
                     | rsip::method::Method::Info
                     | rsip::method::Method::Refer
                     | rsip::method::Method::Update
-            ) && self.inner.ignore_out_of_dialog_option
+            ) && self.inner.ignore_out_of_dialog_request
             {
                 let to_tag = tx
                     .original
@@ -587,8 +587,9 @@ impl SipServer {
                     .and_then(|to| to.tag())
                     .ok()
                     .flatten();
+                let via = tx.original.via_header()?.value();
                 if to_tag.is_none() {
-                    info!(key = %tx.key, "ignoring out-of-dialog OPTIONS request");
+                    info!(key = %tx.key, via, "ignoring out-of-dialog {} request", tx.original.method);
                     continue;
                 }
             }
