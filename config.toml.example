@@ -5,6 +5,8 @@
 http_addr = "0.0.0.0:8080"
 log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
+# Paths can include a trailing * to skip whole subtrees
+# http_access_skip_paths = ["/health", "/metrics*"]
 recorder_path = "/tmp/recorders"
 # recorder_format can be "wav" (default) or "ogg" (requires enabling the 'opus' feature)
 recorder_format = "ogg"

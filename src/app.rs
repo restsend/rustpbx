@@ -451,7 +451,10 @@ fn create_router(state: AppState) -> Router {
         router = router.merge(crate::console::router(console_state));
     }
 
-    router.layer(middleware::from_fn(
+    let access_log_skip_paths = Arc::new(state.config.http_access_skip_paths.clone());
+
+    router.layer(middleware::from_fn_with_state(
+        access_log_skip_paths,
         crate::handler::middleware::request_log::log_requests,
     ))
 }
