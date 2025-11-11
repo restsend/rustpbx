@@ -208,7 +208,7 @@ impl VadProcessorInner {
         };
 
         let samples = samples.to_owned();
-        let result = tokio::task::block_in_place(|| self.vad.process(frame));
+        let result = self.vad.process(frame);
         if let Some((is_speaking, timestamp)) = result {
             if is_speaking || self.triggered {
                 let current_buf = SpeechBuf { samples, timestamp };

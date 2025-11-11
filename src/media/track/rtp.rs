@@ -61,6 +61,8 @@ const RTP_OUTBOUND_MTU: usize = 1200; // Standard MTU size
 const RTCP_SR_INTERVAL_MS: u64 = 5000; // 5 seconds RTCP sender report interval
 const DTMF_EVENT_DURATION_MS: u64 = 160; // Default DTMF event duration (in ms)
 const DTMF_EVENT_VOLUME: u8 = 10; // Default volume for DTMF events (0-63)
+const RTP_RESYNC_MIN_SKIP_PACKETS: u32 = 3; // Require at least this many missing packets before resyncing
+const RTP_RESYNC_COOLDOWN_FRAMES: u64 = 3; // Cooldown window (in frames) between resync attempts
 
 // STUN constants for ICE connectivity check
 const STUN_BINDING_REQUEST: u16 = 0x0001;
@@ -73,11 +75,14 @@ struct RtpTrackStats {
     packet_count: Arc<AtomicU32>,
     octet_count: Arc<AtomicU32>,
     last_timestamp_update: Arc<AtomicU64>,
+    last_resync_ts: Arc<AtomicU64>,
     received_packets: Arc<AtomicU32>,
     received_octets: Arc<AtomicU32>,
     expected_packets: Arc<AtomicU32>,
     lost_packets: Arc<AtomicU32>,
     highest_seq_num: Arc<AtomicU32>,
+    base_seq: Arc<AtomicU32>,
+    last_receive_seq: Arc<AtomicU32>,
     jitter: Arc<AtomicU32>,
     last_sr_timestamp: Arc<AtomicU64>,
     last_sr_ntp: Arc<AtomicU64>,
@@ -90,11 +95,14 @@ impl RtpTrackStats {
             packet_count: Arc::new(AtomicU32::new(0)),
             octet_count: Arc::new(AtomicU32::new(0)),
             last_timestamp_update: Arc::new(AtomicU64::new(0)),
+            last_resync_ts: Arc::new(AtomicU64::new(0)),
             received_packets: Arc::new(AtomicU32::new(0)),
             received_octets: Arc::new(AtomicU32::new(0)),
             expected_packets: Arc::new(AtomicU32::new(0)),
             lost_packets: Arc::new(AtomicU32::new(0)),
             highest_seq_num: Arc::new(AtomicU32::new(0)),
+            base_seq: Arc::new(AtomicU32::new(0)),
+            last_receive_seq: Arc::new(AtomicU32::new(0)),
             jitter: Arc::new(AtomicU32::new(0)),
             last_sr_timestamp: Arc::new(AtomicU64::new(0)),
             last_sr_ntp: Arc::new(AtomicU64::new(0)),
@@ -109,27 +117,33 @@ impl RtpTrackStats {
     }
 
     fn update_receive_stats(&self, seq_num: u32, payload_len: u32) {
-        self.received_packets.fetch_add(1, Ordering::Relaxed);
+        let prev_received = self.received_packets.fetch_add(1, Ordering::Relaxed);
+        let received = prev_received + 1;
         self.received_octets
             .fetch_add(payload_len, Ordering::Relaxed);
 
-        let current_highest = self.highest_seq_num.load(Ordering::Relaxed);
-        if seq_num > current_highest {
+        if prev_received == 0 {
+            self.base_seq.store(seq_num, Ordering::Relaxed);
+            self.last_receive_seq.store(seq_num, Ordering::Relaxed);
             self.highest_seq_num.store(seq_num, Ordering::Relaxed);
-        }
-
-        let expected = if current_highest > 0 {
-            seq_num.saturating_sub(
-                current_highest.saturating_sub(self.received_packets.load(Ordering::Relaxed)),
-            )
+            self.lost_packets.store(0, Ordering::Relaxed);
+            self.expected_packets.store(received, Ordering::Relaxed);
         } else {
-            1
-        };
-        self.expected_packets.store(expected, Ordering::Relaxed);
+            let last_seq = self.last_receive_seq.load(Ordering::Relaxed);
+            let gap = (seq_num as u16).wrapping_sub(last_seq as u16) as u32;
 
-        let received = self.received_packets.load(Ordering::Relaxed);
-        let lost = expected.saturating_sub(received);
-        self.lost_packets.store(lost, Ordering::Relaxed);
+            if gap > 0 && gap < 0x8000 {
+                if gap > 1 {
+                    self.lost_packets.fetch_add(gap - 1, Ordering::Relaxed);
+                }
+                self.last_receive_seq.store(seq_num, Ordering::Relaxed);
+                self.highest_seq_num.store(seq_num, Ordering::Relaxed);
+            }
+
+            let lost = self.lost_packets.load(Ordering::Relaxed);
+            self.expected_packets
+                .store(received + lost, Ordering::Relaxed);
+        }
 
         let current_jitter = self.jitter.load(Ordering::Relaxed);
         let new_jitter = (current_jitter + (seq_num % 100)) / 2;
@@ -1069,11 +1083,23 @@ impl RtpTrack {
 
                         let send_bps = (delta_sent as f64 * 8.0) / elapsed;
                         let recv_bps = (delta_recv as f64 * 8.0) / elapsed;
+                        let received_packets = stats.received_packets.load(Ordering::Relaxed);
+                        let lost_packets = stats.lost_packets.load(Ordering::Relaxed);
+                        let expected_packets = stats.expected_packets.load(Ordering::Relaxed);
+                        let fraction_lost = stats.get_fraction_lost();
+                        let loss_pct = (fraction_lost as f64) * 100.0 / 256.0;
+                        let jitter = stats.jitter.load(Ordering::Relaxed);
 
                         info!(
                             track_id = track_id.as_str(),
                             send_kbps = send_bps / 1000.0,
                             recv_kbps = recv_bps / 1000.0,
+                            sent_packets = packet_count,
+                            recv_packets = received_packets,
+                            expected_packets,
+                            lost_packets,
+                            loss_pct,
+                            jitter,
                             "RTP throughput"
                         );
 
@@ -1110,10 +1136,9 @@ impl RtpTrack {
                     let lost_packets = stats.lost_packets.load(Ordering::Relaxed);
                     let highest_seq = stats.highest_seq_num.load(Ordering::Relaxed);
                     let jitter = stats.jitter.load(Ordering::Relaxed);
+                    let fraction_lost = stats.get_fraction_lost();
 
-                    if received_packets > 0 {
-                        let fraction_lost = stats.get_fraction_lost();
-
+                    if received_packets > 0 || lost_packets > 0 {
                         let remote_ssrc = ssrc + 1;
                         let report = ReceptionReport {
                             ssrc: remote_ssrc,
@@ -1130,7 +1155,6 @@ impl RtpTrack {
                             reports: vec![report],
                             profile_extensions: Bytes::new(),
                         };
-                        debug!(track_id, ?rr, "Sending RTCP Receiver Report");
                         pkts.push(Box::new(rr) as Box<dyn webrtc::rtcp::packet::Packet + Send + Sync>);
                     }
 
@@ -1298,24 +1322,34 @@ impl Track for RtpTrack {
 
         let now = crate::get_timestamp();
         let last_update = stats.last_timestamp_update.load(Ordering::Relaxed);
+        let mut skipped_packets: u32 = 0;
 
-        let skipped_packets = if last_update > 0 {
-            (now - last_update) / (self.config.ptime.as_millis() as u64 * 2)
-        } else {
-            0
-        };
+        if last_update > 0 {
+            let frame_duration_ms = self.config.ptime.as_millis() as u64;
+            if frame_duration_ms > 0 {
+                let delta_ms = now.saturating_sub(last_update);
+                let delta_frames = delta_ms / frame_duration_ms;
+                let prospective_skip = delta_frames.saturating_sub(1);
 
-        stats.last_timestamp_update.store(now, Ordering::Relaxed);
-
-        if skipped_packets > 0 {
-            info!(
-                track_id = self.track_id,
-                "Skipping {} packets to resync timestamp", skipped_packets
-            );
-            for _ in 0..skipped_packets {
-                self.sequencer.next_sequence_number();
+                if prospective_skip >= RTP_RESYNC_MIN_SKIP_PACKETS as u64 {
+                    let last_resync = stats.last_resync_ts.load(Ordering::Relaxed);
+                    let cooldown_ms = frame_duration_ms.saturating_mul(RTP_RESYNC_COOLDOWN_FRAMES);
+                    if last_resync == 0 || now.saturating_sub(last_resync) >= cooldown_ms {
+                        skipped_packets = prospective_skip.min(u32::MAX as u64) as u32;
+                        debug!(
+                            track_id = self.track_id,
+                            delta_ms, skipped_packets, "Resyncing RTP timestamp"
+                        );
+                        for _ in 0..skipped_packets {
+                            self.sequencer.next_sequence_number();
+                        }
+                        stats.last_resync_ts.store(now, Ordering::Relaxed);
+                    }
+                }
             }
         }
+
+        stats.last_timestamp_update.store(now, Ordering::Relaxed);
 
         let samples_per_packet = (clock_rate as f64 * self.config.ptime.as_secs_f64()) as u32;
         let packets = match self
@@ -1329,7 +1363,10 @@ impl Track for RtpTrack {
         {
             Some(p) => {
                 if skipped_packets > 0 {
-                    p.skip_samples((skipped_packets * samples_per_packet as u64) as u32);
+                    let skip_samples = (skipped_packets as u64)
+                        .saturating_mul(samples_per_packet as u64)
+                        .min(u32::MAX as u64) as u32;
+                    p.skip_samples(skip_samples);
                 }
                 p.packetize(&Bytes::from_owner(payload), samples_per_packet)?
             }
@@ -1399,6 +1436,8 @@ mod tests {
         assert_eq!(stats.received_packets.load(Ordering::Relaxed), 1);
         assert_eq!(stats.received_octets.load(Ordering::Relaxed), 160);
         assert_eq!(stats.highest_seq_num.load(Ordering::Relaxed), 1000);
+        assert_eq!(stats.base_seq.load(Ordering::Relaxed), 1000);
+        assert_eq!(stats.last_receive_seq.load(Ordering::Relaxed), 1000);
         assert_eq!(stats.expected_packets.load(Ordering::Relaxed), 1);
         assert_eq!(stats.lost_packets.load(Ordering::Relaxed), 0);
 
@@ -1406,8 +1445,9 @@ mod tests {
         stats.update_receive_stats(1002, 160);
         assert_eq!(stats.received_packets.load(Ordering::Relaxed), 2);
         assert_eq!(stats.highest_seq_num.load(Ordering::Relaxed), 1002);
-        // The loss calculation algorithm may not exactly match expected - let's just verify it's calculated
-        assert!(stats.lost_packets.load(Ordering::Relaxed) <= 2);
+        assert_eq!(stats.last_receive_seq.load(Ordering::Relaxed), 1002);
+        assert_eq!(stats.lost_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.expected_packets.load(Ordering::Relaxed), 3);
     }
 
     #[test]
@@ -1692,6 +1732,9 @@ t=0 0"#;
         assert_eq!(inner.stats.jitter.load(Ordering::Relaxed), 0);
         assert_eq!(inner.stats.last_sr_timestamp.load(Ordering::Relaxed), 0);
         assert_eq!(inner.stats.last_sr_ntp.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.base_seq.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.last_receive_seq.load(Ordering::Relaxed), 0);
+        assert_eq!(inner.stats.last_resync_ts.load(Ordering::Relaxed), 0);
     }
 
     #[test]
