@@ -24,7 +24,28 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 #[cfg(feature = "opus")]
-use opus::{Application, Channels, Encoder};
+use opusic_sys::{
+    OPUS_APPLICATION_AUDIO, OPUS_OK, OpusEncoder as OpusEncoderRaw, opus_encode,
+    opus_encoder_create, opus_encoder_destroy, opus_strerror,
+};
+#[cfg(feature = "opus")]
+use std::{ffi::CStr, os::raw::c_int, ptr::NonNull};
+
+#[cfg(feature = "opus")]
+fn opus_error_message(code: c_int) -> String {
+    if code == OPUS_OK {
+        return "ok".to_string();
+    }
+
+    unsafe {
+        let ptr = opus_strerror(code);
+        if ptr.is_null() {
+            format!("error code {code}")
+        } else {
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -35,7 +56,7 @@ pub enum RecorderFormat {
 
 #[cfg(feature = "opus")]
 struct OggStreamWriter {
-    encoder: Encoder,
+    encoder: NonNull<OpusEncoderRaw>,
     serial: u32,
     sequence: u32,
     granule_position: u64,
@@ -50,8 +71,32 @@ impl OggStreamWriter {
             _ => 16000,
         };
 
-        let encoder = Encoder::new(normalized, Channels::Stereo, Application::Audio)
-            .map_err(|e| anyhow!("Failed to create Opus encoder: {e}"))?;
+        let encoder = {
+            let mut error: c_int = 0;
+            let ptr = unsafe {
+                opus_encoder_create(
+                    normalized as c_int,
+                    2,
+                    OPUS_APPLICATION_AUDIO,
+                    &mut error as *mut c_int,
+                )
+            };
+
+            if error != OPUS_OK {
+                unsafe {
+                    if !ptr.is_null() {
+                        opus_encoder_destroy(ptr);
+                    }
+                }
+                return Err(anyhow!(
+                    "Failed to create Opus encoder: {}",
+                    opus_error_message(error)
+                ));
+            }
+
+            NonNull::new(ptr)
+                .ok_or_else(|| anyhow!("Failed to create Opus encoder: null pointer returned"))?
+        };
 
         let mut serial = rand::random::<u32>();
         if serial == 0 {
@@ -77,12 +122,32 @@ impl OggStreamWriter {
     }
 
     fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
+        if pcm.len() % 2 != 0 {
+            return Err(anyhow!(
+                "PCM frame must contain an even number of samples for stereo Opus encoding"
+            ));
+        }
+
+        let frame_size = (pcm.len() / 2) as c_int;
         let mut buffer = vec![0u8; 4096];
-        let len = self
-            .encoder
-            .encode(pcm, &mut buffer)
-            .map_err(|e| anyhow!("Failed to encode Opus frame: {e}"))?;
-        buffer.truncate(len);
+        let len = unsafe {
+            opus_encode(
+                self.encoder.as_ptr(),
+                pcm.as_ptr() as *const opusic_sys::opus_int16,
+                frame_size,
+                buffer.as_mut_ptr(),
+                buffer.len() as c_int,
+            )
+        };
+
+        if len < 0 {
+            return Err(anyhow!(
+                "Failed to encode Opus frame: {}",
+                opus_error_message(len)
+            ));
+        }
+
+        buffer.truncate(len as usize);
         Ok(buffer)
     }
 
@@ -172,6 +237,21 @@ impl OggStreamWriter {
         tags
     }
 }
+
+#[cfg(feature = "opus")]
+impl Drop for OggStreamWriter {
+    fn drop(&mut self) {
+        unsafe {
+            opus_encoder_destroy(self.encoder.as_ptr());
+        }
+    }
+}
+
+#[cfg(feature = "opus")]
+unsafe impl Send for OggStreamWriter {}
+
+#[cfg(feature = "opus")]
+unsafe impl Sync for OggStreamWriter {}
 
 #[cfg(feature = "opus")]
 fn ogg_crc32(data: &[u8]) -> u32 {
