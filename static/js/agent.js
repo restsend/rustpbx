@@ -41,7 +41,7 @@ function mainApp() {
                 secretId: '',
                 secretKey: '',
                 endpoint: '',
-                speaker: '601003', // '301030'
+                speaker: 'female', // '601003'
                 speed: 1.0,
                 volume: 5,
                 greeting: "Hello, how can I help you today?"
@@ -832,9 +832,9 @@ function mainApp() {
                 switch (this.config.tts.provider) {
                     case 'tencent':
                         if (this.config.tts.speaker == 'male') {
-                            speaker = '601003';
-                        } else {
                             speaker = '601004';
+                        } else {
+                            speaker = '601003';
                         }
                         break;
                     case 'aliyun':
