@@ -1,10 +1,10 @@
-{% extends "console/layout.html" %}
+{% extends "console/auth_layout.html" %}
 
 {% block title %}Forgot password · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <section class="flex items-center justify-center py-16 px-4">
-    <div class="w-full max-w-lg space-y-8 rounded-2xl bg-white/90 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
+    <div class="w-full max-w-md space-y-8 rounded-2xl bg-white/80 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
         <div class="space-y-2 text-center">
             <h1 class="text-2xl font-semibold text-slate-900">Reset your password</h1>
             <p class="text-sm text-slate-500">Enter the email address linked to your account and we will send a reset
