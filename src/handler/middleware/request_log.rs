@@ -1,11 +1,12 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::{
     body::Body,
+    extract::State,
     http::{Request, header::CONTENT_LENGTH},
     middleware::Next,
     response::Response,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing::info;
@@ -162,11 +163,26 @@ where
     }
 }
 
+fn should_skip_logging(path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            path.starts_with(prefix)
+        } else {
+            path == pattern
+        }
+    })
+}
+
 /// Logs basic request metadata once the downstream handler returns.
-pub async fn log_requests(req: Request<Body>, next: Next) -> Response {
+pub async fn log_requests(
+    State(skip_paths): State<Arc<Vec<String>>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
     let started_at = Instant::now();
     let method = req.method().clone();
     let uri = req.uri().to_string();
+    let request_path = req.uri().path().to_string();
     let connect_info = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -185,15 +201,17 @@ pub async fn log_requests(req: Request<Body>, next: Next) -> Response {
         .unwrap_or_else(|| "-".to_string());
     let cost_ms = started_at.elapsed().as_secs_f64() * 1_000.0;
 
-    info!(
-        target: "http.access",
-        method = method.as_str(),
-        status = status.as_u16(),
-        body_len = body_len.as_str(),
-        cost_ms = cost_ms,
-        uri = uri.as_str(),
-        client_ip = client_ip.as_str(),
-    );
+    if !should_skip_logging(&request_path, skip_paths.as_slice()) {
+        info!(
+            target: "http.access",
+            method = method.as_str(),
+            status = status.as_u16(),
+            body_len = body_len.as_str(),
+            cost_ms = cost_ms,
+            uri = uri.as_str(),
+            client_ip = client_ip.as_str(),
+        );
+    }
 
     response
 }

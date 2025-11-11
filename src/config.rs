@@ -120,6 +120,8 @@ pub struct Config {
     pub http_addr: String,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_access_skip_paths: Vec<String>,
     pub ua: Option<UseragentConfig>,
     pub proxy: Option<ProxyConfig>,
 
@@ -559,6 +561,7 @@ impl Default for Config {
             http_addr: default_config_http_addr(),
             log_level: None,
             log_file: None,
+            http_access_skip_paths: Vec::new(),
             ua: Some(UseragentConfig::default()),
             proxy: None,
             recorder_path: default_config_recorder_path(),
