@@ -30,16 +30,16 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 ### Prerequisites
 - Rust 1.75 or later
 - Cargo package manager
-- `pkg-config`, `libasound2-dev`, `libopus-dev`
+- `pkg-config`, `libasound2-dev`
 
 Linux:
 ```bash
-apt-get install -y libasound2-dev libopus-dev
+apt-get install -y cmake libasound2-dev
 ```
 
 macOS:
 ```bash
-brew install opus
+brew install cmake
 ```
 
 ### Install & Build

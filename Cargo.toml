@@ -14,7 +14,7 @@ categories = ["network-programming", "multimedia"]
 vad_webrtc = ["webrtc-vad"]
 vad_silero = ["ort", "ort-sys"]
 vad_ten = ["ort", "ort-sys"]
-opus = ["dep:opus"]
+opus = ["dep:opusic-sys"]
 g729 = ["dep:g729-sys"]
 console = ["dep:minijinja"]
 default = ["vad_webrtc", "vad_silero", "vad_ten", "opus", "g729", "console"]
@@ -27,7 +27,7 @@ wav2text-bin = []
 anyhow = "1.0.100"
 async-trait = "0.1.88"
 async-stream = "0.3.6"
-opus = { version = "0.3", optional = true }
+opusic-sys = { version = "0.5.8", optional = true }
 axum = { version = "0.8.6", features = ["ws", "tokio"] }
 tower-http = { version = "0.6.2", features = ["fs", "cors"] }
 bytes = "1.10.1"
