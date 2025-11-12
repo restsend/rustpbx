@@ -20,8 +20,9 @@
             color: rgba(148, 163, 184, 0.7);
             opacity: 1;
         }
-        [x-cloak] { 
-            display: none !important; 
+
+        [x-cloak] {
+            display: none !important;
         }
     </style>
 </head>
@@ -517,7 +518,8 @@
     </div>
 
     <!-- DTMF Keypad Modal -->
-    <div x-cloak x-show="showDtmfKeypad" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+    <div x-cloak x-show="showDtmfKeypad"
+        class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
         x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0"
         x-transition:enter-end="opacity-100" x-transition:leave="transition ease-in duration-200"
         x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0">
@@ -567,14 +569,14 @@
             </div>
         </div>
     </div>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-6YYK5T2TWT"></script>
     <script>
-        var _hmt = _hmt || [];
-        (function () {
-            var hm = document.createElement("script");
-            hm.src = "https://hm.baidu.com/hm.js?8cf9f9fa16065ca7ca08e8079e07e2fc";
-            var s = document.getElementsByTagName("script")[0];
-            s.parentNode.insertBefore(hm, s);
-        })();
+        window.dataLayer = window.dataLayer || [];
+        function gtag() { dataLayer.push(arguments); }
+        gtag('js', new Date());
+
+        gtag('config', 'G-6YYK5T2TWT');
     </script>
 </body>
 

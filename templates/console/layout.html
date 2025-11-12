@@ -302,7 +302,14 @@
             </div>
         </div>
     </div>
-
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id={{ga|default('G-6YYK5T2TWT')}}"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag() { dataLayer.push(arguments); }
+        gtag('js', new Date());
+        gtag('config', "{{ga|default('G-6YYK5T2TWT')}}");
+    </script>
 </body>
 
 </html>
