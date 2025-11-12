@@ -157,9 +157,9 @@ pub async fn call_handler(
                 }
             }
         };
-    let guard = ActiveCallGuard::new(active_call.clone());
-    info!(session_id, %client_ip, active_calls = guard.active_calls, ?call_type,"new call started");
-    let receiver = active_call.new_receiver();
+        let guard = ActiveCallGuard::new(active_call.clone());
+        info!(session_id, %client_ip, active_calls = guard.active_calls, ?call_type,"new call started");
+        let receiver = active_call.new_receiver();
 
         let (r,_) = join!{
             active_call.serve(receiver),
@@ -181,17 +181,32 @@ pub async fn call_handler(
         }
 
         active_call.cleanup().await.ok();
-        // Drain remaining events
-        while let Ok(event) = event_receiver.try_recv() {
-            let message = match event.try_into() {
-                Ok(msg) => msg,
-                Err(_) => continue,
-            };
-            if let Err(_) = ws_sender.send(message).await {
-                break;
+        // Drain remaining events with 3 second timeout
+        let drain_timeout = tokio::time::sleep(Duration::from_millis(500));
+        tokio::pin!(drain_timeout);
+        loop {
+            tokio::select! {
+                _ = &mut drain_timeout => {
+                    break;
+                }
+                result = event_receiver.recv() => {
+                    match result {
+                        Ok(event) => {
+                            let message = match event.try_into() {
+                                Ok(msg) => msg,
+                                Err(_) => continue,
+                            };
+                            if let Err(_) = ws_sender.send(message).await {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
             }
-        };
-        ws_sender.flush().await.ok();
+        }
         ws_sender.close().await.ok();
         debug!(session_id, %client_ip, "WebSocket connection closed");
     });
