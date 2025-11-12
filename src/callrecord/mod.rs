@@ -792,6 +792,7 @@ impl CallRecordManager {
         record: &CallRecord,
         sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
+        let start_time = Instant::now();
         let object_store =
             build_object_store_from_s3(vendor, bucket, region, access_key, secret_key, endpoint)?;
 
@@ -799,13 +800,21 @@ impl CallRecordManager {
         let call_log_json = formatter.format(record)?;
 
         // Upload call log JSON
-        let json_path = ObjectPath::from(formatter.format_file_name(root, record));
+        let filename = formatter.format_file_name(root, record);
+        let json_path = ObjectPath::from(filename);
         match object_store.put(&json_path, call_log_json.into()).await {
-            Ok(r) => {
-                info!("Upload call record: {:?}", r);
+            Ok(_) => {
+                info!(
+                    elapsed = start_time.elapsed().as_secs_f64(),
+                    %json_path,
+                    "upload call record"
+                );
             }
             Err(e) => {
-                warn!("Failed to upload call record: {}", e);
+                warn!(
+                   %json_path,
+                    "failed to upload call record: {}", e
+                );
             }
         }
         if !sip_flows.is_empty() {
@@ -813,6 +822,7 @@ impl CallRecordManager {
                 if entries.is_empty() {
                     continue;
                 }
+                let start_time = Instant::now();
                 let flow_path =
                     ObjectPath::from(formatter.format_sip_flow_path(root, record, &leg));
                 let mut buffer = Vec::new();
@@ -822,11 +832,18 @@ impl CallRecordManager {
                     buffer.push(b'\n');
                 }
                 match object_store.put(&flow_path, buffer.into()).await {
-                    Ok(r) => {
-                        info!("Upload sip flow file: {:?}", r);
+                    Ok(_) => {
+                        info!(
+                            elapsed = start_time.elapsed().as_secs_f64(),
+                            %flow_path,
+                            "upload sip flow file"
+                        );
                     }
                     Err(e) => {
-                        warn!(path = %flow_path, "Failed to upload sip flow file: {}", e);
+                        warn!(
+                            %flow_path,
+                            "failed to upload sip flow file: {}", e
+                        );
                     }
                 }
             }
@@ -849,19 +866,24 @@ impl CallRecordManager {
                 }
             }
             for (path, media_path) in &media_files {
+                let start_time = Instant::now();
                 let file_content = match tokio::fs::read(path).await {
                     Ok(file_content) => file_content,
                     Err(e) => {
-                        warn!("Failed to read media file {}: {}", path, e);
+                        warn!("failed to read media file {}: {}", path, e);
                         continue;
                     }
                 };
                 match object_store.put(media_path, file_content.into()).await {
-                    Ok(r) => {
-                        info!("Upload media file: {:?}", r);
+                    Ok(_) => {
+                        info!(
+                            elapsed = start_time.elapsed().as_secs_f64(),
+                            %media_path,
+                            "upload media file"
+                        );
                     }
                     Err(e) => {
-                        warn!("Failed to upload media file: {}", e);
+                        warn!(%media_path,"failed to upload media file: {}", e);
                     }
                 }
             }
