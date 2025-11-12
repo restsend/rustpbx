@@ -285,7 +285,7 @@ impl CallModule {
             _ => return dialplan,
         };
 
-        if dialplan.recording.enabled {
+        if dialplan.recording.enabled && dialplan.recording.option.is_some() {
             return dialplan;
         }
 
