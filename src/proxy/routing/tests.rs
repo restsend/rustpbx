@@ -23,7 +23,6 @@ async fn test_match_invite_no_routes() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -108,7 +107,6 @@ async fn test_match_invite_inbound_respects_source_trunk() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         Some(&source_trunk),
@@ -162,7 +160,6 @@ async fn test_match_invite_inbound_without_source_trunk() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -222,7 +219,6 @@ async fn test_match_invite_exact_match() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -296,7 +292,6 @@ async fn test_match_invite_regex_match() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -356,7 +351,6 @@ async fn test_match_invite_reject_rule() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -419,7 +413,6 @@ async fn test_match_invite_rewrite_rules() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -503,7 +496,6 @@ async fn test_match_invite_load_balancing() {
         let result = match_invite(
             Some(&trunks),
             Some(&routes),
-            None,
             test_option,
             &origin,
             None,
@@ -583,7 +575,6 @@ async fn test_match_invite_header_matching() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -641,7 +632,6 @@ async fn test_match_invite_default_route() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,
@@ -713,7 +703,6 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let result_us = match_invite(
         Some(&trunks),
         Some(&routes_config_us),
-        None,
         option_us,
         &origin_us,
         None,
@@ -768,7 +757,6 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let result_digits = match_invite(
         Some(&trunks),
         Some(&routes_config_digits),
-        None,
         option_digits,
         &origin_digits,
         None,
@@ -838,7 +826,6 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
-        None,
         option,
         &origin,
         None,

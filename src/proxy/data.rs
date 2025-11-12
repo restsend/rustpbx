@@ -17,8 +17,8 @@ use crate::{
     config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::{
-        ConfigOrigin, DefaultRoute, DestConfig, MatchConditions, RewriteRules, RouteAction,
-        RouteDirection, RouteRule, TrunkConfig,
+        ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
+        RouteRule, TrunkConfig,
     },
 };
 
@@ -71,10 +71,6 @@ impl ProxyDataContext {
 
     pub fn config(&self) -> Arc<ProxyConfig> {
         self.config.clone()
-    }
-
-    pub fn default_route(&self) -> Option<DefaultRoute> {
-        self.config.default.clone()
     }
 
     pub async fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {

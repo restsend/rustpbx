@@ -1155,7 +1155,6 @@ async fn route_evaluate(
         };
 
     let data_context = server.data_context.clone();
-    let default_route = data_context.default_route();
 
     let (trunks_snapshot, routes_snapshot) = match dataset {
         EvaluationDataset::Runtime => {
@@ -1250,7 +1249,6 @@ async fn route_evaluate(
         } else {
             Some(&routes_snapshot)
         },
-        default_route.as_ref(),
         invite_option,
         &request,
         source_trunk_value.as_ref(),

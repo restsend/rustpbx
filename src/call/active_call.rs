@@ -432,7 +432,7 @@ impl ActiveCall {
             };
             let requested_format = recorder_option
                 .format
-                .unwrap_or(self.app_state.config.recorder_format);
+                .unwrap_or(self.app_state.config.recorder_format());
             let format = requested_format.effective();
             if requested_format != format {
                 warn!(
