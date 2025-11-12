@@ -148,6 +148,7 @@ pub struct EouOption {
     pub secret_id: Option<String>,
     /// max timeout in milliseconds
     pub timeout: Option<u32>,
+    pub extra: Option<HashMap<String, String>>,
 }
 
 // WebSocket Commands
