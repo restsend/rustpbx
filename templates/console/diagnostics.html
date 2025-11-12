@@ -1387,6 +1387,7 @@
                                     x-text="sipCallError"></div>
                             </template>
                             <audio x-ref="sipRemoteAudio" autoplay playsinline hidden></audio>
+                            <audio x-ref="sipLocalAudio" autoplay playsinline hidden muted></audio>
                         </div>
                     </div>
                 </div>
@@ -2473,6 +2474,10 @@
                             this.sipCallStatus = 'Requesting microphone access...';
                             mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                             this.sipLocalStream = mediaStream;
+                            if (this.$refs.sipLocalAudio) {
+                                this.$refs.sipLocalAudio.srcObject = mediaStream;
+                                this.$refs.sipLocalAudio.muted = true; // keep local monitor silent to avoid echo
+                            }
                         } catch (err) {
                             const message = err?.message || 'Unable to access microphone';
                             this.sipCallError = message;
@@ -2519,6 +2524,10 @@
                             await this.ensureIceServers();
                             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                             this.sipLocalStream = stream;
+                            if (this.$refs.sipLocalAudio) {
+                                this.$refs.sipLocalAudio.srcObject = stream;
+                                this.$refs.sipLocalAudio.muted = true; // silence local monitor for incoming calls
+                            }
                             const options = {
                                 mediaStream: stream,
                                 mediaConstraints: { audio: true, video: false },
@@ -2633,6 +2642,10 @@
                             }
                         }
                         this.sipLocalStream = null;
+                        if (this.$refs.sipLocalAudio) {
+                            this.$refs.sipLocalAudio.srcObject = null;
+                            this.$refs.sipLocalAudio.muted = true;
+                        }
                     },
                     appendSipEvent(message, level = 'info') {
                         const labels = {
