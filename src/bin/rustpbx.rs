@@ -308,7 +308,7 @@ async fn main() -> Result<()> {
             info!("Reload requested; restarting with updated configuration");
             next_config_path = state.config_path.clone();
             cached_config = None;
-            sleep(Duration::from_millis(300)).await;
+            sleep(Duration::from_secs(3)).await; // give some time for sockets to be released
             continue;
         }
 
