@@ -23,8 +23,9 @@ use webrtc::{
         media_engine::{
             MIME_TYPE_G722, MIME_TYPE_PCMA, MIME_TYPE_PCMU, MIME_TYPE_TELEPHONE_EVENT, MediaEngine,
         },
+        setting_engine::SettingEngine,
     },
-    ice_transport::ice_server::RTCIceServer,
+    ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer},
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
         sdp::session_description::RTCSessionDescription,
@@ -61,6 +62,7 @@ pub struct WebrtcTrack {
     ssrc: u32,
     pub peer_connection: Option<Arc<RTCPeerConnection>>,
     pub ice_servers: Option<Vec<IceServer>>,
+    pub external_ip: Option<String>,
 }
 
 impl WebrtcTrack {
@@ -170,12 +172,20 @@ impl WebrtcTrack {
             ssrc: 0,
             peer_connection: None,
             ice_servers,
+            external_ip: None,
         }
     }
+
+    pub fn with_external_ip(mut self, external_ip: String) -> Self {
+        self.external_ip = Some(external_ip);
+        self
+    }
+
     pub fn with_ssrc(mut self, ssrc: u32) -> Self {
         self.ssrc = ssrc;
         self
     }
+
     pub fn with_prefered_codec(mut self, codec: Option<CodecType>) -> Self {
         self.prefered_codec = codec;
         self
@@ -183,7 +193,16 @@ impl WebrtcTrack {
 
     async fn create(&mut self) -> Result<()> {
         let media_engine = Self::get_media_engine(self.prefered_codec)?;
-        let api = APIBuilder::new().with_media_engine(media_engine).build();
+        let mut setting_engine = SettingEngine::default();
+
+        if let Some(ref external_ip) = self.external_ip {
+            setting_engine.set_nat_1to1_ips(vec![external_ip.clone()], RTCIceCandidateType::Srflx);
+        }
+        let api = APIBuilder::new()
+            .with_setting_engine(setting_engine)
+            .with_media_engine(media_engine)
+            .build();
+
         let ice_servers = if let Some(ice_servers) = &self.ice_servers {
             ice_servers
                 .iter()

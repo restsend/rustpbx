@@ -1,6 +1,6 @@
 use crate::{
     call::{
-        DialStrategy, Dialplan, FailureAction, Location, TransactionCookie,
+        DialStrategy, Dialplan, FailureAction, Location, MediaConfig, TransactionCookie,
         sip::{DialogStateReceiverGuard, ServerDialogGuard},
     },
     callrecord::{
@@ -126,7 +126,7 @@ struct CallSession {
     early_media_sent: bool,
     media_stream: Arc<MediaStream>, // Always created now
     use_media_proxy: bool,          // Flag to control whether to use media stream proxy
-    external_addr: Option<IpAddr>,  // Optional external IP address for media
+    media_config: MediaConfig,
     original_caller: Option<String>,
     original_callee: Option<String>,
     routed_caller: Option<String>,
@@ -169,7 +169,7 @@ impl CallSession {
         server_dialog: ServerInviteDialog,
         use_media_proxy: bool,
         event_sender: EventSender,
-        external_addr: Option<IpAddr>,
+        media_config: MediaConfig,
         recorder_option: Option<RecorderOption>,
     ) -> Self {
         let mut builder = MediaStreamBuilder::new(event_sender)
@@ -205,13 +205,13 @@ impl CallSession {
             early_media_sent: false,
             media_stream: Arc::new(stream),
             use_media_proxy,
-            external_addr,
             original_caller,
             original_callee,
             routed_caller: None,
             routed_callee: None,
             routed_contact: None,
             routed_destination: None,
+            media_config,
         }
     }
 
@@ -239,17 +239,22 @@ impl CallSession {
         let track_id = "caller-track".to_string();
         let config = TrackConfig::default();
         let mut track: Box<dyn Track> = if Self::is_webrtc_sdp(&orig_offer_sdp) {
-            Box::new(WebrtcTrack::new(
+            let track = WebrtcTrack::new(
                 self.media_stream.cancel_token.clone(),
                 track_id.clone(),
                 config,
-                None,
-            ))
+                self.media_config.ice_servers.clone(),
+            );
+            if let Some(ref addr) = self.media_config.external_ip {
+                Box::new(track.with_external_ip(addr.clone()))
+            } else {
+                Box::new(track)
+            }
         } else {
             let track = RtpTrackBuilder::new(track_id.clone(), config)
                 .with_cancel_token(self.media_stream.cancel_token.clone());
-            if let Some(ref addr) = self.external_addr {
-                Box::new(track.with_external_addr(addr.clone()).build().await?)
+            if let Some(ref addr) = self.media_config.external_ip {
+                Box::new(track.with_external_addr(addr.parse()?).build().await?)
             } else {
                 Box::new(track.build().await?)
             }
@@ -273,11 +278,12 @@ impl CallSession {
     async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
         let track_id = "callee-track".to_string();
         let config = TrackConfig::default();
+
         let (offer, track) = if !is_webrtc {
             let track = RtpTrackBuilder::new(track_id.clone(), config)
                 .with_cancel_token(self.media_stream.cancel_token.clone());
-            let track = if let Some(ref addr) = self.external_addr {
-                track.with_external_addr(addr.clone()).build().await?
+            let track = if let Some(ref addr) = self.media_config.external_ip {
+                track.with_external_addr(addr.parse()?).build().await?
             } else {
                 track.build().await?
             };
@@ -290,8 +296,11 @@ impl CallSession {
                 self.media_stream.cancel_token.clone(),
                 track_id.clone(),
                 config,
-                None,
+                self.media_config.ice_servers.clone(),
             );
+            if let Some(ref addr) = self.media_config.external_ip {
+                track = track.with_external_ip(addr.clone());
+            }
             (
                 track.local_description().await?,
                 Box::new(track) as Box<dyn Track>,
@@ -607,26 +616,20 @@ impl ProxyCall {
             "starting proxy call processing"
         );
 
-        let external_addr = self
-            .dialplan
-            .media
-            .external_ip
-            .as_ref()
-            .map(|ip| ip.parse().ok())
-            .flatten();
         let recorder_option =
             if self.dialplan.recording.enabled && self.dialplan.recording.auto_start {
                 self.dialplan.recording.recorder_config.clone()
             } else {
                 None
             };
+
         let mut session = CallSession::new(
             self.cancel_token.child_token(),
             self.session_id.clone(),
             server_dialog.clone(),
             use_media_proxy,
             self.event_sender.clone(),
-            external_addr,
+            self.dialplan.media.clone(),
             recorder_option,
         );
         if use_media_proxy {

@@ -205,6 +205,9 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "generated_at": now.to_rfc3339(),
         });
 
+        let recorder_path = config.recorder_path();
+        let recorder_format = config.recorder_format();
+
         let mut key_items: Vec<JsonValue> = Vec::new();
         key_items.push(json!({ "label": "HTTP address", "value": config.http_addr.clone() }));
         if let Some(ext) = config.external_ip.as_ref() {
@@ -213,10 +216,8 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
         }
-        key_items.push(json!({ "label": "Recorder path", "value": config.recorder_path.clone() }));
-        key_items.push(
-            json!({ "label": "Recorder format", "value": config.recorder_format.extension() }),
-        );
+        key_items.push(json!({ "label": "Recorder path", "value": recorder_path.clone() }));
+        key_items.push(json!({ "label": "Recorder format", "value": recorder_format.extension() }));
         key_items
             .push(json!({ "label": "Media cache path", "value": config.media_cache_path.clone() }));
         key_items
@@ -556,6 +557,9 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         }
     }
 
+    let recorder_path = config.recorder_path();
+    let recorder_format = config.recorder_format();
+
     let (mode, callrecord_profile) = match config.callrecord.as_ref() {
         Some(CallRecordConfig::Local { root }) => {
             let mut profile = Profile::new(
@@ -631,10 +635,10 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             let mut profile = Profile::new(
                 "callrecord-local",
                 "Call recordings",
-                format!("Storing call detail records on {}", config.recorder_path),
+                format!("Storing call detail records on {}", recorder_path),
             );
             profile.insert("type", json!("local"));
-            profile.insert("root", json!(&config.recorder_path));
+            profile.insert("root", json!(&recorder_path));
             ("local".to_string(), profile)
         }
     };
@@ -644,8 +648,8 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         "Spool directories",
         "Server-side spool paths for recordings and media cache.",
     );
-    spool_profile.insert("recorder_path", json!(&config.recorder_path));
-    spool_profile.insert("recorder_format", json!(config.recorder_format.extension()));
+    spool_profile.insert("recorder_path", json!(&recorder_path));
+    spool_profile.insert("recorder_format", json!(recorder_format.extension()));
     spool_profile.insert("media_cache_path", json!(&config.media_cache_path));
     if let Some(policy) = config.recording.as_ref() {
         if let Ok(policy_value) = serde_json::to_value(policy) {
@@ -661,10 +665,10 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     storage_meta.insert("mode".to_string(), json!(storage_mode));
     storage_meta.insert("active_profile".to_string(), json!(active_profile_id));
     storage_meta.insert("description".to_string(), json!(active_description));
-    storage_meta.insert("recorder_path".to_string(), json!(&config.recorder_path));
+    storage_meta.insert("recorder_path".to_string(), json!(&recorder_path));
     storage_meta.insert(
         "recorder_format".to_string(),
-        json!(config.recorder_format.extension()),
+        json!(recorder_format.extension()),
     );
     storage_meta.insert(
         "media_cache_path".to_string(),
@@ -1429,6 +1433,10 @@ pub(crate) struct RecordingPolicyPayload {
     samplerate: Option<Option<u32>>,
     #[serde(default)]
     ptime: Option<Option<u32>>,
+    #[serde(default)]
+    path: Option<Option<String>>,
+    #[serde(default)]
+    format: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1577,11 +1585,15 @@ pub async fn update_storage_settings(
     let mut modified = false;
 
     if let Some(path_opt) = payload.recorder_path {
-        if let Some(path) = normalize_opt_string(path_opt) {
-            doc["recorder_path"] = value(path);
-        } else {
-            doc.remove("recorder_path");
+        {
+            let table = ensure_table_mut(&mut doc, "recording");
+            if let Some(path) = normalize_opt_string(path_opt) {
+                table["path"] = value(path);
+            } else {
+                table.remove("path");
+            }
         }
+        doc.remove("recorder_path");
         modified = true;
     }
 
@@ -1595,24 +1607,28 @@ pub async fn update_storage_settings(
     }
 
     if let Some(format_opt) = payload.recorder_format {
-        match format_opt {
-            Some(format_value) => {
-                let normalized = format_value.trim().to_ascii_lowercase();
-                if normalized.is_empty() {
-                    doc.remove("recorder_format");
-                } else if normalized == "wav" || normalized == "ogg" {
-                    doc["recorder_format"] = value(normalized);
-                } else {
-                    return json_error(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "recorder_format must be either 'wav' or 'ogg'",
-                    );
+        {
+            let table = ensure_table_mut(&mut doc, "recording");
+            match format_opt {
+                Some(format_value) => {
+                    let normalized = format_value.trim().to_ascii_lowercase();
+                    if normalized.is_empty() {
+                        table.remove("format");
+                    } else if normalized == "wav" || normalized == "ogg" {
+                        table["format"] = value(normalized);
+                    } else {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "recorder_format must be either 'wav' or 'ogg'",
+                        );
+                    }
+                }
+                None => {
+                    table.remove("format");
                 }
             }
-            None => {
-                doc.remove("recorder_format");
-            }
         }
+        doc.remove("recorder_format");
         modified = true;
     }
 
@@ -1720,6 +1736,35 @@ pub async fn update_storage_settings(
                         table.remove("ptime");
                     }
                     None => {}
+                }
+
+                if let Some(path_opt) = policy_payload.path {
+                    if let Some(path) = normalize_opt_string(path_opt) {
+                        table["path"] = value(path);
+                    } else {
+                        table.remove("path");
+                    }
+                }
+
+                if let Some(format_opt) = policy_payload.format {
+                    match format_opt {
+                        Some(format_value) => {
+                            let normalized = format_value.trim().to_ascii_lowercase();
+                            if normalized.is_empty() {
+                                table.remove("format");
+                            } else if normalized == "wav" || normalized == "ogg" {
+                                table["format"] = value(normalized);
+                            } else {
+                                return json_error(
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    "recording.format must be either 'wav' or 'ogg'",
+                                );
+                            }
+                        }
+                        None => {
+                            table.remove("format");
+                        }
+                    }
                 }
 
                 doc["recording"] = Item::Table(table);
@@ -2063,12 +2108,17 @@ fn persist_document(path: &str, contents: String) -> Result<(), Response> {
 }
 
 fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
-    toml::from_str::<Config>(contents).map_err(|err| {
-        json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Configuration validation failed: {}", err),
-        )
-    })
+    toml::from_str::<Config>(contents)
+        .map(|mut cfg| {
+            cfg.ensure_recording_defaults();
+            cfg
+        })
+        .map_err(|err| {
+            json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Configuration validation failed: {}", err),
+            )
+        })
 }
 
 fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {

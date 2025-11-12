@@ -13,7 +13,7 @@ use crate::callrecord::{
     extract_sip_username, extras_map_to_metadata, extras_map_to_option,
     persist_and_dispatch_record, sipflow::SipMessageItem,
 };
-use crate::config::{ProxyConfig, RouteResult, default_config_recorder_path};
+use crate::config::{ProxyConfig, RouteResult};
 use crate::media::recorder::RecorderOption;
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::ProxyCall;
@@ -96,7 +96,6 @@ impl RouteInvite for DefaultRouteInvite {
     ) -> Result<RouteResult> {
         let trunks_snapshot = self.data_context.trunks_snapshot().await;
         let routes_snapshot = self.data_context.routes_snapshot().await;
-        let default_route = self.data_context.default_route();
         let source_trunk = self
             .resolve_source_trunk(&trunks_snapshot, origin, direction)
             .await;
@@ -112,7 +111,6 @@ impl RouteInvite for DefaultRouteInvite {
             } else {
                 Some(&routes_snapshot)
             },
-            default_route.as_ref(),
             option,
             origin,
             source_trunk.as_ref(),
@@ -198,7 +196,8 @@ impl CallModule {
             .with_proxy_mode(self.inner.config.media_proxy)
             .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
             .with_rtp_start_port(self.inner.server.rtp_config.start_port.clone())
-            .with_rtp_end_port(self.inner.server.rtp_config.end_port.clone());
+            .with_rtp_end_port(self.inner.server.rtp_config.end_port.clone())
+            .with_ice_servers(self.inner.server.rtp_config.ice_servers.clone());
 
         let caller_is_same_realm = self
             .inner
@@ -403,9 +402,8 @@ impl CallModule {
             .inner
             .config
             .recorder_root
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(default_config_recorder_path);
+            .clone()
+            .unwrap_or_else(|| policy.recorder_path());
         let pattern = policy.filename_pattern.as_deref().unwrap_or("{session_id}");
         let direction = match dialplan.direction {
             DialDirection::Inbound => "inbound",
@@ -422,7 +420,7 @@ impl CallModule {
         }
         path.push(sanitized);
         if path.extension().is_none() {
-            path.set_extension(self.inner.config.recorder_format.extension());
+            path.set_extension(policy.recorder_format().extension());
         }
         let mut option = RecorderOption::new(path.to_string_lossy().to_string());
         if let Some(rate) = policy.samplerate {
@@ -431,7 +429,7 @@ impl CallModule {
         if let Some(ptime) = policy.ptime {
             option.ptime = ptime;
         }
-        option.format = Some(self.inner.config.recorder_format);
+        option.format = Some(policy.recorder_format());
         Some(option)
     }
 

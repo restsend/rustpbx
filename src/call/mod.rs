@@ -1,5 +1,5 @@
 use crate::{
-    config::{MediaProxyMode, RouteResult},
+    config::{IceServer, MediaProxyMode, RouteResult},
     media::{recorder::RecorderOption, track::media_pass::MediaPassOption, vad::VADOption},
     synthesis::SynthesisOption,
     transcription::TranscriptionOption,
@@ -405,6 +405,7 @@ pub struct MediaConfig {
     pub external_ip: Option<String>,
     pub rtp_start_port: Option<u16>,
     pub rtp_end_port: Option<u16>,
+    pub ice_servers: Option<Vec<IceServer>>,
 }
 
 impl MediaConfig {
@@ -414,6 +415,7 @@ impl MediaConfig {
             external_ip: None,
             rtp_start_port: None,
             rtp_end_port: None,
+            ice_servers: None,
         }
     }
 
@@ -424,6 +426,11 @@ impl MediaConfig {
 
     pub fn with_external_ip(mut self, ip: Option<String>) -> Self {
         self.external_ip = ip;
+        self
+    }
+
+    pub fn with_ice_servers(mut self, servers: Option<Vec<IceServer>>) -> Self {
+        self.ice_servers = servers;
         self
     }
 

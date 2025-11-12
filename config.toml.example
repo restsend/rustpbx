@@ -7,9 +7,6 @@ log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 # Paths can include a trailing * to skip whole subtrees
 # http_access_skip_paths = ["/health", "/metrics*"]
-recorder_path = "/tmp/recorders"
-# recorder_format can be "wav" (default) or "ogg" (requires enabling the 'opus' feature)
-recorder_format = "ogg"
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 
@@ -38,7 +35,6 @@ allow_registration = false
 [ua]
 addr="0.0.0.0"
 udp_port=13050 # don't use 5060
-
 
 [proxy]
 modules = ["acl", "auth", "registrar", "call"]
@@ -87,13 +83,14 @@ users = [
 type = "extension"
 database_url = "sqlite://rustpbx.sqlite3"
 
+[recording]
+enabled = true
+auto_start = true
+
 [callrecord]
 type = "local"
 root = "/tmp/cdr"
 
-[recording]
-enabled = true
-auto_start = true
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"

@@ -163,15 +163,6 @@ pub struct SourceTrunk {
     pub id: Option<i64>,
     pub direction: Option<TrunkDirection>,
 }
-/// Default route strategy
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DefaultRoute {
-    pub dest: DestConfig,
-    #[serde(default = "default_select")]
-    pub select: String,
-    #[serde(default = "default_action")]
-    pub action: String,
-}
 
 /// Destination configuration (can be single or multiple trunks)
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -403,9 +394,6 @@ pub struct RejectConfig {
 
 fn default_select() -> String {
     "rr".to_string()
-}
-fn default_action() -> String {
-    "forward".to_string()
 }
 
 async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {

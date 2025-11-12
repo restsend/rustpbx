@@ -29,7 +29,10 @@ fn create_test_app_state_with(mutator: impl FnOnce(&mut crate::config::Config)) 
     fs::create_dir_all(&mediacache_dir).unwrap();
 
     let mut config = crate::config::Config::default();
-    config.recorder_path = recorder_dir.to_string_lossy().to_string();
+    let mut recording_policy = crate::config::RecordingPolicy::default();
+    recording_policy.path = Some(recorder_dir.to_string_lossy().to_string());
+    config.recording = Some(recording_policy);
+    config.ensure_recording_defaults();
     config.media_cache_path = mediacache_dir.to_string_lossy().to_string();
     mutator(&mut config);
 

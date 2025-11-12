@@ -14,7 +14,7 @@ use tracing::info;
 use crate::{
     call::{DialDirection, RoutingState},
     config::RouteResult,
-    proxy::routing::{ActionType, DefaultRoute, RouteRule, SourceTrunk, TrunkConfig},
+    proxy::routing::{ActionType, RouteRule, SourceTrunk, TrunkConfig},
 };
 
 #[derive(Debug, Default, Clone)]
@@ -42,7 +42,6 @@ pub struct RouteAbortTrace {
 pub async fn match_invite(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
-    default: Option<&DefaultRoute>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -52,7 +51,6 @@ pub async fn match_invite(
     match_invite_impl(
         trunks,
         routes,
-        default,
         option,
         origin,
         source_trunk,
@@ -66,7 +64,6 @@ pub async fn match_invite(
 pub async fn match_invite_with_trace(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
-    default: Option<&DefaultRoute>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -77,7 +74,6 @@ pub async fn match_invite_with_trace(
     match_invite_impl(
         trunks,
         routes,
-        default,
         option,
         origin,
         source_trunk,
@@ -91,7 +87,6 @@ pub async fn match_invite_with_trace(
 async fn match_invite_impl(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
-    default: Option<&DefaultRoute>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -254,41 +249,7 @@ async fn match_invite_impl(
         }
     }
 
-    if matches!(direction, DialDirection::Inbound) {
-        return Ok(RouteResult::NotHandled(option));
-    }
-
-    let default = match default {
-        Some(default) => default,
-        None => return Ok(RouteResult::NotHandled(option)),
-    };
-
-    let selected_trunk = select_trunk(
-        &default.dest,
-        &default.select,
-        &None,
-        &option,
-        routing_state,
-    )?;
-
-    if let Some(trace) = &mut trace {
-        trace.selected_trunk = Some(selected_trunk.clone());
-        trace.used_default_route = true;
-    }
-
-    if let Some(trunk_config) = trunks
-        .as_ref()
-        .and_then(|trunks| trunks.get(&selected_trunk))
-    {
-        apply_trunk_config(&mut option, trunk_config)?;
-        info!(
-            "Using default trunk: {} for destination: {}",
-            selected_trunk, trunk_config.dest
-        );
-        return Ok(RouteResult::Forward(option));
-    }
-
-    Ok(RouteResult::NotHandled(option))
+    return Ok(RouteResult::NotHandled(option));
 }
 
 /// Context for rule matching to reduce function arguments

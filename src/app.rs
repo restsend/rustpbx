@@ -3,7 +3,7 @@ use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
-    media::{engine::StreamEngine, recorder::RecorderFormat},
+    media::engine::StreamEngine,
     proxy::{
         acl::AclModule,
         auth::AuthModule,
@@ -73,7 +73,8 @@ pub struct AppStateBuilder {
 
 impl AppStateInner {
     pub fn get_dump_events_file(&self, session_id: &String) -> String {
-        let root = Path::new(&self.config.recorder_path);
+        let recorder_root = self.config.recorder_path();
+        let root = Path::new(&recorder_root);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
                 Ok(_) => {
@@ -94,7 +95,8 @@ impl AppStateInner {
     }
 
     pub fn get_recorder_file(&self, session_id: &String) -> String {
-        let root = Path::new(&self.config.recorder_path);
+        let recorder_root = self.config.recorder_path();
+        let root = Path::new(&recorder_root);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
                 Ok(_) => {
@@ -110,7 +112,7 @@ impl AppStateInner {
             }
         }
         let mut recorder_file = root.join(session_id);
-        let desired_ext = self.config.recorder_format.extension();
+        let desired_ext = self.config.recorder_format().extension();
         let has_desired_ext = recorder_file
             .extension()
             .and_then(|ext| ext.to_str())
@@ -142,11 +144,10 @@ impl AppStateBuilder {
     }
 
     pub fn with_config(mut self, mut config: Config) -> Self {
-        if config.recorder_format == RecorderFormat::Ogg && !RecorderFormat::Ogg.is_supported() {
+        if config.ensure_recording_defaults() {
             warn!(
                 "recorder_format=ogg requires compiling with the 'opus' feature; falling back to wav"
             );
-            config.recorder_format = RecorderFormat::Wav;
         }
         self.config = Some(config);
         if self.config_loaded_at.is_none() {
@@ -248,13 +249,28 @@ impl AppStateBuilder {
                             }
                         }
                     }
-                    if proxy_config.recorder_root.is_none() {
-                        proxy_config.recorder_root = Some(config.recorder_path.clone());
-                    }
-                    proxy_config.recorder_format = config.recorder_format;
                     if proxy_config.recording.is_none() {
                         proxy_config.recording = config.recording.clone();
                     }
+                    let global_recorder_path = config.recorder_path();
+                    let global_recorder_format = config.recorder_format();
+
+                    if proxy_config.recorder_root.is_none() {
+                        let path = proxy_config
+                            .recording
+                            .as_ref()
+                            .map(|policy| policy.recorder_path())
+                            .unwrap_or_else(|| global_recorder_path.clone());
+                        proxy_config.recorder_root = Some(path);
+                    }
+
+                    proxy_config.recorder_format = proxy_config
+                        .recording
+                        .as_ref()
+                        .map(|policy| policy.recorder_format())
+                        .unwrap_or(global_recorder_format);
+
+                    proxy_config.ensure_recording_defaults();
                     let proxy_config = Arc::new(proxy_config);
                     let builder = SipServerBuilder::new(proxy_config.clone())
                         .with_cancel_token(token.child_token())

@@ -1,7 +1,7 @@
 use crate::{
     call::{DialDirection, user::SipUser},
     media::recorder::RecorderFormat,
-    proxy::routing::{DefaultRoute, RouteRule, TrunkConfig},
+    proxy::routing::{RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
 use anyhow::{Error, Result};
@@ -24,12 +24,14 @@ pub(crate) fn default_config_recorder_path() -> String {
     #[cfg(not(target_os = "windows"))]
     return "/tmp/recorder".to_string();
 }
+
 fn default_config_media_cache_path() -> String {
     #[cfg(target_os = "windows")]
     return "./mediacache".to_string();
     #[cfg(not(target_os = "windows"))]
     return "/tmp/mediacache".to_string();
 }
+
 fn default_config_http_addr() -> String {
     "0.0.0.0:8080".to_string()
 }
@@ -112,6 +114,41 @@ pub struct RecordingPolicy {
     pub samplerate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptime: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<RecorderFormat>,
+}
+
+impl RecordingPolicy {
+    pub fn recorder_path(&self) -> String {
+        self.path
+            .as_ref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_string())
+            .unwrap_or_else(default_config_recorder_path)
+    }
+
+    pub fn recorder_format(&self) -> RecorderFormat {
+        self.format.unwrap_or_default()
+    }
+
+    pub fn ensure_defaults(&mut self) -> bool {
+        if self
+            .path
+            .as_ref()
+            .map(|p| p.trim().is_empty())
+            .unwrap_or(true)
+        {
+            self.path = Some(default_config_recorder_path());
+        }
+
+        let original = self.format.unwrap_or_default();
+        let effective = original.effective();
+        self.format = Some(effective);
+        original != effective
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -131,10 +168,6 @@ pub struct Config {
     #[serde(default = "default_config_rtp_end_port")]
     pub rtp_end_port: Option<u16>,
 
-    #[serde(default = "default_config_recorder_path")]
-    pub recorder_path: String,
-    #[serde(default)]
-    pub recorder_format: RecorderFormat,
     pub callrecord: Option<CallRecordConfig>,
     #[serde(default = "default_config_media_cache_path")]
     pub media_cache_path: String,
@@ -334,6 +367,7 @@ pub struct RtpConfig {
     pub external_ip: Option<String>,
     pub start_port: Option<u16>,
     pub end_port: Option<u16>,
+    pub ice_servers: Option<Vec<IceServer>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -375,8 +409,6 @@ pub struct ProxyConfig {
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trunks_files: Vec<String>,
-    #[serde(default)]
-    pub default: Option<DefaultRoute>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(skip)]
@@ -470,6 +502,24 @@ impl ProxyConfig {
     pub fn generated_acl_dir(&self) -> PathBuf {
         self.generated_root_dir().join("acl")
     }
+
+    pub fn ensure_recording_defaults(&mut self) -> bool {
+        let mut fallback = false;
+
+        if let Some(policy) = self.recording.as_mut() {
+            fallback |= policy.ensure_defaults();
+            self.recorder_root = Some(policy.recorder_path());
+            self.recorder_format = policy.recorder_format();
+        }
+
+        for trunk in self.trunks.values_mut() {
+            if let Some(policy) = trunk.recording.as_mut() {
+                fallback |= policy.ensure_defaults();
+            }
+        }
+
+        fallback
+    }
 }
 
 impl Default for ProxyConfig {
@@ -506,7 +556,6 @@ impl Default for ProxyConfig {
             routes: None,
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
-            default: None,
             recording: None,
             recorder_root: None,
             recorder_format: RecorderFormat::default(),
@@ -564,8 +613,6 @@ impl Default for Config {
             http_access_skip_paths: Vec::new(),
             ua: Some(UseragentConfig::default()),
             proxy: None,
-            recorder_path: default_config_recorder_path(),
-            recorder_format: RecorderFormat::default(),
             media_cache_path: default_config_media_cache_path(),
             callrecord: None,
             llmproxy: None,
@@ -585,9 +632,14 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &str) -> Result<Self, Error> {
-        let config = toml::from_str(
+        let mut config: Self = toml::from_str(
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
         )?;
+        if config.ensure_recording_defaults() {
+            tracing::warn!(
+                "recorder_format=ogg requires compiling with the 'opus' feature; falling back to wav"
+            );
+        }
         Ok(config)
     }
 
@@ -596,7 +648,36 @@ impl Config {
             external_ip: self.external_ip.clone(),
             start_port: self.rtp_start_port.clone(),
             end_port: self.rtp_end_port.clone(),
+            ice_servers: self.ice_servers.clone(),
         }
+    }
+
+    pub fn recorder_path(&self) -> String {
+        self.recording
+            .as_ref()
+            .map(|policy| policy.recorder_path())
+            .unwrap_or_else(default_config_recorder_path)
+    }
+
+    pub fn recorder_format(&self) -> RecorderFormat {
+        self.recording
+            .as_ref()
+            .map(|policy| policy.recorder_format())
+            .unwrap_or_default()
+    }
+
+    pub fn ensure_recording_defaults(&mut self) -> bool {
+        let mut fallback = false;
+
+        if let Some(policy) = self.recording.as_mut() {
+            fallback |= policy.ensure_defaults();
+        }
+
+        if let Some(proxy) = self.proxy.as_mut() {
+            fallback |= proxy.ensure_recording_defaults();
+        }
+
+        fallback
     }
 }
 
