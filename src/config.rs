@@ -1,5 +1,5 @@
 use crate::{
-    call::{DialDirection, user::SipUser},
+    call::{CallRecordingConfig, DialDirection, user::SipUser},
     media::recorder::RecorderFormat,
     proxy::routing::{RouteRule, TrunkConfig},
     useragent::RegisterOption,
@@ -121,6 +121,13 @@ pub struct RecordingPolicy {
 }
 
 impl RecordingPolicy {
+    pub fn new_recording_config(&self) -> CallRecordingConfig {
+        crate::call::CallRecordingConfig {
+            enabled: self.enabled,
+            auto_start: self.auto_start.unwrap_or(true),
+            option: None,
+        }
+    }
     pub fn recorder_path(&self) -> String {
         self.path
             .as_ref()
@@ -411,10 +418,6 @@ pub struct ProxyConfig {
     pub trunks_files: Vec<String>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
-    #[serde(skip)]
-    pub recorder_root: Option<String>,
-    #[serde(skip)]
-    pub recorder_format: RecorderFormat,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     pub sip_flow_max_items: Option<usize>,
@@ -508,8 +511,6 @@ impl ProxyConfig {
 
         if let Some(policy) = self.recording.as_mut() {
             fallback |= policy.ensure_defaults();
-            self.recorder_root = Some(policy.recorder_path());
-            self.recorder_format = policy.recorder_format();
         }
 
         for trunk in self.trunks.values_mut() {
@@ -517,7 +518,6 @@ impl ProxyConfig {
                 fallback |= policy.ensure_defaults();
             }
         }
-
         fallback
     }
 }
@@ -557,8 +557,6 @@ impl Default for ProxyConfig {
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
             recording: None,
-            recorder_root: None,
-            recorder_format: RecorderFormat::default(),
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,
             transcript: None,

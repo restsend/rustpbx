@@ -1,4 +1,9 @@
-use crate::{app::AppState, handler::middleware::clientaddr::ClientAddr, preflight};
+use crate::{
+    app::AppState,
+    config::{Config, ProxyConfig},
+    handler::middleware::clientaddr::ClientAddr,
+    preflight,
+};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -9,7 +14,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
@@ -181,7 +186,17 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
             .into_response();
     };
 
-    match sip_server.inner.data_context.reload_trunks(true).await {
+    let config_override = match load_proxy_config_override(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+
+    match sip_server
+        .inner
+        .data_context
+        .reload_trunks(true, config_override)
+        .await
+    {
         Ok(metrics) => {
             let total = metrics.total;
             Json(serde_json::json!({
@@ -220,7 +235,17 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
             .into_response();
     };
 
-    match sip_server.inner.data_context.reload_routes(true).await {
+    let config_override = match load_proxy_config_override(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+
+    match sip_server
+        .inner
+        .data_context
+        .reload_routes(true, config_override)
+        .await
+    {
         Ok(metrics) => {
             let total = metrics.total;
             Json(serde_json::json!({
@@ -261,7 +286,12 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
 
     let context = sip_server.inner.data_context.clone();
 
-    match context.reload_acl_rules(true).await {
+    let config_override = match load_proxy_config_override(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+
+    match context.reload_acl_rules(true, config_override).await {
         Ok(metrics) => {
             let total = metrics.total;
             let active_rules = context.acl_rules_snapshot().await;
@@ -283,6 +313,27 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+fn load_proxy_config_override(state: &AppState) -> Result<Option<Arc<ProxyConfig>>, Response> {
+    let Some(path) = state.config_path.as_ref() else {
+        return Ok(None);
+    };
+
+    match Config::load(path) {
+        Ok(cfg) => Ok(cfg.proxy.map(Arc::new)),
+        Err(err) => {
+            warn!(path = %path, ?err, "configuration reload failed during parsing");
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "status": "invalid",
+                    "message": format!("Failed to load configuration: {}", err),
+                })),
+            )
+                .into_response())
         }
     }
 }

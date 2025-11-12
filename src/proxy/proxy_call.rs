@@ -618,7 +618,7 @@ impl ProxyCall {
 
         let recorder_option =
             if self.dialplan.recording.enabled && self.dialplan.recording.auto_start {
-                self.dialplan.recording.recorder_config.clone()
+                self.dialplan.recording.option.clone()
             } else {
                 None
             };
@@ -1382,7 +1382,7 @@ impl ProxyCall {
         };
 
         if self.dialplan.recording.enabled {
-            if let Some(recorder_config) = self.dialplan.recording.recorder_config.as_ref() {
+            if let Some(recorder_config) = self.dialplan.recording.option.as_ref() {
                 if !recorder_config.recorder_file.is_empty() {
                     let size = fs::metadata(&recorder_config.recorder_file)
                         .map(|meta| meta.len())

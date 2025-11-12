@@ -252,23 +252,6 @@ impl AppStateBuilder {
                     if proxy_config.recording.is_none() {
                         proxy_config.recording = config.recording.clone();
                     }
-                    let global_recorder_path = config.recorder_path();
-                    let global_recorder_format = config.recorder_format();
-
-                    if proxy_config.recorder_root.is_none() {
-                        let path = proxy_config
-                            .recording
-                            .as_ref()
-                            .map(|policy| policy.recorder_path())
-                            .unwrap_or_else(|| global_recorder_path.clone());
-                        proxy_config.recorder_root = Some(path);
-                    }
-
-                    proxy_config.recorder_format = proxy_config
-                        .recording
-                        .as_ref()
-                        .map(|policy| policy.recorder_format())
-                        .unwrap_or(global_recorder_format);
 
                     proxy_config.ensure_recording_defaults();
                     let proxy_config = Arc::new(proxy_config);
