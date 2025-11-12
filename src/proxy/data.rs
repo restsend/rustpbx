@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub struct ProxyDataContext {
-    config: Arc<ProxyConfig>,
+    config: RwLock<Arc<ProxyConfig>>,
     trunks: RwLock<HashMap<String, TrunkConfig>>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
@@ -57,20 +57,24 @@ pub struct GeneratedFileMetrics {
 impl ProxyDataContext {
     pub async fn new(config: Arc<ProxyConfig>, db: Option<DatabaseConnection>) -> Result<Self> {
         let ctx = Self {
-            config,
+            config: RwLock::new(config.clone()),
             trunks: RwLock::new(HashMap::new()),
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
             db,
         };
-        let _ = ctx.reload_trunks(false).await?;
-        let _ = ctx.reload_routes(false).await?;
-        let _ = ctx.reload_acl_rules(false).await?;
+        let _ = ctx.reload_trunks(false, None).await?;
+        let _ = ctx.reload_routes(false, None).await?;
+        let _ = ctx.reload_acl_rules(false, None).await?;
         Ok(ctx)
     }
 
-    pub fn config(&self) -> Arc<ProxyConfig> {
-        self.config.clone()
+    pub async fn config(&self) -> Arc<ProxyConfig> {
+        self.config.read().await.clone()
+    }
+
+    pub async fn update_config(&self, config: Arc<ProxyConfig>) {
+        *self.config.write().await = config;
     }
 
     pub async fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
@@ -99,11 +103,22 @@ impl ProxyDataContext {
         None
     }
 
-    pub async fn reload_trunks(&self, generated_toml: bool) -> Result<ReloadMetrics> {
+    pub async fn reload_trunks(
+        &self,
+        generated_toml: bool,
+        config_override: Option<Arc<ProxyConfig>>,
+    ) -> Result<ReloadMetrics> {
+        if let Some(config) = config_override {
+            *self.config.write().await = config;
+        }
+
+        let config = self.config.read().await.clone();
+
         let started_at = Utc::now();
-        let default_dir = self.config.generated_trunks_dir();
+        let default_dir = config.generated_trunks_dir();
         let generated = if generated_toml {
-            self.export_trunks_to_toml(default_dir.as_path()).await?
+            self.export_trunks_to_toml(&config, default_dir.as_path())
+                .await?
         } else {
             None
         };
@@ -115,18 +130,18 @@ impl ProxyDataContext {
         let mut config_count = 0usize;
         let mut file_count = 0usize;
         let mut files: Vec<String> = Vec::new();
-        let patterns = self.config.trunks_files.clone();
-        if !self.config.trunks.is_empty() {
-            config_count = self.config.trunks.len();
+        let patterns = config.trunks_files.clone();
+        if !config.trunks.is_empty() {
+            config_count = config.trunks.len();
             info!(count = config_count, "loading trunks from embedded config");
-            for (name, trunk) in self.config.trunks.iter() {
+            for (name, trunk) in config.trunks.iter() {
                 let mut copy = trunk.clone();
                 copy.origin = ConfigOrigin::embedded();
                 trunks.insert(name.clone(), copy);
             }
         }
-        if !self.config.trunks_files.is_empty() {
-            let (file_trunks, file_paths) = load_trunks_from_files(&self.config.trunks_files)?;
+        if !config.trunks_files.is_empty() {
+            let (file_trunks, file_paths) = load_trunks_from_files(&config.trunks_files)?;
             file_count = file_trunks.len();
             if !file_paths.is_empty() {
                 files.extend(file_paths);
@@ -160,11 +175,22 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn reload_routes(&self, generated_toml: bool) -> Result<ReloadMetrics> {
+    pub async fn reload_routes(
+        &self,
+        generated_toml: bool,
+        config_override: Option<Arc<ProxyConfig>>,
+    ) -> Result<ReloadMetrics> {
+        if let Some(config) = config_override {
+            *self.config.write().await = config;
+        }
+
+        let config = self.config.read().await.clone();
+
         let started_at = Utc::now();
-        let default_dir = self.config.generated_routes_dir();
+        let default_dir = config.generated_routes_dir();
         let generated = if generated_toml {
-            self.export_routes_to_toml(default_dir.as_path()).await?
+            self.export_routes_to_toml(&config, default_dir.as_path())
+                .await?
         } else {
             None
         };
@@ -176,8 +202,8 @@ impl ProxyDataContext {
         let mut config_count = 0usize;
         let mut file_count = 0usize;
         let mut files: Vec<String> = Vec::new();
-        let patterns = self.config.routes_files.clone();
-        if let Some(cfg_routes) = self.config.routes.clone() {
+        let patterns = config.routes_files.clone();
+        if let Some(cfg_routes) = config.routes.clone() {
             config_count = cfg_routes.len();
             info!(count = config_count, "loading routes from embedded config");
             for mut route in cfg_routes {
@@ -185,8 +211,8 @@ impl ProxyDataContext {
                 upsert_route(&mut routes, route);
             }
         }
-        if !self.config.routes_files.is_empty() {
-            let (file_routes, file_paths) = load_routes_from_files(&self.config.routes_files)?;
+        if !config.routes_files.is_empty() {
+            let (file_routes, file_paths) = load_routes_from_files(&config.routes_files)?;
             file_count = file_routes.len();
             if !file_paths.is_empty() {
                 files.extend(file_paths);
@@ -225,15 +251,25 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn reload_acl_rules(&self, _generated_toml: bool) -> Result<ReloadMetrics> {
+    pub async fn reload_acl_rules(
+        &self,
+        _generated_toml: bool,
+        config_override: Option<Arc<ProxyConfig>>,
+    ) -> Result<ReloadMetrics> {
+        if let Some(config) = config_override {
+            *self.config.write().await = config;
+        }
+
+        let config = self.config.read().await.clone();
+
         let started_at = Utc::now();
         let mut rules: Vec<String> = Vec::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
-        let files_patterns = self.config.acl_files.clone();
+        let files_patterns = config.acl_files.clone();
         let mut files: Vec<String> = Vec::new();
 
-        if let Some(cfg_rules) = self.config.acl_rules.clone() {
+        if let Some(cfg_rules) = config.acl_rules.clone() {
             config_count = cfg_rules.len();
             if config_count > 0 {
                 info!(
@@ -244,8 +280,8 @@ impl ProxyDataContext {
             rules.extend(cfg_rules);
         }
 
-        if !self.config.acl_files.is_empty() {
-            let (file_rules, file_paths) = load_acl_rules_from_files(&self.config.acl_files)?;
+        if !config.acl_files.is_empty() {
+            let (file_rules, file_paths) = load_acl_rules_from_files(&config.acl_files)?;
             file_count = file_rules.len();
             if !file_paths.is_empty() {
                 files.extend(file_paths);
@@ -253,7 +289,7 @@ impl ProxyDataContext {
             rules.extend(file_rules);
         }
 
-        let generated_acl_path = self.config.generated_acl_dir().join("acl.generated.toml");
+        let generated_acl_path = config.generated_acl_dir().join("acl.generated.toml");
         if generated_acl_path.exists() {
             let generated_pattern = vec![generated_acl_path.to_string_lossy().to_string()];
             let (generated_rules, generated_files) = load_acl_rules_from_files(&generated_pattern)?;
@@ -302,16 +338,15 @@ impl ProxyDataContext {
 
     async fn export_trunks_to_toml(
         &self,
+        config: &ProxyConfig,
         default_dir: &Path,
     ) -> Result<Option<GeneratedFileMetrics>> {
         let Some(db) = self.db.as_ref() else {
             return Ok(None);
         };
-        let Some(target_path) = resolve_generated_path(
-            &self.config.trunks_files,
-            default_dir,
-            "trunks.generated.toml",
-        ) else {
+        let Some(target_path) =
+            resolve_generated_path(&config.trunks_files, default_dir, "trunks.generated.toml")
+        else {
             return Ok(None);
         };
 
@@ -329,16 +364,15 @@ impl ProxyDataContext {
 
     async fn export_routes_to_toml(
         &self,
+        config: &ProxyConfig,
         default_dir: &Path,
     ) -> Result<Option<GeneratedFileMetrics>> {
         let Some(db) = self.db.as_ref() else {
             return Ok(None);
         };
-        let Some(target_path) = resolve_generated_path(
-            &self.config.routes_files,
-            default_dir,
-            "routes.generated.toml",
-        ) else {
+        let Some(target_path) =
+            resolve_generated_path(&config.routes_files, default_dir, "routes.generated.toml")
+        else {
             return Ok(None);
         };
 

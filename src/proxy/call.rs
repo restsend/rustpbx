@@ -252,10 +252,18 @@ impl CallModule {
         };
 
         let targets = DialStrategy::Sequential(locs);
+        let recording = self
+            .inner
+            .config
+            .recording
+            .as_ref()
+            .map(|r| r.new_recording_config())
+            .unwrap_or_default();
 
         let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
             .with_caller(caller_uri)
             .with_media(media_config)
+            .with_recording(recording)
             .with_route_invite(route_invite)
             .with_targets(targets);
 
@@ -326,9 +334,8 @@ impl CallModule {
 
         dialplan.recording.enabled = true;
         dialplan.recording.auto_start = policy.auto_start.unwrap_or(true);
-        dialplan.recording.filename_pattern = policy.filename_pattern.clone();
 
-        if let Some(existing) = dialplan.recording.recorder_config.as_mut() {
+        if let Some(existing) = dialplan.recording.option.as_mut() {
             if existing.recorder_file.is_empty() {
                 existing.recorder_file = recorder_option.recorder_file.clone();
             }
@@ -342,7 +349,7 @@ impl CallModule {
                 existing.ptime = ptime;
             }
         } else {
-            dialplan.recording.recorder_config = Some(recorder_option);
+            dialplan.recording.option = Some(recorder_option);
         }
 
         dialplan
@@ -398,12 +405,7 @@ impl CallModule {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let root = self
-            .inner
-            .config
-            .recorder_root
-            .clone()
-            .unwrap_or_else(|| policy.recorder_path());
+        let root = policy.recorder_path();
         let pattern = policy.filename_pattern.as_deref().unwrap_or("{session_id}");
         let direction = match dialplan.direction {
             DialDirection::Inbound => "inbound",

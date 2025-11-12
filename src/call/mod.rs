@@ -349,20 +349,17 @@ pub struct CallRecordingConfig {
     /// Enable call recording
     pub enabled: bool,
     /// Recording configuration
-    pub recorder_config: Option<RecorderOption>,
+    pub option: Option<RecorderOption>,
     /// Auto start recording when call is answered
     pub auto_start: bool,
-    /// Recording file name pattern
-    pub filename_pattern: Option<String>,
 }
 
 impl CallRecordingConfig {
     pub fn new() -> Self {
         Self {
             enabled: false,
-            recorder_config: None,
+            option: None,
             auto_start: true,
-            filename_pattern: None,
         }
     }
 
@@ -372,7 +369,7 @@ impl CallRecordingConfig {
     }
 
     pub fn with_config(mut self, config: RecorderOption) -> Self {
-        self.recorder_config = Some(config);
+        self.option = Some(config);
         self
     }
 }
@@ -522,37 +519,21 @@ impl Dialplan {
         self
     }
 
-    /// Set targets with sequential strategy
-    pub fn with_sequential_targets(mut self, targets: Vec<Location>) -> Self {
-        self.targets = DialStrategy::Sequential(targets);
-        self
-    }
-
-    /// Set targets with parallel strategy
-    pub fn with_parallel_targets(mut self, targets: Vec<Location>) -> Self {
-        self.targets = DialStrategy::Parallel(targets);
-        self
-    }
-
-    /// Configure recording
     pub fn with_recording(mut self, recording: CallRecordingConfig) -> Self {
         self.recording = recording;
         self
     }
 
-    /// Configure ringback
     pub fn with_ringback(mut self, ringback: RingbackConfig) -> Self {
         self.ringback = ringback;
         self
     }
 
-    /// Configure media
     pub fn with_media(mut self, media: MediaConfig) -> Self {
         self.media = media;
         self
     }
 
-    /// Set failure action
     pub fn with_failure_action(mut self, action: FailureAction) -> Self {
         self.failure_action = action;
         self
