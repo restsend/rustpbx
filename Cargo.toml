@@ -103,6 +103,7 @@ sha1 = "0.10.6"
 sea-orm = { version = "1.1.17", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
+    "sqlx-mysql",
 ] }
 sea-orm-migration = "1.1.17"
 argon2 = { version = "0.5.3", features = ["password-hash"] }
