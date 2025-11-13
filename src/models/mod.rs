@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use sqlx::Connection;
+use url::Url;
 
 pub mod bill_template;
 pub mod call_record;
@@ -50,8 +52,42 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     Ok(())
 }
 
+async fn prepare_mysql_database(database_url: &str) -> Result<()> {
+    let url = Url::parse(database_url)?;
+
+    let database_name = url.path().trim_start_matches('/');
+    if database_name.is_empty() {
+        return Err(anyhow::anyhow!("No database specified"));
+    }
+
+    let mut server_url = url.clone();
+    server_url.set_path("/mysql");
+    server_url.set_query(None);
+    let server_url_str = server_url.to_string();
+
+    let mut conn = sqlx::MySqlConnection::connect(&server_url_str)
+        .await
+        .with_context(|| format!("failed to connect to MySQL server: {}", server_url_str))?;
+
+    sqlx::query(&format!(
+        "CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+        database_name
+    ))
+    .execute(&mut conn)
+    .await
+    .with_context(|| format!("failed to create database: {}", database_name))?;
+
+    conn.close().await?;
+    Ok(())
+}
+
 pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
-    prepare_sqlite_database(database_url)?;
+    if database_url.starts_with("sqlite://") {
+        prepare_sqlite_database(database_url)?;
+    } else if database_url.starts_with("mysql://") || database_url.starts_with("mysqlx://") {
+        prepare_mysql_database(database_url).await?;
+    }
+
     let db = Database::connect(database_url)
         .await
         .with_context(|| format!("failed to connect admin database: {}", database_url))?;
