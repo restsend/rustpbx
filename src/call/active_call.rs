@@ -463,7 +463,13 @@ impl ActiveCall {
             let track_id = self.server_side_track_id.clone();
             let cancel_token = self.cancel_token.child_token();
             let ssrc = rand::random::<u32>();
-            let media_pass_track = MediaPassTrack::new(ssrc, track_id, cancel_token, opt.clone());
+            let media_pass_track = MediaPassTrack::new(
+                self.session_id.clone(),
+                ssrc,
+                track_id,
+                cancel_token,
+                opt.clone(),
+            );
             self.media_stream
                 .update_track(Box::new(media_pass_track), None)
                 .await;
