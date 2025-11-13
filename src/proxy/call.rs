@@ -318,7 +318,7 @@ impl CallModule {
             return dialplan;
         }
 
-        let recorder_option =
+        let mut recorder_option =
             match self.build_recorder_option(&dialplan, policy, &caller_identity, &callee_identity)
             {
                 Some(option) => option,
@@ -348,7 +348,10 @@ impl CallModule {
             if let Some(ptime) = policy.ptime {
                 existing.ptime = ptime;
             }
+            let fallback_format = existing.format.unwrap_or(policy.recorder_format());
+            existing.ensure_path_extension(fallback_format);
         } else {
+            recorder_option.ensure_path_extension(policy.recorder_format());
             dialplan.recording.option = Some(recorder_option);
         }
 
@@ -431,7 +434,9 @@ impl CallModule {
         if let Some(ptime) = policy.ptime {
             option.ptime = ptime;
         }
-        option.format = Some(policy.recorder_format());
+        let policy_format = policy.recorder_format();
+        option.format = Some(policy_format);
+        option.ensure_path_extension(policy_format);
         Some(option)
     }
 

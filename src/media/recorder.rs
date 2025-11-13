@@ -5,7 +5,7 @@ use hound::{SampleFormat, WavSpec};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -324,6 +324,27 @@ impl RecorderOption {
 
     pub fn resolved_format(&self, default: RecorderFormat) -> RecorderFormat {
         self.format.unwrap_or(default).effective()
+    }
+
+    pub fn ensure_path_extension(&mut self, fallback_format: RecorderFormat) {
+        let effective_format = self.format.unwrap_or(fallback_format).effective();
+        self.format = Some(effective_format);
+
+        if self.recorder_file.is_empty() {
+            return;
+        }
+
+        let mut path = PathBuf::from(&self.recorder_file);
+        let has_desired_ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case(effective_format.extension()))
+            .unwrap_or(false);
+
+        if !has_desired_ext {
+            path.set_extension(effective_format.extension());
+            self.recorder_file = path.to_string_lossy().into_owned();
+        }
     }
 }
 
