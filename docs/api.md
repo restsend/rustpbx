@@ -191,6 +191,8 @@ The `mediaPass` option in `CallOption` configures the WebSocket connection for a
 - `inputSampleRate` (number): Sample rate of audio received from the WebSocket server (also the sample rate of the track)
 - `outputSampleRate` (number): Sample rate of audio sent to the WebSocket server
 - `packetSize` (number, optional): Packet size sent to WebSocket server, default is 2560 bytes
+- `ptime` (numer, optional): if ptime is set, server will buffering the input audio, and playing it with `ptime` period
+
 
 ### MediaPass Example Usage
 
