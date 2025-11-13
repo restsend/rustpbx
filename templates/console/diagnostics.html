@@ -1596,6 +1596,7 @@
                     sipTrafficAutoScroll: true,
                     sipTrafficLimit: 80,
                     sipLocalStream: null,
+                    sipRemoteStream: null,
                     sipDomain: '',
                     sipDebugEnabled: false,
                     hasSipSession: false,
@@ -2605,10 +2606,54 @@
                                 return;
                             }
                             pc.addEventListener('track', (ev) => {
-                                const remoteStream = ev.streams?.[0];
-                                if (remoteStream && this.$refs.sipRemoteAudio) {
+                                const track = ev?.track;
+                                if (!track || (track.kind && track.kind !== 'audio')) {
+                                    return;
+                                }
+                                const localTracks = this.sipLocalStream?.getTracks?.() || [];
+                                const isLocalTrack = localTracks.some((item) => item.id === track.id);
+                                if (isLocalTrack) {
+                                    // Skip attaching the local microphone to the remote monitor.
+                                    return;
+                                }
+                                if (typeof MediaStream === 'undefined') {
+                                    const fallbackStream = ev.streams?.[0];
+                                    if (fallbackStream && this.$refs.sipRemoteAudio) {
+                                        if (!this.sipLocalStream || fallbackStream.id !== this.sipLocalStream.id) {
+                                            this.$refs.sipRemoteAudio.srcObject = fallbackStream;
+                                        }
+                                    }
+                                    return;
+                                }
+                                if (!this.sipRemoteStream) {
+                                    this.sipRemoteStream = new MediaStream();
+                                }
+                                const remoteStream = this.sipRemoteStream;
+                                if (!remoteStream.getTracks().some((item) => item.id === track.id)) {
+                                    remoteStream.addTrack(track);
+                                }
+                                if (this.$refs.sipRemoteAudio && this.$refs.sipRemoteAudio.srcObject !== remoteStream) {
                                     this.$refs.sipRemoteAudio.srcObject = remoteStream;
                                 }
+                                const handleEnded = () => {
+                                    if (!this.sipRemoteStream) {
+                                        track.removeEventListener('ended', handleEnded);
+                                        return;
+                                    }
+                                    try {
+                                        this.sipRemoteStream.removeTrack(track);
+                                    } catch (err) {
+                                        // ignore removal errors
+                                    }
+                                    if (!this.sipRemoteStream.getTracks().length) {
+                                        this.sipRemoteStream = null;
+                                        if (this.$refs.sipRemoteAudio) {
+                                            this.$refs.sipRemoteAudio.srcObject = null;
+                                        }
+                                    }
+                                    track.removeEventListener('ended', handleEnded);
+                                };
+                                track.addEventListener('ended', handleEnded);
                             });
                         });
                     },
@@ -2620,17 +2665,16 @@
                         this.sipCallError = null;
                         this.sipCallStatus = this.sipRegistered ? 'Idle' : 'Unregistered';
                         this.releaseLocalStream();
-                        if (this.$refs.sipRemoteAudio) {
-                            const remoteEl = this.$refs.sipRemoteAudio;
-                            const remoteStream = remoteEl.srcObject;
-                            if (remoteStream && typeof remoteStream.getTracks === 'function') {
-                                try {
-                                    remoteStream.getTracks().forEach((track) => track.stop());
-                                } catch (err) {
-                                    // ignore track stop errors
-                                }
+                        if (this.sipRemoteStream) {
+                            try {
+                                this.sipRemoteStream.getTracks().forEach((track) => track.stop());
+                            } catch (err) {
+                                // ignore track stop errors
                             }
-                            remoteEl.srcObject = null;
+                            this.sipRemoteStream = null;
+                        }
+                        if (this.$refs.sipRemoteAudio) {
+                            this.$refs.sipRemoteAudio.srcObject = null;
                         }
                     },
                     releaseLocalStream() {

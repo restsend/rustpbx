@@ -441,12 +441,13 @@ impl ActiveCall {
                     "Recorder format fallback to wav due to unsupported feature"
                 );
             }
-            let recorder_config = RecorderOption {
+            let mut recorder_config = RecorderOption {
                 recorder_file,
                 samplerate: recorder_samplerate,
                 ptime: recorder_ptime,
                 format: Some(format),
             };
+            recorder_config.ensure_path_extension(format);
             Some(recorder_config)
         } else {
             None
