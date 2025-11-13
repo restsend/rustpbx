@@ -1,10 +1,10 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, double_null, integer, integer_null, json_null, pk_auto, string, string_null,
+    boolean, double_null, integer, integer_null, json_null, string, string_null,
     text_null, timestamp, timestamp_null,
 };
-use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
+use sea_orm_migration::sea_query::{ForeignKeyAction as MigrationForeignKeyAction, ColumnDef};
 use sea_query::Expr;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -124,7 +124,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(pk_auto(Column::Id))
+                    .col(ColumnDef::new(Column::Id).big_integer().primary_key().auto_increment())
                     .col(string(Column::CallId).char_len(120))
                     .col(string_null(Column::DisplayId).char_len(120))
                     .col(string(Column::Direction).char_len(16))
@@ -137,11 +137,11 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::CallerName).char_len(160))
                     .col(string_null(Column::AgentName).char_len(160))
                     .col(string_null(Column::Queue).char_len(120))
-                    .col(integer_null(Column::DepartmentId))
-                    .col(integer_null(Column::ExtensionId))
-                    .col(integer_null(Column::SipTrunkId))
-                    .col(integer_null(Column::BillingTemplateId))
-                    .col(integer_null(Column::RouteId))
+                    .col(ColumnDef::new(Column::DepartmentId).big_integer().null())
+                    .col(ColumnDef::new(Column::ExtensionId).big_integer().null())
+                    .col(ColumnDef::new(Column::SipTrunkId).big_integer().null())
+                    .col(ColumnDef::new(Column::BillingTemplateId).big_integer().null())
+                    .col(ColumnDef::new(Column::RouteId).big_integer().null())
                     .col(string_null(Column::SipGateway).char_len(160))
                     .col(text_null(Column::CallerUri))
                     .col(text_null(Column::CalleeUri))

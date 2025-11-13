@@ -3453,7 +3453,7 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
 
     let total_duration_secs = CallRecordEntity::find()
         .select_only()
-        .column_as(CallRecordColumn::DurationSecs.sum(), "total_duration")
+        .column_as(CallRecordColumn::DurationSecs.sum().cast_as("bigint"), "total_duration")
         .filter(condition.clone())
         .into_tuple::<Option<i64>>()
         .one(db)
@@ -3484,7 +3484,7 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
     let total_billable_secs = CallRecordEntity::find()
         .select_only()
         .column_as(
-            CallRecordColumn::BillingBillableSecs.sum(),
+            CallRecordColumn::BillingBillableSecs.sum().cast_as("bigint"),
             "billing_billable_secs",
         )
         .filter(condition.clone())
@@ -3551,7 +3551,7 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         }
     }
 
-    let billing_billable_minutes = (total_billable_secs as f64 / 60.0 * 100.0).round() / 100.0;
+    let billing_billable_minutes = ((total_billable_secs as f64) / 60.0 * 100.0).round() / 100.0;
     let billing_rated_calls = billing_charged_calls + billing_included_calls;
 
     Ok(json!({

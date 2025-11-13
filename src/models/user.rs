@@ -9,8 +9,9 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, pk_auto, string, string_null, string_uniq, timestamp, timestamp_null,
+    boolean, string, string_null, string_uniq, timestamp, timestamp_null,
 };
+use sea_orm_migration::sea_query::ColumnDef;
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
@@ -133,7 +134,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(pk_auto(Column::Id))
+                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
                     .col(string_uniq(Column::Email).char_len(255))
                     .col(string_uniq(Column::Username).char_len(100))
                     .col(string(Column::PasswordHash).char_len(255))

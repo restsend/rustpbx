@@ -1,10 +1,9 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer, integer_null, json_null, pk_auto, string, string_null, text_null, timestamp,
-    timestamp_null,
+    boolean, integer, json_null, string, string_null, text_null, timestamp, timestamp_null,
 };
-use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
+use sea_orm_migration::sea_query::{ForeignKeyAction as MigrationForeignKeyAction, ColumnDef};
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +121,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(pk_auto(Column::Id))
+                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
                     .col(string(Column::Name).char_len(160))
                     .col(text_null(Column::Description))
                     .col(
@@ -138,8 +137,8 @@ impl MigrationTrait for Migration {
                             .default(RoutingSelectionStrategy::default().as_str()),
                     )
                     .col(string_null(Column::HashKey).char_len(120))
-                    .col(integer_null(Column::SourceTrunkId))
-                    .col(integer_null(Column::DefaultTrunkId))
+                    .col(ColumnDef::new(Column::SourceTrunkId).big_integer().null())
+                    .col(ColumnDef::new(Column::DefaultTrunkId).big_integer().null())
                     .col(string_null(Column::SourcePattern).char_len(160))
                     .col(string_null(Column::DestinationPattern).char_len(160))
                     .col(json_null(Column::HeaderFilters))
