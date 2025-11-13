@@ -22,7 +22,6 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
-use sqlx::types::Decimal;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -3454,13 +3453,12 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
 
     let total_duration_secs = CallRecordEntity::find()
         .select_only()
-        .column_as(CallRecordColumn::DurationSecs.sum(), "total_duration")
+        .column_as(CallRecordColumn::DurationSecs.sum().cast_as("bigint"), "total_duration")
         .filter(condition.clone())
-        .into_tuple::<Option<Decimal>>()
+        .into_tuple::<Option<i64>>()
         .one(db)
         .await?
         .flatten()
-        .map(|v| v.mantissa())
         .unwrap_or(0);
 
     let total_minutes = total_duration_secs as f64 / 60.0;
@@ -3486,15 +3484,14 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
     let total_billable_secs = CallRecordEntity::find()
         .select_only()
         .column_as(
-            CallRecordColumn::BillingBillableSecs.sum(),
+            CallRecordColumn::BillingBillableSecs.sum().cast_as("bigint"),
             "billing_billable_secs",
         )
         .filter(condition.clone())
-        .into_tuple::<Option<Decimal>>()
+        .into_tuple::<Option<i64>>()
         .one(db)
         .await?
         .flatten()
-        .map(|v| v.mantissa())
         .unwrap_or(0);
 
     let billing_status_rows: Vec<(Option<String>, Option<i64>)> = CallRecordEntity::find()
