@@ -1,6 +1,7 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{json_null, pk_auto, string, string_null, text_null, timestamp};
+use sea_orm_migration::schema::{json_null, string, string_null, text_null, timestamp};
+use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(pk_auto(Column::Id))
+                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
                     .col(string(Column::Name).char_len(120))
                     .col(string_null(Column::DisplayLabel).char_len(160))
                     .col(string_null(Column::Slug).char_len(120))
