@@ -3453,7 +3453,10 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
 
     let total_duration_secs = CallRecordEntity::find()
         .select_only()
-        .column_as(CallRecordColumn::DurationSecs.sum().cast_as("bigint"), "total_duration")
+        .column_as(
+            CallRecordColumn::DurationSecs.sum().cast_as("bigint"),
+            "total_duration",
+        )
         .filter(condition.clone())
         .into_tuple::<Option<i64>>()
         .one(db)
@@ -3484,7 +3487,9 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
     let total_billable_secs = CallRecordEntity::find()
         .select_only()
         .column_as(
-            CallRecordColumn::BillingBillableSecs.sum().cast_as("bigint"),
+            CallRecordColumn::BillingBillableSecs
+                .sum()
+                .cast_as("bigint"),
             "billing_billable_secs",
         )
         .filter(condition.clone())

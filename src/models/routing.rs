@@ -3,7 +3,7 @@ use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     boolean, integer, json_null, string, string_null, text_null, timestamp, timestamp_null,
 };
-use sea_orm_migration::sea_query::{ForeignKeyAction as MigrationForeignKeyAction, ColumnDef};
+use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForeignKeyAction};
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
@@ -121,7 +121,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(Column::Id)
+                            .big_integer()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(string(Column::Name).char_len(160))
                     .col(text_null(Column::Description))
                     .col(

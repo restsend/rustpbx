@@ -190,8 +190,13 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
-                    .col(string(Column::Extension).char_len(32))    
+                    .col(
+                        ColumnDef::new(Column::Id)
+                            .big_integer()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(string(Column::Extension).char_len(32))
                     .col(string_null(Column::DisplayName).char_len(160))
                     .col(string_null(Column::Email).char_len(160))
                     .col(string_null(Column::Status).char_len(32))
