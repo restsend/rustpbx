@@ -1,10 +1,7 @@
 use crate::{call::DialDirection, config::RecordingPolicy};
 use anyhow::{Result, anyhow};
 use ipnetwork::IpNetwork;
-<<<<<<< Updated upstream
-=======
 use regex::Regex;
->>>>>>> Stashed changes
 use rsip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::{
