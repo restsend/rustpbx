@@ -99,9 +99,6 @@ impl RouteInvite for DefaultRouteInvite {
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
             self.build_context(origin, direction).await;
-<<<<<<< Updated upstream
-=======
-
         if matches!(direction, DialDirection::Inbound) {
             if let Some(source) = source_trunk.as_ref() {
                 if let Some(trunk_cfg) = trunks_snapshot.get(&source.name) {
@@ -138,8 +135,6 @@ impl RouteInvite for DefaultRouteInvite {
                 }
             }
         }
->>>>>>> Stashed changes
-
         match_invite(
             if trunks_snapshot.is_empty() {
                 None
