@@ -30,10 +30,10 @@ async fn test_db_backend() {
     sqlx::query("INSERT INTO users (username, password, realm) VALUES (?, ?, ?), (?, ?, ?)")
         .bind("testuser")
         .bind("testpass")
-        .bind("example.com")
+        .bind("rustpbx.com")
         .bind("admin")
         .bind("adminpass")
-        .bind("example.com")
+        .bind("rustpbx.com")
         .execute(&setup_db)
         .await
         .unwrap();
@@ -56,7 +56,7 @@ async fn test_db_backend() {
         .bind("customuser")
         .bind("custompass")
         .bind(1)
-        .bind("example.com")
+        .bind("rustpbx.com")
         .execute(&setup_db)
         .await
         .unwrap();
@@ -123,10 +123,10 @@ async fn test_db_backend() {
 
     // Test with realm filtering
     let user_with_realm = custom_backend
-        .get_user("customuser", Some("example.com"))
+        .get_user("customuser", Some("rustpbx.com"))
         .await
         .unwrap()
         .expect("Failed to get user");
     assert_eq!(user_with_realm.username, "customuser");
-    assert_eq!(user_with_realm.realm, Some("example.com".to_string()));
+    assert_eq!(user_with_realm.realm, Some("rustpbx.com".to_string()));
 }

@@ -704,7 +704,7 @@ mod tests {
         let now = Utc::now();
         user::Model {
             id: 1,
-            email: "tester@example.com".into(),
+            email: "tester@rustpbx.com".into(),
             username: "tester".into(),
             password_hash: "hashed".into(),
             reset_token: None,

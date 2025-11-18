@@ -1,5 +1,7 @@
 use crate::{call::DialDirection, config::RecordingPolicy};
+use anyhow::{Result, anyhow};
 use ipnetwork::IpNetwork;
+use rsip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -339,6 +341,14 @@ pub struct RouteAction {
     /// Reject configuration (when action is reject)
     #[serde(default)]
     pub reject: Option<RejectConfig>,
+
+    /// Queue configuration (when action is queue)
+    #[serde(default)]
+    pub queue: Option<RouteQueueConfig>,
+
+    /// IVR configuration (when action is ivr)
+    #[serde(default)]
+    pub ivr: Option<RouteIvrConfig>,
 }
 
 impl Default for RouteAction {
@@ -349,6 +359,8 @@ impl Default for RouteAction {
             select: default_select(),
             hash_key: None,
             reject: None,
+            queue: None,
+            ivr: None,
         }
     }
 }
@@ -360,11 +372,17 @@ impl RouteAction {
             Some(action) => match action.as_str() {
                 "reject" => ActionType::Reject,
                 "busy" => ActionType::Busy,
+                "queue" => ActionType::Queue,
+                "ivr" => ActionType::Ivr,
                 _ => ActionType::Forward,
             },
             None => {
                 // If no explicit action, infer from other fields
-                if self.reject.is_some() {
+                if self.queue.is_some() {
+                    ActionType::Queue
+                } else if self.ivr.is_some() {
+                    ActionType::Ivr
+                } else if self.reject.is_some() {
                     ActionType::Reject
                 } else {
                     ActionType::Forward
@@ -380,6 +398,106 @@ pub enum ActionType {
     Forward,
     Reject,
     Busy,
+    Queue,
+    Ivr,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteQueueConfig {
+    #[serde(default)]
+    pub accept_immediately: bool,
+    #[serde(default)]
+    pub hold: Option<RouteQueueHoldConfig>,
+    #[serde(default)]
+    pub fallback: Option<RouteQueueFallbackConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct RouteQueueHoldConfig {
+    pub audio_file: Option<String>,
+    #[serde(default = "RouteQueueHoldConfig::default_loop")]
+    pub loop_playback: bool,
+}
+
+impl RouteQueueHoldConfig {
+    fn default_loop() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteQueueFallbackConfig {
+    pub redirect: Option<String>,
+    pub failure_code: Option<u16>,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteIvrConfig {
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+    #[serde(default)]
+    pub availability_override: bool,
+    #[serde(default)]
+    pub plan: Option<crate::call::ivr::IvrPlan>,
+}
+
+impl RouteQueueConfig {
+    pub fn to_queue_plan(&self) -> Result<crate::call::QueuePlan> {
+        let mut plan = crate::call::QueuePlan::default();
+        plan.accept_immediately = self.accept_immediately;
+        if let Some(hold) = &self.hold {
+            let mut cfg = crate::call::QueueHoldConfig::default();
+            if let Some(file) = &hold.audio_file {
+                cfg = cfg.with_audio_file(file.clone());
+            }
+            cfg = cfg.with_loop_playback(hold.loop_playback);
+            plan.hold = Some(cfg);
+        }
+        if let Some(fallback) = &self.fallback {
+            plan.fallback = Some(fallback.to_action()?);
+        }
+        Ok(plan)
+    }
+}
+
+impl RouteQueueFallbackConfig {
+    fn to_action(&self) -> Result<crate::call::QueueFallbackAction> {
+        if let Some(target) = &self.redirect {
+            let uri = Uri::try_from(target.as_str())?;
+            return Ok(crate::call::QueueFallbackAction::Redirect { target: uri });
+        }
+        if let Some(code) = self.failure_code {
+            if !(100..=699).contains(&code) {
+                return Err(anyhow!("invalid failure_code {}: must be 100-699", code));
+            }
+            let status = StatusCode::from(code);
+            let action = crate::call::FailureAction::Hangup(Some(status));
+            return Ok(crate::call::QueueFallbackAction::Failure(action));
+        }
+        Err(anyhow!(
+            "Queue fallback must specify redirect or failure_code"
+        ))
+    }
+}
+
+impl RouteIvrConfig {
+    pub fn to_dialplan_config(&self) -> Result<crate::call::DialplanIvrConfig> {
+        let mut config = if let Some(plan) = &self.plan {
+            crate::call::DialplanIvrConfig::new().with_inline_plan(plan.clone())
+        } else if let Some(id) = &self.plan_id {
+            crate::call::DialplanIvrConfig::from_plan_id(id.clone())
+        } else {
+            return Err(anyhow!("IVR action requires plan_id or plan"));
+        };
+        config.variables = self.variables.clone();
+        config.availability_override = self.availability_override;
+        Ok(config)
+    }
 }
 
 /// Reject configuration

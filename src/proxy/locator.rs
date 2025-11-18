@@ -421,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn memory_locator_orders_by_last_modified() {
         let locator = MemoryLocator::new();
-        let uri: rsip::Uri = "sip:alice@example.com".try_into().unwrap();
+        let uri: rsip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
 
         let now = Instant::now();
         let older = now - Duration::from_secs(120);
@@ -439,7 +439,7 @@ mod tests {
         locator
             .register(
                 "alice",
-                Some("example.com"),
+                Some("rustpbx.com"),
                 Location {
                     aor: uri.clone(),
                     expires: 3600,
@@ -455,7 +455,7 @@ mod tests {
         locator
             .register(
                 "alice",
-                Some("example.com"),
+                Some("rustpbx.com"),
                 Location {
                     aor: uri.clone(),
                     expires: 3600,

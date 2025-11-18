@@ -404,12 +404,12 @@ mod tests {
 
     #[test]
     fn parse_contact_with_gruu_and_instance() {
-        let value = "\"Alice\" <sip:alice@example.com;transport=ws>;expires=600;+sip.instance=\"urn:uuid:1234\";pub-gruu=\"sip:alice-gruu@example.com\"";
+        let value = "\"Alice\" <sip:alice@rustpbx.com;transport=ws>;expires=600;+sip.instance=\"urn:uuid:1234\";pub-gruu=\"sip:alice-gruu@rustpbx.com\"";
         let parsed = parse_contact_entry(value).expect("parse contact");
         assert!(!parsed.is_wildcard());
         assert_eq!(parsed.expires(), Some(600));
         assert_eq!(parsed.instance_id().as_deref(), Some("urn:uuid:1234"));
-        assert_eq!(parsed.gruu().as_deref(), Some("sip:alice-gruu@example.com"));
+        assert_eq!(parsed.gruu().as_deref(), Some("sip:alice-gruu@rustpbx.com"));
         assert!(matches!(parsed.transport(), Some(Transport::Ws)));
         let rendered = parsed.contact_value(300);
         assert!(rendered.contains("+sip.instance=\"urn:uuid:1234\""));
@@ -424,11 +424,11 @@ mod tests {
 
     #[test]
     fn parse_contact_without_angle_brackets() {
-        let value = "sip:alice@example.com;transport=ws;expires=120";
+        let value = "sip:alice@rustpbx.com;transport=ws;expires=120";
         let parsed = parse_contact_entry(value).expect("parse contact");
         assert!(!parsed.is_wildcard());
         let rendered = parsed.contact_value(60);
-        assert!(rendered.starts_with("sip:alice@example.com"));
+        assert!(rendered.starts_with("sip:alice@rustpbx.com"));
         assert!(!rendered.contains('<'));
         assert!(!rendered.contains('>'));
         assert!(rendered.contains("transport=ws"));

@@ -131,8 +131,8 @@ async fn websocket_hangup_should_finish_even_with_dump_enabled() {
     };
 
     let mut call_option = CallOption::default();
-    call_option.caller = Some("sip:alice@example.com".to_string());
-    call_option.callee = Some("sip:bob@example.com".to_string());
+    call_option.caller = Some("sip:alice@rustpbx.com".to_string());
+    call_option.callee = Some("sip:bob@rustpbx.com".to_string());
 
     active_call
         .enqueue_command(Command::Invite {
@@ -214,8 +214,8 @@ async fn websocket_invite_emits_answer_and_track_events() {
     };
 
     let mut call_option = CallOption::default();
-    call_option.caller = Some("sip:alice@example.com".to_string());
-    call_option.callee = Some("sip:bob@example.com".to_string());
+    call_option.caller = Some("sip:alice@rustpbx.com".to_string());
+    call_option.callee = Some("sip:bob@rustpbx.com".to_string());
 
     active_call
         .enqueue_command(Command::Invite {

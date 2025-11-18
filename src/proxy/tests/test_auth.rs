@@ -30,7 +30,7 @@ async fn test_auth_module_invite_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
         .on_transaction_begin(
@@ -48,7 +48,7 @@ async fn test_auth_module_invite_success() {
             headers: tx.original.headers().clone(),
             body: vec![],
         };
-        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
+        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::WwwAuthenticate(www_auth));
         tx.last_response = Some(response);
     }
@@ -82,7 +82,7 @@ async fn test_auth_module_invite_success() {
     // Step 2: Request with authentication
     let request_with_auth = {
         let host_with_port = rsip::HostWithPort {
-            host: "example.com".parse().unwrap(),
+            host: "rustpbx.com".parse().unwrap(),
             port: Some(5060.into()),
         };
         let uri = rsip::Uri {
@@ -106,7 +106,7 @@ async fn test_auth_module_invite_success() {
             params: vec![],
         };
         let via = rsip::headers::Via::new(format!(
-            "SIP/2.0/UDP example.com:5060;branch=z9hG4bK{}",
+            "SIP/2.0/UDP rustpbx.com:5060;branch=z9hG4bK{}",
             random_text(8)
         ));
         let call_id = rsip::headers::CallId::new(random_text(16));
@@ -145,11 +145,11 @@ async fn test_auth_module_invite_success() {
             nonce: &nonce,
             method: &rsip::Method::Invite,
             uri: &uri,
-            realm: "example.com",
+            realm: "rustpbx.com",
             qop: None,
         };
         let auth_header = rsip::headers::Authorization::new(format!(
-            "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
             uri.to_string(),
             digest.compute()
@@ -181,7 +181,7 @@ async fn test_auth_module_register_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    let request = create_test_request(rsip::Method::Register, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Register, "alice", None, "rustpbx.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
         .on_transaction_begin(
@@ -199,7 +199,7 @@ async fn test_auth_module_register_success() {
             headers: tx.original.headers().clone(),
             body: vec![],
         };
-        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
+        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::WwwAuthenticate(www_auth));
         tx.last_response = Some(response);
     }
@@ -233,7 +233,7 @@ async fn test_auth_module_register_success() {
     // Step 2: Request with authentication
     let request_with_auth = {
         let host_with_port = rsip::HostWithPort {
-            host: "example.com".parse().unwrap(),
+            host: "rustpbx.com".parse().unwrap(),
             port: Some(5060.into()),
         };
         let uri = rsip::Uri {
@@ -257,7 +257,7 @@ async fn test_auth_module_register_success() {
             params: vec![],
         };
         let via = rsip::headers::Via::new(format!(
-            "SIP/2.0/UDP example.com:5060;branch=z9hG4bK{}",
+            "SIP/2.0/UDP rustpbx.com:5060;branch=z9hG4bK{}",
             random_text(8)
         ));
         let call_id = rsip::headers::CallId::new(random_text(16));
@@ -295,11 +295,11 @@ async fn test_auth_module_register_success() {
             nonce: &nonce,
             method: &rsip::Method::Register,
             uri: &uri,
-            realm: "example.com",
+            realm: "rustpbx.com",
             qop: None,
         };
         let auth_header = rsip::headers::Authorization::new(format!(
-            "Digest username=\"alice\", realm=\"example.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
+            "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
             uri.to_string(),
             digest.compute()
@@ -331,7 +331,7 @@ async fn test_auth_module_disabled_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for disabled user
-    let request = create_auth_request(rsip::Method::Invite, "bob", "example.com", "password");
+    let request = create_auth_request(rsip::Method::Invite, "bob", "rustpbx.com", "password");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -359,7 +359,7 @@ async fn test_auth_module_unknown_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for unknown user
-    let request = create_auth_request(rsip::Method::Invite, "unknown", "example.com", "123456");
+    let request = create_auth_request(rsip::Method::Invite, "unknown", "rustpbx.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -387,7 +387,7 @@ async fn test_auth_module_bypass_other_methods() {
     let (server_inner, _) = create_test_server().await;
 
     // Create OPTIONS request for unknown user (should bypass auth)
-    let request = create_auth_request(rsip::Method::Options, "unknown", "example.com", "123456");
+    let request = create_auth_request(rsip::Method::Options, "unknown", "rustpbx.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -419,13 +419,13 @@ async fn test_guest_call_allowed_extension() {
         .realms
         .as_mut()
         .unwrap()
-        .push("example.com".to_string());
+        .push("rustpbx.com".to_string());
 
     let builtin_users = vec![SipUser {
         id: 2000,
         username: "2000".to_string(),
         enabled: true,
-        realm: Some("example.com".to_string()),
+        realm: Some("rustpbx.com".to_string()),
         allow_guest_calls: true,
         ..Default::default()
     }];
@@ -466,7 +466,7 @@ async fn test_guest_call_allowed_extension() {
     let module = AuthModule::new(server_inner);
 
     let request = {
-        let realm = "example.com";
+        let realm = "rustpbx.com";
         let caller = "guestuser";
         let callee = "2000";
 
@@ -628,7 +628,7 @@ async fn test_auth_no_credentials() {
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request with no auth headers
-    let request = create_sip_request(rsip::Method::Invite, "alice", "example.com");
+    let request = create_sip_request(rsip::Method::Invite, "alice", "rustpbx.com");
     let transport_layer = TransportLayer::new(CancellationToken::new());
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
@@ -656,7 +656,7 @@ async fn test_auth_bypass_for_non_invite_register() {
     let auth_module = AuthModule::new(server);
 
     // Create a BYE request
-    let request = create_sip_request(rsip::Method::Bye, "alice", "example.com");
+    let request = create_sip_request(rsip::Method::Bye, "alice", "rustpbx.com");
     let transport_layer = TransportLayer::new(CancellationToken::new());
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
@@ -693,7 +693,7 @@ async fn test_auth_disabled_user() {
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request for disabled user
-    let request = create_sip_request(rsip::Method::Invite, "bob", "example.com");
+    let request = create_sip_request(rsip::Method::Invite, "bob", "rustpbx.com");
 
     // Print the request details for debugging
     println!(
@@ -734,7 +734,7 @@ async fn test_proxy_auth_invite_success() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Send INVITE request without credentials
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request).await;
 
@@ -761,8 +761,8 @@ async fn test_proxy_auth_invite_success() {
         };
 
         // Add both WWW-Authenticate and Proxy-Authenticate headers
-        let www_auth = module.create_www_auth_challenge("example.com").unwrap();
-        let proxy_auth = module.create_proxy_auth_challenge("example.com").unwrap();
+        let www_auth = module.create_www_auth_challenge("rustpbx.com").unwrap();
+        let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::WwwAuthenticate(www_auth));
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));
 
@@ -780,7 +780,7 @@ async fn test_proxy_auth_invite_success() {
     let request_with_auth = create_proxy_auth_request_with_nonce(
         rsip::Method::Invite,
         "alice",
-        "example.com",
+        "rustpbx.com",
         Some("password"),
         &nonce,
     );
@@ -813,7 +813,7 @@ async fn test_proxy_auth_no_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for valid user with no proxy authentication
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -859,7 +859,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Get challenge
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request).await;
 
@@ -885,7 +885,7 @@ async fn test_proxy_auth_wrong_credentials() {
         };
 
         // Add Proxy-Authenticate header
-        let proxy_auth = module.create_proxy_auth_challenge("example.com").unwrap();
+        let proxy_auth = module.create_proxy_auth_challenge("rustpbx.com").unwrap();
         response.headers.push(Header::ProxyAuthenticate(proxy_auth));
 
         tx.last_response = Some(response);
@@ -900,7 +900,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let request_with_wrong_auth = create_proxy_auth_request_with_nonce(
         rsip::Method::Invite,
         "alice",
-        "example.com",
+        "rustpbx.com",
         Some("wrongpassword"),
         &nonce,
     );

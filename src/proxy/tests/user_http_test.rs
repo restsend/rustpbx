@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_http_backend_creation() -> Result<()> {
     let _backend = HttpUserBackend::new(
-        "http://example.com/auth",
+        "http://rustpbx.com/auth",
         &Some("GET".to_string()),
         &Some("user".to_string()),
         &Some("realm".to_string()),
@@ -26,7 +26,7 @@ async fn test_http_backend_with_custom_headers() -> Result<()> {
     headers.insert("X-Auth-Token".to_string(), "test-token".to_string());
 
     let _backend = HttpUserBackend::new(
-        "http://example.com/auth",
+        "http://rustpbx.com/auth",
         &Some("GET".to_string()),
         &Some("user".to_string()),
         &Some("realm".to_string()),
@@ -40,7 +40,7 @@ async fn test_http_backend_with_custom_headers() -> Result<()> {
 #[tokio::test]
 async fn test_http_backend_with_post_method() -> Result<()> {
     let _backend = HttpUserBackend::new(
-        "http://example.com/auth",
+        "http://rustpbx.com/auth",
         &Some("POST".to_string()),
         &Some("username".to_string()),
         &Some("domain".to_string()),
@@ -53,7 +53,7 @@ async fn test_http_backend_with_post_method() -> Result<()> {
 
 #[tokio::test]
 async fn test_http_backend_with_defaults() -> Result<()> {
-    let _backend = HttpUserBackend::new("http://example.com/auth", &None, &None, &None, &None);
+    let _backend = HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None);
 
     // Test that the backend was created successfully with default values
     Ok(())
@@ -72,7 +72,7 @@ async fn test_http_backend_get_user() -> Result<()> {
     // Note: This test will fail if httpbin.org is not available
     // In a real test environment, you'd use a mock server
     // For now, we just test that the method exists and can be called
-    let result = backend.get_user("testuser", Some("example.com")).await;
+    let result = backend.get_user("testuser", Some("rustpbx.com")).await;
 
     // We expect this to fail since httpbin.org/json doesn't return SipUser format
     // But it verifies the method signature and that the HTTP client works

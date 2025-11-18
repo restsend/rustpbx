@@ -18,7 +18,10 @@ use crate::media::recorder::RecorderOption;
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::ProxyCall;
 use crate::proxy::proxy_call::ProxyCallBuilder;
-use crate::proxy::routing::{SourceTrunk, TrunkConfig, build_source_trunk, matcher::match_invite};
+use crate::proxy::routing::{
+    RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
+    matcher::{inspect_invite, match_invite},
+};
 use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -94,13 +97,39 @@ impl RouteInvite for DefaultRouteInvite {
         origin: &rsip::Request,
         direction: &DialDirection,
     ) -> Result<RouteResult> {
-        let trunks_snapshot = self.data_context.trunks_snapshot().await;
-        let routes_snapshot = self.data_context.routes_snapshot().await;
-        let source_trunk = self
-            .resolve_source_trunk(&trunks_snapshot, origin, direction)
-            .await;
+        let (trunks_snapshot, routes_snapshot, source_trunk) =
+            self.build_context(origin, direction).await;
 
         match_invite(
+            if trunks_snapshot.is_empty() {
+                None
+            } else {
+                Some(&trunks_snapshot)
+            },
+            if routes_snapshot.is_empty() {
+                None
+            } else {
+                Some(&routes_snapshot)
+            },
+            option,
+            origin,
+            source_trunk.as_ref(),
+            self.routing_state.clone(),
+            direction,
+        )
+        .await
+    }
+
+    async fn preview_route(
+        &self,
+        option: InviteOption,
+        origin: &rsip::Request,
+        direction: &DialDirection,
+    ) -> Result<RouteResult> {
+        let (trunks_snapshot, routes_snapshot, source_trunk) =
+            self.build_context(origin, direction).await;
+
+        inspect_invite(
             if trunks_snapshot.is_empty() {
                 None
             } else {
@@ -122,6 +151,23 @@ impl RouteInvite for DefaultRouteInvite {
 }
 
 impl DefaultRouteInvite {
+    async fn build_context(
+        &self,
+        origin: &rsip::Request,
+        direction: &DialDirection,
+    ) -> (
+        std::collections::HashMap<String, TrunkConfig>,
+        Vec<RouteRule>,
+        Option<SourceTrunk>,
+    ) {
+        let trunks_snapshot = self.data_context.trunks_snapshot().await;
+        let routes_snapshot = self.data_context.routes_snapshot().await;
+        let source_trunk = self
+            .resolve_source_trunk(&trunks_snapshot, origin, direction)
+            .await;
+        (trunks_snapshot, routes_snapshot, source_trunk)
+    }
+
     async fn resolve_source_trunk(
         &self,
         trunks: &HashMap<String, TrunkConfig>,
@@ -251,6 +297,38 @@ impl CallModule {
                 .map_err(|e| (anyhow::anyhow!(e), None))?,
         };
 
+        let preview_option = InviteOption {
+            callee: callee_uri.clone(),
+            caller: caller_uri.clone(),
+            contact: caller_uri.clone(),
+            ..Default::default()
+        };
+
+        let preview_outcome = route_invite
+            .preview_route(preview_option, original, &direction)
+            .await
+            .map_err(|e| {
+                (
+                    anyhow::anyhow!(e),
+                    Some(rsip::StatusCode::ServerInternalError),
+                )
+            })?;
+
+        let mut pending_queue = None;
+        let mut pending_ivr = None;
+
+        match preview_outcome {
+            RouteResult::Queue { queue, .. } => pending_queue = Some(queue),
+            RouteResult::Ivr { ivr, .. } => pending_ivr = Some(ivr),
+            RouteResult::Abort(code, reason) => {
+                let err = anyhow::anyhow!(
+                    reason.unwrap_or_else(|| "route aborted during preview".to_string())
+                );
+                return Err((err, Some(code)));
+            }
+            _ => {}
+        }
+
         let targets = DialStrategy::Sequential(locs);
         let recording = self
             .inner
@@ -266,6 +344,14 @@ impl CallModule {
             .with_recording(recording)
             .with_route_invite(route_invite)
             .with_targets(targets);
+
+        if let Some(queue_plan) = pending_queue {
+            dialplan = dialplan.with_queue(queue_plan);
+        }
+
+        if let Some(ivr_config) = pending_ivr {
+            dialplan = dialplan.with_ivr(ivr_config);
+        }
 
         if let Some(contact_uri) = self.inner.server.default_contact_uri() {
             let contact = rsip::typed::Contact {

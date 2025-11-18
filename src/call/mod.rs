@@ -1,3 +1,4 @@
+use self::ivr::IvrPlan;
 use crate::{
     config::{IceServer, MediaProxyMode, RouteResult},
     media::{recorder::RecorderOption, track::media_pass::MediaPassOption, vad::VADOption},
@@ -20,6 +21,7 @@ use std::{
 
 pub mod active_call;
 pub mod cookie;
+pub mod ivr;
 pub mod sip;
 pub mod user;
 pub use active_call::ActiveCall;
@@ -259,6 +261,34 @@ impl std::fmt::Display for Location {
     }
 }
 
+impl std::fmt::Debug for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Location")
+            .field("aor", &self.aor)
+            .field("expires", &self.expires)
+            .field("destination", &self.destination)
+            .field("last_modified", &self.last_modified)
+            .field("supports_webrtc", &self.supports_webrtc)
+            .field("headers", &self.headers)
+            .field("registered_aor", &self.registered_aor)
+            .field("contact_raw", &self.contact_raw)
+            .field("contact_params", &self.contact_params)
+            .field("path", &self.path)
+            .field("service_route", &self.service_route)
+            .field("instance_id", &self.instance_id)
+            .field("gruu", &self.gruu)
+            .field("temp_gruu", &self.temp_gruu)
+            .field("reg_id", &self.reg_id)
+            .field("transport", &self.transport)
+            .field("user_agent", &self.user_agent)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 impl Location {
     pub fn binding_key(&self) -> String {
         if let Some(instance) = &self.instance_id {
@@ -282,7 +312,7 @@ impl Location {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DialStrategy {
     Sequential(Vec<Location>),
     Parallel(Vec<Location>),
@@ -341,6 +371,189 @@ impl RingbackConfig {
     pub fn with_audio_file(mut self, file: String) -> Self {
         self.audio_file = Some(file);
         self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueHoldConfig {
+    pub audio_file: Option<String>,
+    pub loop_playback: bool,
+}
+
+impl Default for QueueHoldConfig {
+    fn default() -> Self {
+        Self {
+            audio_file: None,
+            loop_playback: true,
+        }
+    }
+}
+
+impl QueueHoldConfig {
+    pub fn with_audio_file(mut self, file: String) -> Self {
+        self.audio_file = Some(file);
+        self
+    }
+
+    pub fn with_loop_playback(mut self, loop_playback: bool) -> Self {
+        self.loop_playback = loop_playback;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum QueueFallbackAction {
+    /// Reuse existing failure behaviors
+    Failure(FailureAction),
+    /// Redirect to a specific SIP URI (e.g., external voicemail)
+    Redirect { target: rsip::Uri },
+}
+
+#[derive(Debug, Clone)]
+pub struct DialplanIvrConfig {
+    pub plan_id: Option<String>,
+    pub plan: Option<IvrPlan>,
+    pub variables: HashMap<String, String>,
+    pub availability_override: bool,
+}
+
+impl Default for DialplanIvrConfig {
+    fn default() -> Self {
+        Self {
+            plan_id: None,
+            plan: None,
+            variables: HashMap::new(),
+            availability_override: false,
+        }
+    }
+}
+
+impl DialplanIvrConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_plan_id(plan_id: impl Into<String>) -> Self {
+        Self {
+            plan_id: Some(plan_id.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_inline_plan(mut self, plan: IvrPlan) -> Self {
+        if self.plan_id.is_none() {
+            self.plan_id = Some(plan.id.clone());
+        }
+        self.plan = Some(plan);
+        self
+    }
+
+    pub fn with_variables(mut self, variables: HashMap<String, String>) -> Self {
+        self.variables = variables;
+        self
+    }
+
+    pub fn insert_variable(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.variables.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn set_availability_override(mut self, enabled: bool) -> Self {
+        self.availability_override = enabled;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QueuePlan {
+    pub accept_immediately: bool,
+    pub hold: Option<QueueHoldConfig>,
+    pub fallback: Option<QueueFallbackAction>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DialplanFlow {
+    Targets(DialStrategy),
+    Queue {
+        plan: QueuePlan,
+        next: Box<DialplanFlow>,
+    },
+    Ivr(DialplanIvrConfig),
+}
+
+impl DialplanFlow {
+    fn replace_terminal(current: DialplanFlow, new_terminal: DialplanFlow) -> DialplanFlow {
+        match current {
+            DialplanFlow::Queue { plan, next } => DialplanFlow::Queue {
+                plan,
+                next: Box::new(Self::replace_terminal(*next, new_terminal)),
+            },
+            _ => new_terminal,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
+                    targets.is_empty()
+                }
+            },
+            DialplanFlow::Queue { next, .. } => next.is_empty(),
+            DialplanFlow::Ivr(_) => false,
+        }
+    }
+
+    fn all_webrtc_target(&self) -> bool {
+        match self {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
+                    targets.iter().all(|loc| loc.supports_webrtc)
+                }
+            },
+            DialplanFlow::Queue { next, .. } => next.all_webrtc_target(),
+            DialplanFlow::Ivr(_) => false,
+        }
+    }
+
+    fn find_targets(&self) -> Option<&Vec<Location>> {
+        match self {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
+                    Some(targets)
+                }
+            },
+            DialplanFlow::Queue { next, .. } => next.find_targets(),
+            DialplanFlow::Ivr(_) => None,
+        }
+    }
+
+    fn is_parallel(&self) -> bool {
+        match self {
+            DialplanFlow::Targets(DialStrategy::Parallel(_)) => true,
+            DialplanFlow::Queue { next, .. } => next.is_parallel(),
+            _ => false,
+        }
+    }
+
+    fn has_queue(&self) -> bool {
+        matches!(self, DialplanFlow::Queue { .. })
+    }
+
+    fn has_ivr(&self) -> bool {
+        match self {
+            DialplanFlow::Ivr(_) => true,
+            DialplanFlow::Queue { next, .. } => next.has_ivr(),
+            _ => false,
+        }
+    }
+
+    fn ivr_config(&self) -> Option<&DialplanIvrConfig> {
+        match self {
+            DialplanFlow::Ivr(config) => Some(config),
+            DialplanFlow::Queue { next, .. } => next.ivr_config(),
+            _ => None,
+        }
     }
 }
 /// Recording configuration for call control
@@ -453,7 +666,7 @@ pub struct Dialplan {
     pub caller_contact: Option<rsip::typed::Contact>,
     pub caller_display_name: Option<String>,
     pub caller: Option<rsip::Uri>,
-    pub targets: DialStrategy,
+    pub flow: DialplanFlow,
     pub max_ring_time: u32,
     pub original: rsip::Request,
     // Enhanced call control options
@@ -476,16 +689,11 @@ pub struct Dialplan {
 
 impl Dialplan {
     pub fn is_empty(&self) -> bool {
-        match &self.targets {
-            DialStrategy::Sequential(targets) => targets.is_empty(),
-            DialStrategy::Parallel(targets) => targets.is_empty(),
-        }
+        self.flow.is_empty()
     }
+
     pub fn all_webrtc_target(&self) -> bool {
-        match &self.targets {
-            DialStrategy::Sequential(targets) => targets.iter().all(|loc| loc.supports_webrtc),
-            DialStrategy::Parallel(targets) => targets.iter().all(|loc| loc.supports_webrtc),
-        }
+        self.flow.all_webrtc_target()
     }
     /// Create a new dialplan with basic configuration
     pub fn new(session_id: String, original: rsip::Request, direction: DialDirection) -> Self {
@@ -496,7 +704,7 @@ impl Dialplan {
             caller_display_name: None,
             caller: None,
             caller_contact: None,
-            targets: DialStrategy::Sequential(vec![]),
+            flow: DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
             max_ring_time: 60,
             recording: CallRecordingConfig::default(),
             ringback: RingbackConfig::default(),
@@ -515,8 +723,21 @@ impl Dialplan {
         self
     }
     pub fn with_targets(mut self, targets: DialStrategy) -> Self {
-        self.targets = targets;
+        self.set_terminal_flow(DialplanFlow::Targets(targets));
         self
+    }
+
+    pub fn with_ivr(mut self, ivr: DialplanIvrConfig) -> Self {
+        self.set_terminal_flow(DialplanFlow::Ivr(ivr));
+        self
+    }
+
+    pub fn has_ivr(&self) -> bool {
+        self.flow.has_ivr()
+    }
+
+    pub fn ivr_config(&self) -> Option<&DialplanIvrConfig> {
+        self.flow.ivr_config()
     }
 
     pub fn with_recording(mut self, recording: CallRecordingConfig) -> Self {
@@ -549,27 +770,52 @@ impl Dialplan {
         self
     }
 
+    pub fn with_queue(mut self, queue: QueuePlan) -> Self {
+        let current = std::mem::replace(
+            &mut self.flow,
+            DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
+        );
+        self.flow = DialplanFlow::Queue {
+            plan: queue,
+            next: Box::new(current),
+        };
+        self
+    }
+
     pub fn with_caller_contact(mut self, contact: rsip::typed::Contact) -> Self {
         self.caller_contact = Some(contact);
         self
     }
 
     /// Get all target locations regardless of strategy
-    pub fn get_all_targets(&self) -> &Vec<Location> {
-        match &self.targets {
-            DialStrategy::Sequential(targets) => targets,
-            DialStrategy::Parallel(targets) => targets,
-        }
+    pub fn get_all_targets(&self) -> Option<&Vec<Location>> {
+        self.flow.find_targets()
+    }
+
+    pub fn first_target(&self) -> Option<&Location> {
+        self.get_all_targets().and_then(|targets| targets.first())
     }
 
     /// Check if using parallel dialing strategy
     pub fn is_parallel_strategy(&self) -> bool {
-        matches!(self.targets, DialStrategy::Parallel(_))
+        self.flow.is_parallel()
+    }
+
+    pub fn has_queue(&self) -> bool {
+        self.flow.has_queue()
     }
 
     /// Check if recording is enabled
     pub fn is_recording_enabled(&self) -> bool {
         self.recording.enabled
+    }
+
+    fn set_terminal_flow(&mut self, new_terminal: DialplanFlow) {
+        let current = std::mem::replace(
+            &mut self.flow,
+            DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
+        );
+        self.flow = DialplanFlow::replace_terminal(current, new_terminal);
     }
 
     pub fn should_forward_header(header: &rsip::Header) -> bool {
@@ -649,6 +895,15 @@ pub trait RouteInvite: Sync + Send {
         origin: &rsip::Request,
         direction: &DialDirection,
     ) -> Result<RouteResult>;
+
+    async fn preview_route(
+        &self,
+        option: InviteOption,
+        origin: &rsip::Request,
+        direction: &DialDirection,
+    ) -> Result<RouteResult> {
+        self.route_invite(option, origin, direction).await
+    }
 }
 
 /// Routing state for managing stateful load balancing

@@ -31,7 +31,7 @@ pub async fn create_test_server() -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
 pub async fn create_test_server_with_config(
     mut config: ProxyConfig,
 ) -> (Arc<SipServerInner>, Arc<ProxyConfig>) {
-    // Add example.com to the allowed realms for testing
+    // Add rustpbx.com to the allowed realms for testing
     if config.realms.is_none() {
         config.realms = Some(vec![]);
     }
@@ -39,7 +39,7 @@ pub async fn create_test_server_with_config(
         .realms
         .as_mut()
         .unwrap()
-        .push("example.com".to_string());
+        .push("rustpbx.com".to_string());
 
     let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
@@ -80,7 +80,7 @@ pub async fn create_test_server_with_config(
         username: "alice".to_string(),
         password: Some("password".to_string()),
         enabled: true,
-        realm: Some("example.com".to_string()),
+        realm: Some("rustpbx.com".to_string()),
         ..Default::default()
     };
 
@@ -89,7 +89,7 @@ pub async fn create_test_server_with_config(
         username: "bob".to_string(),
         password: Some("password".to_string()),
         enabled: false,
-        realm: Some("example.com".to_string()),
+        realm: Some("rustpbx.com".to_string()),
         ..Default::default()
     };
 

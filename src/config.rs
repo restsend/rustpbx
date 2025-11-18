@@ -1,5 +1,5 @@
 use crate::{
-    call::{CallRecordingConfig, DialDirection, user::SipUser},
+    call::{CallRecordingConfig, DialDirection, DialplanIvrConfig, QueuePlan, user::SipUser},
     media::recorder::RecorderFormat,
     proxy::routing::{RouteRule, TrunkConfig},
     useragent::RegisterOption,
@@ -428,6 +428,14 @@ pub struct ProxyConfig {
 
 pub enum RouteResult {
     Forward(InviteOption),
+    Queue {
+        option: InviteOption,
+        queue: QueuePlan,
+    },
+    Ivr {
+        option: InviteOption,
+        ivr: DialplanIvrConfig,
+    },
     NotHandled(InviteOption),
     Abort(StatusCode, Option<String>),
 }

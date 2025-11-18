@@ -14,7 +14,7 @@ async fn test_registrar_register_success() {
     let (server_inner, config) = create_test_server().await;
 
     // Create REGISTER request
-    let request = create_register_request("alice", "example.com", Some(60));
+    let request = create_register_request("alice", "rustpbx.com", Some(60));
 
     // Create the registrar module
     let module = RegistrarModule::new(server_inner.clone(), config);
@@ -38,7 +38,7 @@ async fn test_registrar_register_success() {
     // Verify that the user was registered in the locator
     let locations = server_inner
         .locator
-        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await;
 
     assert!(locations.is_ok());
@@ -47,7 +47,7 @@ async fn test_registrar_register_success() {
     let location = &locations[0];
     let registered_aor = location.registered_aor.as_ref().unwrap();
     assert_eq!(registered_aor.user().unwrap_or(""), "alice");
-    assert_eq!(registered_aor.host().to_string(), "example.com");
+    assert_eq!(registered_aor.host().to_string(), "rustpbx.com");
     assert!(
         location
             .contact_raw
@@ -63,7 +63,7 @@ async fn test_registrar_unregister() {
     let (server_inner, config) = create_test_server().await;
 
     // First register the user
-    let register_request = create_register_request("alice", "example.com", Some(60));
+    let register_request = create_register_request("alice", "rustpbx.com", Some(60));
 
     let module = RegistrarModule::new(server_inner.clone(), config.clone());
 
@@ -82,7 +82,7 @@ async fn test_registrar_unregister() {
     assert!(matches!(result, ProxyAction::Abort));
 
     // Now unregister by sending a REGISTER with Expires: 0
-    let unregister_request = create_register_request("alice", "example.com", Some(0));
+    let unregister_request = create_register_request("alice", "rustpbx.com", Some(0));
 
     let (mut tx, _) = create_transaction(unregister_request).await;
 
@@ -102,7 +102,7 @@ async fn test_registrar_unregister() {
     // Verify that the user was unregistered
     let locations = server_inner
         .locator
-        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await;
 
     match locations {
@@ -121,7 +121,7 @@ async fn test_registrar_with_custom_expires() {
     let (server_inner, config) = create_test_server_with_config(config).await;
 
     // Create REGISTER request with no explicit expires (should use config default)
-    let request = create_register_request("alice", "example.com", None);
+    let request = create_register_request("alice", "rustpbx.com", None);
 
     // Create the registrar module
     let module = RegistrarModule::new(server_inner.clone(), config);
@@ -145,7 +145,7 @@ async fn test_registrar_with_custom_expires() {
     // Verify that the user was registered in the locator with the custom expires value
     let locations = server_inner
         .locator
-        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await
         .unwrap();
 
@@ -159,7 +159,7 @@ async fn test_registrar_non_register_method() {
     let (server_inner, config) = create_test_server().await;
 
     // Create an INVITE request instead of REGISTER
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "example.com", None);
+    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
 
     // Create the registrar module
     let module = RegistrarModule::new(server_inner, config);

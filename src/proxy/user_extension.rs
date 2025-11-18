@@ -115,7 +115,7 @@ mod tests {
         let backend = ExtensionUserBackend::new(db.clone());
 
         let user = backend
-            .get_user("1001", Some("example.com"))
+            .get_user("1001", Some("rustpbx.com"))
             .await
             .expect("query user")
             .expect("user exists");
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(user.username, "1001");
         assert_eq!(user.password.as_deref(), Some("secret"));
         assert!(user.allow_guest_calls);
-        assert_eq!(user.realm.as_deref(), Some("example.com"));
+        assert_eq!(user.realm.as_deref(), Some("rustpbx.com"));
         assert!(user.enabled);
     }
 

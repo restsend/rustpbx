@@ -35,6 +35,9 @@ async fn test_match_invite_no_routes() {
     match result {
         RouteResult::Forward(_) | RouteResult::NotHandled(_) => {} // Expected
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("Unexpected queue/ivr result")
+        }
     }
 }
 
@@ -121,6 +124,9 @@ async fn test_match_invite_inbound_respects_source_trunk() {
         RouteResult::NotHandled(_) | RouteResult::Abort(_, _) => {
             panic!("expected inbound invite to forward")
         }
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -174,6 +180,9 @@ async fn test_match_invite_inbound_without_source_trunk() {
         RouteResult::Forward(_) | RouteResult::Abort(_, _) => {
             panic!("expected invite to be left unhandled when source trunk is missing")
         }
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -185,7 +194,7 @@ async fn test_match_invite_exact_match() {
     trunks.insert(
         "test_trunk".to_string(),
         TrunkConfig {
-            dest: "sip:gateway.example.com:5060".to_string(),
+            dest: "sip:gateway.rustpbx.com:5060".to_string(),
             username: Some("testuser".to_string()),
             password: Some("testpass".to_string()),
             transport: Some("udp".to_string()),
@@ -208,6 +217,7 @@ async fn test_match_invite_exact_match() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
@@ -234,7 +244,7 @@ async fn test_match_invite_exact_match() {
             // Verify destination is set
             assert!(option.destination.is_some());
             let dest = option.destination.unwrap();
-            assert_eq!(dest.addr.to_string(), "gateway.example.com:5060");
+            assert_eq!(dest.addr.to_string(), "gateway.rustpbx.com:5060");
 
             // Verify credential is set
             assert!(option.credential.is_some());
@@ -243,6 +253,9 @@ async fn test_match_invite_exact_match() {
             assert_eq!(cred.password, "testpass");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -274,14 +287,15 @@ async fn test_match_invite_regex_match() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
     }];
 
     let option = create_invite_option(
-        "sip:alice@example.com",
-        "sip:13812345678@example.com",
+        "sip:alice@rustpbx.com",
+        "sip:13812345678@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -309,6 +323,9 @@ async fn test_match_invite_regex_match() {
             // Expected
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -334,14 +351,15 @@ async fn test_match_invite_reject_rule() {
                 reason: Some("Emergency calls not allowed".to_string()),
                 headers: HashMap::new(),
             }),
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
     }];
 
     let option = create_invite_option(
-        "sip:alice@example.com",
-        "sip:110@example.com",
+        "sip:alice@rustpbx.com",
+        "sip:110@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -367,6 +385,9 @@ async fn test_match_invite_reject_rule() {
         }
         RouteResult::Forward(_) => panic!("Expected abort, got forward"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -378,7 +399,7 @@ async fn test_match_invite_rewrite_rules() {
     trunks.insert(
         "trunk1".to_string(),
         TrunkConfig {
-            dest: "sip:gateway.example.com:5060".to_string(),
+            dest: "sip:gateway.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -401,13 +422,14 @@ async fn test_match_invite_rewrite_rules() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
     }];
 
     let mut option = create_test_invite_option();
-    option.caller = "sip:+8613812345678@example.com".try_into().unwrap();
+    option.caller = "sip:+8613812345678@rustpbx.com".try_into().unwrap();
     let origin = create_test_request();
 
     let result = match_invite(
@@ -430,6 +452,9 @@ async fn test_match_invite_rewrite_rules() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -441,7 +466,7 @@ async fn test_match_invite_load_balancing() {
     trunks.insert(
         "trunk1".to_string(),
         TrunkConfig {
-            dest: "sip:gateway1.example.com:5060".to_string(),
+            dest: "sip:gateway1.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -449,7 +474,7 @@ async fn test_match_invite_load_balancing() {
     trunks.insert(
         "trunk2".to_string(),
         TrunkConfig {
-            dest: "sip:gateway2.example.com:5060".to_string(),
+            dest: "sip:gateway2.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -457,7 +482,7 @@ async fn test_match_invite_load_balancing() {
     trunks.insert(
         "trunk3".to_string(),
         TrunkConfig {
-            dest: "sip:gateway3.example.com:5060".to_string(),
+            dest: "sip:gateway3.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -481,6 +506,7 @@ async fn test_match_invite_load_balancing() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
@@ -514,6 +540,9 @@ async fn test_match_invite_load_balancing() {
             }
             RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
             RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+            RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+                panic!("unexpected queue/ivr result")
+            }
         }
     }
 
@@ -553,6 +582,7 @@ async fn test_match_invite_header_matching() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
@@ -561,10 +591,10 @@ async fn test_match_invite_header_matching() {
     let option = create_test_invite_option();
     let origin = create_sip_request(
         rsip::Method::Invite,
-        "sip:1001@example.com",
-        "Alice <sip:alice@example.com>",
-        "Bob <sip:1001@example.com>",
-        &format!("{}@example.com", generate_random_string(8)),
+        "sip:1001@rustpbx.com",
+        "Alice <sip:alice@rustpbx.com>",
+        "Bob <sip:1001@rustpbx.com>",
+        &format!("{}@rustpbx.com", generate_random_string(8)),
         1,
         Some(vec![rsip::Header::Other(
             "X-VIP".to_string(),
@@ -590,6 +620,9 @@ async fn test_match_invite_header_matching() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -621,6 +654,7 @@ async fn test_match_invite_default_route() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
@@ -651,6 +685,9 @@ async fn test_match_invite_default_route() {
         RouteResult::NotHandled(_) => {
             // acceptable in current behavior
         }
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -662,7 +699,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     trunks.insert(
         "test_trunk".to_string(),
         TrunkConfig {
-            dest: "sip:gateway.example.com:5060".to_string(),
+            dest: "sip:gateway.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -686,14 +723,15 @@ async fn test_match_invite_advanced_rewrite_patterns() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
     }];
 
     let option_us = create_invite_option(
-        "sip:+15551234567@example.com",
-        "sip:1001@example.com",
+        "sip:+15551234567@rustpbx.com",
+        "sip:1001@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -719,6 +757,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 
     // Test case 2: Simple digit extraction 12345 -> prefix{1}suffix
@@ -740,14 +781,15 @@ async fn test_match_invite_advanced_rewrite_patterns() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
     }];
 
     let option_digits = create_invite_option(
-        "sip:12345@example.com",
-        "sip:1001@example.com",
+        "sip:12345@rustpbx.com",
+        "sip:1001@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -773,6 +815,9 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -784,7 +829,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
     trunks.insert(
         "trunk1".to_string(),
         TrunkConfig {
-            dest: "sip:gateway.example.com:5060".to_string(),
+            dest: "sip:gateway.rustpbx.com:5060".to_string(),
             ..Default::default()
         },
     );
@@ -809,6 +854,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
             select: "rr".to_string(),
             hash_key: None,
             reject: None,
+            ..Default::default()
         },
         disabled: None,
         ..Default::default()
@@ -816,7 +862,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
 
     let option = create_invite_option(
         "sip:+15551234567@gw-us-west.provider.net",
-        "sip:1001@example.com",
+        "sip:1001@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -845,6 +891,9 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
+            panic!("unexpected queue/ivr result")
+        }
     }
 }
 
@@ -964,8 +1013,8 @@ fn generate_random_string(length: usize) -> String {
 // Convenience functions for common test scenarios
 fn create_test_invite_option() -> InviteOption {
     create_invite_option(
-        "sip:alice@example.com",
-        "sip:1001@example.com",
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com",
         None,
         Some("application/sdp"),
         None,
@@ -975,10 +1024,10 @@ fn create_test_invite_option() -> InviteOption {
 fn create_test_request() -> rsip::Request {
     create_sip_request(
         rsip::Method::Invite,
-        "sip:1001@example.com",
-        "Alice <sip:alice@example.com>",
-        "Bob <sip:1001@example.com>",
-        &format!("{}@example.com", generate_random_string(8)),
+        "sip:1001@rustpbx.com",
+        "Alice <sip:alice@rustpbx.com>",
+        "Bob <sip:1001@rustpbx.com>",
+        &format!("{}@rustpbx.com", generate_random_string(8)),
         1,
         None,
     )

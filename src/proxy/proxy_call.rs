@@ -1,6 +1,11 @@
 use crate::{
     call::{
-        DialStrategy, Dialplan, FailureAction, Location, MediaConfig, TransactionCookie,
+        DialStrategy, Dialplan, DialplanFlow, DialplanIvrConfig, FailureAction, Location,
+        MediaConfig, QueueFallbackAction, QueueHoldConfig, QueuePlan, TransactionCookie,
+        ivr::{
+            InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
+            PromptPlayback, PromptSource, ResolvedTransferAction,
+        },
         sip::{DialogStateReceiverGuard, ServerDialogGuard},
     },
     callrecord::{
@@ -9,7 +14,7 @@ use crate::{
         extras_map_to_option, persist_and_dispatch_record, sipflow::SipMessageItem,
     },
     config::{MediaProxyMode, RouteResult},
-    event::{EventReceiver, EventSender, create_event_sender},
+    event::{EventReceiver, EventSender, SessionEvent, create_event_sender},
     media::{
         recorder::RecorderOption,
         stream::{MediaStream, MediaStreamBuilder},
@@ -21,6 +26,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::{FutureExt, future::BoxFuture};
 use rsip::{Param, StatusCode, Uri, headers::UntypedHeader, prelude::HeadersExt};
 use rsipstack::{
     dialog::{
@@ -36,15 +42,17 @@ use rsipstack::{
 };
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     net::IpAddr,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -124,8 +132,9 @@ struct CallSession {
     hangup_reason: Option<CallRecordHangupReason>,
     callee_hangup_reason: Option<TerminatedReason>,
     early_media_sent: bool,
-    media_stream: Arc<MediaStream>, // Always created now
-    use_media_proxy: bool,          // Flag to control whether to use media stream proxy
+    media_stream: Arc<MediaStream>,
+    event_sender: EventSender,
+    use_media_proxy: bool,
     media_config: MediaConfig,
     original_caller: Option<String>,
     original_callee: Option<String>,
@@ -133,6 +142,7 @@ struct CallSession {
     routed_callee: Option<String>,
     routed_contact: Option<String>,
     routed_destination: Option<String>,
+    queue_hold_active: bool,
 }
 
 #[derive(Debug)]
@@ -162,7 +172,12 @@ enum ParallelEvent {
     },
     Cancelled,
 }
+
 impl CallSession {
+    const QUEUE_HOLD_TRACK_ID: &'static str = "queue-hold-track";
+    const QUEUE_HOLD_PLAY_ID: &'static str = "queue-hold";
+    const IVR_PROMPT_TRACK_ID: &'static str = "ivr-prompt-track";
+
     fn new(
         cancel_token: CancellationToken,
         session_id: String,
@@ -172,7 +187,7 @@ impl CallSession {
         media_config: MediaConfig,
         recorder_option: Option<RecorderOption>,
     ) -> Self {
-        let mut builder = MediaStreamBuilder::new(event_sender)
+        let mut builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id)
             .with_cancel_token(cancel_token);
         if let Some(option) = recorder_option {
@@ -204,14 +219,16 @@ impl CallSession {
             callee_hangup_reason: None,
             early_media_sent: false,
             media_stream: Arc::new(stream),
+            event_sender,
             use_media_proxy,
+            media_config,
             original_caller,
             original_callee,
             routed_caller: None,
             routed_callee: None,
             routed_contact: None,
             routed_destination: None,
-            media_config,
+            queue_hold_active: false,
         }
     }
 
@@ -418,6 +435,10 @@ impl CallSession {
         debug!(code = %code, reason = ?reason, "Call session error set");
     }
 
+    fn is_answered(&self) -> bool {
+        self.answer.is_some() || self.answer_time.is_some()
+    }
+
     async fn play_ringtone(
         &mut self,
         audio_file: &String,
@@ -436,7 +457,7 @@ impl CallSession {
             let wait_for_completion = async {
                 while let Ok(event) = rx.recv().await {
                     match event {
-                        crate::event::SessionEvent::TrackEnd { ssrc, .. } => {
+                        SessionEvent::TrackEnd { ssrc, .. } => {
                             if ssrc == hangup_ssrc {
                                 info!("Ringtone playback completed");
                                 break;
@@ -451,11 +472,18 @@ impl CallSession {
         Ok(())
     }
 
-    async fn accept_call(&mut self, callee: String, answer: String) -> Result<()> {
-        // retain pending dialog id
-        let resolved_callee = self.routed_callee.clone().unwrap_or(callee);
-        self.connected_callee = Some(resolved_callee);
-        self.answer_time = Some(Instant::now());
+    async fn accept_call(
+        &mut self,
+        callee: Option<String>,
+        callee_answer: Option<String>,
+    ) -> Result<()> {
+        if let Some(callee_addr) = callee {
+            let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
+            self.connected_callee = Some(resolved_callee);
+        }
+        if self.answer_time.is_none() {
+            self.answer_time = Some(Instant::now());
+        }
 
         info!(
             server_dialog_id = %self.server_dialog.id(),
@@ -463,24 +491,64 @@ impl CallSession {
             has_answer = self.answer.is_some(),
             "Call answered"
         );
+
+        if self.answer.is_none() {
+            let answer_for_caller = self.create_caller_answer_from_offer().await?;
+            self.answer = Some(answer_for_caller);
+        }
+
         if self.use_media_proxy {
-            if self.answer.is_none() {
-                let answer_for_caller = self.create_caller_answer_from_offer().await?;
-                self.answer = Some(answer_for_caller);
+            if let Some(answer) = callee_answer.as_ref() {
+                self.setup_callee_track(answer).await?;
             }
-            self.setup_callee_track(&answer).await?;
-        } else {
+        } else if let Some(answer) = callee_answer {
             self.answer = Some(answer);
         }
 
-        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-        if let Err(e) = self.server_dialog.accept(
-            Some(headers),
-            self.answer.clone().map(|sdp| sdp.into_bytes()),
-        ) {
+        let headers = if self.answer.is_some() {
+            Some(vec![rsip::Header::ContentType("application/sdp".into())])
+        } else {
+            None
+        };
+
+        if let Err(e) = self
+            .server_dialog
+            .accept(headers, self.answer.clone().map(|sdp| sdp.into_bytes()))
+        {
             return Err(anyhow!("Failed to send 200 OK: {}", e));
         }
         Ok(())
+    }
+
+    async fn start_queue_hold(&mut self, hold: QueueHoldConfig) -> Result<()> {
+        if self.queue_hold_active {
+            return Ok(());
+        }
+
+        let audio_file = hold
+            .audio_file
+            .clone()
+            .ok_or_else(|| anyhow!("Queue hold requires an audio file"))?;
+
+        let track = FileTrack::new(Self::QUEUE_HOLD_TRACK_ID.to_string())
+            .with_path(audio_file)
+            .with_ssrc(rand::random::<u32>())
+            .with_cancel_token(self.media_stream.cancel_token.child_token());
+        self.media_stream
+            .update_track(Box::new(track), Some(Self::QUEUE_HOLD_PLAY_ID.to_string()))
+            .await;
+        self.queue_hold_active = true;
+        Ok(())
+    }
+
+    async fn stop_queue_hold(&mut self) {
+        if !self.queue_hold_active {
+            return;
+        }
+        self.media_stream
+            .remove_track(&Self::QUEUE_HOLD_TRACK_ID.to_string(), false)
+            .await;
+        self.queue_hold_active = false;
     }
 }
 
@@ -714,25 +782,190 @@ impl ProxyCall {
             );
             return Err(anyhow!("Dialplan has no targets"));
         }
+        self.execute_flow(session, &self.dialplan.flow).await
+    }
 
-        info!(
-            session_id = %self.session_id,
-            strategy = %self.dialplan.targets,
-            media_proxy = session.use_media_proxy,
-            "executing dialplan"
-        );
+    fn execute_flow<'a>(
+        &'a self,
+        session: &'a mut CallSession,
+        flow: &'a DialplanFlow,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            match flow {
+                DialplanFlow::Targets(strategy) => self.execute_targets(session, strategy).await,
+                DialplanFlow::Queue { plan, next } => {
+                    self.execute_queue_plan(session, plan, next).await
+                }
+                DialplanFlow::Ivr(config) => self.run_ivr(session, config).await,
+            }
+        }
+        .boxed()
+    }
 
-        let dial_result = match &self.dialplan.targets {
-            DialStrategy::Sequential(targets) => self.dial_sequential(session, targets).await,
-            DialStrategy::Parallel(targets) => self.dial_parallel(session, targets).await,
-        };
-
-        match dial_result {
+    async fn execute_targets(
+        &self,
+        session: &mut CallSession,
+        strategy: &DialStrategy,
+    ) -> Result<()> {
+        match self.run_targets(session, strategy).await {
             Ok(_) => {
                 info!(session_id = %self.session_id, "Dialplan executed successfully");
                 Ok(())
             }
             Err(_) => self.handle_failure(session).await,
+        }
+    }
+
+    async fn run_targets(&self, session: &mut CallSession, strategy: &DialStrategy) -> Result<()> {
+        info!(
+            session_id = %self.session_id,
+            strategy = %strategy,
+            media_proxy = session.use_media_proxy,
+            "executing dialplan"
+        );
+
+        match strategy {
+            DialStrategy::Sequential(targets) => self.dial_sequential(session, targets).await,
+            DialStrategy::Parallel(targets) => self.dial_parallel(session, targets).await,
+        }
+    }
+
+    async fn handle_ivr_exit(&self, session: &mut CallSession, exit: IvrExit) -> Result<()> {
+        match exit {
+            IvrExit::Completed => Ok(()),
+            IvrExit::Transfer(action) => self.handle_ivr_transfer(session, action).await,
+            IvrExit::Hangup(hangup) => {
+                let status = hangup.code.map(StatusCode::from).unwrap_or(StatusCode::OK);
+                session.set_error(status, hangup.reason.clone());
+                Ok(())
+            }
+            IvrExit::Queue(_) => Err(anyhow!("Queue actions from IVR are not supported yet")),
+            IvrExit::Webhook(_) => Err(anyhow!("Webhook actions from IVR are not supported yet")),
+            IvrExit::Playback(_) => Err(anyhow!("Playback-only exits are not supported yet")),
+        }
+    }
+
+    async fn handle_ivr_transfer(
+        &self,
+        session: &mut CallSession,
+        action: ResolvedTransferAction,
+    ) -> Result<()> {
+        let uri = Uri::try_from(action.target.as_str())?;
+        let mut location = Location::default();
+        location.aor = uri.clone();
+        location.contact_raw = Some(uri.to_string());
+        if !action.headers.is_empty() {
+            let mut headers = Vec::new();
+            for (name, value) in action.headers {
+                headers.push(rsip::Header::Other(name, value));
+            }
+            location.headers = Some(headers);
+        }
+        if let Some(caller_id) = action.caller_id {
+            session.routed_caller = Some(caller_id);
+        }
+        self.try_single_target(session, &location)
+            .await
+            .map_err(|(code, reason)| {
+                session.set_error(code.clone(), reason.clone());
+                anyhow!(
+                    "IVR transfer failed: {}",
+                    reason.unwrap_or_else(|| code.to_string())
+                )
+            })
+    }
+
+    async fn run_ivr(&self, session: &mut CallSession, config: &DialplanIvrConfig) -> Result<()> {
+        session.stop_queue_hold().await;
+        let plan = config
+            .plan
+            .as_ref()
+            .ok_or_else(|| anyhow!("IVR config requires inline plan data"))?
+            .clone();
+        let plan = Arc::new(plan);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let availability_override = config.availability_override;
+        let executor_plan = plan.clone();
+        let executor_handle = tokio::task::spawn_blocking(move || {
+            let mut runtime = BlockingIvrRuntime::new(cmd_tx);
+            let mut executor = IvrExecutor::new(executor_plan.as_ref(), &mut runtime)
+                .with_availability_override(availability_override);
+            executor.run()
+        });
+
+        {
+            let event_rx = session.event_sender.subscribe();
+            let mut processor = IvrCommandProcessor::new(session, event_rx);
+            while let Some(command) = cmd_rx.recv().await {
+                if let Err(err) = processor.process(command).await {
+                    warn!(
+                        session_id = %self.session_id,
+                        error = %err,
+                        "failed to process IVR command"
+                    );
+                    return Err(err);
+                }
+            }
+        }
+
+        let exit = executor_handle
+            .await
+            .map_err(|e| anyhow!("IVR executor panic: {e}"))??;
+        self.handle_ivr_exit(session, exit).await
+    }
+
+    async fn execute_queue_plan(
+        &self,
+        session: &mut CallSession,
+        plan: &QueuePlan,
+        next: &DialplanFlow,
+    ) -> Result<()> {
+        if plan.accept_immediately {
+            session.accept_call(None, None).await?;
+        } else if !session.early_media_sent {
+            session.start_ringing(String::new(), self).await;
+        }
+
+        if let Some(hold) = plan.hold.clone() {
+            if let Err(e) = session.start_queue_hold(hold).await {
+                warn!(session_id = %self.session_id, error = %e, "Failed to start queue hold track");
+            }
+        }
+
+        let dial_result = self.execute_flow(session, next).await;
+
+        session.stop_queue_hold().await;
+
+        match dial_result {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                if let Some(fallback) = &plan.fallback {
+                    self.execute_queue_fallback(session, fallback).await
+                } else {
+                    self.handle_failure(session).await
+                }
+            }
+        }
+    }
+
+    async fn execute_queue_fallback(
+        &self,
+        session: &mut CallSession,
+        fallback: &QueueFallbackAction,
+    ) -> Result<()> {
+        match fallback {
+            QueueFallbackAction::Failure(action) => {
+                self.execute_failure_action(session, action).await
+            }
+            QueueFallbackAction::Redirect { target } => {
+                let mut location = Location::default();
+                location.aor = target.clone();
+                match self.try_single_target(session, &location).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => self.handle_failure(session).await,
+                }
+            }
         }
     }
 
@@ -968,7 +1201,7 @@ impl ProxyCall {
                     session.routed_contact = Some(contact.clone());
                     session.routed_destination = destination.clone();
                     if accepted_idx.is_none() {
-                        if let Err(e) = session.accept_call(aor, answer).await {
+                        if let Err(e) = session.accept_call(Some(aor), Some(answer)).await {
                             warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
                             continue;
                         }
@@ -1072,7 +1305,9 @@ impl ProxyCall {
                     );
                     option
                 }
-                RouteResult::Forward(option) => option,
+                RouteResult::Forward(option)
+                | RouteResult::Queue { option, .. }
+                | RouteResult::Ivr { option, .. } => option,
                 RouteResult::Abort(code, reason) => {
                     warn!(session_id = self.session_id, %code, ?reason, "route abort");
                     return Err((code, reason));
@@ -1188,7 +1423,16 @@ impl ProxyCall {
     }
 
     async fn handle_failure(&self, session: &mut CallSession) -> Result<()> {
-        match &self.dialplan.failure_action {
+        self.execute_failure_action(session, &self.dialplan.failure_action)
+            .await
+    }
+
+    async fn execute_failure_action(
+        &self,
+        session: &mut CallSession,
+        action: &FailureAction,
+    ) -> Result<()> {
+        match action {
             FailureAction::Hangup(code) => {
                 let status_code = code
                     .as_ref()
@@ -1271,8 +1515,7 @@ impl ProxyCall {
             })
             .or_else(|| {
                 self.dialplan
-                    .get_all_targets()
-                    .first()
+                    .first_target()
                     .map(|location| location.aor.to_string())
             })
             .unwrap_or_else(|| "unknown".to_string());
@@ -1488,6 +1731,307 @@ impl Drop for ProxyCall {
     }
 }
 
+type PromptResponseSender = std_mpsc::Sender<Result<PromptPlayback>>;
+type InputResponseSender = std_mpsc::Sender<Result<InputEvent>>;
+
+enum IvrRuntimeCommand {
+    PlayPrompt {
+        step_id: String,
+        prompt: PromptMedia,
+        allow_barge_in: bool,
+        responder: PromptResponseSender,
+    },
+    CollectInput {
+        step_id: String,
+        input: InputStep,
+        attempt: u32,
+        responder: InputResponseSender,
+    },
+}
+
+struct BlockingIvrRuntime {
+    command_tx: mpsc::UnboundedSender<IvrRuntimeCommand>,
+}
+
+impl BlockingIvrRuntime {
+    fn new(command_tx: mpsc::UnboundedSender<IvrRuntimeCommand>) -> Self {
+        Self { command_tx }
+    }
+
+    fn send(&self, command: IvrRuntimeCommand) -> Result<()> {
+        self.command_tx
+            .send(command)
+            .map_err(|_| anyhow!("IVR command processor dropped"))
+    }
+
+    fn await_response<T>(receiver: std_mpsc::Receiver<Result<T>>) -> Result<T> {
+        Ok(receiver
+            .recv()
+            .map_err(|_| anyhow!("IVR command response channel closed"))??)
+    }
+}
+
+impl IvrRuntime for BlockingIvrRuntime {
+    fn play_prompt(
+        &mut self,
+        _plan: &IvrPlan,
+        step_id: &str,
+        prompt: &PromptMedia,
+        allow_barge_in: bool,
+    ) -> Result<PromptPlayback> {
+        let (tx, rx) = std_mpsc::channel();
+        self.send(IvrRuntimeCommand::PlayPrompt {
+            step_id: step_id.to_string(),
+            prompt: prompt.clone(),
+            allow_barge_in,
+            responder: tx,
+        })?;
+        Self::await_response(rx)
+    }
+
+    fn collect_input(
+        &mut self,
+        _plan: &IvrPlan,
+        step_id: &str,
+        input: &InputStep,
+        attempt: u32,
+    ) -> Result<InputEvent> {
+        let (tx, rx) = std_mpsc::channel();
+        self.send(IvrRuntimeCommand::CollectInput {
+            step_id: step_id.to_string(),
+            input: input.clone(),
+            attempt,
+            responder: tx,
+        })?;
+        Self::await_response(rx)
+    }
+}
+
+struct IvrCommandProcessor<'a> {
+    session: &'a mut CallSession,
+    events: IvrEventStream,
+    prompt_counter: u64,
+}
+
+impl<'a> IvrCommandProcessor<'a> {
+    fn new(session: &'a mut CallSession, receiver: EventReceiver) -> Self {
+        Self {
+            session,
+            events: IvrEventStream::new(receiver),
+            prompt_counter: 0,
+        }
+    }
+
+    async fn process(&mut self, command: IvrRuntimeCommand) -> Result<()> {
+        match command {
+            IvrRuntimeCommand::PlayPrompt {
+                prompt,
+                allow_barge_in,
+                responder,
+                ..
+            } => {
+                let result = self.handle_play_prompt(prompt, allow_barge_in).await;
+                let _ = responder.send(result);
+            }
+            IvrRuntimeCommand::CollectInput {
+                input, responder, ..
+            } => {
+                let result = self.handle_collect_input(input).await;
+                let _ = responder.send(result);
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_answered(&mut self) -> Result<()> {
+        if !self.session.is_answered() {
+            self.session.accept_call(None, None).await?;
+        }
+        Ok(())
+    }
+
+    fn next_play_id(&mut self) -> String {
+        self.prompt_counter += 1;
+        format!("ivr-prompt-{}", self.prompt_counter)
+    }
+
+    async fn handle_play_prompt(
+        &mut self,
+        prompt: PromptMedia,
+        allow_barge_in: bool,
+    ) -> Result<PromptPlayback> {
+        self.ensure_answered().await?;
+        let repeat = prompt.loop_count.unwrap_or(1).max(1) as usize;
+        let mut last = PromptPlayback::Completed;
+        for _ in 0..repeat {
+            let play_id = self.next_play_id();
+            self.start_prompt_track(&prompt, &play_id).await?;
+            let result = self
+                .events
+                .wait_for_prompt(play_id.clone(), allow_barge_in)
+                .await;
+            self.stop_prompt_track().await;
+            last = result?;
+            if matches!(last, PromptPlayback::BargeIn) {
+                break;
+            }
+        }
+        Ok(last)
+    }
+
+    async fn start_prompt_track(&mut self, prompt: &PromptMedia, play_id: &str) -> Result<()> {
+        match &prompt.source {
+            PromptSource::File { file } => {
+                let track = FileTrack::new(CallSession::IVR_PROMPT_TRACK_ID.to_string())
+                    .with_path(file.path.clone())
+                    .with_ssrc(rand::random::<u32>())
+                    .with_cancel_token(self.session.media_stream.cancel_token.child_token());
+                self.session
+                    .media_stream
+                    .update_track(Box::new(track), Some(play_id.to_string()))
+                    .await;
+                Ok(())
+            }
+            PromptSource::Tts { .. } => Err(anyhow!("TTS prompts are not supported yet")),
+            PromptSource::Url { .. } => Err(anyhow!("URL prompts are not supported yet")),
+        }
+    }
+
+    async fn stop_prompt_track(&mut self) {
+        self.session
+            .media_stream
+            .remove_track(&CallSession::IVR_PROMPT_TRACK_ID.to_string(), false)
+            .await;
+    }
+
+    async fn handle_collect_input(&mut self, input: InputStep) -> Result<InputEvent> {
+        self.ensure_answered().await?;
+        let mut digits = String::new();
+        self.events
+            .drain_pending(&mut digits, input.max_digits.unwrap_or(usize::MAX));
+        if let Some(max) = input.max_digits {
+            if digits.len() >= max {
+                return Ok(InputEvent::Digits(digits));
+            }
+        }
+
+        loop {
+            let timeout_ms = input.timeout_ms.unwrap_or(5_000);
+            match self
+                .events
+                .next_digit(Some(Duration::from_millis(timeout_ms)))
+                .await?
+            {
+                DigitWaitResult::Digit(digit) => {
+                    digits.push_str(&digit);
+                    if let Some(max) = input.max_digits {
+                        if digits.len() >= max {
+                            return Ok(InputEvent::Digits(digits));
+                        }
+                    }
+                }
+                DigitWaitResult::Timeout => {
+                    if digits.is_empty() {
+                        return Ok(InputEvent::Timeout);
+                    }
+                    return Ok(InputEvent::Digits(digits));
+                }
+                DigitWaitResult::Cancelled => return Ok(InputEvent::Cancel),
+            }
+        }
+    }
+}
+
+struct IvrEventStream {
+    receiver: EventReceiver,
+    pending_digits: VecDeque<String>,
+}
+
+impl IvrEventStream {
+    fn new(receiver: EventReceiver) -> Self {
+        Self {
+            receiver,
+            pending_digits: VecDeque::new(),
+        }
+    }
+
+    fn drain_pending(&mut self, buffer: &mut String, max: usize) {
+        while buffer.len() < max {
+            if let Some(digit) = self.pending_digits.pop_front() {
+                buffer.push_str(&digit);
+            } else {
+                break;
+            }
+        }
+    }
+
+    async fn wait_for_prompt(
+        &mut self,
+        play_id: String,
+        allow_barge_in: bool,
+    ) -> Result<PromptPlayback> {
+        loop {
+            match self.receiver.recv().await {
+                Ok(SessionEvent::TrackEnd {
+                    play_id: Some(id), ..
+                }) if id == play_id => {
+                    return Ok(PromptPlayback::Completed);
+                }
+                Ok(SessionEvent::Dtmf { digit, .. }) => {
+                    self.pending_digits.push_back(digit.clone());
+                    if allow_barge_in {
+                        return Ok(PromptPlayback::BargeIn);
+                    }
+                }
+                Ok(SessionEvent::Hangup { .. }) => {
+                    return Err(anyhow!("call ended during IVR prompt"));
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow!("event channel closed"));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) | Ok(_) => {
+                    continue;
+                }
+            }
+        }
+    }
+
+    async fn next_digit(&mut self, timeout: Option<Duration>) -> Result<DigitWaitResult> {
+        if let Some(digit) = self.pending_digits.pop_front() {
+            return Ok(DigitWaitResult::Digit(digit));
+        }
+
+        if let Some(duration) = timeout {
+            match tokio::time::timeout(duration, self.receiver.recv()).await {
+                Ok(result) => self.handle_digit_event(result),
+                Err(_) => Ok(DigitWaitResult::Timeout),
+            }
+        } else {
+            let event = self.receiver.recv().await;
+            self.handle_digit_event(event)
+        }
+    }
+
+    fn handle_digit_event(
+        &mut self,
+        event: Result<SessionEvent, broadcast::error::RecvError>,
+    ) -> Result<DigitWaitResult> {
+        match event {
+            Ok(SessionEvent::Dtmf { digit, .. }) => Ok(DigitWaitResult::Digit(digit)),
+            Ok(SessionEvent::Hangup { .. }) => Ok(DigitWaitResult::Cancelled),
+            Ok(_) => Ok(DigitWaitResult::Timeout),
+            Err(broadcast::error::RecvError::Lagged(_)) => Ok(DigitWaitResult::Timeout),
+            Err(broadcast::error::RecvError::Closed) => Ok(DigitWaitResult::Cancelled),
+        }
+    }
+}
+
+enum DigitWaitResult {
+    Digit(String),
+    Timeout,
+    Cancelled,
+}
+
 #[async_trait]
 trait ProxyCallDialogStateReceiverGuard {
     async fn handle_proxy_call_state(
@@ -1544,7 +2088,10 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                     proxy_call.update_remote_target_from_response(&dialog_id, &response);
                     session.add_callee_dialog(dialog_id);
                     let answer = String::from_utf8_lossy(response.body()).to_string();
-                    if let Err(e) = session.accept_call(target.aor.to_string(), answer).await {
+                    if let Err(e) = session
+                        .accept_call(Some(target.aor.to_string()), Some(answer))
+                        .await
+                    {
                         warn!(
                             session_id = proxy_call.session_id,
                             error = %e,
@@ -1673,19 +2220,19 @@ mod tests {
     fn test_compute_remote_target_rewrites_using_received_rport() {
         let request = rsip::Request {
             method: rsip::Method::Invite,
-            uri: rsip::Uri::try_from("sip:bob@example.com").expect("uri"),
+            uri: rsip::Uri::try_from("sip:bob@rustpbx.com").expect("uri"),
             version: rsip::Version::V2,
             headers: vec![
                 rsip::headers::Via::new(
-                    "SIP/2.0/UDP proxy.example.com:5060;branch=z9hG4bK-1;received=198.51.100.5;rport=5090",
+                    "SIP/2.0/UDP proxy.rustpbx.com:5060;branch=z9hG4bK-1;received=198.51.100.5;rport=5090",
                 )
                 .into(),
                 rsip::headers::Contact::new(
                     "<sip:alice@10.0.0.5:5060;transport=udp>",
                 )
                 .into(),
-                rsip::headers::From::new("Alice <sip:alice@example.com>;tag=from-tag").into(),
-                rsip::headers::To::new("Bob <sip:bob@example.com>").into(),
+                rsip::headers::From::new("Alice <sip:alice@rustpbx.com>;tag=from-tag").into(),
+                rsip::headers::To::new("Bob <sip:bob@rustpbx.com>").into(),
                 rsip::headers::CallId::new("callid-1").into(),
                 rsip::headers::CSeq::new("1 INVITE").into(),
                 rsip::headers::MaxForwards::new("70").into(),
@@ -1726,16 +2273,16 @@ mod tests {
     fn test_compute_remote_target_adds_transport_param_when_needed() {
         let request = rsip::Request {
             method: rsip::Method::Invite,
-            uri: rsip::Uri::try_from("sip:bob@example.com").expect("uri"),
+            uri: rsip::Uri::try_from("sip:bob@rustpbx.com").expect("uri"),
             version: rsip::Version::V2,
             headers: vec![
                 rsip::headers::Via::new(
-                    "SIP/2.0/TCP proxy.example.com:5060;branch=z9hG4bK-2;received=203.0.113.9;rport=5070",
+                    "SIP/2.0/TCP proxy.rustpbx.com:5060;branch=z9hG4bK-2;received=203.0.113.9;rport=5070",
                 )
                 .into(),
                 rsip::headers::Contact::new("<sip:alice@10.0.0.5>").into(),
-                rsip::headers::From::new("Alice <sip:alice@example.com>;tag=from-tag").into(),
-                rsip::headers::To::new("Bob <sip:bob@example.com>").into(),
+                rsip::headers::From::new("Alice <sip:alice@rustpbx.com>;tag=from-tag").into(),
+                rsip::headers::To::new("Bob <sip:bob@rustpbx.com>").into(),
                 rsip::headers::CallId::new("callid-2").into(),
                 rsip::headers::CSeq::new("1 INVITE").into(),
                 rsip::headers::MaxForwards::new("70").into(),

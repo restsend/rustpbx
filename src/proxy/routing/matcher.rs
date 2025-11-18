@@ -39,6 +39,12 @@ pub struct RouteAbortTrace {
 /// 2. Apply rewrite rules
 /// 3. Select target trunk
 /// 4. Set destination, headers and credentials
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchMode {
+    Execute,
+    Inspect,
+}
+
 pub async fn match_invite(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
@@ -56,6 +62,7 @@ pub async fn match_invite(
         source_trunk,
         routing_state,
         direction,
+        MatchMode::Execute,
         None,
     )
     .await
@@ -79,7 +86,31 @@ pub async fn match_invite_with_trace(
         source_trunk,
         routing_state,
         direction,
+        MatchMode::Execute,
         Some(trace),
+    )
+    .await
+}
+
+pub async fn inspect_invite(
+    trunks: Option<&HashMap<String, TrunkConfig>>,
+    routes: Option<&Vec<RouteRule>>,
+    option: InviteOption,
+    origin: &rsip::Request,
+    source_trunk: Option<&SourceTrunk>,
+    routing_state: Arc<RoutingState>,
+    direction: &DialDirection,
+) -> Result<RouteResult> {
+    match_invite_impl(
+        trunks,
+        routes,
+        option,
+        origin,
+        source_trunk,
+        routing_state,
+        direction,
+        MatchMode::Inspect,
+        None,
     )
     .await
 }
@@ -92,6 +123,7 @@ async fn match_invite_impl(
     source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
+    mode: MatchMode,
     mut trace: Option<&mut RouteTrace>,
 ) -> Result<RouteResult> {
     let mut option = option;
@@ -217,8 +249,51 @@ async fn match_invite_impl(
                 return Ok(RouteResult::Abort(rsip::StatusCode::BusyHere, None));
             }
             ActionType::Forward => {
-                // Select trunk and apply configuration
                 if let Some(dest_config) = &rule.action.dest {
+                    if mode == MatchMode::Execute {
+                        let selected_trunk = select_trunk(
+                            dest_config,
+                            &rule.action.select,
+                            &rule.action.hash_key,
+                            &option,
+                            routing_state.clone(),
+                        )?;
+
+                        if let Some(trace) = &mut trace {
+                            trace.selected_trunk = Some(selected_trunk.clone());
+                        }
+
+                        if let Some(trunk_config) = trunks
+                            .as_ref()
+                            .and_then(|trunks| trunks.get(&selected_trunk))
+                        {
+                            apply_trunk_config(&mut option, trunk_config)?;
+                            info!(
+                                "Selected trunk: {} for destination: {}",
+                                selected_trunk, trunk_config.dest
+                            );
+                        } else {
+                            info!("Trunk '{}' not found in configuration", selected_trunk);
+                        }
+                    }
+                }
+                return Ok(RouteResult::Forward(option));
+            }
+            ActionType::Queue => {
+                let queue_cfg = rule
+                    .action
+                    .queue
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("queue action missing queue config"))?;
+                let queue_plan = queue_cfg.to_queue_plan()?;
+
+                let dest_config = rule
+                    .action
+                    .dest
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("queue action requires 'dest' to dial agents"))?;
+
+                if mode == MatchMode::Execute {
                     let selected_trunk = select_trunk(
                         dest_config,
                         &rule.action.select,
@@ -236,15 +311,22 @@ async fn match_invite_impl(
                         .and_then(|trunks| trunks.get(&selected_trunk))
                     {
                         apply_trunk_config(&mut option, trunk_config)?;
-                        info!(
-                            "Selected trunk: {} for destination: {}",
-                            selected_trunk, trunk_config.dest
-                        );
-                    } else {
-                        info!("Trunk '{}' not found in configuration", selected_trunk);
                     }
                 }
-                return Ok(RouteResult::Forward(option));
+
+                return Ok(RouteResult::Queue {
+                    option,
+                    queue: queue_plan,
+                });
+            }
+            ActionType::Ivr => {
+                let ivr_cfg = rule
+                    .action
+                    .ivr
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("ivr action missing configuration"))?;
+                let ivr = ivr_cfg.to_dialplan_config()?;
+                return Ok(RouteResult::Ivr { option, ivr });
             }
         }
     }

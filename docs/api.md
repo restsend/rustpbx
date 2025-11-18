@@ -202,11 +202,11 @@ The `mediaPass` option in `CallOption` configures the WebSocket connection for a
 {
   "command": "invite",
   "option": {
-    "caller": "sip:alice@example.com",
-    "callee": "sip:bob@example.com",
+    "caller": "sip:alice@rustpbx.com",
+    "callee": "sip:bob@rustpbx.com",
     "codec": "g722",
     "mediaPass": {
-      "url": "ws://ai-server.example.com:9090/audio",
+      "url": "ws://ai-server.rustpbx.com:9090/audio",
       "inputSampleRate": 16000,
       "outputSampleRate": 16000,
       "packetSize": 1280
@@ -229,12 +229,12 @@ The `mediaPass` option in `CallOption` configures the WebSocket connection for a
 {
   "command": "accept",
   "option": {
-    "caller": "sip:caller@example.com",
-    "callee": "sip:agent@example.com",
+    "caller": "sip:caller@rustpbx.com",
+    "callee": "sip:agent@rustpbx.com",
     "codec": "pcmu",
     "denoise": true,
     "mediaPass": {
-      "url": "ws://ai-voice-processor.example.com:8090/stream",
+      "url": "ws://ai-voice-processor.rustpbx.com:8090/stream",
       "inputSampleRate": 8000,
       "outputSampleRate": 16000,
       "packetSize": 2560
@@ -299,8 +299,8 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 {
   "command": "invite",
   "option": {
-    "caller": "sip:alice@example.com",
-    "callee": "sip:bob@example.com",
+    "caller": "sip:alice@rustpbx.com",
+    "callee": "sip:bob@rustpbx.com",
     "offer": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n...",
     "codec": "g722",
     "denoise": true,
@@ -336,8 +336,8 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 {
   "command": "accept",
   "option": {
-    "caller": "sip:alice@example.com",
-    "callee": "sip:bob@example.com",
+    "caller": "sip:alice@rustpbx.com",
+    "callee": "sip:bob@rustpbx.com",
     "codec": "g722",
     "recorder": {
       "recorderFile": "/path/to/recording.wav",
@@ -386,7 +386,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
       "ptime": 200
   },
   "earlyMedia": true,
-  "ringtone": "http://example.com/ringtone.wav"
+  "ringtone": "http://rustpbx.com/ringtone.wav"
 }
 ```
 
@@ -437,7 +437,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 ```json
 {
   "command": "play",
-  "url": "http://example.com/audio.mp3",
+  "url": "http://rustpbx.com/audio.mp3",
   "autoHangup": false,
   "waitInputTimeout": 30
 }
@@ -479,7 +479,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 **Fields:**
 - `command` (string): Always "refer"
 - `caller` (string): Caller identity for the transfer
-- `callee` (string): Address of Record (AOR) of the transfer target (e.g., sip:bob@example.com)
+- `callee` (string): Address of Record (AOR) of the transfer target (e.g., sip:bob@rustpbx.com)
 - `options` (ReferOption, optional): Transfer configuration
   - `denoise` (boolean, optional): Enable noise reduction
   - `timeout` (number, optional): Transfer timeout in seconds
@@ -500,12 +500,12 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
 ```json
 {
   "command": "refer",
-  "caller": "sip:alice@example.com",
-  "callee": "sip:charlie@example.com",
+  "caller": "sip:alice@rustpbx.com",
+  "callee": "sip:charlie@rustpbx.com",
   "options": {
     "denoise": true,
     "timeout": 30,
-    "moh": "http://example.com/hold_music.wav",
+    "moh": "http://rustpbx.com/hold_music.wav",
     "asr": {
       "provider": "tencent",
       "language": "zh-CN",
@@ -515,7 +515,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
       "modelType": "16k_zh",
       "bufferSize": 4000,
       "samplerate": 16000,
-      "endpoint": "https://api.example.com",
+      "endpoint": "https://api.rustpbx.com",
       "extra": {
         "custom_param": "value"
       },
@@ -525,7 +525,7 @@ Commands are sent as JSON messages through the WebSocket connection. All timesta
     "sip": {
       "username": "transfer_user",
       "password": "transfer_password",
-      "realm": "example.com",
+      "realm": "rustpbx.com",
       "headers": {
         "X-Transfer-Source": "pbx"
       }
@@ -606,8 +606,8 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
 {
   "denoise": true,
   "offer": "SDP offer string",
-  "callee": "sip:callee@example.com",
-  "caller": "sip:caller@example.com",
+  "callee": "sip:callee@rustpbx.com",
+  "caller": "sip:caller@rustpbx.com",
   "recorder": {
     "recorderFile": "/path/to/recording.wav",
     "samplerate": 16000,
@@ -622,7 +622,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "modelType": "16k_zh",
     "bufferSize": 4000,
     "samplerate": 16000,
-    "endpoint": "https://api.example.com",
+    "endpoint": "https://api.rustpbx.com",
     "extra": {
       "custom_param": "value"
     },
@@ -653,7 +653,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
     "codec": "pcm",
     "subtitle": true,
     "emotion": "neutral",
-    "endpoint": "https://api.example.com",
+    "endpoint": "https://api.rustpbx.com",
     "extra": {
       "custom_param": "value"
     },
@@ -670,7 +670,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   "sip": {
     "username": "user",
     "password": "password",
-    "realm": "example.com",
+    "realm": "rustpbx.com",
     "headers": {
       "X-Custom-Header": "value"
     }
@@ -681,7 +681,7 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
   "codec": "g722",
   "eou": {
     "type": "tencent",
-    "endpoint": "https://api.example.com",
+    "endpoint": "https://api.rustpbx.com",
     "secretKey": "your_secret_key",
     "secretId": "your_secret_id",
     "timeout": 5000
@@ -692,8 +692,8 @@ The `CallOption` object is used in `invite` and `accept` commands and contains t
 **CallOption Fields:**
 - `denoise` (boolean, optional): Enable noise reduction for audio processing
 - `offer` (string, optional): SDP offer string for WebRTC/SIP negotiation
-- `callee` (string, optional): Callee's SIP URI or phone number (e.g., "sip:bob@example.com")
-- `caller` (string, optional): Caller's SIP URI or phone number (e.g., "sip:alice@example.com")
+- `callee` (string, optional): Callee's SIP URI or phone number (e.g., "sip:bob@rustpbx.com")
+- `caller` (string, optional): Caller's SIP URI or phone number (e.g., "sip:alice@rustpbx.com")
 - `recorder` (RecorderOption, optional): Call recording configuration
   - `recorderFile` (string): Path to the recording file
   - `samplerate` (number): Recording sample rate in Hz (default: 16000)
@@ -766,7 +766,7 @@ The `ReferOption` object is used in the `refer` command and contains the followi
 {
   "denoise": true,
   "timeout": 30,
-  "moh": "http://example.com/hold_music.wav",
+  "moh": "http://rustpbx.com/hold_music.wav",
   "asr": {
     "provider": "tencent",
     "language": "zh-CN",
@@ -776,7 +776,7 @@ The `ReferOption` object is used in the `refer` command and contains the followi
     "modelType": "16k_zh",
     "bufferSize": 4000,
     "samplerate": 16000,
-    "endpoint": "https://api.example.com",
+    "endpoint": "https://api.rustpbx.com",
     "extra": {
       "custom_param": "value"
     },
@@ -786,7 +786,7 @@ The `ReferOption` object is used in the `refer` command and contains the followi
   "sip": {
     "username": "transfer_user",
     "password": "transfer_password",
-    "realm": "example.com",
+    "realm": "rustpbx.com",
     "headers": {
       "X-Transfer-Source": "pbx"
     }
@@ -824,8 +824,8 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "event": "incoming",
   "trackId": "track-abc123",
   "timestamp": 1640995200000,
-  "caller": "sip:alice@example.com",
-  "callee": "sip:bob@example.com",
+  "caller": "sip:alice@rustpbx.com",
+  "callee": "sip:bob@rustpbx.com",
   "sdp": "v=0\r\no=- 1234567890 2 IN IP4 127.0.0.1\r\n..."
 }
 ```
@@ -914,13 +914,13 @@ Events are received as JSON messages from the server. All timestamps are in mill
   "ringingTime": "2024-01-01T12:00:02Z",
   "from": {
     "username": "alice",
-    "realm": "example.com",
-    "source": "sip:alice@example.com"
+    "realm": "rustpbx.com",
+    "source": "sip:alice@rustpbx.com"
   },
   "to": {
     "username": "bob",
-    "realm": "example.com", 
-    "source": "sip:bob@example.com"
+    "realm": "rustpbx.com", 
+    "source": "sip:bob@rustpbx.com"
   },
   "extra": {
     "call_quality": "good",
@@ -1261,8 +1261,8 @@ The `Attendee` object appears in call events and contains participant informatio
 ```json
 {
   "username": "alice",
-  "realm": "example.com",
-  "source": "sip:alice@example.com"
+  "realm": "rustpbx.com",
+  "source": "sip:alice@rustpbx.com"
 }
 ```
 
