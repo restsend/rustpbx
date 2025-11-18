@@ -1,9 +1,12 @@
+use crate::call::QueueFallbackAction;
+use crate::call::ivr::{IvrPlan, IvrStep, PromptFile, PromptMedia, PromptSource, PromptStep};
 use crate::call::{DialDirection, RoutingState};
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::match_invite;
 use crate::proxy::routing::{
     DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteDirection,
-    RouteRule, SourceTrunk, TrunkConfig, TrunkDirection,
+    RouteIvrConfig, RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig, RouteRule,
+    SourceTrunk, TrunkConfig, TrunkDirection,
 };
 use rsipstack::dialog::invitation::InviteOption;
 use std::sync::Arc;
@@ -368,6 +371,170 @@ async fn test_match_invite_regex_match() {
         RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
             panic!("unexpected queue/ivr result")
         }
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_queue_action_builds_hold_and_fallback() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "support".to_string(),
+        TrunkConfig {
+            dest: "sip:support-gateway.rustpbx.com:5060".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let queue_cfg = RouteQueueConfig {
+        accept_immediately: true,
+        hold: Some(RouteQueueHoldConfig {
+            audio_file: Some("moh/support.wav".to_string()),
+            loop_playback: true,
+        }),
+        fallback: Some(RouteQueueFallbackConfig {
+            redirect: Some("sip:voicemail@rustpbx.com".to_string()),
+            failure_code: None,
+            failure_reason: None,
+        }),
+    };
+
+    let routes = vec![RouteRule {
+        name: "support-queue".to_string(),
+        priority: 50,
+        direction: RouteDirection::Inbound,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("queue".to_string()),
+            dest: Some(DestConfig::Single("support".to_string())),
+            queue: Some(queue_cfg),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("queue route should resolve");
+
+    match result {
+        RouteResult::Queue { option, queue } => {
+            assert!(
+                option.destination.is_some(),
+                "queue should select trunk destination"
+            );
+            assert!(
+                queue.accept_immediately,
+                "queue must honor accept_immediately flag"
+            );
+
+            let hold = queue.hold.expect("queue hold config missing");
+            assert_eq!(hold.audio_file.as_deref(), Some("moh/support.wav"));
+            assert!(hold.loop_playback);
+
+            match queue.fallback.expect("fallback missing") {
+                QueueFallbackAction::Redirect { target } => {
+                    assert_eq!(target.to_string(), "sip:voicemail@rustpbx.com");
+                }
+                other => panic!("unexpected fallback action: {:?}", other),
+            }
+        }
+        RouteResult::Forward(_) => panic!("route forwarded instead of enqueuing"),
+        RouteResult::NotHandled(_) => panic!("route was not handled"),
+        RouteResult::Ivr { .. } => panic!("unexpected ivr result"),
+        RouteResult::Abort(..) => panic!("queue route aborted"),
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_ivr_action_returns_inline_plan() {
+    let routing_state = Arc::new(RoutingState::new());
+    let trunks = HashMap::new();
+
+    let mut steps = HashMap::new();
+    steps.insert(
+        "welcome".to_string(),
+        IvrStep::Prompt(PromptStep {
+            prompts: vec![PromptMedia {
+                source: PromptSource::File {
+                    file: PromptFile {
+                        path: "prompts/welcome.wav".to_string(),
+                    },
+                },
+                locale: None,
+                loop_count: None,
+            }],
+            allow_barge_in: true,
+            next: None,
+            availability: None,
+        }),
+    );
+    let plan = IvrPlan {
+        id: "main-menu".to_string(),
+        version: 1,
+        entry_step: "welcome".to_string(),
+        steps,
+        calendars: HashMap::new(),
+    };
+
+    let routes = vec![RouteRule {
+        name: "ivr-route".to_string(),
+        priority: 5,
+        direction: RouteDirection::Inbound,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("ivr".to_string()),
+            ivr: Some(RouteIvrConfig {
+                plan_id: None,
+                variables: HashMap::new(),
+                availability_override: false,
+                plan: Some(plan.clone()),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_test_invite_option();
+    let origin = create_test_request();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("ivr route should resolve");
+
+    match result {
+        RouteResult::Ivr { ivr, .. } => {
+            let stored = ivr.plan.expect("inline plan missing");
+            assert_eq!(stored.id, "main-menu");
+            assert_eq!(stored.entry_step, "welcome");
+            assert!(stored.steps.contains_key("welcome"));
+        }
+        _ => panic!("expected ivr result"),
     }
 }
 

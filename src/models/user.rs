@@ -134,7 +134,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(Column::Id)
+                            .big_integer()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(string_uniq(Column::Email).char_len(255))
                     .col(string_uniq(Column::Username).char_len(100))
                     .col(string(Column::PasswordHash).char_len(255))

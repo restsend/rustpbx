@@ -81,7 +81,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(ColumnDef::new(Column::Id).big_integer().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(Column::Id)
+                            .big_integer()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(string(Column::Name).char_len(120))
                     .col(string_null(Column::DisplayName).char_len(160))
                     .col(text_null(Column::Description))
