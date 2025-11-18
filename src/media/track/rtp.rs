@@ -194,6 +194,7 @@ pub struct RtpTrackInner {
     remote_addr: Option<SipAddr>,
     remote_rtcp_addr: Option<SipAddr>,
     enabled_codecs: Vec<CodecType>,
+    rtp_map: Vec<(u8, (CodecType, u32, u16))>,
 }
 
 pub struct RtpTrack {
@@ -423,6 +424,7 @@ impl RtpTrackBuilder {
             remote_addr: None,
             remote_rtcp_addr: None,
             enabled_codecs: self.enabled_codecs.clone(),
+            rtp_map: vec![],
         };
         let track = RtpTrack {
             ssrc,
@@ -456,6 +458,12 @@ impl RtpTrack {
         self.inner.lock().unwrap().remote_description.clone()
     }
 
+    pub fn set_rtp_map(&self, rtp_map: Vec<(u8, (CodecType, u32, u16))>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.rtp_map = rtp_map;
+        }
+    }
+
     pub fn set_remote_description(&self, answer: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let mut reader = Cursor::new(answer);
@@ -464,6 +472,8 @@ impl RtpTrack {
             Some(peer_media) => peer_media,
             None => return Err(anyhow::anyhow!("no audio media in answer SDP")),
         };
+
+        inner.rtp_map = peer_media.rtp_map.clone();
 
         if peer_media.codecs.is_empty() {
             return Err(anyhow::anyhow!("no audio codecs in answer SDP"));
@@ -502,6 +512,15 @@ impl RtpTrack {
 
         inner.payload_type = codec_type.payload_type();
         inner.enabled_codecs = vec![codec_type];
+        for (payload_type, (codec, clock_rate, _)) in peer_media.rtp_map.iter() {
+            if *codec == codec_type {
+                inner.payload_type = *payload_type;
+            }
+
+            if codec == &CodecType::TelephoneEvent && clock_rate == &codec_type.clock_rate() {
+                inner.dtmf_payload_type = *payload_type;
+            }
+        }
 
         inner.remote_addr.replace(remote_addr);
         inner.remote_rtcp_addr.replace(remote_rtcp_addr);
@@ -575,20 +594,71 @@ impl RtpTrack {
         };
         let inner = self.inner.lock().unwrap();
         for codec in inner.enabled_codecs.iter() {
-            media
-                .media_name
-                .formats
-                .push(codec.payload_type().to_string());
+            // Try to find payload type from rtp_map (from caller's offer), otherwise use default
+            let mut payload_type = codec.payload_type();
+            for (payload_typ, (rtp_map_codec, _, _)) in inner.rtp_map.iter() {
+                if *rtp_map_codec == *codec {
+                    payload_type = *payload_typ;
+                    break;
+                }
+            }
+
+            media.media_name.formats.push(payload_type.to_string());
             media.attributes.push(Attribute {
                 key: "rtpmap".to_string(),
-                value: Some(format!("{} {}", codec.payload_type(), codec.rtpmap())),
+                value: Some(format!("{} {}", payload_type, codec.rtpmap())),
             });
             if let Some(fmtp) = codec.fmtp() {
                 media.attributes.push(Attribute {
                     key: "fmtp".to_string(),
-                    value: Some(format!("{} {}", codec.payload_type(), fmtp)),
+                    value: Some(format!("{} {}", payload_type, fmtp)),
                 });
             }
+        }
+
+        // Add telephone-event
+        // Creating an offer: add telephone-event if enabled_codecs have 8000 or 48000 clock rate
+        let has_8khz_codec = inner.enabled_codecs.iter().any(|c| c.clock_rate() == 8000);
+        let has_48khz_codec = inner.enabled_codecs.iter().any(|c| c.clock_rate() == 48000);
+
+        if has_8khz_codec {
+            // Add telephone-event at 8000 Hz (default payload type 101)
+            let mut payload_type = 101;
+            for (typ, (codec, clock_rate, _)) in inner.rtp_map.iter() {
+                if *codec == CodecType::TelephoneEvent && *clock_rate == 8000 {
+                    payload_type = *typ;
+                    break;
+                }
+            }
+            media.media_name.formats.push(payload_type.to_string());
+            media.attributes.push(Attribute {
+                key: "rtpmap".to_string(),
+                value: Some(format!("{} telephone-event/8000", payload_type)),
+            });
+            media.attributes.push(Attribute {
+                key: "fmtp".to_string(),
+                value: Some(format!("{} 0-16", payload_type)),
+            });
+        }
+
+        if has_48khz_codec {
+            let mut payload_type = 97;
+            for (typ, (codec, clock_rate, _)) in inner.rtp_map.iter() {
+                if *codec == CodecType::TelephoneEvent && *clock_rate == 48000 {
+                    payload_type = *typ;
+                    break;
+                }
+            }
+            
+            media.media_name.formats.push(payload_type.to_string());
+            media.attributes.push(Attribute {
+                key: "rtpmap".to_string(),
+                value: Some(format!("{} telephone-event/48000", payload_type)),
+            });
+            media.attributes.push(Attribute {
+                key: "fmtp".to_string(),
+                value: Some(format!("{} 0-16", payload_type)),
+            });
         }
 
         // Add media-level attributes

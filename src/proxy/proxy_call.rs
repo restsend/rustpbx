@@ -240,10 +240,7 @@ impl CallSession {
     }
 
     fn is_webrtc_sdp(sdp: &str) -> bool {
-        sdp.contains("a=ice-ufrag")
-            || sdp.contains("a=ice-pwd")
-            || sdp.contains("a=fingerprint")
-            || sdp.contains("a=setup:")
+        sdp.contains("a=fingerprint")
     }
 
     async fn create_caller_answer_from_offer(&mut self) -> Result<String> {
@@ -296,18 +293,35 @@ impl CallSession {
         let track_id = "callee-track".to_string();
         let config = TrackConfig::default();
 
+        // Parse caller's offer to extract rtp_map for correct payload types
+        let mut caller_rtp_map = Vec::new();
+        if let Some(ref caller_offer) = self.caller_offer {
+            use crate::media::negotiate::select_peer_media;
+            use std::io::Cursor;
+            use webrtc::sdp::SessionDescription;
+
+            let mut reader = Cursor::new(caller_offer.as_bytes());
+            if let Ok(sdp) = SessionDescription::unmarshal(&mut reader) {
+                if let Some(peer_media) = select_peer_media(&sdp, "audio") {
+                    caller_rtp_map = peer_media.rtp_map;
+                }
+            }
+        }
+
         let (offer, track) = if !is_webrtc {
             let track = RtpTrackBuilder::new(track_id.clone(), config)
                 .with_cancel_token(self.media_stream.cancel_token.clone());
-            let track = if let Some(ref addr) = self.media_config.external_ip {
+            let rtp_track = if let Some(ref addr) = self.media_config.external_ip {
                 track.with_external_addr(addr.parse()?).build().await?
             } else {
                 track.build().await?
             };
-            (
-                track.local_description()?,
-                Box::new(track) as Box<dyn Track>,
-            )
+
+            // Set rtp_map from caller's offer before generating local_description
+            rtp_track.set_rtp_map(caller_rtp_map);
+
+            let offer = rtp_track.local_description()?;
+            (offer, Box::new(rtp_track) as Box<dyn Track>)
         } else {
             let mut track = WebrtcTrack::new(
                 self.media_stream.cancel_token.clone(),
@@ -570,10 +584,7 @@ impl ProxyCall {
     }
 
     fn is_webrtc_sdp(sdp: &str) -> bool {
-        sdp.contains("a=ice-ufrag")
-            || sdp.contains("a=ice-pwd")
-            || sdp.contains("a=fingerprint")
-            || sdp.contains("a=setup:")
+        sdp.contains("a=fingerprint")
     }
 
     fn needs_media_proxy(&self, offer_sdp: &str) -> bool {
