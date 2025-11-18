@@ -69,6 +69,48 @@ async fn test_trunk_matches_inbound_ip_with_hostname() {
     assert!(trunk.matches_inbound_ip(&loopback).await);
 }
 
+#[test]
+fn test_trunk_incoming_user_prefix_plain() {
+    let mut trunk = TrunkConfig::default();
+    trunk.incoming_from_user_prefix = Some("+852".to_string());
+    assert!(
+        trunk
+            .matches_incoming_user_prefixes(Some("+852123456"), None)
+            .unwrap()
+    );
+    assert!(
+        !trunk
+            .matches_incoming_user_prefixes(Some("+853123456"), None)
+            .unwrap()
+    );
+}
+
+#[test]
+fn test_trunk_incoming_user_prefix_regex() {
+    let mut trunk = TrunkConfig::default();
+    trunk.incoming_to_user_prefix = Some(r"^\d{10}$".to_string());
+    assert!(
+        trunk
+            .matches_incoming_user_prefixes(None, Some("1234567890"))
+            .unwrap()
+    );
+    assert!(
+        !trunk
+            .matches_incoming_user_prefixes(None, Some("1234"))
+            .unwrap()
+    );
+}
+
+#[test]
+fn test_trunk_incoming_user_prefix_invalid_regex() {
+    let mut trunk = TrunkConfig::default();
+    trunk.incoming_from_user_prefix = Some("^(".to_string());
+    let err = trunk
+        .matches_incoming_user_prefixes(Some("1001"), None)
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid regex"));
+}
+
 #[tokio::test]
 async fn test_match_invite_inbound_respects_source_trunk() {
     let routing_state = Arc::new(RoutingState::new());

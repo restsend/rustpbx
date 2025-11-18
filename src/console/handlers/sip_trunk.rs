@@ -562,6 +562,16 @@ fn apply_form_to_active_model(
     if !is_update || form.tags.is_some() {
         active.tags = Set(tags);
     }
+    if !is_update || form.incoming_from_user_prefix.is_some() {
+        active.incoming_from_user_prefix = Set(super::normalize_optional_string(
+            &form.incoming_from_user_prefix,
+        ));
+    }
+    if !is_update || form.incoming_to_user_prefix.is_some() {
+        active.incoming_to_user_prefix = Set(super::normalize_optional_string(
+            &form.incoming_to_user_prefix,
+        ));
+    }
     if !is_update || form.metadata.is_some() {
         active.metadata = Set(metadata);
     }

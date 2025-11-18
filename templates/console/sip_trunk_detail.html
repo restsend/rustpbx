@@ -298,6 +298,33 @@ default('RustPBX') }}{% endblock %}
                         </label>
                     </div>
                 </section>
+
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-1">
+                        <h2 class="text-sm font-semibold text-slate-900">Inbound identity filters</h2>
+                        <p class="text-sm text-slate-500">Drop inbound calls whose SIP From/To users don't match these
+                            prefixes. Plain text is treated as a prefix; include regex tokens for advanced rules.</p>
+                    </div>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            From user prefix / regex
+                            <input type="text" x-model.trim="form.incoming_from_user_prefix"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="^\\+8525">
+                            <span class="text-xs font-normal text-slate-500">Example: <code
+                                    class="text-[11px]">^\\+8525</code>
+                                ensures caller IDs start with +8525.</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            To user prefix / regex
+                            <input type="text" x-model.trim="form.incoming_to_user_prefix"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="^\\d{10}$">
+                            <span class="text-xs font-normal text-slate-500">Leave blank to accept all
+                                destinations.</span>
+                        </label>
+                    </div>
+                </section>
             </div>
 
             <div class="space-y-6" x-show="activeTab === 'metadata'" x-transition.opacity x-cloak
@@ -395,6 +422,8 @@ default('RustPBX') }}{% endblock %}
                 billing_snapshot: '',
                 analytics: '',
                 tags: '',
+                incoming_from_user_prefix: '',
+                incoming_to_user_prefix: '',
                 metadata: '',
                 is_active: true,
             },
@@ -456,6 +485,8 @@ default('RustPBX') }}{% endblock %}
                 this.form.billing_snapshot = this.formatJson(model.billing_snapshot);
                 this.form.analytics = this.formatJson(model.analytics);
                 this.form.tags = this.formatJson(model.tags);
+                this.form.incoming_from_user_prefix = model.incoming_from_user_prefix || '';
+                this.form.incoming_to_user_prefix = model.incoming_to_user_prefix || '';
                 this.form.metadata = this.formatJson(model.metadata);
                 this.form.is_active = model.is_active !== false;
             },
@@ -641,6 +672,8 @@ default('RustPBX') }}{% endblock %}
                 params.set('billing_snapshot', this.form.billing_snapshot.trim());
                 params.set('analytics', this.form.analytics.trim());
                 params.set('tags', this.form.tags.trim());
+                params.set('incoming_from_user_prefix', this.form.incoming_from_user_prefix.trim());
+                params.set('incoming_to_user_prefix', this.form.incoming_to_user_prefix.trim());
                 params.set('metadata', this.form.metadata.trim());
                 params.set('is_active', this.form.is_active ? 'true' : 'false');
 

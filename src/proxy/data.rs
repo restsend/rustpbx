@@ -671,6 +671,8 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         direction: Some(model.direction.into()),
         inbound_hosts,
         recording,
+        incoming_from_user_prefix: model.incoming_from_user_prefix,
+        incoming_to_user_prefix: model.incoming_to_user_prefix,
         origin: ConfigOrigin::embedded(),
     };
 
