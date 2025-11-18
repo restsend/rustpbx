@@ -363,3 +363,37 @@ fn test_g729_encode_decode() {
         println!("ffplay -f s16le -ar 8000  -i fixtures/sample.g729.decoded");
     }
 }
+
+#[test]
+fn test_parse_rtpmap() {
+    assert_eq!(
+        (0, CodecType::PCMU, 8000, 1),
+        parse_rtpmap("0 PCMU/8000").unwrap()
+    );
+    assert_eq!(
+        (8, CodecType::PCMA, 8000, 1),
+        parse_rtpmap("8 PCMA/8000").unwrap()
+    );
+    assert_eq!(
+        (9, CodecType::G722, 8000, 1),
+        parse_rtpmap("9 G722/8000").unwrap()
+    );
+    #[cfg(feature = "g729")]
+    assert_eq!(
+        (18, CodecType::G729, 8000, 1),
+        parse_rtpmap("18 G729/8000").unwrap()
+    );
+    #[cfg(feature = "opus")]
+    assert_eq!(
+        (96, CodecType::Opus, 48000, 2),
+        parse_rtpmap("96 opus/48000/2").unwrap()
+    );
+    assert_eq!(
+        (97, CodecType::TelephoneEvent, 8000, 1),
+        parse_rtpmap("97 telephone-event/8000").unwrap()
+    );
+    assert_eq!(
+        (101, CodecType::TelephoneEvent, 48000, 1),
+        parse_rtpmap("101 telephone-event/48000").unwrap()
+    );
+}

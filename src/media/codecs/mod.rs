@@ -87,7 +87,7 @@ impl CodecType {
         match self {
             CodecType::PCMU => "PCMU/8000",
             CodecType::PCMA => "PCMA/8000",
-            CodecType::G722 => "G722/16000",
+            CodecType::G722 => "G722/8000",
             #[cfg(feature = "g729")]
             CodecType::G729 => "G729/8000",
             #[cfg(feature = "opus")]
@@ -163,25 +163,93 @@ impl CodecType {
             _ => false,
         }
     }
+
+    pub fn is_dynamic(&self) -> bool {
+        match self {
+            #[cfg(feature = "opus")]
+            CodecType::Opus => true,
+            CodecType::TelephoneEvent => true,
+            _ => false,
+        }
+    }
 }
 
-impl TryFrom<&String> for CodecType {
+impl TryFrom<u8> for CodecType {
     type Error = anyhow::Error;
 
-    fn try_from(value: &String) -> Result<Self, Self::Error> {
-        match value.as_str() {
-            "0" => Ok(CodecType::PCMU),
-            "8" => Ok(CodecType::PCMA),
-            "9" => Ok(CodecType::G722),
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(CodecType::PCMU),
+            8 => Ok(CodecType::PCMA),
+            9 => Ok(CodecType::G722),
             #[cfg(feature = "g729")]
-            "18" => Ok(CodecType::G729), // Static payload type
+            18 => Ok(CodecType::G729), // Static payload type
             #[cfg(feature = "opus")]
-            "111" => Ok(CodecType::Opus), // Dynamic payload type
-            "101" => Ok(CodecType::TelephoneEvent),
+            // Dynamic payload type shoulw get from the rtpmap in sdp offer, leave this for backward compatibility
+            101 => Ok(CodecType::TelephoneEvent),
+            111 => Ok(CodecType::Opus), // Dynamic payload type
             _ => Err(anyhow::anyhow!("Invalid codec type: {}", value)),
         }
     }
 }
+
+/// Parse an rtpmap string like "96 opus/48000/2" into its components
+///
+/// Assumes RFC 4566/8866 compliant format:
+/// `<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
+///
+/// Returns: (payload_type, codec_type, clock_rate, channel_count)
+///
+/// # Examples
+/// ```
+/// use rustpbx::media::codecs::{parse_rtpmap, CodecType};
+///
+/// let (pt, codec, rate, channels) = parse_rtpmap("96 opus/48000/2").unwrap();
+/// assert_eq!(pt, 96);
+/// assert_eq!(codec, CodecType::Opus);
+/// assert_eq!(rate, 48000);
+/// assert_eq!(channels, 2);
+/// ```
+pub fn parse_rtpmap(rtpmap: &str) -> Result<(u8, CodecType, u32, u16), anyhow::Error> {
+    if let [payload_type_str, codec_spec] = rtpmap.split(' ').collect::<Vec<&str>>().as_slice() {
+        // Parse payload type
+        let payload_type = payload_type_str
+            .parse::<u8>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse payload type: {}", e))?;
+        let codec_parts: Vec<&str> = codec_spec.split('/').collect();
+
+        if let [codec_name, clock_rate_str, channel_count @ ..] = codec_parts.as_slice() {
+            let codec_type = match codec_name.to_lowercase().as_str() {
+                "pcmu" => CodecType::PCMU,
+                "pcma" => CodecType::PCMA,
+                "g722" => CodecType::G722,
+                #[cfg(feature = "g729")]
+                "g729" => CodecType::G729,
+                #[cfg(feature = "opus")]
+                "opus" => CodecType::Opus,
+                "telephone-event" => CodecType::TelephoneEvent,
+                _ => return Err(anyhow::anyhow!("Unsupported codec name: {}", codec_name)),
+            };
+
+            let clock_rate = clock_rate_str
+                .parse::<u32>()
+                .map_err(|e| anyhow::anyhow!("Failed to parse clock rate: {}", e))?;
+
+            let channel_count = match channel_count {
+                ["2"] => 2,
+                _ => 1,
+            };
+            Ok((payload_type, codec_type, clock_rate, channel_count))
+        } else {
+            return Err(anyhow::anyhow!("Invalid codec specification in rtpmap"));
+        }
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid rtpmap format: missing space between payload type and encoding name"
+        ))
+    }
+}
+
 #[cfg(target_endian = "little")]
 pub fn samples_to_bytes(samples: &[Sample]) -> Vec<u8> {
     unsafe {
