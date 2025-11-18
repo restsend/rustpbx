@@ -349,7 +349,7 @@ mod tests {
     async fn first_user_becomes_superuser_and_blocks_when_disabled() {
         let state = setup_state(false).await;
         let first = state
-            .create_user("owner@example.com", "owner", "password123")
+            .create_user("owner@rustpbx.com", "owner", "password123")
             .await
             .expect("create first user");
         assert!(first.is_superuser);
@@ -360,7 +360,7 @@ mod tests {
         assert!(!policy_after.first_user);
 
         let err = state
-            .create_user("second@example.com", "second", "password123")
+            .create_user("second@rustpbx.com", "second", "password123")
             .await
             .expect_err("second user should be blocked");
         assert!(
@@ -373,7 +373,7 @@ mod tests {
     async fn additional_users_allowed_when_enabled() {
         let state = setup_state(true).await;
         let first = state
-            .create_user("root@example.com", "root", "password123")
+            .create_user("root@rustpbx.com", "root", "password123")
             .await
             .expect("create first user");
         assert!(first.is_superuser);
@@ -383,7 +383,7 @@ mod tests {
         assert!(!policy_after.first_user);
 
         let second = state
-            .create_user("member@example.com", "member", "password123")
+            .create_user("member@rustpbx.com", "member", "password123")
             .await
             .expect("create second user");
         assert!(!second.is_superuser);

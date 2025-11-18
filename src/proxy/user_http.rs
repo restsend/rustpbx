@@ -128,14 +128,14 @@ mod tests {
     #[tokio::test]
     async fn test_http_backend_creation() {
         let backend = HttpUserBackend::new(
-            "http://example.com/auth",
+            "http://rustpbx.com/auth",
             &Some("POST".to_string()),
             &Some("username".to_string()),
             &None,
             &None,
         );
 
-        assert_eq!(backend.url, "http://example.com/auth");
+        assert_eq!(backend.url, "http://rustpbx.com/auth");
         assert_eq!(backend.username_field, "username");
         assert!(backend.headers.is_empty());
 
@@ -144,14 +144,14 @@ mod tests {
         headers.insert("User-Agent".to_string(), "RustPBX-Test".to_string());
 
         let backend = HttpUserBackend::new(
-            "http://example.com/auth",
+            "http://rustpbx.com/auth",
             &None,
             &None,
             &None,
             &Some(headers.clone()),
         );
 
-        assert_eq!(backend.url, "http://example.com/auth");
+        assert_eq!(backend.url, "http://rustpbx.com/auth");
         assert_eq!(backend.username_field, "username");
         assert_eq!(backend.headers, headers);
     }

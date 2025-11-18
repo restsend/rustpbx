@@ -15,7 +15,7 @@ async fn test_db_locator() {
             user: "alice".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("example.com").unwrap(),
+        host_with_port: HostWithPort::try_from("rustpbx.com").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -39,13 +39,13 @@ async fn test_db_locator() {
 
     // Test register
     locator
-        .register("alice", Some("example.com"), location)
+        .register("alice", Some("rustpbx.com"), location)
         .await
         .unwrap();
 
     // Test lookup
     let locations = locator
-        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await
         .unwrap();
     assert_eq!(locations.len(), 1);
@@ -69,13 +69,13 @@ async fn test_db_locator() {
 
     // Test unregister
     locator
-        .unregister("alice", Some("example.com"))
+        .unregister("alice", Some("rustpbx.com"))
         .await
         .unwrap();
 
     // Lookup should now return none (empty) or an error, both acceptable
     let result = locator
-        .lookup(&"sip:alice@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await;
     match result {
         Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
@@ -95,7 +95,7 @@ async fn test_db_locator_with_custom_table() {
             user: "bob".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("example.com:5080").unwrap(),
+        host_with_port: HostWithPort::try_from("rustpbx.com:5080").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -116,13 +116,13 @@ async fn test_db_locator_with_custom_table() {
 
     // Test register
     locator
-        .register("bob", Some("example.com"), location)
+        .register("bob", Some("rustpbx.com"), location)
         .await
         .unwrap();
 
     // Test lookup
     let locations = locator
-        .lookup(&"sip:bob@example.com:5080".try_into().expect("invalid uri"))
+        .lookup(&"sip:bob@rustpbx.com:5080".try_into().expect("invalid uri"))
         .await
         .unwrap();
     assert_eq!(locations.len(), 1);
@@ -146,13 +146,13 @@ async fn test_db_locator_with_custom_table() {
 
     // Test unregister
     locator
-        .unregister("bob", Some("example.com"))
+        .unregister("bob", Some("rustpbx.com"))
         .await
         .unwrap();
 
     // Lookup should now return none (empty) or an error, both acceptable
     let result = locator
-        .lookup(&"sip:bob@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:bob@rustpbx.com".try_into().expect("invalid uri"))
         .await;
     match result {
         Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
@@ -172,7 +172,7 @@ async fn test_db_locator_multiple_lookups() {
             user: "carol".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("example.com").unwrap(),
+        host_with_port: HostWithPort::try_from("rustpbx.com").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -195,13 +195,13 @@ async fn test_db_locator_multiple_lookups() {
     // uses the identifier as a unique key, so we can't store multiple registrations for
     // the same user. This is a limitation compared to the in-memory implementation.)
     locator
-        .register("carol", Some("example.com"), location1)
+        .register("carol", Some("rustpbx.com"), location1)
         .await
         .unwrap();
 
     // Look up the registered location
     let locations = locator
-        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:carol@rustpbx.com".try_into().expect("invalid uri"))
         .await
         .unwrap();
     assert_eq!(locations.len(), 1);
@@ -213,7 +213,7 @@ async fn test_db_locator_multiple_lookups() {
             user: "carol".to_string(),
             password: None,
         }),
-        host_with_port: HostWithPort::try_from("otherexample.com:5080").unwrap(),
+        host_with_port: HostWithPort::try_from("otherrustpbx.com:5080").unwrap(),
         params: vec![],
         headers: vec![],
     };
@@ -234,13 +234,13 @@ async fn test_db_locator_multiple_lookups() {
 
     // Register with a different realm
     locator
-        .register("carol", Some("otherexample.com"), location2)
+        .register("carol", Some("otherrustpbx.com"), location2)
         .await
         .unwrap();
 
     // First realm lookup should still work
     let locations1 = locator
-        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:carol@rustpbx.com".try_into().expect("invalid uri"))
         .await
         .unwrap();
     assert_eq!(locations1.len(), 1);
@@ -249,7 +249,7 @@ async fn test_db_locator_multiple_lookups() {
     // Second realm lookup should also work
     let locations2 = locator
         .lookup(
-            &"sip:carol@otherexample.com:5080"
+            &"sip:carol@otherrustpbx.com:5080"
                 .try_into()
                 .expect("invalid uri"),
         )
@@ -260,18 +260,18 @@ async fn test_db_locator_multiple_lookups() {
 
     // Unregistering one realm shouldn't affect the other
     locator
-        .unregister("carol", Some("example.com"))
+        .unregister("carol", Some("rustpbx.com"))
         .await
         .unwrap();
 
     // First realm lookup should now be none (empty) or an error, both acceptable
     let result1 = locator
-        .lookup(&"sip:carol@example.com".try_into().expect("invalid uri"))
+        .lookup(&"sip:carol@rustpbx.com".try_into().expect("invalid uri"))
         .await;
     match result1 {
         Ok(v) => assert!(
             v.is_empty(),
-            "Expected no locations after unregister for realm example.com"
+            "Expected no locations after unregister for realm rustpbx.com"
         ),
         Err(_) => {}
     }
@@ -279,7 +279,7 @@ async fn test_db_locator_multiple_lookups() {
     // Second realm lookup should still work
     let locations2 = locator
         .lookup(
-            &"sip:carol@otherexample.com:5080"
+            &"sip:carol@otherrustpbx.com:5080"
                 .try_into()
                 .expect("invalid uri"),
         )

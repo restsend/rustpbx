@@ -1291,6 +1291,42 @@ async fn route_evaluate(
                 rewrites,
             )
         }
+        RouteResult::Queue { option, queue } => {
+            let rewrites = collect_rewrite_diff(&original_option, &option);
+            let forward = RouteForwardOutcome {
+                destination: option.destination.map(|d| d.addr.to_string()),
+                headers: option
+                    .headers
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| h.to_string())
+                    .collect(),
+                credential: option.credential.map(|cred| CredentialView {
+                    username: cred.username,
+                    realm: cred.realm.map(|r| r.to_string()),
+                }),
+            };
+            (
+                RouteOutcomeView::Queue(RouteQueueOutcome {
+                    queue: QueuePlanView::from(&queue),
+                    forward,
+                }),
+                option.caller.to_string(),
+                option.callee.to_string(),
+                request.uri.to_string(),
+                rewrites,
+            )
+        }
+        RouteResult::Ivr { option, ivr } => {
+            let rewrites = collect_rewrite_diff(&original_option, &option);
+            (
+                RouteOutcomeView::Ivr(RouteIvrOutcome::from(&ivr)),
+                option.caller.to_string(),
+                option.callee.to_string(),
+                request.uri.to_string(),
+                rewrites,
+            )
+        }
         RouteResult::NotHandled(option) => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (
@@ -1530,6 +1566,8 @@ async fn detect_trunk_by_ip(
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RouteOutcomeView {
     Forward(RouteForwardOutcome),
+    Queue(RouteQueueOutcome),
+    Ivr(RouteIvrOutcome),
     NotHandled,
     Abort(RouteAbortOutcome),
 }
@@ -1549,6 +1587,68 @@ struct CredentialView {
     username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     realm: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RouteQueueOutcome {
+    queue: QueuePlanView,
+    forward: RouteForwardOutcome,
+}
+
+#[derive(Serialize)]
+struct QueuePlanView {
+    accept_immediately: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hold_audio: Option<String>,
+    loop_playback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<String>,
+}
+
+impl From<&crate::call::QueuePlan> for QueuePlanView {
+    fn from(plan: &crate::call::QueuePlan) -> Self {
+        let hold_audio = plan.hold.as_ref().and_then(|hold| hold.audio_file.clone());
+        let loop_playback = plan
+            .hold
+            .as_ref()
+            .map(|hold| hold.loop_playback)
+            .unwrap_or(true);
+        let fallback = plan.fallback.as_ref().map(|action| match action {
+            crate::call::QueueFallbackAction::Failure(_) => "failure".to_string(),
+            crate::call::QueueFallbackAction::Redirect { target } => {
+                format!("redirect: {}", target)
+            }
+        });
+        Self {
+            accept_immediately: plan.accept_immediately,
+            hold_audio,
+            loop_playback,
+            fallback,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RouteIvrOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_id: Option<String>,
+    inline_plan: bool,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    variables: HashMap<String, String>,
+}
+
+impl From<&crate::call::DialplanIvrConfig> for RouteIvrOutcome {
+    fn from(config: &crate::call::DialplanIvrConfig) -> Self {
+        let plan_id = config
+            .plan_id
+            .clone()
+            .or_else(|| config.plan.as_ref().map(|plan| plan.id.clone()));
+        Self {
+            plan_id,
+            inline_plan: config.plan.is_some(),
+            variables: config.variables.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]

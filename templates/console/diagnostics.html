@@ -607,7 +607,7 @@
                             (optional)</span>
                         <input type="text" x-model.trim="routingCaller"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="sip:caller@example.com">
+                            placeholder="sip:caller@rustpbx.com">
                     </label>
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction</span>
@@ -632,7 +632,7 @@
                                     (optional)</span>
                                 <input type="text" x-model.trim="routingRequestUri"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="sip:destination@example.com">
+                                    placeholder="sip:destination@rustpbx.com">
                             </label>
                             <label class="flex flex-col gap-2">
                                 <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
@@ -990,13 +990,13 @@
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">User</span>
                         <input type="text" x-model.trim="locatorUser"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="e.g. 1001 or 1001@example.com">
+                            placeholder="e.g. 1001 or 1001@rustpbx.com">
                     </label>
                     <label class="flex flex-col gap-2">
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">SIP URI</span>
                         <input type="text" x-model.trim="locatorUri"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="sip:1001@example.com">
+                            placeholder="sip:1001@rustpbx.com">
                     </label>
                     <div class="md:col-span-2 flex flex-wrap items-center gap-3">
                         <button type="submit"
@@ -1204,7 +1204,7 @@
                                         SIP URL</span>
                                     <input type="text" x-model.trim="sipForm.wsServer"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="wss://pbx.example.com/ws">
+                                        placeholder="wss://pbx.rustpbx.com/ws">
                                     <span class="text-[11px] text-slate-400">Prefer secure wss:// transports.</span>
                                 </label>
                                 <label class="flex flex-col gap-1.5">
@@ -1212,7 +1212,7 @@
                                         URI</span>
                                     <input type="text" x-model.trim="sipForm.uri"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="sip:1001@example.com">
+                                        placeholder="sip:1001@rustpbx.com">
                                 </label>
                                 <label class="flex flex-col gap-1.5">
                                     <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Auth User
@@ -1285,7 +1285,7 @@
                                 <div class="flex gap-2">
                                     <input type="text" x-model.trim="sipForm.target"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="1000 or sip:1000@example.com">
+                                        placeholder="1000 or sip:1000@rustpbx.com">
                                     <div class="relative" x-data="{ open: false }" @click.outside="open = false">
                                         <button type="button" @click="open = !open"
                                             class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
@@ -2309,7 +2309,7 @@
                         }
                         const parsed = this.parseSipUri(rawUri);
                         if (!parsed) {
-                            this.sipRegisterError = 'Invalid SIP URI (expected sip:1001@example.com).';
+                            this.sipRegisterError = 'Invalid SIP URI (expected sip:1001@rustpbx.com).';
                             return;
                         }
                         await this.ensureIceServers();

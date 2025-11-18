@@ -42,7 +42,7 @@ async fn test_proxy_full_flow() {
         username: "testuser".to_string(),
         password: Some("testpassword".to_string()),
         enabled: true,
-        realm: Some("example.com".to_string()),
+        realm: Some("rustpbx.com".to_string()),
         ..Default::default()
     };
 
@@ -81,12 +81,12 @@ async fn test_proxy_full_flow() {
             println!("Testing flows...");
 
             // Test authentication and ban module
-            let ban_verified = test_ban_module("testuser", "example.com", client_tx.clone()).await;
+            let ban_verified = test_ban_module("testuser", "rustpbx.com", client_tx.clone()).await;
 
             // Test registration
             let registration_verified = test_registration_module(
                 "testuser",
-                "example.com",
+                "rustpbx.com",
                 "testpassword",
                 client_tx.clone(),
             )
@@ -94,7 +94,7 @@ async fn test_proxy_full_flow() {
 
             // Test call module
             let call_verified =
-                test_call_module("caller", "testuser", "example.com", client_tx.clone()).await;
+                test_call_module("caller", "testuser", "rustpbx.com", client_tx.clone()).await;
 
             // Report results
             client_tx
