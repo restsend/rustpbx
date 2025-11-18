@@ -1,6 +1,10 @@
 use crate::{call::DialDirection, config::RecordingPolicy};
 use anyhow::{Result, anyhow};
 use ipnetwork::IpNetwork;
+<<<<<<< Updated upstream
+=======
+use regex::Regex;
+>>>>>>> Stashed changes
 use rsip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -62,6 +66,10 @@ pub struct TrunkConfig {
     pub inbound_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording: Option<RecordingPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming_from_user_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming_to_user_prefix: Option<String>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -83,6 +91,8 @@ impl Default for TrunkConfig {
             direction: None,
             inbound_hosts: Vec::new(),
             recording: None,
+            incoming_from_user_prefix: None,
+            incoming_to_user_prefix: None,
             origin: ConfigOrigin::embedded(),
         }
     }
@@ -107,6 +117,32 @@ impl TrunkConfig {
         }
 
         false
+    }
+
+    pub fn matches_incoming_user_prefixes(
+        &self,
+        from_user: Option<&str>,
+        to_user: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(pattern) = &self.incoming_from_user_prefix {
+            let candidate = from_user.unwrap_or_default();
+            if pattern.trim().is_empty() {
+                // Treat empty string as unset
+            } else if !matches_user_prefix(pattern, candidate)? {
+                return Ok(false);
+            }
+        }
+
+        if let Some(pattern) = &self.incoming_to_user_prefix {
+            let candidate = to_user.unwrap_or_default();
+            if pattern.trim().is_empty() {
+                // Treat empty string as unset
+            } else if !matches_user_prefix(pattern, candidate)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 }
 
@@ -597,4 +633,30 @@ fn split_host_port(input: &str) -> Option<(&str, &str)> {
     }
 
     None
+}
+
+fn matches_user_prefix(pattern: &str, value: &str) -> Result<bool> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Ok(true);
+    }
+
+    let mut is_regex = false;
+    for ch in trimmed.chars() {
+        match ch {
+            '^' | '$' | '.' | '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '\\' => {
+                is_regex = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if !is_regex {
+        return Ok(value.starts_with(trimmed));
+    }
+
+    let regex =
+        Regex::new(trimmed).map_err(|err| anyhow!("invalid regex '{}': {}", trimmed, err))?;
+    Ok(regex.is_match(value))
 }

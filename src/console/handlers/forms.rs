@@ -77,6 +77,8 @@ pub struct SipTrunkForm {
     pub billing_snapshot: Option<String>,
     pub analytics: Option<String>,
     pub tags: Option<String>,
+    pub incoming_from_user_prefix: Option<String>,
+    pub incoming_to_user_prefix: Option<String>,
     pub metadata: Option<String>,
     pub is_active: Option<bool>,
 }

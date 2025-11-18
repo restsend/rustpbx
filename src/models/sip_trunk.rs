@@ -1,11 +1,11 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, double_null, integer_null, json_null, string, string_null, text_null,
-    timestamp, timestamp_null,
+    boolean, double_null, integer_null, json_null, string, string_null, text_null, timestamp,
+    timestamp_null,
 };
-use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_orm_migration::sea_query::ColumnDef;
+use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +125,8 @@ pub struct Model {
     pub billing_snapshot: Option<Json>,
     pub analytics: Option<Json>,
     pub tags: Option<Json>,
+    pub incoming_from_user_prefix: Option<String>,
+    pub incoming_to_user_prefix: Option<String>,
     pub is_active: bool,
     pub metadata: Option<Json>,
     pub created_at: DateTimeUtc,
@@ -163,7 +165,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(ColumnDef::new(Column::Id).big_integer().primary_key().auto_increment())
+                    .col(
+                        ColumnDef::new(Column::Id)
+                            .big_integer()
+                            .primary_key()
+                            .auto_increment(),
+                    )
                     .col(string(Column::Name).char_len(120))
                     .col(string_null(Column::DisplayName).char_len(160))
                     .col(string_null(Column::Carrier).char_len(160))
@@ -188,7 +195,11 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::AuthUsername).char_len(160))
                     .col(string_null(Column::AuthPassword).char_len(160))
                     .col(string_null(Column::DefaultRouteLabel).char_len(160))
-                    .col(ColumnDef::new(Column::BillingTemplateId).big_integer().null())
+                    .col(
+                        ColumnDef::new(Column::BillingTemplateId)
+                            .big_integer()
+                            .null(),
+                    )
                     .col(integer_null(Column::MaxCps))
                     .col(integer_null(Column::MaxConcurrent))
                     .col(integer_null(Column::MaxCallDuration))
@@ -199,6 +210,8 @@ impl MigrationTrait for Migration {
                     .col(json_null(Column::BillingSnapshot))
                     .col(json_null(Column::Analytics))
                     .col(json_null(Column::Tags))
+                    .col(string_null(Column::IncomingFromUserPrefix).char_len(160))
+                    .col(string_null(Column::IncomingToUserPrefix).char_len(160))
                     .col(boolean(Column::IsActive).default(true))
                     .col(json_null(Column::Metadata))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))

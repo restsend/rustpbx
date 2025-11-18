@@ -99,6 +99,46 @@ impl RouteInvite for DefaultRouteInvite {
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
             self.build_context(origin, direction).await;
+<<<<<<< Updated upstream
+=======
+
+        if matches!(direction, DialDirection::Inbound) {
+            if let Some(source) = source_trunk.as_ref() {
+                if let Some(trunk_cfg) = trunks_snapshot.get(&source.name) {
+                    let from_user = extract_from_user(origin);
+                    let to_user = extract_to_user(origin);
+                    match trunk_cfg
+                        .matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                trunk = %source.name,
+                                from = from_user.as_deref().unwrap_or(""),
+                                to = to_user.as_deref().unwrap_or(""),
+                                "dropping inbound INVITE due to SIP trunk user prefix mismatch",
+                            );
+                            return Ok(RouteResult::Abort(
+                                rsip::StatusCode::Forbidden,
+                                Some("Inbound identity rejected".to_string()),
+                            ));
+                        }
+                        Err(err) => {
+                            warn!(
+                                trunk = %source.name,
+                                error = %err,
+                                "failed to evaluate SIP trunk user prefix",
+                            );
+                            return Ok(RouteResult::Abort(
+                                rsip::StatusCode::ServerInternalError,
+                                Some("Invalid trunk prefix configuration".to_string()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+>>>>>>> Stashed changes
 
         match_invite(
             if trunks_snapshot.is_empty() {
@@ -191,6 +231,22 @@ impl DefaultRouteInvite {
         let config = trunks.get(&name)?;
         build_source_trunk(name, config, direction)
     }
+}
+
+fn extract_from_user(origin: &rsip::Request) -> Option<String> {
+    origin
+        .from_header()
+        .ok()
+        .and_then(|header| header.uri().ok())
+        .and_then(|uri| uri.user().map(|u| u.to_string()))
+}
+
+fn extract_to_user(origin: &rsip::Request) -> Option<String> {
+    origin
+        .to_header()
+        .ok()
+        .and_then(|header| header.uri().ok())
+        .and_then(|uri| uri.user().map(|u| u.to_string()))
 }
 
 #[derive(Clone)]
