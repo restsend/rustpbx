@@ -51,7 +51,8 @@ use std::{
 };
 use tokio::{
     sync::{broadcast, mpsc},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -68,6 +69,8 @@ pub struct ProxyCall {
     call_record_sender: Option<CallRecordSender>,
     event_sender: EventSender,
 }
+
+const MAX_QUEUE_CHAIN_DEPTH: usize = 4;
 
 pub struct ProxyCallBuilder {
     cookie: TransactionCookie,
@@ -143,6 +146,9 @@ struct CallSession {
     routed_contact: Option<String>,
     routed_destination: Option<String>,
     queue_hold_active: bool,
+    queue_hold_audio_file: Option<String>,
+    queue_hold_loop_cancel: Option<CancellationToken>,
+    queue_hold_loop_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -229,6 +235,9 @@ impl CallSession {
             routed_contact: None,
             routed_destination: None,
             queue_hold_active: false,
+            queue_hold_audio_file: None,
+            queue_hold_loop_cancel: None,
+            queue_hold_loop_handle: None,
         }
     }
 
@@ -544,14 +553,16 @@ impl CallSession {
             .clone()
             .ok_or_else(|| anyhow!("Queue hold requires an audio file"))?;
 
-        let track = FileTrack::new(Self::QUEUE_HOLD_TRACK_ID.to_string())
-            .with_path(audio_file)
-            .with_ssrc(rand::random::<u32>())
-            .with_cancel_token(self.media_stream.cancel_token.child_token());
-        self.media_stream
-            .update_track(Box::new(track), Some(Self::QUEUE_HOLD_PLAY_ID.to_string()))
-            .await;
+        Self::play_queue_hold_track(self.media_stream.clone(), audio_file.clone()).await;
         self.queue_hold_active = true;
+        self.queue_hold_audio_file = Some(audio_file.clone());
+
+        if hold.loop_playback {
+            let cancel = CancellationToken::new();
+            let loop_handle = self.spawn_queue_hold_loop(audio_file, cancel.clone());
+            self.queue_hold_loop_cancel = Some(cancel);
+            self.queue_hold_loop_handle = Some(loop_handle);
+        }
         Ok(())
     }
 
@@ -559,10 +570,71 @@ impl CallSession {
         if !self.queue_hold_active {
             return;
         }
+        if let Some(cancel) = self.queue_hold_loop_cancel.take() {
+            cancel.cancel();
+        }
+        if let Some(handle) = self.queue_hold_loop_handle.take() {
+            match tokio::time::timeout(Duration::from_secs(2), handle).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    warn!("queue hold loop task error: {}", err);
+                }
+                Err(_) => {
+                    warn!("queue hold loop task did not stop in time");
+                }
+            }
+        }
         self.media_stream
             .remove_track(&Self::QUEUE_HOLD_TRACK_ID.to_string(), false)
             .await;
         self.queue_hold_active = false;
+        self.queue_hold_audio_file = None;
+    }
+
+    fn spawn_queue_hold_loop(
+        &self,
+        audio_file: String,
+        cancel: CancellationToken,
+    ) -> JoinHandle<()> {
+        let mut event_rx = self.event_sender.subscribe();
+        let media_stream = self.media_stream.clone();
+        let track_id = Self::QUEUE_HOLD_TRACK_ID.to_string();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    event = event_rx.recv() => {
+                        match event {
+                            Ok(SessionEvent::TrackEnd { track_id: ended_id, .. }) if ended_id == track_id => {
+                                if cancel.is_cancelled() {
+                                    break;
+                                }
+                                Self::play_queue_hold_track(media_stream.clone(), audio_file.clone()).await;
+                            }
+                            Ok(SessionEvent::Error { track_id: errored_id, .. }) if errored_id == track_id => {
+                                if cancel.is_cancelled() {
+                                    break;
+                                }
+                                Self::play_queue_hold_track(media_stream.clone(), audio_file.clone()).await;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    async fn play_queue_hold_track(media_stream: Arc<MediaStream>, audio_file: String) {
+        let track = FileTrack::new(Self::QUEUE_HOLD_TRACK_ID.to_string())
+            .with_path(audio_file)
+            .with_ssrc(rand::random::<u32>())
+            .with_cancel_token(media_stream.cancel_token.child_token());
+        media_stream
+            .update_track(Box::new(track), Some(Self::QUEUE_HOLD_PLAY_ID.to_string()))
+            .await;
     }
 }
 
@@ -805,7 +877,7 @@ impl ProxyCall {
             match flow {
                 DialplanFlow::Targets(strategy) => self.execute_targets(session, strategy).await,
                 DialplanFlow::Queue { plan, next } => {
-                    self.execute_queue_plan(session, plan, next).await
+                    self.execute_queue_plan(session, plan, next, 0).await
                 }
                 DialplanFlow::Ivr(config) => self.run_ivr(session, config).await,
             }
@@ -931,7 +1003,16 @@ impl ProxyCall {
         session: &mut CallSession,
         plan: &QueuePlan,
         next: &DialplanFlow,
+        depth: usize,
     ) -> Result<()> {
+        if depth >= MAX_QUEUE_CHAIN_DEPTH {
+            warn!(
+                session_id = %self.session_id,
+                depth,
+                "queue chain exceeded maximum depth"
+            );
+            return self.handle_failure(session).await;
+        }
         if plan.accept_immediately {
             session.accept_call(None, None).await?;
         } else if !session.early_media_sent {
@@ -944,7 +1025,22 @@ impl ProxyCall {
             }
         }
 
-        let dial_result = self.execute_flow(session, next).await;
+        let dial_future = self.execute_flow(session, next);
+        let dial_result = if let Some(timeout_duration) = plan.ring_timeout {
+            match timeout(timeout_duration, dial_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        timeout = ?timeout_duration,
+                        "queue dial attempt timed out"
+                    );
+                    Err(anyhow!("queue dial timed out after {:?}", timeout_duration))
+                }
+            }
+        } else {
+            dial_future.await
+        };
 
         session.stop_queue_hold().await;
 
@@ -952,7 +1048,8 @@ impl ProxyCall {
             Ok(_) => Ok(()),
             Err(_) => {
                 if let Some(fallback) = &plan.fallback {
-                    self.execute_queue_fallback(session, fallback).await
+                    self.execute_queue_fallback(session, fallback, next, depth)
+                        .await
                 } else {
                     self.handle_failure(session).await
                 }
@@ -960,24 +1057,66 @@ impl ProxyCall {
         }
     }
 
-    async fn execute_queue_fallback(
-        &self,
-        session: &mut CallSession,
-        fallback: &QueueFallbackAction,
-    ) -> Result<()> {
-        match fallback {
-            QueueFallbackAction::Failure(action) => {
-                self.execute_failure_action(session, action).await
-            }
-            QueueFallbackAction::Redirect { target } => {
-                let mut location = Location::default();
-                location.aor = target.clone();
-                match self.try_single_target(session, &location).await {
-                    Ok(_) => Ok(()),
-                    Err(_) => self.handle_failure(session).await,
+    fn execute_queue_fallback<'a>(
+        &'a self,
+        session: &'a mut CallSession,
+        fallback: &'a QueueFallbackAction,
+        next: &'a DialplanFlow,
+        depth: usize,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            match fallback {
+                QueueFallbackAction::Failure(action) => {
+                    self.execute_failure_action(session, action).await
+                }
+                QueueFallbackAction::Redirect { target } => {
+                    let mut location = Location::default();
+                    location.aor = target.clone();
+                    match self.try_single_target(session, &location).await {
+                        Ok(_) => Ok(()),
+                        Err(_) => self.handle_failure(session).await,
+                    }
+                }
+                QueueFallbackAction::Queue { name } => {
+                    let config = match self.server.data_context.resolve_queue_config(name).await {
+                        Ok(Some(cfg)) => cfg,
+                        Ok(None) => {
+                            warn!(
+                                session_id = %self.session_id,
+                                queue = name,
+                                "queue fallback references unknown queue"
+                            );
+                            return self.handle_failure(session).await;
+                        }
+                        Err(err) => {
+                            warn!(
+                                session_id = %self.session_id,
+                                queue = name,
+                                error = %err,
+                                "failed to load queue fallback config"
+                            );
+                            return self.handle_failure(session).await;
+                        }
+                    };
+                    match config.to_queue_plan() {
+                        Ok(plan) => {
+                            self.execute_queue_plan(session, &plan, next, depth + 1)
+                                .await
+                        }
+                        Err(err) => {
+                            warn!(
+                                session_id = %self.session_id,
+                                queue = name,
+                                error = %err,
+                                "failed to build fallback queue plan"
+                            );
+                            self.handle_failure(session).await
+                        }
+                    }
                 }
             }
         }
+        .boxed()
     }
 
     async fn dial_sequential(&self, session: &mut CallSession, targets: &[Location]) -> Result<()> {
@@ -1444,20 +1583,21 @@ impl ProxyCall {
         action: &FailureAction,
     ) -> Result<()> {
         match action {
-            FailureAction::Hangup(code) => {
+            FailureAction::Hangup { code, reason } => {
                 let status_code = code
                     .as_ref()
                     .cloned()
                     .unwrap_or(StatusCode::ServiceUnavailable);
                 if !session.has_error() {
-                    session.set_error(status_code, None);
+                    session.set_error(status_code, reason.clone());
                 }
             }
             FailureAction::PlayThenHangup {
                 audio_file,
                 status_code,
+                reason,
             } => {
-                session.set_error(status_code.clone(), None);
+                session.set_error(status_code.clone(), reason.clone());
                 session
                     .play_ringtone(audio_file, Some(self.event_sender.subscribe()))
                     .await

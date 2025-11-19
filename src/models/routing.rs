@@ -37,8 +37,10 @@ impl Default for RoutingDirection {
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum RoutingSelectionStrategy {
     #[sea_orm(string_value = "rr")]
+    #[serde(alias = "rr", alias = "round_robin", alias = "round-robin")]
     RoundRobin,
     #[sea_orm(string_value = "weight")]
+    #[serde(alias = "weight")]
     Weighted,
     #[sea_orm(string_value = "hash")]
     Hash,
@@ -109,6 +111,32 @@ pub enum Relation {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(test)]
+mod tests {
+    use super::RoutingSelectionStrategy;
+
+    #[test]
+    fn selection_strategy_accepts_aliases() {
+        let rr: RoutingSelectionStrategy = serde_json::from_str("\"rr\"").unwrap();
+        assert!(matches!(rr, RoutingSelectionStrategy::RoundRobin));
+
+        let rr_alt: RoutingSelectionStrategy = serde_json::from_str("\"round_robin\"").unwrap();
+        assert!(matches!(rr_alt, RoutingSelectionStrategy::RoundRobin));
+
+        let weight: RoutingSelectionStrategy = serde_json::from_str("\"weight\"").unwrap();
+        assert!(matches!(weight, RoutingSelectionStrategy::Weighted));
+    }
+
+    #[test]
+    fn selection_strategy_serializes_with_canonical_names() {
+        let serialized = serde_json::to_string(&RoutingSelectionStrategy::RoundRobin).unwrap();
+        assert_eq!(serialized, "\"roundrobin\"");
+
+        let serialized_weight = serde_json::to_string(&RoutingSelectionStrategy::Weighted).unwrap();
+        assert_eq!(serialized_weight, "\"weighted\"");
+    }
+}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

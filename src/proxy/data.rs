@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use glob::glob;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
@@ -6,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
+    io::ErrorKind,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,10 +18,12 @@ use tracing::info;
 use crate::{
     config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
+    proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
-        RouteRule, TrunkConfig,
+        RouteIvrConfig, RouteQueueConfig, RouteRule, TrunkConfig,
     },
+    services::queue_utils::{self},
 };
 
 pub struct ProxyDataContext {
@@ -93,6 +97,75 @@ impl ProxyDataContext {
         self.acl_rules.read().await.clone()
     }
 
+    pub async fn resolve_queue_config(&self, name: &str) -> Result<Option<RouteQueueConfig>> {
+        let Some(key) = queue_utils::canonical_queue_key(name) else {
+            return Ok(None);
+        };
+        let config = self.config.read().await.clone();
+        let queues = queue_utils::collect_queue_configs(&config)?;
+        Ok(queues.get(&key).cloned())
+    }
+
+    pub async fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+        let trimmed = reference.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let config = self.config.read().await.clone();
+        let base = config.generated_queue_dir();
+        let path = Self::resolve_reference_path(base.as_path(), trimmed);
+        Self::read_queue_document(path)
+    }
+
+    pub async fn load_ivr_file(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
+        let trimmed = reference.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let config = self.config.read().await.clone();
+        let base = config.generated_ivr_dir();
+        let path = Self::resolve_reference_path(base.as_path(), trimmed);
+        Self::read_ivr_document(path)
+    }
+
+    fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
+        let candidate = Path::new(reference);
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            base.join(candidate)
+        }
+    }
+
+    fn read_queue_document(path: PathBuf) -> Result<Option<RouteQueueConfig>> {
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                let doc: queue_utils::QueueFileDocument = toml::from_str(&contents)
+                    .with_context(|| format!("failed to parse queue file {}", path.display()))?;
+                Ok(Some(doc.queue))
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => {
+                Err(err).with_context(|| format!("failed to read queue file {}", path.display()))
+            }
+        }
+    }
+
+    fn read_ivr_document(path: PathBuf) -> Result<Option<RouteIvrConfig>> {
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                let mut config: RouteIvrConfig = toml::from_str(&contents)
+                    .with_context(|| format!("failed to parse ivr file {}", path.display()))?;
+                config.plan_id = sanitize_metadata_string(config.plan_id.take());
+                Ok(Some(config))
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => {
+                Err(err).with_context(|| format!("failed to read ivr file {}", path.display()))
+            }
+        }
+    }
+
     pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {
         let trunks = self.trunks_snapshot().await;
         for (name, trunk) in trunks.iter() {
@@ -116,13 +189,13 @@ impl ProxyDataContext {
 
         let started_at = Utc::now();
         let default_dir = config.generated_trunks_dir();
+        let mut generated_entries = 0usize;
         let generated = if generated_toml {
             self.export_trunks_to_toml(&config, default_dir.as_path())
                 .await?
         } else {
             None
         };
-        let mut generated_entries = 0usize;
         if let Some(ref info) = generated {
             generated_entries = info.entries;
         }
@@ -194,10 +267,11 @@ impl ProxyDataContext {
         } else {
             None
         };
-        let mut generated_entries = 0usize;
-        if let Some(ref info) = generated {
-            generated_entries = info.entries;
-        }
+        let generated_entries = if let Some(ref info) = generated {
+            info.entries
+        } else {
+            0usize
+        };
         let mut routes: Vec<RouteRule> = Vec::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
@@ -394,6 +468,17 @@ impl ProxyDataContext {
             path: target_path.to_string_lossy().to_string(),
             backup: backup.map(|path| path.to_string_lossy().to_string()),
         }))
+    }
+}
+
+#[async_trait]
+impl RouteResourceLookup for ProxyDataContext {
+    async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>> {
+        self.load_queue_file(path).await
+    }
+
+    async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>> {
+        self.load_ivr_file(path).await
     }
 }
 
@@ -704,6 +789,22 @@ fn recording_policy_from_metadata(value: &serde_json::Value) -> Option<Recording
         .and_then(|entry| serde_json::from_value::<RecordingPolicy>(entry.clone()).ok())
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RouteMetadataDocument {
+    #[serde(default)]
+    action: Option<RouteMetadataAction>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RouteMetadataAction {
+    #[serde(default)]
+    target_type: Option<String>,
+    #[serde(default)]
+    queue_file: Option<String>,
+    #[serde(default)]
+    ivr_file: Option<String>,
+}
+
 fn convert_route(
     model: routing::Model,
     trunk_lookup: &HashMap<i64, String>,
@@ -757,6 +858,14 @@ fn convert_route(
     action.select = model.selection_strategy.as_str().to_string();
     action.hash_key = model.hash_key.clone();
 
+    if let Some(metadata) = model.metadata.clone() {
+        if let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata) {
+            if let Some(meta_action) = doc.action {
+                apply_route_metadata(&mut action, meta_action);
+            }
+        }
+    }
+
     let direction = match model.direction {
         routing::RoutingDirection::Inbound => RouteDirection::Inbound,
         routing::RoutingDirection::Outbound => RouteDirection::Outbound,
@@ -787,6 +896,67 @@ fn convert_route(
     Ok(Some(route))
 }
 
+fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
+    let target_type = meta
+        .target_type
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "sip_trunk".to_string());
+
+    match target_type.as_str() {
+        "queue" => {
+            if let Some(queue_path) = sanitize_metadata_string(meta.queue_file) {
+                action.queue = Some(queue_path);
+            }
+        }
+        "ivr" => {
+            if let Some(ivr_path) = sanitize_metadata_string(meta.ivr_file) {
+                action.ivr = Some(ivr_path);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_queue_name_strips_whitespace() {
+        assert_eq!(
+            queue_utils::slugify_queue_name("  Sales Support  "),
+            "sales-support"
+        );
+        assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
+        assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
+    }
+
+    #[test]
+    fn route_metadata_sets_queue_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("queue".to_string()),
+            queue_file: Some("queues/support.toml".to_string()),
+            ivr_file: None,
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
+    }
+
+    #[test]
+    fn route_metadata_sets_ivr_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("ivr".to_string()),
+            queue_file: None,
+            ivr_file: Some("ivr/main_menu.toml".to_string()),
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.ivr.as_deref(), Some("ivr/main_menu.toml"));
+    }
+}
+
 fn set_field(target: &mut Option<String>, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -796,6 +966,12 @@ fn set_field(target: &mut Option<String>, value: &str) {
         Some(existing) if existing == trimmed => {}
         _ => *target = Some(trimmed.to_string()),
     }
+}
+
+fn sanitize_metadata_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
 }
 
 fn canonical_condition_key(raw: &str) -> String {

@@ -6,6 +6,7 @@
             mode: {{ mode | tojson }},
             route: {{ route_data | tojson }},
             trunks: {{ trunk_options | tojson }},
+            queues: {{ queue_options | tojson }},
             algorithms: {{ selection_algorithms | tojson }},
             directionOptions: {{ direction_options | tojson }},
             statusOptions: {{ status_options | tojson }},
@@ -515,80 +516,188 @@
 
                     <div class="mt-6 space-y-6">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
-                                algorithm</label>
-                            <div class="flex flex-wrap gap-2">
-                                <template x-for="option in algorithmOptions" :key="option.value">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Destination
+                                type</label>
+                            <div class="grid gap-2 md:grid-cols-3">
+                                <template x-for="option in destinationOptions" :key="option.value">
                                     <button type="button"
                                         class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
-                                        :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
-                                        @click="setAlgorithm(option.value)">
+                                        :class="normalizeTargetType(route.action.target_type) === option.value ? 'border-sky-400 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                        @click="setTargetType(option.value)">
                                         <span x-text="option.label"></span>
                                     </button>
                                 </template>
                             </div>
-                            <template x-if="route.action.select === 'hash'">
-                                <div class="mt-3 space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
-                                        key</label>
-                                    <input type="text" name="hash_key" x-model="route.action.hash_key"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="caller">
-                                </div>
-                            </template>
                         </div>
 
-                        <div class="space-y-3">
-                            <div class="flex items-center justify-between">
-                                <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk pool</h3>
-                                <button type="button" @click="addTrunkAssignment()"
-                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                    Add trunk
-                                </button>
-                            </div>
-                            <template x-if="!route.action.trunks.length">
-                                <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
-                                    fallback will be used.</p>
-                            </template>
-                            <div class="space-y-3">
-                                <template x-for="(trunk, index) in route.action.trunks" :key="index">
-                                    <div
-                                        class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
-                                        <select x-model="trunk.name"
-                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                            <option value="">Select trunk</option>
-                                            <template x-for="option in trunkOptions" :key="option.name">
-                                                <option :value="option.name"
-                                                    x-text="option.display_name || option.name">
-                                                </option>
-                                            </template>
-                                        </select>
-                                        <input type="number" min="0" step="1" x-model.number="trunk.weight"
-                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="Weight">
-                                        <button type="button" @click="removeTrunkAssignment(index)"
-                                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                            Remove
+                        <div class="space-y-6" x-show="isSipTrunkTarget" x-cloak>
+                            <div class="space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
+                                    algorithm</label>
+                                <div class="flex flex-wrap gap-2">
+                                    <template x-for="option in algorithmOptions" :key="option.value">
+                                        <button type="button"
+                                            class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                            :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                            @click="setAlgorithm(option.value)">
+                                            <span x-text="option.label"></span>
                                         </button>
+                                    </template>
+                                </div>
+                                <template x-if="route.action.select === 'hash'">
+                                    <div class="mt-3 space-y-2">
+                                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
+                                            key</label>
+                                        <input type="text" name="hash_key" x-model="route.action.hash_key"
+                                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="caller">
                                     </div>
                                 </template>
                             </div>
-                            <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-                                <div class="flex flex-wrap items-center gap-3">
-                                    <span>Total weight:</span>
-                                    <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
-                                        x-text="totalWeight"></span>
-                                    <span>Normalized distribution preview:</span>
-                                    <div class="flex flex-wrap gap-2 text-[11px]">
-                                        <template x-for="item in normalizedWeights" :key="item.name">
-                                            <span
-                                                class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
-                                                <span x-text="item.label"></span>
-                                                <span class="text-slate-400" x-text="item.percent + '%' "></span>
-                                            </span>
-                                        </template>
+
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk
+                                        pool</h3>
+                                    <button type="button" @click="addTrunkAssignment()"
+                                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                        Add trunk
+                                    </button>
+                                </div>
+                                <template x-if="!route.action.trunks.length">
+                                    <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
+                                        fallback will be used.</p>
+                                </template>
+                                <div class="space-y-3">
+                                    <template x-for="(trunk, index) in route.action.trunks" :key="index">
+                                        <div
+                                            class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
+                                            <select x-model="trunk.name"
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                <option value="">Select trunk</option>
+                                                <template x-for="option in trunkOptions" :key="option.name">
+                                                    <option :value="option.name"
+                                                        x-text="option.display_name || option.name">
+                                                    </option>
+                                                </template>
+                                            </select>
+                                            <input type="number" min="0" step="1" x-model.number="trunk.weight"
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                placeholder="Weight">
+                                            <button type="button" @click="removeTrunkAssignment(index)"
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                                Remove
+                                            </button>
+                                        </div>
+                                    </template>
+                                </div>
+                                <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
+                                    <div class="flex flex-wrap items-center gap-3">
+                                        <span>Total weight:</span>
+                                        <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
+                                            x-text="totalWeight"></span>
+                                        <span>Normalized distribution preview:</span>
+                                        <div class="flex flex-wrap gap-2 text-[11px]">
+                                            <template x-for="item in normalizedWeights" :key="item.name">
+                                                <span
+                                                    class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
+                                                    <span x-text="item.label"></span>
+                                                    <span class="text-slate-400" x-text="item.percent + '%' "></span>
+                                                </span>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+
+                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-800">Queue destination</h3>
+                                    <p class="text-xs text-slate-500">Provide the queue TOML file that should handle
+                                        matched calls.</p>
+                                </div>
+                                <a :href="queuesUrl()"
+                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
+                                    Manage queues
+                                </a>
+                            </div>
+                            <div class="mt-4 space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Queue
+                                    file path</label>
+                                <input type="text" x-model="route.action.queue_file" maxlength="200"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="0001-support.toml">
+                                <p class="text-[11px] text-slate-500">Relative paths resolve from
+                                    <code class="font-mono text-[11px]">config/queue</code> by default.
+                                </p>
+                            </div>
+                            <div class="mt-4 space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Saved
+                                        queues</h4>
+                                    <span class="text-[11px] text-slate-400"
+                                        x-text="queueOptions.length + ' available'"></span>
+                                </div>
+                                <template x-if="queueOptions.length">
+                                    <ul class="space-y-2 text-xs text-slate-600">
+                                        <template x-for="option in queueOptions" :key="option.id">
+                                            <li class="rounded-lg border border-slate-200 bg-white p-3">
+                                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                                    <div>
+                                                        <div class="text-sm font-semibold text-slate-800"
+                                                            x-text="option.name"></div>
+                                                        <div class="text-[11px] text-slate-500"
+                                                            x-text="option.description || 'No description provided.'">
+                                                        </div>
+                                                    </div>
+                                                    <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                                                        :class="option.is_active ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
+                                                        <span x-text="option.is_active ? 'Active' : 'Disabled'"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                                    <span class="rounded bg-slate-100 px-2 py-1 font-mono"
+                                                        x-text="queueSuggestion(option)"></span>
+                                                    <button type="button" @click="applyQueueSuggestion(option)"
+                                                        class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                                        Use path
+                                                    </button>
+                                                    <span class="text-slate-400"
+                                                        x-text="'Updated ' + formatTimestamp(option.updated_at)"></span>
+                                                </div>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </template>
+                                <template x-if="!queueOptions.length">
+                                    <p class="text-xs text-rose-500">No queues available.
+                                        <a :href="queuesUrl()" class="underline">Create a queue first</a>.
+                                    </p>
+                                </template>
+                            </div>
+                        </div>
+
+                        <div class="rounded-xl border border-slate-200 bg-white p-4" x-show="isIvrTarget" x-cloak>
+                            <div class="flex flex-col gap-1">
+                                <h3 class="text-sm font-semibold text-slate-900">IVR transfer</h3>
+                                <p class="text-xs text-slate-500">Point this route at an IVR specification stored in a
+                                    TOML file.</p>
+                            </div>
+                            <div class="mt-4 space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">IVR file
+                                    path</label>
+                                <input type="text" x-model="route.action.ivr_file" maxlength="200"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="main_menu.toml">
+                                <p class="text-[11px] text-slate-500">Relative paths resolve from
+                                    <code class="font-mono text-[11px]">config/ivr</code> by default.
+                                </p>
+                            </div>
+                            <div class="mt-3 rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
+                                Ensure the IVR file contains the prompts, menus, and handoff actions required before a
+                                call leaves this route.
                             </div>
                         </div>
 
@@ -605,7 +714,7 @@
                                     </template>
                                 </select>
                             </div>
-                            <div class="space-y-2">
+                            <div class="space-y-2" x-show="isSipTrunkTarget" x-cloak>
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
                                     trunks (optional)</label>
                                 <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
@@ -622,6 +731,10 @@
                                         <p class="text-slate-400">No trunks available. Add trunks first.</p>
                                     </template>
                                 </div>
+                            </div>
+                            <div class="rounded-lg border border-dashed border-slate-200 p-3 text-xs text-slate-500"
+                                x-show="!isSipTrunkTarget" x-cloak>
+                                Target trunk selection is controlled by the chosen destination type.
                             </div>
                         </div>
                     </div>
@@ -641,7 +754,13 @@
             directionOptions: Array.isArray(options.directionOptions) ? options.directionOptions : [],
             statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
             trunkOptions: [],
+            queueOptions: [],
             algorithmOptions: [],
+            destinationOptions: [
+                { value: 'sip_trunk', label: 'SIP trunks' },
+                { value: 'queue', label: 'Queue' },
+                { value: 'ivr', label: 'IVR' },
+            ],
             route: {
                 id: null,
                 name: '',
@@ -652,7 +771,14 @@
                 disabled: false,
                 match: {},
                 rewrite: {},
-                action: { select: 'rr', hash_key: null, trunks: [] },
+                action: {
+                    select: 'rr',
+                    hash_key: null,
+                    trunks: [],
+                    target_type: 'sip_trunk',
+                    queue_file: '',
+                    ivr_file: '',
+                },
                 source_trunk: '',
                 target_trunks: [],
             },
@@ -683,6 +809,8 @@
                 this.statusOptions = Array.isArray(options.statusOptions) ? options.statusOptions : [];
                 const trunksData = options.trunks;
                 this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
+                const queuesData = options.queues;
+                this.queueOptions = Array.isArray(queuesData) ? queuesData : (queuesData?.queues || []);
                 const normalised = this.normaliseRoute(options.route || {});
                 this.route = normalised.route;
                 this.matchHeaders = normalised.matchHeaders;
@@ -792,6 +920,17 @@
                     }
                     return 'outbound';
                 };
+                const normalizeTargetType = (value) => {
+                    if (typeof value === 'string') {
+                        const trimmed = value.trim().toLowerCase();
+                        if (trimmed === 'queue' || trimmed === 'ivr') {
+                            return trimmed;
+                        }
+                    }
+                    return 'sip_trunk';
+                };
+                const queueFile = this.trimString(raw?.action?.queue_file || '');
+                const ivrFile = this.trimString(raw?.action?.ivr_file || '');
                 const normalizeSelection = (value) => {
                     if (typeof value === 'string' && value.trim().length) {
                         return value.trim().toLowerCase();
@@ -832,6 +971,9 @@
                                 weight: typeof item?.weight === 'number' ? item.weight : Number(item?.weight) || 0,
                             }))
                             : [],
+                        target_type: normalizeTargetType(raw?.action?.target_type),
+                        queue_file: queueFile,
+                        ivr_file: ivrFile,
                     },
                     source_trunk: raw?.source_trunk || '',
                     target_trunks: Array.isArray(raw?.target_trunks) ? raw.target_trunks.slice() : [],
@@ -875,6 +1017,15 @@
                 });
                 return result;
             },
+            normalizeTargetType(value) {
+                if (typeof value === 'string') {
+                    const trimmed = value.trim().toLowerCase();
+                    if (trimmed === 'queue' || trimmed === 'ivr') {
+                        return trimmed;
+                    }
+                }
+                return 'sip_trunk';
+            },
             get matchFields() {
                 return [
                     { key: 'from_user', label: 'From user regex', placeholder: '^20(0[1-9]|[1-9][0-9])$' },
@@ -909,12 +1060,19 @@
                 this.rewriteHeaders.splice(index, 1);
             },
             addTrunkAssignment() {
+                if (!this.isSipTrunkTarget) return;
                 this.route.action.trunks.push({ name: '', weight: 0 });
             },
             removeTrunkAssignment(index) {
+                if (!this.isSipTrunkTarget) return;
                 this.route.action.trunks.splice(index, 1);
             },
             setAlgorithm(value) {
+                if (!this.isSipTrunkTarget) {
+                    this.route.action.select = 'rr';
+                    this.route.action.hash_key = null;
+                    return;
+                }
                 if (typeof value === 'string' && value.trim().length) {
                     this.route.action.select = value.trim().toLowerCase();
                 } else {
@@ -925,6 +1083,7 @@
                 }
             },
             toggleTarget(name) {
+                if (!this.isSipTrunkTarget) return;
                 const candidate = this.trimString(name);
                 if (!candidate.length) return;
                 const current = new Set(
@@ -940,9 +1099,15 @@
                 this.route.target_trunks = Array.from(current);
             },
             get totalWeight() {
+                if (!this.isSipTrunkTarget) {
+                    return 0;
+                }
                 return this.route.action.trunks.reduce((sum, trunk) => sum + (Number(trunk.weight) || 0), 0);
             },
             get normalizedWeights() {
+                if (!this.isSipTrunkTarget) {
+                    return [];
+                }
                 const total = this.totalWeight || 1;
                 return this.route.action.trunks
                     .map((trunk) => ({
@@ -952,8 +1117,63 @@
                     }))
                     .filter((item) => item.name.length);
             },
+            queueSuggestion(option) {
+                const id = Number(option?.id);
+                const prefix = Number.isFinite(id) ? String(id).padStart(4, '0') : 'queue';
+                const slug = this.slugify(option?.name || '') || 'queue';
+                return `${prefix}-${slug}.toml`;
+            },
+            applyQueueSuggestion(option) {
+                this.route.action.queue_file = this.queueSuggestion(option);
+            },
+            slugify(value) {
+                if (!value) return '';
+                const chars = String(value)
+                    .toLowerCase()
+                    .split('')
+                    .map((ch) => (/[a-z0-9]/.test(ch) ? ch : '-'))
+                    .join('');
+                return chars.replace(/-+/g, '-').replace(/^-|-$/g, '');
+            },
+            formatTimestamp(value) {
+                if (!value) return 'recently';
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) {
+                    return 'recently';
+                }
+                return date.toLocaleString();
+            },
+            setTargetType(value) {
+                const targetType = this.normalizeTargetType(value);
+                this.route.action.target_type = targetType;
+                if (!this.isSipTrunkTarget) {
+                    this.route.action.select = 'rr';
+                    this.route.action.hash_key = null;
+                    this.route.action.trunks = [];
+                    this.route.target_trunks = [];
+                }
+                if (!this.isQueueTarget) {
+                    this.route.action.queue_file = '';
+                }
+                if (!this.isIvrTarget) {
+                    this.route.action.ivr_file = '';
+                }
+            },
+            get isSipTrunkTarget() {
+                return this.normalizeTargetType(this.route.action?.target_type) === 'sip_trunk';
+            },
+            get isQueueTarget() {
+                return this.normalizeTargetType(this.route.action?.target_type) === 'queue';
+            },
+            get isIvrTarget() {
+                return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
+            },
             get routeSummary() {
                 return `${this.route.direction} · priority ${this.route.priority}`;
+            },
+            queuesUrl() {
+                const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
+                return `${base}/queues`;
             },
             submitUrl() {
                 return this.formAction || this.listUrl;
@@ -976,6 +1196,18 @@
                         throw new Error(`Source trunk "${source}" is not available.`);
                     }
                 }
+                const targetType = this.normalizeTargetType(this.route.action?.target_type);
+                if (targetType === 'queue') {
+                    const queueFile = this.trimString(this.route.action.queue_file);
+                    if (!queueFile.length) {
+                        throw new Error('Queue destination requires a queue file path.');
+                    }
+                } else if (targetType === 'ivr') {
+                    const ivrFile = this.trimString(this.route.action.ivr_file);
+                    if (!ivrFile.length) {
+                        throw new Error('IVR destination requires an IVR file path.');
+                    }
+                }
             },
             buildPayload() {
                 const match = this.sanitizeKeyValue(this.route.match);
@@ -996,24 +1228,45 @@
                     }
                 });
 
-                const trunks = this.route.action.trunks
-                    .map((trunk) => ({
-                        name: this.trimString(trunk.name),
-                        weight: Math.max(0, Math.round(Number(trunk.weight) || 0)),
-                    }))
-                    .filter((trunk) => trunk.name.length);
+                const targetType = this.normalizeTargetType(this.route.action?.target_type);
+                const isTrunk = targetType === 'sip_trunk';
+                const trunks = isTrunk
+                    ? this.route.action.trunks
+                        .map((trunk) => ({
+                            name: this.trimString(trunk.name),
+                            weight: Math.max(0, Math.round(Number(trunk.weight) || 0)),
+                        }))
+                        .filter((trunk) => trunk.name.length)
+                    : [];
 
-                const hashKey = this.route.action.select === 'hash'
+                const hashKey = isTrunk && this.route.action.select === 'hash'
                     ? this.trimString(this.route.action.hash_key)
                     : '';
 
-                const targetTrunks = Array.from(
-                    new Set(
-                        (this.route.target_trunks || [])
-                            .map((name) => this.trimString(name))
-                            .filter((name) => name.length),
-                    ),
-                );
+                const targetTrunks = isTrunk
+                    ? Array.from(
+                        new Set(
+                            (this.route.target_trunks || [])
+                                .map((name) => this.trimString(name))
+                                .filter((name) => name.length),
+                        ),
+                    )
+                    : [];
+
+                const actionPayload = {
+                    select: isTrunk ? (this.route.action.select || 'rr') : 'rr',
+                    hash_key: hashKey.length ? hashKey : null,
+                    trunks,
+                    target_type: targetType,
+                };
+
+                if (targetType === 'queue') {
+                    const queueFile = this.trimString(this.route.action.queue_file);
+                    actionPayload.queue_file = queueFile || null;
+                } else if (targetType === 'ivr') {
+                    const ivrFile = this.trimString(this.route.action.ivr_file);
+                    actionPayload.ivr_file = ivrFile || null;
+                }
 
                 const description = this.trimString(this.route.description);
                 const owner = this.trimString(this.route.owner);
@@ -1028,11 +1281,7 @@
                     disabled: Boolean(this.route.disabled),
                     match,
                     rewrite,
-                    action: {
-                        select: this.route.action.select || 'rr',
-                        hash_key: hashKey.length ? hashKey : null,
-                        trunks,
-                    },
+                    action: actionPayload,
                     source_trunk: this.trimString(this.route.source_trunk) || null,
                     target_trunks: targetTrunks,
                 };

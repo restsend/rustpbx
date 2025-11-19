@@ -407,6 +407,8 @@ pub enum QueueFallbackAction {
     Failure(FailureAction),
     /// Redirect to a specific SIP URI (e.g., external voicemail)
     Redirect { target: rsip::Uri },
+    /// Transfer caller to another named queue
+    Queue { name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -464,11 +466,31 @@ impl DialplanIvrConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct QueuePlan {
     pub accept_immediately: bool,
     pub hold: Option<QueueHoldConfig>,
     pub fallback: Option<QueueFallbackAction>,
+    pub dial_strategy: Option<DialStrategy>,
+    pub ring_timeout: Option<Duration>,
+}
+
+impl Default for QueuePlan {
+    fn default() -> Self {
+        Self {
+            accept_immediately: false,
+            hold: None,
+            fallback: None,
+            dial_strategy: None,
+            ring_timeout: None,
+        }
+    }
+}
+
+impl QueuePlan {
+    pub fn dial_strategy(&self) -> Option<&DialStrategy> {
+        self.dial_strategy.as_ref()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -591,11 +613,15 @@ impl CallRecordingConfig {
 #[derive(Debug, Clone)]
 pub enum FailureAction {
     /// Hangup with specific status code
-    Hangup(Option<StatusCode>),
+    Hangup {
+        code: Option<StatusCode>,
+        reason: Option<String>,
+    },
     /// Play audio file and then hangup
     PlayThenHangup {
         audio_file: String,
         status_code: StatusCode,
+        reason: Option<String>,
     },
     /// Transfer to another destination
     Transfer(String),
@@ -603,7 +629,10 @@ pub enum FailureAction {
 
 impl Default for FailureAction {
     fn default() -> Self {
-        Self::Hangup(None)
+        Self::Hangup {
+            code: None,
+            reason: None,
+        }
     }
 }
 

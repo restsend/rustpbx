@@ -1,13 +1,16 @@
-use crate::call::QueueFallbackAction;
 use crate::call::ivr::{IvrPlan, IvrStep, PromptFile, PromptMedia, PromptSource, PromptStep};
-use crate::call::{DialDirection, RoutingState};
+use crate::call::{DialDirection, DialStrategy, RoutingState};
+use crate::call::{FailureAction, QueueFallbackAction};
 use crate::config::RouteResult;
-use crate::proxy::routing::matcher::match_invite;
+use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
-    DestConfig, MatchConditions, RejectConfig, RewriteRules, RouteAction, RouteDirection,
-    RouteIvrConfig, RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig, RouteRule,
-    SourceTrunk, TrunkConfig, TrunkDirection,
+    DestConfig, MatchConditions, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
+    RouteDirection, RouteIvrConfig, RouteQueueConfig, RouteQueueFallbackConfig,
+    RouteQueueHoldConfig, RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule, SourceTrunk,
+    TrunkConfig, TrunkDirection,
 };
+use async_trait::async_trait;
+use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use std::sync::Arc;
 use std::{collections::HashMap, net::IpAddr};
@@ -26,6 +29,7 @@ async fn test_match_invite_no_routes() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -155,6 +159,7 @@ async fn test_match_invite_inbound_respects_source_trunk() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         Some(&source_trunk),
@@ -211,6 +216,7 @@ async fn test_match_invite_inbound_without_source_trunk() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -274,6 +280,7 @@ async fn test_match_invite_exact_match() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -351,6 +358,7 @@ async fn test_match_invite_regex_match() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -396,8 +404,15 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
             redirect: Some("sip:voicemail@rustpbx.com".to_string()),
             failure_code: None,
             failure_reason: None,
+            failure_prompt: None,
+            queue_ref: None,
         }),
+        ..RouteQueueConfig::default()
     };
+
+    let queue_path = "queue/support.toml";
+    let mut lookup = TestResourceLookup::default();
+    lookup.add_queue(queue_path, queue_cfg.clone());
 
     let routes = vec![RouteRule {
         name: "support-queue".to_string(),
@@ -410,7 +425,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
         action: RouteAction {
             action: Some("queue".to_string()),
             dest: Some(DestConfig::Single("support".to_string())),
-            queue: Some(queue_cfg),
+            queue: Some(queue_path.to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -422,6 +437,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        Some(&lookup),
         option,
         &origin,
         None,
@@ -460,6 +476,93 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
     }
 }
 
+#[test]
+fn test_queue_fallback_play_then_hangup_action() {
+    let queue_cfg = RouteQueueConfig {
+        accept_immediately: true,
+        hold: None,
+        fallback: Some(RouteQueueFallbackConfig {
+            redirect: None,
+            failure_code: Some(486),
+            failure_reason: Some("Busy".to_string()),
+            failure_prompt: Some("prompts/busy.wav".to_string()),
+            queue_ref: None,
+        }),
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    match plan.fallback.expect("fallback missing") {
+        QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
+            audio_file,
+            status_code,
+            reason,
+        }) => {
+            assert_eq!(audio_file, "prompts/busy.wav");
+            assert_eq!(status_code, StatusCode::BusyHere);
+            assert_eq!(reason.as_deref(), Some("Busy"));
+        }
+        other => panic!("unexpected fallback action: {:?}", other),
+    }
+}
+
+#[test]
+fn test_queue_fallback_to_named_queue() {
+    let queue_cfg = RouteQueueConfig {
+        fallback: Some(RouteQueueFallbackConfig {
+            queue_ref: Some("tier2".to_string()),
+            ..RouteQueueFallbackConfig::default()
+        }),
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    match plan.fallback.expect("fallback missing") {
+        QueueFallbackAction::Queue { name } => assert_eq!(name, "tier2"),
+        other => panic!("unexpected fallback action: {:?}", other),
+    }
+}
+
+#[test]
+fn test_queue_strategy_builds_dial_targets() {
+    let queue_cfg = RouteQueueConfig {
+        strategy: RouteQueueStrategyConfig {
+            mode: QueueDialMode::Parallel,
+            wait_timeout_secs: Some(12),
+            targets: vec![
+                RouteQueueTargetConfig {
+                    uri: "sip:agent1@pbx.example".to_string(),
+                    label: Some("Agent 1".to_string()),
+                },
+                RouteQueueTargetConfig {
+                    uri: "sip:agent2@pbx.example".to_string(),
+                    label: None,
+                },
+            ],
+        },
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    match plan.dial_strategy.expect("dial strategy missing") {
+        DialStrategy::Parallel(targets) => {
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0].aor.to_string(), "sip:agent1@pbx.example");
+        }
+        other => panic!("unexpected strategy: {:?}", other),
+    }
+    assert_eq!(plan.ring_timeout, Some(std::time::Duration::from_secs(12)));
+}
+
 #[tokio::test]
 async fn test_match_invite_ivr_action_returns_inline_plan() {
     let routing_state = Arc::new(RoutingState::new());
@@ -491,6 +594,18 @@ async fn test_match_invite_ivr_action_returns_inline_plan() {
         calendars: HashMap::new(),
     };
 
+    let ivr_path = "ivr/main-menu.toml";
+    let mut lookup = TestResourceLookup::default();
+    lookup.add_ivr(
+        ivr_path,
+        RouteIvrConfig {
+            plan_id: None,
+            variables: HashMap::new(),
+            availability_override: false,
+            plan: Some(plan.clone()),
+        },
+    );
+
     let routes = vec![RouteRule {
         name: "ivr-route".to_string(),
         priority: 5,
@@ -501,12 +616,7 @@ async fn test_match_invite_ivr_action_returns_inline_plan() {
         },
         action: RouteAction {
             action: Some("ivr".to_string()),
-            ivr: Some(RouteIvrConfig {
-                plan_id: None,
-                variables: HashMap::new(),
-                availability_override: false,
-                plan: Some(plan.clone()),
-            }),
+            ivr: Some(ivr_path.to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -518,6 +628,7 @@ async fn test_match_invite_ivr_action_returns_inline_plan() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        Some(&lookup),
         option,
         &origin,
         None,
@@ -578,6 +689,7 @@ async fn test_match_invite_reject_rule() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -644,6 +756,7 @@ async fn test_match_invite_rewrite_rules() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -731,6 +844,7 @@ async fn test_match_invite_load_balancing() {
         let result = match_invite(
             Some(&trunks),
             Some(&routes),
+            None,
             test_option,
             &origin,
             None,
@@ -814,6 +928,7 @@ async fn test_match_invite_header_matching() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -875,6 +990,7 @@ async fn test_match_invite_default_route() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -950,6 +1066,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let result_us = match_invite(
         Some(&trunks),
         Some(&routes_config_us),
+        None,
         option_us,
         &origin_us,
         None,
@@ -1008,6 +1125,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     let result_digits = match_invite(
         Some(&trunks),
         Some(&routes_config_digits),
+        None,
         option_digits,
         &origin_digits,
         None,
@@ -1081,6 +1199,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
     let result = match_invite(
         Some(&trunks),
         Some(&routes),
+        None,
         option,
         &origin,
         None,
@@ -1103,6 +1222,33 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
         RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
             panic!("unexpected queue/ivr result")
         }
+    }
+}
+
+#[derive(Default)]
+struct TestResourceLookup {
+    queues: HashMap<String, RouteQueueConfig>,
+    ivrs: HashMap<String, RouteIvrConfig>,
+}
+
+impl TestResourceLookup {
+    fn add_queue(&mut self, path: &str, config: RouteQueueConfig) {
+        self.queues.insert(path.to_string(), config);
+    }
+
+    fn add_ivr(&mut self, path: &str, config: RouteIvrConfig) {
+        self.ivrs.insert(path.to_string(), config);
+    }
+}
+
+#[async_trait]
+impl RouteResourceLookup for TestResourceLookup {
+    async fn load_queue(&self, path: &str) -> anyhow::Result<Option<RouteQueueConfig>> {
+        Ok(self.queues.get(path).cloned())
+    }
+
+    async fn load_ivr(&self, path: &str) -> anyhow::Result<Option<RouteIvrConfig>> {
+        Ok(self.ivrs.get(path).cloned())
     }
 }
 

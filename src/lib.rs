@@ -12,6 +12,7 @@ pub mod models;
 pub mod net_tool;
 pub mod preflight;
 pub mod proxy;
+pub mod services;
 pub mod synthesis;
 pub mod transcription;
 pub mod useragent;

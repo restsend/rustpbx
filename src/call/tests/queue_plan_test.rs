@@ -39,6 +39,8 @@ fn dialplan_reports_queue_presence() {
         fallback: Some(QueueFallbackAction::Redirect {
             target: "sip:vm@rustpbx.com".try_into().unwrap(),
         }),
+        dial_strategy: None,
+        ring_timeout: None,
     };
 
     let plan = plan.with_queue(queue);
@@ -52,6 +54,8 @@ fn queue_wraps_terminal_flow() {
         accept_immediately: false,
         hold: None,
         fallback: None,
+        dial_strategy: None,
+        ring_timeout: None,
     };
 
     let plan = Dialplan::new(

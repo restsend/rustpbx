@@ -10,6 +10,7 @@ pub mod department;
 pub mod extension;
 pub mod extension_department;
 pub mod migration;
+pub mod queue;
 pub mod routing;
 pub mod sip_trunk;
 pub mod user;

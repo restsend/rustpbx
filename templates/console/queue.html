@@ -1,0 +1,603 @@
+{% extends "console/layout.html" %}
+{% block title %}Queues · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block content %}
+{% set base_url = base_path | default('/console') %}
+<div class="p-6" x-data='queuePage({
+        basePath: {{ base_url | tojson }},
+        filters: {{ filters | default({}) | tojson }},
+        createUrl: {{ create_url | tojson }}
+    })' x-init="init()">
+    <div class="mx-auto max-w-6xl space-y-6">
+        <header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div class="space-y-1">
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Service queues</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Queues</h1>
+                <p class="text-sm text-slate-500">Create voice queues, manage hold music, and configure fallback
+                    behaviors.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    :class="exportingAll ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
+                    :disabled="exportingAll" @click="confirmExportAll()">
+                    <template x-if="!exportingAll">
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
+                        </svg>
+                    </template>
+                    <template x-if="exportingAll">
+                        <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                        </svg>
+                    </template>
+                    Export all
+                </button>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    :class="loading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
+                    :disabled="loading" @click="refresh()">
+                    <svg class="h-4 w-4" :class="loading ? 'animate-spin text-slate-400' : ''" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M3 12a9 9 0 0 1 15.364-6.364L21 8.27M21 12a9 9 0 0 1-15.364 6.364L3 15.73" />
+                    </svg>
+                    Refresh list
+                </button>
+                <a :href="createUrl"
+                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                    </svg>
+                    New queue
+                </a>
+            </div>
+        </header>
+
+        <template x-if="flash">
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+                x-text="flash"></div>
+        </template>
+        <template x-if="error">
+            <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600" x-text="error">
+            </div>
+        </template>
+
+        <section class="grid gap-4 sm:grid-cols-3">
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Total queues</div>
+                <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="summary.total || 0"></div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Active</div>
+                <div class="mt-2 text-2xl font-semibold text-emerald-600" x-text="summary.active || 0"></div>
+            </div>
+            <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Paused</div>
+                <div class="mt-2 text-2xl font-semibold text-amber-500" x-text="summary.inactive || 0"></div>
+            </div>
+        </section>
+
+        <section class="rounded-xl bg-white p-5 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div class="flex flex-wrap items-center gap-2">
+                    <button type="button"
+                        class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                        :class="statusFilter === 'all' ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
+                        @click="selectStatus('all')">
+                        All statuses
+                    </button>
+                    <template x-for="tab in statusTabs" :key="tab.value">
+                        <button type="button"
+                            class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                            :class="statusFilter === tab.value ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
+                            @click="selectStatus(tab.value)">
+                            <span x-text="tab.label"></span>
+                        </button>
+                    </template>
+                </div>
+                <label class="relative w-full lg:w-80" aria-label="Search queues">
+                    <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                        viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="m17.5 17.5-3.65-3.65m0 0a5.5 5.5 0 1 0-7.778-7.778 5.5 5.5 0 0 0 7.778 7.778Z" />
+                    </svg>
+                    <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="Search by name or note">
+                </label>
+            </div>
+        </section>
+
+        <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                    <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th scope="col" class="px-4 py-2">Queue</th>
+                            <th scope="col" class="px-4 py-2">Hold treatment</th>
+                            <th scope="col" class="px-4 py-2">Targets</th>
+                            <th scope="col" class="px-4 py-2">Fallback</th>
+                            <th scope="col" class="px-4 py-2">Updated</th>
+                            <th scope="col" class="px-4 py-2">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
+                        <template x-if="loading">
+                            <tr>
+                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500">
+                                    <div class="inline-flex items-center gap-2">
+                                        <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                        </svg>
+                                        Loading queues…
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-if="!loading && !queues.length">
+                            <tr>
+                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500">
+                                    No queues found. Create one to get started.
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-for="queue in queues" :key="queue.id">
+                            <tr class="hover:bg-slate-50">
+                                <td class="px-4 py-3">
+                                    <div class="flex items-center gap-3">
+                                        <div>
+                                            <a :href="queue.detail_url || detailUrl(queue.id)"
+                                                class="font-semibold text-slate-900 transition hover:text-sky-600"
+                                                x-text="queue.name"></a>
+                                            <div class="text-xs text-slate-400" x-text="queue.description || '—'"></div>
+                                            <div class="mt-2 flex flex-wrap gap-1">
+                                                <span
+                                                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                    :class="queue.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'">
+                                                    <span class="h-1.5 w-1.5 rounded-full"
+                                                        :class="queue.is_active ? 'bg-emerald-400' : 'bg-amber-400'"></span>
+                                                    <span x-text="queue.is_active ? 'Active' : 'Paused'"></span>
+                                                </span>
+                                                <template x-for="tag in queue.tags" :key="tag">
+                                                    <span
+                                                        class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
+                                                        x-text="tag"></span>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-4 py-3">
+                                    <div class="text-sm font-semibold text-slate-800" x-text="holdSummary(queue)"></div>
+                                    <div class="text-xs text-slate-500"
+                                        x-text="queue.spec?.accept_immediately ? 'Agent picks immediately' : 'Play hold audio until agent joins'">
+                                    </div>
+                                </td>
+                                <td class="px-4 py-3">
+                                    <div class="text-sm text-slate-700" x-text="targetSummary(queue)"></div>
+                                    <div class="text-xs text-slate-400" x-text="targetDetails(queue)"></div>
+                                </td>
+                                <td class="px-4 py-3">
+                                    <span class="text-sm text-slate-700" x-text="fallbackSummary(queue)"></span>
+                                </td>
+                                <td class="whitespace-nowrap px-4 py-3 text-slate-500"
+                                    x-text="formatDate(queue.updated_at)"></td>
+                                <td class="px-4 py-3">
+                                    <div class="flex items-center gap-2">
+                                        <a :href="queue.detail_url || detailUrl(queue.id)" title="View queue"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600">
+                                            <span class="sr-only">View queue</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
+                                            </svg>
+                                        </a>
+                                        <button type="button" title="Export queue"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
+                                            :class="exportingQueueId === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-indigo-300 hover:text-indigo-600'"
+                                            :disabled="exportingQueueId === queue.id" @click="exportQueue(queue)">
+                                            <span class="sr-only">Export queue</span>
+                                            <template x-if="exportingQueueId === queue.id">
+                                                <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"
+                                                    stroke="currentColor" stroke-width="1.8">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                                                </svg>
+                                            </template>
+                                            <template x-if="exportingQueueId !== queue.id">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                                    stroke-width="1.5" stroke="currentColor" class="size-4">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" />
+                                                </svg>
+                                            </template>
+                                        </button>
+                                        <button type="button" title="Delete queue"
+                                            class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
+                                            :class="processingDelete === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-rose-300 hover:text-rose-600'"
+                                            :disabled="processingDelete === queue.id" @click="confirmDelete(queue)">
+                                            <span class="sr-only">Delete queue</span>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="1.6">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M6 7h8m-7 0v8m3-8v8m3-8v8M4 7h12M8 4h4a1 1 0 011 1v2H7V5a1 1 0 011-1z" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+
+            <template x-if="pagination">
+                <div
+                    class="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs text-slate-500">
+                    <div>
+                        Showing <span class="font-semibold" x-text="showingFrom"></span>
+                        – <span class="font-semibold" x-text="showingTo"></span>
+                        of <span class="font-semibold" x-text="pagination.total_items"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
+                            :class="pagination.has_prev ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
+                            :disabled="!pagination.has_prev" @click="prevPage()">
+                            Prev
+                        </button>
+                        <div class="text-sm font-semibold text-slate-600">
+                            Page <span x-text="pagination.current_page"></span> / <span
+                                x-text="pagination.total_pages"></span>
+                        </div>
+                        <button type="button"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
+                            :class="pagination.has_next ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
+                            :disabled="!pagination.has_next" @click="nextPage()">
+                            Next
+                        </button>
+                    </div>
+                </div>
+            </template>
+        </section>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('queuePage', (options) => ({
+            basePath: options.basePath || '/console',
+            listEndpoint: `${options.basePath || '/console'}/queues`,
+            createUrl: options.createUrl || `${options.basePath || '/console'}/queues/new`,
+            exportAllEndpoint: `${options.basePath || '/console'}/queues/export`,
+            filtersRaw: options.filters || {},
+            keyword: '',
+            statusFilter: 'all',
+            statusOptions: [],
+            statusTabs: [],
+            queues: [],
+            pagination: null,
+            loading: false,
+            error: null,
+            flash: null,
+            summary: { total: 0, active: 0, inactive: 0 },
+            page: 1,
+            perPage: 20,
+            processingDelete: null,
+            exportingAll: false,
+            exportingQueueId: null,
+            showingFrom: 0,
+            showingTo: 0,
+            init() {
+                this.loadStatusOptions();
+                this.fetchQueues();
+            },
+            loadStatusOptions() {
+                const options = Array.isArray(this.filtersRaw.status_options) ? this.filtersRaw.status_options : [];
+                this.statusOptions = options.length ? options : [
+                    { value: 'all', label: 'Any status' },
+                    { value: 'active', label: 'Active' },
+                    { value: 'inactive', label: 'Paused' },
+                ];
+                this.statusTabs = this.statusOptions.filter((opt) => opt.value !== 'all');
+            },
+            buildParams() {
+                return {
+                    page: this.page,
+                    per_page: this.perPage,
+                    filters: {
+                        q: this.keyword.trim() || undefined,
+                        status: this.statusFilter !== 'all' ? this.statusFilter : undefined,
+                    },
+                };
+            },
+            async fetchQueues() {
+                this.loading = true;
+                this.error = null;
+                try {
+                    const response = await fetch(this.listEndpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(this.buildParams()),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to load queues');
+                    }
+
+                    this.queues = Array.isArray(data?.items) ? data.items : [];
+                    this.summary = typeof data?.summary === 'object' && data.summary !== null
+                        ? {
+                            total: Number(data.summary.total) || 0,
+                            active: Number(data.summary.active) || 0,
+                            inactive: Number(data.summary.inactive) || 0,
+                        }
+                        : {
+                            total: this.queues.length,
+                            active: this.queues.filter((q) => q.is_active).length,
+                            inactive: this.queues.filter((q) => !q.is_active).length,
+                        };
+
+                    const perPage = Number(data?.per_page) > 0 ? Number(data.per_page) : this.perPage;
+                    const totalItems = Number(data?.total_items) >= 0 ? Number(data.total_items) : this.queues.length;
+                    const totalPages = Number(data?.total_pages) >= 1 ? Number(data.total_pages) : Math.max(Math.ceil(totalItems / perPage), 1);
+                    const currentPage = Number(data?.page) >= 1 ? Number(data.page) : Math.min(this.page, totalPages);
+
+                    this.perPage = perPage;
+                    this.pagination = {
+                        current_page: currentPage,
+                        per_page: perPage,
+                        total_items: totalItems,
+                        total_pages: totalPages,
+                        has_prev: currentPage > 1,
+                        has_next: currentPage < totalPages,
+                    };
+
+                    this.showingFrom = this.queues.length ? ((currentPage - 1) * perPage) + 1 : 0;
+                    this.showingTo = this.queues.length ? this.showingFrom + this.queues.length - 1 : 0;
+
+                    if (data?.filters) {
+                        this.filtersRaw = data.filters;
+                        this.loadStatusOptions();
+                    }
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Unable to load queues';
+                    this.queues = [];
+                    this.pagination = null;
+                } finally {
+                    this.loading = false;
+                }
+            },
+            applyFilters() {
+                this.page = 1;
+                this.fetchQueues();
+            },
+            selectStatus(value) {
+                if (this.statusFilter === value) {
+                    return;
+                }
+                this.statusFilter = value;
+                this.applyFilters();
+            },
+            refresh() {
+                this.fetchQueues();
+            },
+            prevPage() {
+                if (this.pagination?.has_prev) {
+                    this.page = Math.max((this.pagination.current_page || 1) - 1, 1);
+                    this.fetchQueues();
+                }
+            },
+            nextPage() {
+                if (this.pagination?.has_next) {
+                    const totalPages = this.pagination.total_pages || 1;
+                    this.page = Math.min((this.pagination.current_page || 1) + 1, totalPages);
+                    this.fetchQueues();
+                }
+            },
+            formatDate(value) {
+                if (!value) return '—';
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) {
+                    return value;
+                }
+                return date.toLocaleString();
+            },
+            detailUrl(id) {
+                return `${this.basePath}/queues/${id}`;
+            },
+            holdSummary(queue) {
+                const spec = queue?.spec || {};
+                if (spec.accept_immediately) {
+                    return 'Answer immediately';
+                }
+                const audio = spec?.hold?.audio_file;
+                if (audio) {
+                    return spec?.hold?.loop_playback === false ? audio : `${audio} · loop`;
+                }
+                return 'Default hold tone';
+            },
+            strategyTargets(queue) {
+                const rawTargets = queue?.spec?.strategy?.targets;
+                if (!Array.isArray(rawTargets)) {
+                    return [];
+                }
+                return rawTargets
+                    .map((target) => ({
+                        uri: (target?.uri || '').trim(),
+                        label: (target?.label || '').trim(),
+                    }))
+                    .filter((target) => target.uri);
+            },
+            targetSummary(queue) {
+                const targets = this.strategyTargets(queue);
+                if (!targets.length) {
+                    return 'Route trunks (no inline targets)';
+                }
+                const modeLabel = queue?.spec?.strategy?.mode === 'parallel' ? 'Parallel' : 'Sequential';
+                const timeoutRaw = Number(queue?.spec?.strategy?.wait_timeout_secs);
+                const timeoutLabel = Number.isFinite(timeoutRaw) && timeoutRaw > 0
+                    ? ` · ${timeoutRaw}s timeout`
+                    : '';
+                const countLabel = `${targets.length} target${targets.length > 1 ? 's' : ''}`;
+                return `${modeLabel} · ${countLabel}${timeoutLabel}`;
+            },
+            targetDetails(queue) {
+                const targets = this.strategyTargets(queue);
+                if (!targets.length) {
+                    return 'Configure inline SIP URIs per queue if needed';
+                }
+                const names = targets
+                    .map((target) => target.label || target.uri)
+                    .slice(0, 3)
+                    .join(', ');
+                const extra = targets.length > 3 ? ` +${targets.length - 3}` : '';
+                return names + extra;
+            },
+            fallbackSummary(queue) {
+                const fallback = queue?.spec?.fallback;
+                if (!fallback) {
+                    return 'Continue waiting';
+                }
+                if (fallback.redirect) {
+                    return `Redirect to ${fallback.redirect}`;
+                }
+                if (fallback.failure_prompt) {
+                    return `Play ${fallback.failure_prompt} (${fallback.failure_code || 480})`;
+                }
+                if (fallback.failure_code) {
+                    return `Fail ${fallback.failure_code}${fallback.failure_reason ? ' · ' + fallback.failure_reason : ''}`;
+                }
+                return 'Custom failure action';
+            },
+            confirmDelete(queue) {
+                if (!queue || !queue.id) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete queue',
+                        message: `Delete queue ${queue.name}? This cannot be undone.`,
+                        confirmLabel: 'Delete',
+                        destructive: true,
+                        onConfirm: () => this.deleteQueue(queue),
+                    },
+                }));
+            },
+            async deleteQueue(queue) {
+                if (!queue || !queue.id) {
+                    return;
+                }
+                this.processingDelete = queue.id;
+                this.error = null;
+                try {
+                    const response = await fetch(queue.delete_url || this.detailUrl(queue.id), {
+                        method: 'DELETE',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to delete queue');
+                    }
+                    this.flash = 'Queue deleted.';
+                    await this.fetchQueues();
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to delete queue';
+                } finally {
+                    this.processingDelete = null;
+                }
+            },
+            confirmExportAll() {
+                if (this.exportingAll) {
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Export all queues',
+                        message: 'Generate updated queue configuration files for every queue? Existing files will be replaced.',
+                        confirmLabel: 'Export',
+                        cancelLabel: 'Cancel',
+                        destructive: false,
+                        onConfirm: () => this.exportAllQueues(),
+                    },
+                }));
+            },
+            async exportAllQueues() {
+                if (this.exportingAll) {
+                    return;
+                }
+                this.exportingAll = true;
+                this.error = null;
+                try {
+                    const response = await fetch(this.exportAllEndpoint, {
+                        method: 'POST',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to export queues');
+                    }
+                    const paths = Array.isArray(data?.paths) ? data.paths : [];
+                    const count = paths.length;
+                    this.flash = count
+                        ? `Exported ${count} queue file${count === 1 ? '' : 's'}.`
+                        : 'Queues exported.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to export queues';
+                } finally {
+                    this.exportingAll = false;
+                }
+            },
+            exportEndpoint(queue) {
+                if (!queue) {
+                    return null;
+                }
+                if (typeof queue.export_url === 'string' && queue.export_url.trim().length) {
+                    return queue.export_url;
+                }
+                return `${this.basePath}/queues/${queue.id}/export`;
+            },
+            async exportQueue(queue) {
+                if (!queue || !queue.id || this.exportingQueueId === queue.id) {
+                    return;
+                }
+                const endpoint = this.exportEndpoint(queue);
+                if (!endpoint) {
+                    return;
+                }
+                this.exportingQueueId = queue.id;
+                this.error = null;
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to export queue');
+                    }
+                    const path = data?.path || data?.paths?.[0];
+                    this.flash = path ? `Queue exported to ${path}.` : 'Queue exported.';
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || 'Failed to export queue';
+                } finally {
+                    this.exportingQueueId = null;
+                }
+            },
+        }));
+    });
+</script>
+{% endblock %}

@@ -1,5 +1,6 @@
 use crate::models::bill_template::BillingInterval;
 use crate::models::sip_trunk::{SipTransport, SipTrunkDirection, SipTrunkStatus};
+use crate::proxy::routing::RouteQueueConfig;
 use sea_orm::{DatabaseConnection, DbErr, Paginator, SelectorTrait};
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -81,6 +82,17 @@ pub struct SipTrunkForm {
     pub incoming_to_user_prefix: Option<String>,
     pub metadata: Option<String>,
     pub is_active: Option<bool>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct QueuePayload {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+    pub metadata: Option<String>,
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub spec: Option<RouteQueueConfig>,
 }
 
 #[derive(Deserialize, Default, Clone)]

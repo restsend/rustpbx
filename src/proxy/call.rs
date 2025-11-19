@@ -20,7 +20,7 @@ use crate::proxy::proxy_call::ProxyCall;
 use crate::proxy::proxy_call::ProxyCallBuilder;
 use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
-    matcher::{inspect_invite, match_invite},
+    matcher::{RouteResourceLookup, inspect_invite, match_invite},
 };
 use anyhow::Error;
 use anyhow::{Result, anyhow};
@@ -135,6 +135,7 @@ impl RouteInvite for DefaultRouteInvite {
                 }
             }
         }
+        let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         match_invite(
             if trunks_snapshot.is_empty() {
                 None
@@ -146,6 +147,7 @@ impl RouteInvite for DefaultRouteInvite {
             } else {
                 Some(&routes_snapshot)
             },
+            Some(resource_lookup),
             option,
             origin,
             source_trunk.as_ref(),
@@ -164,6 +166,7 @@ impl RouteInvite for DefaultRouteInvite {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
             self.build_context(origin, direction).await;
 
+        let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         inspect_invite(
             if trunks_snapshot.is_empty() {
                 None
@@ -175,6 +178,7 @@ impl RouteInvite for DefaultRouteInvite {
             } else {
                 Some(&routes_snapshot)
             },
+            Some(resource_lookup),
             option,
             origin,
             source_trunk.as_ref(),
@@ -380,7 +384,10 @@ impl CallModule {
             _ => {}
         }
 
-        let targets = DialStrategy::Sequential(locs);
+        let queue_targets = pending_queue
+            .as_ref()
+            .and_then(|plan| plan.dial_strategy.clone());
+        let targets = queue_targets.unwrap_or_else(|| DialStrategy::Sequential(locs));
         let recording = self
             .inner
             .config
