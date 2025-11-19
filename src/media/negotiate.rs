@@ -9,6 +9,15 @@ pub struct PeerMedia {
     pub rtcp_port: u16,
     pub rtcp_mux: bool,
     pub codecs: Vec<CodecType>,
+    // From RFC 3551 6.  Payload Type Definitions
+    // payload type values in the range 96-127 MAY be defined dynamically through a conference control protocol
+    // From RFC 4566 5.14 Media Descriptions ("m=")
+    // For dynamic payload type assignments the "a=rtpmap:" attribute (see
+    // Section 6) SHOULD be used to map from an RTP payload type number
+    // to a media encoding name that identifies the payload format.  The
+    // "a=fmtp:"  attribute MAY be used to specify format parameters (see
+    // Section 6).
+    pub rtp_map: Vec<(u8, (CodecType, u32, u16))>,
 }
 
 pub fn strip_ipv6_candidates(sdp: &str) -> String {
@@ -37,6 +46,7 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
         rtcp_port: 0,
         rtcp_mux: false,
         codecs: Vec::new(),
+        rtp_map: Vec::new(),
     };
 
     match sdp.connection_information {
@@ -52,26 +62,71 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
         }
         None => {}
     }
+
     for media in sdp.media_descriptions.iter() {
+        for attribute in media.attributes.iter() {
+            if attribute.key == "rtpmap" {
+                attribute
+                    .value
+                    .as_ref()
+                    .map(|v| match codecs::parse_rtpmap(v) {
+                        Ok((payload_type, codec, clock_rate, channel_count)) => {
+                            peer_media
+                                .rtp_map
+                                .push((payload_type, (codec, clock_rate, channel_count)));
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse rtpmap: value ={}, err={}", v, e);
+                        }
+                    });
+            }
+        }
+
         if media.media_name.media == media_type {
             media.media_name.formats.iter().for_each(|format| {
-                match CodecType::try_from(format) {
-                    Ok(codec) => peer_media.codecs.push(codec),
-                    Err(_) => return,
-                };
+                if let Ok(digit) = format.parse::<u8>() {
+                    // Dynamic payload type
+                    if digit >= 96 && digit <= 127 {
+                        if let Some((_, (codec, _, _))) = peer_media
+                            .rtp_map
+                            .iter()
+                            .find(|(payload_type, _)| *payload_type == digit)
+                        {
+                            peer_media.codecs.push(*codec);
+                        } else {
+                            tracing::warn!("Unknown codec type: {}", digit);
+                        }
+                    } else {
+                        match CodecType::try_from(digit) {
+                            Ok(codec) => peer_media.codecs.push(codec),
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed to parse codec type: value ={}, err={}",
+                                    format,
+                                    err
+                                );
+                            }
+                        };
+                    }
+                }
             });
             peer_media.rtp_port = media.media_name.port.value as u16;
             peer_media.rtcp_port = peer_media.rtp_port + 1;
 
+            // Always use media-level connection info if present (overrides session-level)
+            // RFC 4566 5.7.  Connection Data ("c=")            
+            //    A session description MUST contain either at least one "c=" field in
+            //    each media description or a single "c=" field at the session level.
+            //    It MAY contain a single session-level "c=" field and additional "c="
+            //    field(s) per media description, in which case the per-media values
+            //    override the session-level settings for the respective media.
+
             match media.connection_information {
                 Some(ref connection_information) => {
                     connection_information.address.as_ref().map(|address| {
-                        if peer_media.rtp_addr.is_empty() {
-                            peer_media.rtp_addr = address.address.clone();
-                        }
-                        if peer_media.rtcp_addr.is_empty() {
-                            peer_media.rtcp_addr = address.address.clone();
-                        }
+                        // Always use media-level connection info if present (overrides session-level)
+                        peer_media.rtp_addr = address.address.clone();
+                        peer_media.rtcp_addr = address.address.clone();
                     });
                 }
                 None => {}
