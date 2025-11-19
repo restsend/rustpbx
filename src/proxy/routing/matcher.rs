@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use regex::Regex;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
@@ -14,7 +15,9 @@ use tracing::info;
 use crate::{
     call::{DialDirection, RoutingState},
     config::RouteResult,
-    proxy::routing::{ActionType, RouteRule, SourceTrunk, TrunkConfig},
+    proxy::routing::{
+        ActionType, RouteIvrConfig, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig,
+    },
 };
 
 #[derive(Debug, Default, Clone)]
@@ -30,6 +33,12 @@ pub struct RouteTrace {
 pub struct RouteAbortTrace {
     pub code: u16,
     pub reason: Option<String>,
+}
+
+#[async_trait]
+pub trait RouteResourceLookup: Send + Sync {
+    async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>>;
+    async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>>;
 }
 
 /// Main routing function
@@ -48,6 +57,7 @@ enum MatchMode {
 pub async fn match_invite(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
+    resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -57,6 +67,7 @@ pub async fn match_invite(
     match_invite_impl(
         trunks,
         routes,
+        resource_lookup,
         option,
         origin,
         source_trunk,
@@ -71,6 +82,7 @@ pub async fn match_invite(
 pub async fn match_invite_with_trace(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
+    resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -81,6 +93,7 @@ pub async fn match_invite_with_trace(
     match_invite_impl(
         trunks,
         routes,
+        resource_lookup,
         option,
         origin,
         source_trunk,
@@ -95,6 +108,7 @@ pub async fn match_invite_with_trace(
 pub async fn inspect_invite(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
+    resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -104,6 +118,7 @@ pub async fn inspect_invite(
     match_invite_impl(
         trunks,
         routes,
+        resource_lookup,
         option,
         origin,
         source_trunk,
@@ -118,6 +133,7 @@ pub async fn inspect_invite(
 async fn match_invite_impl(
     trunks: Option<&HashMap<String, TrunkConfig>>,
     routes: Option<&Vec<RouteRule>>,
+    resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
     origin: &rsip::Request,
     source_trunk: Option<&SourceTrunk>,
@@ -280,37 +296,53 @@ async fn match_invite_impl(
                 return Ok(RouteResult::Forward(option));
             }
             ActionType::Queue => {
-                let queue_cfg = rule
+                let queue_path = rule
                     .action
                     .queue
                     .as_ref()
-                    .ok_or_else(|| anyhow!("queue action missing queue config"))?;
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("queue action requires a 'queue' file reference"))?;
+
+                let lookup = resource_lookup.ok_or_else(|| {
+                    anyhow!(
+                        "queue action cannot resolve '{}' without resource lookup",
+                        queue_path
+                    )
+                })?;
+
+                let queue_cfg = lookup
+                    .load_queue(queue_path.as_str())
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!("queue file '{}' not found or unreadable", queue_path)
+                    })?;
                 let queue_plan = queue_cfg.to_queue_plan()?;
+                let needs_trunk = queue_plan.dial_strategy.is_none();
+                if needs_trunk {
+                    let dest_config = rule.action.dest.as_ref().ok_or_else(|| {
+                        anyhow!("queue action requires 'dest' or inline queue targets")
+                    })?;
 
-                let dest_config = rule
-                    .action
-                    .dest
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("queue action requires 'dest' to dial agents"))?;
+                    if mode == MatchMode::Execute {
+                        let selected_trunk = select_trunk(
+                            dest_config,
+                            &rule.action.select,
+                            &rule.action.hash_key,
+                            &option,
+                            routing_state.clone(),
+                        )?;
 
-                if mode == MatchMode::Execute {
-                    let selected_trunk = select_trunk(
-                        dest_config,
-                        &rule.action.select,
-                        &rule.action.hash_key,
-                        &option,
-                        routing_state.clone(),
-                    )?;
+                        if let Some(trace) = &mut trace {
+                            trace.selected_trunk = Some(selected_trunk.clone());
+                        }
 
-                    if let Some(trace) = &mut trace {
-                        trace.selected_trunk = Some(selected_trunk.clone());
-                    }
-
-                    if let Some(trunk_config) = trunks
-                        .as_ref()
-                        .and_then(|trunks| trunks.get(&selected_trunk))
-                    {
-                        apply_trunk_config(&mut option, trunk_config)?;
+                        if let Some(trunk_config) = trunks
+                            .as_ref()
+                            .and_then(|trunks| trunks.get(&selected_trunk))
+                        {
+                            apply_trunk_config(&mut option, trunk_config)?;
+                        }
                     }
                 }
 
@@ -320,11 +352,25 @@ async fn match_invite_impl(
                 });
             }
             ActionType::Ivr => {
-                let ivr_cfg = rule
+                let ivr_path = rule
                     .action
                     .ivr
                     .as_ref()
-                    .ok_or_else(|| anyhow!("ivr action missing configuration"))?;
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("ivr action requires an 'ivr' file reference"))?;
+
+                let lookup = resource_lookup.ok_or_else(|| {
+                    anyhow!(
+                        "ivr action cannot resolve '{}' without resource lookup",
+                        ivr_path
+                    )
+                })?;
+
+                let ivr_cfg = lookup
+                    .load_ivr(ivr_path.as_str())
+                    .await?
+                    .ok_or_else(|| anyhow!("ivr file '{}' not found or unreadable", ivr_path))?;
                 let ivr = ivr_cfg.to_dialplan_config()?;
                 return Ok(RouteResult::Ivr { option, ivr });
             }

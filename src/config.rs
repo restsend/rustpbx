@@ -1,7 +1,7 @@
 use crate::{
     call::{CallRecordingConfig, DialDirection, DialplanIvrConfig, QueuePlan, user::SipUser},
     media::recorder::RecorderFormat,
-    proxy::routing::{RouteRule, TrunkConfig},
+    proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
 use anyhow::{Error, Result};
@@ -413,9 +413,13 @@ pub struct ProxyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<RouteRule>>,
     #[serde(default)]
+    pub queues: HashMap<String, RouteQueueConfig>,
+    #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trunks_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_dir: Option<String>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default = "default_generated_config_dir")]
@@ -510,6 +514,23 @@ impl ProxyConfig {
         self.generated_root_dir().join("routes")
     }
 
+    pub fn generated_queue_dir(&self) -> PathBuf {
+        if let Some(dir) = self
+            .queue_dir
+            .as_ref()
+            .map(|path| path.trim())
+            .filter(|path| !path.is_empty())
+        {
+            PathBuf::from(dir)
+        } else {
+            self.generated_root_dir().join("queue")
+        }
+    }
+
+    pub fn generated_ivr_dir(&self) -> PathBuf {
+        self.generated_root_dir().join("ivr")
+    }
+
     pub fn generated_acl_dir(&self) -> PathBuf {
         self.generated_root_dir().join("acl")
     }
@@ -562,8 +583,10 @@ impl Default for ProxyConfig {
             routes_files: Vec::new(),
             acl_files: Vec::new(),
             routes: None,
+            queues: HashMap::new(),
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
+            queue_dir: None,
             recording: None,
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,

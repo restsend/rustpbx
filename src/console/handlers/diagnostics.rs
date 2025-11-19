@@ -12,7 +12,7 @@ use crate::{
         data::load_routes_from_db,
         routing::{
             self, SourceTrunk, TrunkDirection, build_source_trunk,
-            matcher::{RouteTrace, match_invite_with_trace},
+            matcher::{RouteResourceLookup, RouteTrace, match_invite_with_trace},
         },
     },
 };
@@ -1239,6 +1239,7 @@ async fn route_evaluate(
     }
 
     let mut trace = RouteTrace::default();
+    let resource_lookup = data_context.as_ref() as &dyn RouteResourceLookup;
     let original_option = invite_option.clone();
     let result = match match_invite_with_trace(
         if trunks_snapshot.is_empty() {
@@ -1251,6 +1252,7 @@ async fn route_evaluate(
         } else {
             Some(&routes_snapshot)
         },
+        Some(resource_lookup),
         invite_option,
         &request,
         source_trunk_value.as_ref(),
@@ -1619,6 +1621,9 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
             crate::call::QueueFallbackAction::Failure(_) => "failure".to_string(),
             crate::call::QueueFallbackAction::Redirect { target } => {
                 format!("redirect: {}", target)
+            }
+            crate::call::QueueFallbackAction::Queue { name } => {
+                format!("queue: {}", name)
             }
         });
         Self {

@@ -1,4 +1,7 @@
-use crate::{call::DialDirection, config::RecordingPolicy};
+use crate::{
+    call::{DialDirection, DialStrategy, Location},
+    config::RecordingPolicy,
+};
 use anyhow::{Result, anyhow};
 use ipnetwork::IpNetwork;
 use regex::Regex;
@@ -7,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    time::Duration,
 };
 use tokio::net::lookup_host;
 
@@ -375,13 +379,13 @@ pub struct RouteAction {
     #[serde(default)]
     pub reject: Option<RejectConfig>,
 
-    /// Queue configuration (when action is queue)
-    #[serde(default)]
-    pub queue: Option<RouteQueueConfig>,
+    /// Queue configuration file (when action is queue)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
 
-    /// IVR configuration (when action is ivr)
-    #[serde(default)]
-    pub ivr: Option<RouteIvrConfig>,
+    /// IVR configuration file (when action is ivr)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ivr: Option<String>,
 }
 
 impl Default for RouteAction {
@@ -444,6 +448,8 @@ pub struct RouteQueueConfig {
     pub hold: Option<RouteQueueHoldConfig>,
     #[serde(default)]
     pub fallback: Option<RouteQueueFallbackConfig>,
+    #[serde(default)]
+    pub strategy: RouteQueueStrategyConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -451,6 +457,43 @@ pub struct RouteQueueHoldConfig {
     pub audio_file: Option<String>,
     #[serde(default = "RouteQueueHoldConfig::default_loop")]
     pub loop_playback: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteQueueStrategyConfig {
+    #[serde(default = "QueueDialMode::default_mode")]
+    pub mode: QueueDialMode,
+    #[serde(default)]
+    pub wait_timeout_secs: Option<u16>,
+    #[serde(default)]
+    pub targets: Vec<RouteQueueTargetConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RouteQueueTargetConfig {
+    pub uri: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum QueueDialMode {
+    Sequential,
+    Parallel,
+}
+
+impl QueueDialMode {
+    pub fn default_mode() -> Self {
+        QueueDialMode::Sequential
+    }
+}
+
+impl Default for QueueDialMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
 }
 
 impl RouteQueueHoldConfig {
@@ -465,6 +508,8 @@ pub struct RouteQueueFallbackConfig {
     pub redirect: Option<String>,
     pub failure_code: Option<u16>,
     pub failure_reason: Option<String>,
+    pub failure_prompt: Option<String>,
+    pub queue_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -494,26 +539,91 @@ impl RouteQueueConfig {
         if let Some(fallback) = &self.fallback {
             plan.fallback = Some(fallback.to_action()?);
         }
+        if let Some(strategy) = self.build_dial_strategy()? {
+            plan.dial_strategy = Some(strategy);
+        }
+        if let Some(timeout) = self.strategy.wait_timeout_secs {
+            if timeout > 0 {
+                plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
+            }
+        }
         Ok(plan)
+    }
+
+    fn build_dial_strategy(&self) -> Result<Option<DialStrategy>> {
+        if self.strategy.targets.is_empty() {
+            return Ok(None);
+        }
+
+        let mut locations = Vec::new();
+        for target in &self.strategy.targets {
+            let uri_text = target.uri.trim();
+            if uri_text.is_empty() {
+                continue;
+            }
+            let uri = Uri::try_from(uri_text)
+                .map_err(|err| anyhow!("invalid queue target uri '{}': {}", uri_text, err))?;
+            let mut location = Location::default();
+            location.aor = uri.clone();
+            location.contact_raw = Some(uri.to_string());
+            locations.push(location);
+        }
+
+        if locations.is_empty() {
+            return Ok(None);
+        }
+
+        let strategy = match self.strategy.mode {
+            QueueDialMode::Parallel => DialStrategy::Parallel(locations),
+            QueueDialMode::Sequential => DialStrategy::Sequential(locations),
+        };
+        Ok(Some(strategy))
     }
 }
 
 impl RouteQueueFallbackConfig {
     fn to_action(&self) -> Result<crate::call::QueueFallbackAction> {
+        if let Some(queue) = self
+            .queue_ref
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(crate::call::QueueFallbackAction::Queue {
+                name: queue.to_string(),
+            });
+        }
         if let Some(target) = &self.redirect {
             let uri = Uri::try_from(target.as_str())?;
             return Ok(crate::call::QueueFallbackAction::Redirect { target: uri });
         }
-        if let Some(code) = self.failure_code {
-            if !(100..=699).contains(&code) {
-                return Err(anyhow!("invalid failure_code {}: must be 100-699", code));
-            }
-            let status = StatusCode::from(code);
-            let action = crate::call::FailureAction::Hangup(Some(status));
+        if self.failure_code.is_some() || self.failure_prompt.is_some() {
+            let status = match self.failure_code {
+                Some(code) => {
+                    if !(100..=699).contains(&code) {
+                        return Err(anyhow!("invalid failure_code {}: must be 100-699", code));
+                    }
+                    StatusCode::from(code)
+                }
+                None => StatusCode::TemporarilyUnavailable,
+            };
+
+            let action = if let Some(prompt) = &self.failure_prompt {
+                crate::call::FailureAction::PlayThenHangup {
+                    audio_file: prompt.clone(),
+                    status_code: status.clone(),
+                    reason: self.failure_reason.clone(),
+                }
+            } else {
+                crate::call::FailureAction::Hangup {
+                    code: Some(status),
+                    reason: self.failure_reason.clone(),
+                }
+            };
             return Ok(crate::call::QueueFallbackAction::Failure(action));
         }
         Err(anyhow!(
-            "Queue fallback must specify redirect or failure_code"
+            "Queue fallback must specify redirect or failure action"
         ))
     }
 }

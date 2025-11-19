@@ -1,6 +1,7 @@
 use crate::console::handlers::{bad_request, forms};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
+    queue::{Column as QueueColumn, Entity as QueueEntity, Model as QueueModel},
     routing::{
         ActiveModel as RoutingActiveModel, Column as RoutingColumn, Entity as RoutingEntity,
         Model as RoutingModel, RoutingDirection, RoutingSelectionStrategy,
@@ -101,6 +102,20 @@ impl Default for RouteDocument {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RouteTargetKind {
+    SipTrunk,
+    Queue,
+    Ivr,
+}
+
+impl Default for RouteTargetKind {
+    fn default() -> Self {
+        Self::SipTrunk
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RouteActionDocument {
     select: RoutingSelectionStrategy,
@@ -108,6 +123,12 @@ pub(crate) struct RouteActionDocument {
     hash_key: Option<String>,
     #[serde(default)]
     trunks: Vec<RouteTrunkDocument>,
+    #[serde(default)]
+    target_type: RouteTargetKind,
+    #[serde(default)]
+    queue_file: Option<String>,
+    #[serde(default)]
+    ivr_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +174,9 @@ impl Default for RouteActionDocument {
             select: DEFAULT_SELECTION,
             hash_key: None,
             trunks: Vec::new(),
+            target_type: RouteTargetKind::SipTrunk,
+            queue_file: None,
+            ivr_file: None,
         }
     }
 }
@@ -217,6 +241,7 @@ impl RouteDocument {
                     None
                 },
                 trunks: parse_trunk_assignments(model.target_trunks.clone()),
+                ..RouteActionDocument::default()
             },
             source_trunk: None,
             target_trunks: Vec::new(),
@@ -230,12 +255,61 @@ impl RouteDocument {
         if self.name.trim().is_empty() {
             return Err(RouteError::new("Route name is required"));
         }
+        match self.action.target_type {
+            RouteTargetKind::SipTrunk => {}
+            RouteTargetKind::Queue => {
+                let has_queue_file = self
+                    .action
+                    .queue_file
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_queue_file.is_none() {
+                    return Err(RouteError::new(
+                        "Queue destination requires a queue file reference",
+                    ));
+                }
+            }
+            RouteTargetKind::Ivr => {
+                let has_ivr_file = self
+                    .action
+                    .ivr_file
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_ivr_file.is_none() {
+                    return Err(RouteError::new("IVR destination requires an ivr file reference"));
+                }
+            }
+        }
         Ok(())
     }
 
     fn ensure_consistency(&mut self) {
         if self.action.select != RoutingSelectionStrategy::Hash {
             self.action.hash_key = None;
+        }
+
+        self.action.queue_file = sanitize_optional_string(self.action.queue_file.take());
+        self.action.ivr_file = sanitize_optional_string(self.action.ivr_file.take());
+
+        match self.action.target_type {
+            RouteTargetKind::SipTrunk => {
+                self.action.queue_file = None;
+                self.action.ivr_file = None;
+            }
+            RouteTargetKind::Queue => {
+                self.action.ivr_file = None;
+                self.action.trunks.clear();
+                self.target_trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+            }
+            RouteTargetKind::Ivr => {
+                self.action.queue_file = None;
+                self.action.trunks.clear();
+                self.target_trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+            }
         }
 
         let mut dedup = HashSet::new();
@@ -281,6 +355,10 @@ impl RouteDocument {
                     self.source_trunk = Some(trunk.name.clone());
                 }
             }
+        }
+
+        if !matches!(self.action.target_type, RouteTargetKind::SipTrunk) {
+            return;
         }
 
         if self.target_trunks.is_empty() {
@@ -462,6 +540,13 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
         .await
 }
 
+async fn load_queues(db: &DatabaseConnection) -> Result<Vec<QueueModel>, DbErr> {
+    QueueEntity::find()
+        .order_by_asc(QueueColumn::Name)
+        .all(db)
+        .await
+}
+
 fn build_trunk_options(trunks: &[SipTrunkModel]) -> Vec<Value> {
     trunks
         .iter()
@@ -476,6 +561,21 @@ fn build_trunk_options(trunks: &[SipTrunkModel]) -> Vec<Value> {
                 "carrier": trunk.carrier.clone().unwrap_or_default(),
                 "status": trunk.status,
                 "direction": trunk.direction,
+            })
+        })
+        .collect()
+}
+
+fn build_queue_options(queues: &[QueueModel]) -> Vec<Value> {
+    queues
+        .iter()
+        .map(|queue| {
+            json!({
+                "id": queue.id,
+                "name": queue.name,
+                "description": queue.description,
+                "is_active": queue.is_active,
+                "updated_at": queue.updated_at.to_rfc3339(),
             })
         })
         .collect()
@@ -501,6 +601,9 @@ fn build_route_console_payload(
             "select": doc.action.select,
             "hash_key": doc.action.hash_key.clone(),
             "trunks": doc.action.trunks.clone(),
+            "target_type": doc.action.target_type,
+            "queue_file": doc.action.queue_file.clone(),
+            "ivr_file": doc.action.ivr_file.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.target_trunks.clone(),
@@ -573,11 +676,13 @@ fn render_route_form(
     mode: &str,
     doc: &RouteDocument,
     trunks: &[SipTrunkModel],
+    queues: &[QueueModel],
     error_message: Option<String>,
     form_action: String,
 ) -> Response {
     let route_value = serde_json::to_value(doc).unwrap_or(Value::Null);
     let trunk_options = Value::Array(build_trunk_options(trunks));
+    let queue_options = Value::Array(build_queue_options(queues));
     let selection_algorithms = selection_algorithms_value();
     let direction_options = direction_options_value();
     let status_options = status_options_value();
@@ -601,6 +706,7 @@ fn render_route_form(
             "submit_label": submit_label,
             "route_data": route_value,
             "trunk_options": trunk_options,
+            "queue_options": queue_options,
             "selection_algorithms": selection_algorithms,
             "direction_options": direction_options,
             "status_options": status_options,
@@ -808,6 +914,17 @@ pub async fn page_routing_create(
                 .into_response();
         }
     };
+    let queues = match load_queues(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load queues for route create page: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load routing form",
+            )
+                .into_response();
+        }
+    };
 
     let doc = RouteDocument::default();
     render_route_form(
@@ -815,6 +932,7 @@ pub async fn page_routing_create(
         "create",
         &doc,
         &trunks,
+        &queues,
         None,
         state.url_for("/routing"),
     )
@@ -857,6 +975,18 @@ pub async fn page_routing_edit(
         .map(|trunk| (trunk.id, trunk))
         .collect();
 
+    let queues = match load_queues(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load queues for route edit page: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load routing form",
+            )
+                .into_response();
+        }
+    };
+
     let mut doc = RouteDocument::from_model(&model);
     doc.apply_trunk_context(&model, &trunk_map);
 
@@ -865,6 +995,7 @@ pub async fn page_routing_edit(
         "edit",
         &doc,
         &trunks,
+        &queues,
         None,
         state.url_for(&format!("/routing/{}", id)),
     )
@@ -907,6 +1038,18 @@ pub async fn route_detail_data(
         }
     };
 
+    let queues = match load_queues(db).await {
+        Ok(list) => list,
+        Err(err) => {
+            warn!("failed to load queues for route detail {}: {}", id, err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"message": "Failed to load routing data"})),
+            )
+                .into_response();
+        }
+    };
+
     let trunk_map: HashMap<i64, SipTrunkModel> =
         trunks.iter().cloned().map(|t| (t.id, t)).collect();
     let mut doc = RouteDocument::from_model(&model);
@@ -915,6 +1058,7 @@ pub async fn route_detail_data(
     Json(json!({
         "route": doc,
         "trunk_options": build_trunk_options(&trunks),
+        "queue_options": build_queue_options(&queues),
         "selection_algorithms": selection_algorithms(),
         "direction_options": direction_options_value(),
         "status_options": status_options_value(),
@@ -987,6 +1131,15 @@ pub async fn clone_routing(
         }
     };
     let trunk_lookup = build_trunk_name_lookup(&trunks);
+
+    if let Err(err) = load_queues(db).await {
+        warn!("failed to load queues for route clone {}: {}", id, err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"message": "Failed to clone routing rule"})),
+        )
+            .into_response();
+    }
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk {
