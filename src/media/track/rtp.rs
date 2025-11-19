@@ -594,6 +594,9 @@ impl RtpTrack {
         };
         let inner = self.inner.lock().unwrap();
         for codec in inner.enabled_codecs.iter() {
+            if codec == &CodecType::TelephoneEvent {
+                continue;
+            }
             // Try to find payload type from rtp_map (from caller's offer), otherwise use default
             let mut payload_type = codec.payload_type();
             for (payload_typ, (rtp_map_codec, _, _)) in inner.rtp_map.iter() {
@@ -649,7 +652,7 @@ impl RtpTrack {
                     break;
                 }
             }
-            
+
             media.media_name.formats.push(payload_type.to_string());
             media.attributes.push(Attribute {
                 key: "rtpmap".to_string(),
