@@ -36,6 +36,11 @@ pub mod tests;
 pub type CommandSender = tokio::sync::broadcast::Sender<Command>;
 pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;
 
+/// Default hold audio that ships with config/sounds.
+pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
+/// Default prompt played when a queue cannot find an available agent.
+pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.wav";
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct SipOption {
@@ -318,6 +323,100 @@ pub enum DialStrategy {
     Parallel(Vec<Location>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferEndpoint {
+    Uri(String),
+    Queue(String),
+    Ivr(String),
+}
+
+impl TransferEndpoint {
+    pub fn parse(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        const QUEUE_PREFIX: &str = "queue:";
+        const IVR_PREFIX: &str = "ivr:";
+
+        if trimmed.len() >= QUEUE_PREFIX.len()
+            && trimmed[..QUEUE_PREFIX.len()].eq_ignore_ascii_case(QUEUE_PREFIX)
+        {
+            let name = trimmed[QUEUE_PREFIX.len()..].trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(TransferEndpoint::Queue(name.to_string()));
+        }
+
+        if trimmed.len() >= IVR_PREFIX.len()
+            && trimmed[..IVR_PREFIX.len()].eq_ignore_ascii_case(IVR_PREFIX)
+        {
+            let name = trimmed[IVR_PREFIX.len()..].trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(TransferEndpoint::Ivr(name.to_string()));
+        }
+
+        Some(TransferEndpoint::Uri(trimmed.to_string()))
+    }
+}
+
+impl std::fmt::Display for TransferEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransferEndpoint::Uri(uri) => write!(f, "{}", uri),
+            TransferEndpoint::Queue(name) => write!(f, "queue:{}", name),
+            TransferEndpoint::Ivr(reference) => write!(f, "ivr:{}", reference),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallForwardingMode {
+    Always,
+    WhenBusy,
+    WhenNoAnswer,
+}
+
+pub const CALL_FORWARDING_TIMEOUT_MIN_SECS: u64 = 5;
+pub const CALL_FORWARDING_TIMEOUT_MAX_SECS: u64 = 120;
+pub const CALL_FORWARDING_TIMEOUT_DEFAULT_SECS: u64 = 30;
+
+#[derive(Debug, Clone)]
+pub struct CallForwardingConfig {
+    pub mode: CallForwardingMode,
+    pub endpoint: TransferEndpoint,
+    pub timeout: Duration,
+}
+
+impl CallForwardingConfig {
+    pub fn new(mode: CallForwardingMode, endpoint: TransferEndpoint, timeout_secs: u64) -> Self {
+        let clamped = timeout_secs.clamp(
+            CALL_FORWARDING_TIMEOUT_MIN_SECS,
+            CALL_FORWARDING_TIMEOUT_MAX_SECS,
+        );
+        let timeout = Duration::from_secs(clamped);
+        Self {
+            mode,
+            endpoint,
+            timeout,
+        }
+    }
+
+    pub fn clamp_timeout(value: i64) -> u64 {
+        if value <= 0 {
+            return CALL_FORWARDING_TIMEOUT_DEFAULT_SECS;
+        }
+        value.clamp(
+            CALL_FORWARDING_TIMEOUT_MIN_SECS as i64,
+            CALL_FORWARDING_TIMEOUT_MAX_SECS as i64,
+        ) as u64
+    }
+}
+
 impl std::fmt::Display for DialStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -479,8 +578,15 @@ impl Default for QueuePlan {
     fn default() -> Self {
         Self {
             accept_immediately: false,
-            hold: None,
-            fallback: None,
+            hold: Some(
+                QueueHoldConfig::default()
+                    .with_audio_file(DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+            ),
+            fallback: Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
+                audio_file: DEFAULT_QUEUE_FAILURE_AUDIO.to_string(),
+                status_code: StatusCode::TemporarilyUnavailable,
+                reason: Some("All agents are currently unavailable".to_string()),
+            })),
             dial_strategy: None,
             ring_timeout: None,
         }
@@ -624,7 +730,7 @@ pub enum FailureAction {
         reason: Option<String>,
     },
     /// Transfer to another destination
-    Transfer(String),
+    Transfer(TransferEndpoint),
 }
 
 impl Default for FailureAction {
@@ -712,6 +818,8 @@ pub struct Dialplan {
     /// What to do when a call fails
     pub failure_action: FailureAction,
 
+    pub call_forwarding: Option<CallForwardingConfig>,
+
     pub route_invite: Option<Box<dyn RouteInvite>>,
     pub with_original_headers: bool,
 }
@@ -741,6 +849,7 @@ impl Dialplan {
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
             call_timeout: Duration::from_secs(60),              // 60 seconds
             failure_action: FailureAction::default(),
+            call_forwarding: None,
             route_invite: None,
             with_original_headers: true,
         }
@@ -796,6 +905,11 @@ impl Dialplan {
     }
     pub fn with_route_invite(mut self, route: Box<dyn RouteInvite>) -> Self {
         self.route_invite = Some(route);
+        self
+    }
+
+    pub fn with_call_forwarding(mut self, config: Option<CallForwardingConfig>) -> Self {
+        self.call_forwarding = config;
         self
     }
 

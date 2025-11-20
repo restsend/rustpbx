@@ -114,7 +114,7 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
             peer_media.rtcp_port = peer_media.rtp_port + 1;
 
             // Always use media-level connection info if present (overrides session-level)
-            // RFC 4566 5.7.  Connection Data ("c=")            
+            // RFC 4566 5.7.  Connection Data ("c=")
             //    A session description MUST contain either at least one "c=" field in
             //    each media description or a single "c=" field at the session level.
             //    It MAY contain a single session-level "c=" field and additional "c="

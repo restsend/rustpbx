@@ -1,7 +1,8 @@
 use crate::{
     call::{
-        DialStrategy, Dialplan, DialplanFlow, DialplanIvrConfig, FailureAction, Location,
-        MediaConfig, QueueFallbackAction, QueueHoldConfig, QueuePlan, TransactionCookie,
+        CallForwardingConfig, CallForwardingMode, DialStrategy, Dialplan, DialplanFlow,
+        DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
+        QueueHoldConfig, QueuePlan, TransactionCookie, TransferEndpoint,
         ivr::{
             InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
             PromptPlayback, PromptSource, ResolvedTransferAction,
@@ -639,6 +640,64 @@ impl CallSession {
 }
 
 impl ProxyCall {
+    fn forwarding_config(&self) -> Option<&CallForwardingConfig> {
+        self.dialplan.call_forwarding.as_ref()
+    }
+
+    fn immediate_forwarding_config(&self) -> Option<&CallForwardingConfig> {
+        self.forwarding_config().and_then(|config| {
+            if matches!(config.mode, CallForwardingMode::Always) {
+                Some(config)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn forwarding_timeout(&self) -> Option<Duration> {
+        self.forwarding_config().and_then(|config| {
+            if matches!(config.mode, CallForwardingMode::WhenNoAnswer) {
+                Some(config.timeout)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn failure_is_busy(&self, session: &CallSession) -> bool {
+        session
+            .last_error
+            .as_ref()
+            .map(|(code, _)| {
+                matches!(
+                    code,
+                    StatusCode::BusyHere
+                        | StatusCode::BusyEverywhere
+                        | StatusCode::Decline
+                        | StatusCode::RequestTerminated
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn failure_is_no_answer(&self, session: &CallSession) -> bool {
+        if session.is_answered() {
+            return false;
+        }
+        session
+            .last_error
+            .as_ref()
+            .map(|(code, _)| {
+                matches!(
+                    code,
+                    StatusCode::RequestTimeout
+                        | StatusCode::TemporarilyUnavailable
+                        | StatusCode::ServerTimeOut
+                )
+            })
+            .unwrap_or(false)
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
@@ -865,7 +924,136 @@ impl ProxyCall {
             );
             return Err(anyhow!("Dialplan has no targets"));
         }
+        if self.try_forwarding_before_dial(session).await? {
+            return Ok(());
+        }
         self.execute_flow(session, &self.dialplan.flow).await
+    }
+
+    async fn try_forwarding_before_dial(&self, session: &mut CallSession) -> Result<bool> {
+        let Some(config) = self.immediate_forwarding_config() else {
+            return Ok(false);
+        };
+        info!(
+            session_id = %self.session_id,
+            endpoint = ?config.endpoint,
+            "Call forwarding (always) engaged"
+        );
+        match self.transfer_to_endpoint(session, &config.endpoint).await {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    "Call forwarding (always) failed, continuing with dialplan"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    async fn try_call_forwarding_on_failure(&self, session: &mut CallSession) -> Result<bool> {
+        let Some(config) = self.forwarding_config() else {
+            return Ok(false);
+        };
+        let should_forward = match config.mode {
+            CallForwardingMode::Always => false,
+            CallForwardingMode::WhenBusy => self.failure_is_busy(session),
+            CallForwardingMode::WhenNoAnswer => self.failure_is_no_answer(session),
+        };
+        if !should_forward {
+            return Ok(false);
+        }
+        info!(
+            session_id = %self.session_id,
+            mode = ?config.mode,
+            endpoint = ?config.endpoint,
+            "Call forwarding engaged after failure"
+        );
+        match self.transfer_to_endpoint(session, &config.endpoint).await {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    "Call forwarding after failure failed"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    fn transfer_to_endpoint<'a>(
+        &'a self,
+        session: &'a mut CallSession,
+        endpoint: &'a TransferEndpoint,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            match endpoint {
+                TransferEndpoint::Uri(uri) => self.transfer_to_uri(session, uri).await,
+                TransferEndpoint::Queue(name) => self.transfer_to_queue(session, name).await,
+                TransferEndpoint::Ivr(reference) => self.transfer_to_ivr(session, reference).await,
+            }
+        }
+        .boxed()
+    }
+
+    async fn transfer_to_uri(&self, session: &mut CallSession, uri: &str) -> Result<()> {
+        let parsed = Uri::try_from(uri)
+            .map_err(|err| anyhow!("invalid forwarding uri '{}': {}", uri, err))?;
+        let mut location = Location::default();
+        location.aor = parsed.clone();
+        location.contact_raw = Some(parsed.to_string());
+        match self.try_single_target(session, &location).await {
+            Ok(_) => Ok(()),
+            Err((code, reason)) => {
+                let message = reason.unwrap_or_else(|| code.to_string());
+                Err(anyhow!("forwarding to {} failed: {}", uri, message))
+            }
+        }
+    }
+
+    async fn transfer_to_queue(&self, session: &mut CallSession, reference: &str) -> Result<()> {
+        let queue_plan = self.load_queue_plan(reference).await?;
+        let strategy = queue_plan
+            .dial_strategy()
+            .cloned()
+            .ok_or_else(|| anyhow!("queue '{}' has no dial targets", reference))?;
+        let next_flow = DialplanFlow::Targets(strategy);
+        self.execute_queue_plan(session, &queue_plan, &next_flow, 0, false)
+            .await
+    }
+
+    async fn load_queue_plan(&self, reference: &str) -> Result<QueuePlan> {
+        if reference.trim().is_empty() {
+            return Err(anyhow!("queue reference cannot be empty"));
+        }
+        if let Some(config) = self
+            .server
+            .data_context
+            .resolve_queue_config(reference)
+            .await?
+        {
+            return config.to_queue_plan();
+        }
+        if let Some(config) = self.server.data_context.load_queue_file(reference).await? {
+            return config.to_queue_plan();
+        }
+        Err(anyhow!("queue reference '{}' not found", reference))
+    }
+
+    async fn transfer_to_ivr(&self, session: &mut CallSession, reference: &str) -> Result<()> {
+        if reference.trim().is_empty() {
+            return Err(anyhow!("ivr reference cannot be empty"));
+        }
+        let config = self
+            .server
+            .data_context
+            .load_ivr_file(reference)
+            .await?
+            .ok_or_else(|| anyhow!("ivr reference '{}' not found", reference))?;
+        let dialplan_config = config.to_dialplan_config()?;
+        self.run_ivr(session, &dialplan_config).await
     }
 
     fn execute_flow<'a>(
@@ -877,7 +1065,7 @@ impl ProxyCall {
             match flow {
                 DialplanFlow::Targets(strategy) => self.execute_targets(session, strategy).await,
                 DialplanFlow::Queue { plan, next } => {
-                    self.execute_queue_plan(session, plan, next, 0).await
+                    self.execute_queue_plan(session, plan, next, 0, true).await
                 }
                 DialplanFlow::Ivr(config) => self.run_ivr(session, config).await,
             }
@@ -890,7 +1078,23 @@ impl ProxyCall {
         session: &mut CallSession,
         strategy: &DialStrategy,
     ) -> Result<()> {
-        match self.run_targets(session, strategy).await {
+        let run_future = self.run_targets(session, strategy);
+        let result = if let Some(timeout_duration) = self.forwarding_timeout() {
+            match timeout(timeout_duration, run_future).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    session.set_error(
+                        StatusCode::RequestTimeout,
+                        Some("Call forwarding timeout elapsed".to_string()),
+                    );
+                    Err(anyhow!("forwarding timeout elapsed"))
+                }
+            }
+        } else {
+            run_future.await
+        };
+
+        match result {
             Ok(_) => {
                 info!(session_id = %self.session_id, "Dialplan executed successfully");
                 Ok(())
@@ -1004,6 +1208,7 @@ impl ProxyCall {
         plan: &QueuePlan,
         next: &DialplanFlow,
         depth: usize,
+        propagate_failure: bool,
     ) -> Result<()> {
         if depth >= MAX_QUEUE_CHAIN_DEPTH {
             warn!(
@@ -1048,10 +1253,12 @@ impl ProxyCall {
             Ok(_) => Ok(()),
             Err(_) => {
                 if let Some(fallback) = &plan.fallback {
-                    self.execute_queue_fallback(session, fallback, next, depth)
+                    self.execute_queue_fallback(session, fallback, next, depth, propagate_failure)
                         .await
-                } else {
+                } else if propagate_failure {
                     self.handle_failure(session).await
+                } else {
+                    Err(anyhow!("queue plan execution failed"))
                 }
             }
         }
@@ -1063,6 +1270,7 @@ impl ProxyCall {
         fallback: &'a QueueFallbackAction,
         next: &'a DialplanFlow,
         depth: usize,
+        propagate_failure: bool,
     ) -> BoxFuture<'a, Result<()>> {
         async move {
             match fallback {
@@ -1074,7 +1282,13 @@ impl ProxyCall {
                     location.aor = target.clone();
                     match self.try_single_target(session, &location).await {
                         Ok(_) => Ok(()),
-                        Err(_) => self.handle_failure(session).await,
+                        Err(_) => {
+                            if propagate_failure {
+                                self.handle_failure(session).await
+                            } else {
+                                Err(anyhow!("queue fallback redirect target failed to answer"))
+                            }
+                        }
                     }
                 }
                 QueueFallbackAction::Queue { name } => {
@@ -1100,8 +1314,14 @@ impl ProxyCall {
                     };
                     match config.to_queue_plan() {
                         Ok(plan) => {
-                            self.execute_queue_plan(session, &plan, next, depth + 1)
-                                .await
+                            self.execute_queue_plan(
+                                session,
+                                &plan,
+                                next,
+                                depth + 1,
+                                propagate_failure,
+                            )
+                            .await
                         }
                         Err(err) => {
                             warn!(
@@ -1110,7 +1330,11 @@ impl ProxyCall {
                                 error = %err,
                                 "failed to build fallback queue plan"
                             );
-                            self.handle_failure(session).await
+                            if propagate_failure {
+                                self.handle_failure(session).await
+                            } else {
+                                Err(anyhow!("queue fallback plan failed"))
+                            }
                         }
                     }
                 }
@@ -1573,6 +1797,9 @@ impl ProxyCall {
     }
 
     async fn handle_failure(&self, session: &mut CallSession) -> Result<()> {
+        if self.try_call_forwarding_on_failure(session).await? {
+            return Ok(());
+        }
         self.execute_failure_action(session, &self.dialplan.failure_action)
             .await
     }

@@ -1,6 +1,6 @@
 use super::super::{
-    DialDirection, Dialplan, DialplanFlow, DialplanIvrConfig, QueueFallbackAction, QueueHoldConfig,
-    QueuePlan,
+    DialDirection, Dialplan, DialplanFlow, DialplanIvrConfig, FailureAction, QueueFallbackAction,
+    QueueHoldConfig, QueuePlan, DEFAULT_QUEUE_FAILURE_AUDIO, DEFAULT_QUEUE_HOLD_AUDIO,
 };
 use rsip::{Headers, Method, Request, Version};
 
@@ -74,5 +74,23 @@ fn queue_wraps_terminal_flow() {
             _ => panic!("queue next flow should be IVR"),
         },
         _ => panic!("dialplan flow should start with queue"),
+    }
+}
+
+#[test]
+fn queue_plan_default_uses_bundled_prompts() {
+    let plan = QueuePlan::default();
+
+    let hold = plan.hold.expect("default queue plan should provide hold audio");
+    assert_eq!(hold.audio_file.as_deref(), Some(DEFAULT_QUEUE_HOLD_AUDIO));
+
+    match plan
+        .fallback
+        .expect("default queue plan should provide fallback prompt")
+    {
+        QueueFallbackAction::Failure(FailureAction::PlayThenHangup { audio_file, .. }) => {
+            assert_eq!(audio_file, DEFAULT_QUEUE_FAILURE_AUDIO)
+        }
+        other => panic!("unexpected fallback action: {:?}", other),
     }
 }

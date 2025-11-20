@@ -9,8 +9,9 @@ use crate::models::{
     extension_department::{
         Column as ExtensionDepartmentColumn, Entity as ExtensionDepartmentEntity,
     },
+    queue::{Column as QueueColumn, Entity as QueueEntity},
 };
-use crate::proxy::server::SipServerRef;
+use crate::proxy::{routing::RouteIvrConfig, server::SipServerRef};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
@@ -28,8 +29,8 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, io::ErrorKind, sync::Arc};
+use tokio::fs;
 use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -54,6 +55,35 @@ struct QueryExtensionsFilters {
     registered_at_to: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ForwardingCatalog {
+    queues: Vec<ForwardingQueue>,
+    ivrs: Vec<ForwardingIvrRef>,
+}
+
+impl ForwardingCatalog {
+    fn empty() -> Self {
+        Self {
+            queues: Vec::new(),
+            ivrs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ForwardingQueue {
+    id: i64,
+    name: String,
+    reference: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ForwardingIvrRef {
+    reference: String,
+    file: String,
+    plan_id: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Default)]
 struct ExtensionLocatorRecord {
     binding_key: String,
@@ -277,6 +307,121 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
     });
 }
 
+async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog {
+    let mut catalog = ForwardingCatalog::empty();
+    let queues = match QueueEntity::find()
+        .order_by_asc(QueueColumn::Name)
+        .all(state.db())
+        .await
+    {
+        Ok(models) => models,
+        Err(err) => {
+            warn!("failed to load queues for forwarding catalog: {}", err);
+            vec![]
+        }
+    };
+    catalog.queues = queues
+        .into_iter()
+        .map(|queue| ForwardingQueue {
+            id: queue.id,
+            reference: queue.name.clone(),
+            name: queue.name,
+            description: queue.description,
+        })
+        .collect();
+    catalog.ivrs = load_forwarding_ivrs(state).await;
+    catalog
+}
+
+async fn load_forwarding_ivrs(state: Arc<ConsoleState>) -> Vec<ForwardingIvrRef> {
+    let Some(app_state) = state.app_state() else {
+        return Vec::new();
+    };
+    let Some(proxy_config) = app_state.config.proxy.as_ref() else {
+        return Vec::new();
+    };
+    let base_dir = proxy_config.generated_ivr_dir();
+    let mut entries = match fs::read_dir(&base_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Vec::new();
+        }
+        Err(err) => {
+            warn!(
+                "failed to read ivr directory {}: {}",
+                base_dir.display(),
+                err
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut ivrs = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if extension != "toml" {
+            continue;
+        }
+        let reference = path
+            .strip_prefix(&base_dir)
+            .ok()
+            .map(|rel| rel.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let fallback = entry.file_name().to_string_lossy().trim().to_string();
+                if fallback.is_empty() {
+                    None
+                } else {
+                    Some(fallback)
+                }
+            });
+        let Some(reference) = reference else {
+            continue;
+        };
+        let contents = match fs::read_to_string(&path).await {
+            Ok(contents) => contents,
+            Err(err) => {
+                warn!("failed to read ivr file {}: {}", path.display(), err);
+                continue;
+            }
+        };
+        let config: RouteIvrConfig = match toml::from_str(&contents) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!("failed to parse ivr file {}: {}", path.display(), err);
+                continue;
+            }
+        };
+        let plan_id = config.plan_id.clone().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        ivrs.push(ForwardingIvrRef {
+            reference,
+            file: path.display().to_string(),
+            plan_id,
+        });
+    }
+
+    ivrs.sort_by(|a, b| a.reference.cmp(&b.reference));
+    ivrs
+}
+
 async fn page_extensions(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
@@ -320,6 +465,7 @@ async fn page_extension_detail(
     let realm = resolve_default_realm(state.as_ref());
     let locator_info =
         fetch_extension_locator_summary(state.sip_server(), &realm, &model.extension).await;
+    let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
 
     state.render(
         "console/extension_detail.html",
@@ -330,6 +476,7 @@ async fn page_extension_detail(
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
             "registration_info": locator_info,
+            "forwarding_catalog": forwarding_catalog,
         }),
     )
 }
@@ -338,6 +485,7 @@ async fn page_extension_create(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
+    let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
     state.render(
         "console/extension_detail.html",
         json!({
@@ -345,6 +493,7 @@ async fn page_extension_create(
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
             "registration_info": ExtensionLocatorSummary::default(),
+            "forwarding_catalog": forwarding_catalog,
         }),
     )
 }
