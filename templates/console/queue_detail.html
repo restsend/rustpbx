@@ -134,7 +134,10 @@
                 x-cloak>
                 <div class="flex flex-col gap-1">
                     <h2 class="text-sm font-semibold text-slate-900">Hold treatment</h2>
-                    <p class="text-sm text-slate-500">Upload prompts separately and reference the storage path here.</p>
+                    <p class="text-sm text-slate-500">Upload prompts separately and reference the storage path here.
+                        Leave blank to fall back to <code
+                            class="font-mono text-xs">config/sounds/phone-calling.wav</code>.
+                    </p>
                 </div>
                 <div class="mt-4 space-y-4">
                     <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
@@ -232,7 +235,10 @@
                 x-cloak>
                 <div class="flex flex-col gap-1">
                     <h2 class="text-sm font-semibold text-slate-900">Fallback behavior</h2>
-                    <p class="text-sm text-slate-500">Choose what happens when no agents are available.</p>
+                    <p class="text-sm text-slate-500">Choose what happens when no agents are available. By default the
+                        system plays <code class="font-mono text-xs">config/sounds/unavailable-phone.wav</code> before
+                        hanging up.
+                    </p>
                 </div>
                 <div class="mt-4 space-y-4">
                     <div class="flex flex-wrap gap-3">

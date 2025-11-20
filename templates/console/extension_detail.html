@@ -12,7 +12,8 @@
         model: {{ model_data | tojson }},
         departments: {{ filters.departments | default([]) | tojson }},
         assignedDepartments: {{ departments | default([]) | tojson }},
-        locator: {{ registration_info | default({}) | tojson }}
+    locator: {{ registration_info | default({}) | tojson }},
+    forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -270,6 +271,48 @@
                                     placeholder="SIP URI, PSTN number, or internal extension">
                                 <span class="text-xs font-normal text-slate-400">Required whenever forwarding is
                                     enabled.</span>
+                                <template x-if="hasForwardingTargets()">
+                                    <div
+                                        class="mt-2 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                            Catalog shortcuts</div>
+                                        <template x-if="queueTargets.length">
+                                            <label class="flex flex-col gap-1 text-[13px] font-medium text-slate-600">
+                                                Queue target
+                                                <select
+                                                    class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    @change="onCatalogSelect($event, 'queue')"
+                                                    :disabled="!queueTargets.length">
+                                                    <option value="">Select queue…</option>
+                                                    <template x-for="queue in queueTargets" :key="queue.reference">
+                                                        <option :value="queue.reference" x-text="queue.name"></option>
+                                                    </template>
+                                                </select>
+                                                <span class="text-[11px] font-normal text-slate-400">Automatically fills
+                                                    destination as <code
+                                                        class="font-mono text-[11px] text-slate-500">queue:reference</code>.</span>
+                                            </label>
+                                        </template>
+                                        <template x-if="ivrTargets.length">
+                                            <label class="flex flex-col gap-1 text-[13px] font-medium text-slate-600">
+                                                IVR target
+                                                <select
+                                                    class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    @change="onCatalogSelect($event, 'ivr')"
+                                                    :disabled="!ivrTargets.length">
+                                                    <option value="">Select IVR…</option>
+                                                    <template x-for="ivr in ivrTargets" :key="ivr.reference">
+                                                        <option :value="ivr.reference"
+                                                            x-text="ivr.plan_id || ivr.reference"></option>
+                                                    </template>
+                                                </select>
+                                                <span class="text-[11px] font-normal text-slate-400">Fills destination
+                                                    as <code
+                                                        class="font-mono text-[11px] text-slate-500">ivr:reference</code>.</span>
+                                            </label>
+                                        </template>
+                                    </div>
+                                </template>
                             </label>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                                 Ring timeout (seconds)
@@ -458,6 +501,45 @@
                 };
             };
 
+            const normalizeForwardingCatalog = (raw) => {
+                const catalog = {
+                    queues: [],
+                    ivrs: [],
+                };
+                if (raw && Array.isArray(raw.queues)) {
+                    catalog.queues = raw.queues
+                        .map((queue) => {
+                            const reference = typeof queue.reference === 'string'
+                                ? queue.reference.trim()
+                                : '';
+                            return {
+                                id: queue.id,
+                                name: queue.name || 'Unnamed queue',
+                                reference,
+                                description: queue.description || null,
+                            };
+                        })
+                        .filter((queue) => queue.reference.length);
+                }
+                if (raw && Array.isArray(raw.ivrs)) {
+                    catalog.ivrs = raw.ivrs
+                        .map((ivr) => {
+                            const reference = typeof ivr.reference === 'string'
+                                ? ivr.reference.trim()
+                                : '';
+                            return {
+                                reference,
+                                file: ivr.file || '',
+                                plan_id: typeof ivr.plan_id === 'string' && ivr.plan_id.trim().length
+                                    ? ivr.plan_id.trim()
+                                    : null,
+                            };
+                        })
+                        .filter((ivr) => ivr.reference.length);
+                }
+                return catalog;
+            };
+
             const existingSipPassword = typeof options.model?.sip_password === 'string'
                 ? options.model.sip_password
                 : '';
@@ -474,6 +556,7 @@
                 error: null,
                 saving: false,
                 activeTab: 'profile',
+                forwardingCatalog: normalizeForwardingCatalog(options.forwardingCatalog || {}),
                 tabs: [
                     { id: 'profile', label: 'Profile', description: 'Extension details' },
                     { id: 'access', label: 'Access & Departments', description: 'Departments and access permissions' },
@@ -503,6 +586,15 @@
                     { value: 'when_busy', label: 'When busy', description: 'Forward only when already on a call.' },
                     { value: 'when_not_answered', label: 'When not answered', description: 'Forward if unanswered within the timeout.' },
                 ],
+                get queueTargets() {
+                    return this.forwardingCatalog.queues;
+                },
+                get ivrTargets() {
+                    return this.forwardingCatalog.ivrs;
+                },
+                hasForwardingTargets() {
+                    return this.queueTargets.length > 0 || this.ivrTargets.length > 0;
+                },
                 setActiveTab(tabId) {
                     const fallback = this.tabs[0]?.id || 'profile';
                     this.activeTab = this.tabs.some((tab) => tab.id === tabId) ? tabId : fallback;
@@ -754,6 +846,26 @@
                     }
                     const trimmed = this.sipPasswordInput.trim();
                     return trimmed.length ? trimmed : undefined;
+                },
+                applyForwardingReference(reference, kind) {
+                    if (!reference) {
+                        return;
+                    }
+                    const prefix = kind === 'ivr' ? 'ivr' : 'queue';
+                    this.form.call_forwarding_destination = `${prefix}:${reference}`;
+                    if (this.form.call_forwarding_mode === 'none') {
+                        this.form.call_forwarding_mode = 'always';
+                    }
+                },
+                onCatalogSelect(event, kind) {
+                    const reference = (event?.target?.value || '').trim();
+                    if (!reference) {
+                        return;
+                    }
+                    this.applyForwardingReference(reference, kind);
+                    if (event && event.target) {
+                        event.target.value = '';
+                    }
                 },
             };
         });

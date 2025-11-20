@@ -1,13 +1,8 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
-use crate::call::DialDirection;
-use crate::call::DialStrategy;
-use crate::call::Dialplan;
-use crate::call::Location;
-use crate::call::MediaConfig;
-use crate::call::RouteInvite;
-use crate::call::RoutingState;
-use crate::call::SipUser;
-use crate::call::TransactionCookie;
+use crate::call::{
+    CallForwardingConfig, DialDirection, DialStrategy, Dialplan, Location, MediaConfig,
+    RouteInvite, RoutingState, SipUser, TransactionCookie,
+};
 use crate::callrecord::{
     CallRecord, CallRecordHangupReason, CallRecordPersistArgs, apply_record_file_extras,
     extract_sip_username, extras_map_to_metadata, extras_map_to_option,
@@ -502,6 +497,39 @@ impl CallModule {
         dialplan
     }
 
+    async fn resolve_callee_forwarding(
+        &self,
+        request: &rsip::Request,
+    ) -> Result<Option<CallForwardingConfig>> {
+        let callee_uri = request.to_header()?.uri()?;
+        let callee_realm = callee_uri.host().to_string();
+        if !self.inner.server.is_same_realm(&callee_realm).await {
+            return Ok(None);
+        }
+
+        let username = callee_uri
+            .user()
+            .map(|u| u.to_string())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if username.is_empty() {
+            return Ok(None);
+        }
+
+        match self
+            .inner
+            .server
+            .user_backend
+            .get_user(username.as_str(), Some(&callee_realm))
+            .await
+        {
+            Ok(Some(user)) => Ok(user.forwarding_config()),
+            Ok(None) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     fn matches_any_pattern(value: &str, patterns: &[String]) -> bool {
         patterns
             .iter()
@@ -655,13 +683,26 @@ impl CallModule {
                 .await
         }?;
 
-        let dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
+        let mut dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
             inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
                 .await?
         } else {
             dialplan
         };
+
+        if dialplan.call_forwarding.is_none() {
+            match self.resolve_callee_forwarding(&tx.original).await {
+                Ok(Some(config)) => {
+                    dialplan = dialplan.with_call_forwarding(Some(config));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(error = %err, "failed to resolve call forwarding for callee");
+                }
+            }
+        }
+
         let dialplan = self.apply_recording_policy(dialplan, caller);
         Ok(dialplan)
     }

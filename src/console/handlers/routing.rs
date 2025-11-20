@@ -276,7 +276,9 @@ impl RouteDocument {
                     .as_ref()
                     .and_then(|value| sanitize_optional_string(Some(value.clone())));
                 if has_ivr_file.is_none() {
-                    return Err(RouteError::new("IVR destination requires an ivr file reference"));
+                    return Err(RouteError::new(
+                        "IVR destination requires an ivr file reference",
+                    ));
                 }
             }
         }

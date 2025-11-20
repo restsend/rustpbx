@@ -11,6 +11,8 @@ use rsipstack::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::{CallForwardingConfig, CallForwardingMode, TransferEndpoint};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SipUser {
     #[serde(default)]
@@ -27,6 +29,12 @@ pub struct SipUser {
     pub note: Option<String>,
     #[serde(default)]
     pub allow_guest_calls: bool,
+    #[serde(default)]
+    pub call_forwarding_mode: Option<String>,
+    #[serde(default)]
+    pub call_forwarding_destination: Option<String>,
+    #[serde(default)]
+    pub call_forwarding_timeout: Option<i32>,
     /// From the original INVITE
     #[serde(skip)]
     pub origin_contact: Option<rsip::typed::Contact>,
@@ -78,6 +86,9 @@ impl Default for SipUser {
             phone: None,
             note: None,
             allow_guest_calls: false,
+            call_forwarding_mode: None,
+            call_forwarding_destination: None,
+            call_forwarding_timeout: None,
         }
     }
 }
@@ -133,6 +144,41 @@ impl SipUser {
             self.is_support_webrtc = other.is_support_webrtc;
         }
     }
+
+    pub fn forwarding_config(&self) -> Option<CallForwardingConfig> {
+        let mode_text = self
+            .call_forwarding_mode
+            .as_deref()
+            .map(|value| value.trim().to_lowercase())?;
+        if mode_text.is_empty() || mode_text == "none" {
+            return None;
+        }
+
+        let destination = self
+            .call_forwarding_destination
+            .as_deref()
+            .map(|value| value.trim())?;
+        if destination.is_empty() {
+            return None;
+        }
+
+        let endpoint = TransferEndpoint::parse(destination)?;
+
+        let mode = match mode_text.as_str() {
+            "always" => CallForwardingMode::Always,
+            "when_busy" | "busy" => CallForwardingMode::WhenBusy,
+            "when_not_answered" | "no_answer" => CallForwardingMode::WhenNoAnswer,
+            _ => return None,
+        };
+
+        let timeout_secs = self
+            .call_forwarding_timeout
+            .map(|value| CallForwardingConfig::clamp_timeout(value as i64))
+            .unwrap_or(super::CALL_FORWARDING_TIMEOUT_DEFAULT_SECS);
+
+        Some(CallForwardingConfig::new(mode, endpoint, timeout_secs))
+    }
+
     fn build_contact(&mut self, tx: &Transaction) {
         let addr = match tx.endpoint_inner.get_addrs().first() {
             Some(addr) => addr.clone(),
@@ -232,6 +278,9 @@ impl TryFrom<&Transaction> for SipUser {
             from: Some(from_uri),
             destination: Some(destination),
             is_support_webrtc,
+            call_forwarding_mode: None,
+            call_forwarding_destination: None,
+            call_forwarding_timeout: None,
             departments: None,
             display_name: None,
             email: None,
