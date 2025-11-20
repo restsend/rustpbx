@@ -124,9 +124,12 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
             match media.connection_information {
                 Some(ref connection_information) => {
                     connection_information.address.as_ref().map(|address| {
-                        // Always use media-level connection info if present (overrides session-level)
-                        peer_media.rtp_addr = address.address.clone();
-                        peer_media.rtcp_addr = address.address.clone();
+                        if peer_media.rtp_addr.is_empty() {
+                            peer_media.rtp_addr = address.address.clone();
+                        }
+                        if peer_media.rtcp_addr.is_empty() {
+                            peer_media.rtcp_addr = address.address.clone();
+                        }
                     });
                 }
                 None => {}
