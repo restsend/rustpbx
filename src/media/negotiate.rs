@@ -66,19 +66,15 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
     for media in sdp.media_descriptions.iter() {
         for attribute in media.attributes.iter() {
             if attribute.key == "rtpmap" {
-                attribute
-                    .value
-                    .as_ref()
-                    .map(|v| match codecs::parse_rtpmap(v) {
-                        Ok((payload_type, codec, clock_rate, channel_count)) => {
-                            peer_media
-                                .rtp_map
-                                .push((payload_type, (codec, clock_rate, channel_count)));
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse rtpmap: value ={}, err={}", v, e);
-                        }
-                    });
+                attribute.value.as_ref().map(|v| {
+                    if let Ok((payload_type, codec, clock_rate, channel_count)) =
+                        codecs::parse_rtpmap(v)
+                    {
+                        peer_media
+                            .rtp_map
+                            .push((payload_type, (codec, clock_rate, channel_count)));
+                    }
+                });
             }
         }
 
@@ -97,16 +93,9 @@ pub fn select_peer_media(sdp: &SessionDescription, media_type: &str) -> Option<P
                             tracing::warn!("Unknown codec type: {}", digit);
                         }
                     } else {
-                        match CodecType::try_from(digit) {
-                            Ok(codec) => peer_media.codecs.push(codec),
-                            Err(err) => {
-                                tracing::warn!(
-                                    "Failed to parse codec type: value ={}, err={}",
-                                    format,
-                                    err
-                                );
-                            }
-                        };
+                        if let Ok(codec) = CodecType::try_from(digit) {
+                            peer_media.codecs.push(codec);
+                        }
                     }
                 }
             });
