@@ -3528,19 +3528,19 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
     let total_duration_secs = CallRecordEntity::find()
         .select_only()
         .column_as(
-            CallRecordColumn::DurationSecs.sum().cast_as("bigint"),
+            CallRecordColumn::DurationSecs.sum(),
             "total_duration",
         )
         .filter(condition.clone())
-        .into_tuple::<Option<i64>>()
+        .into_tuple::<Option<f64>>()
         .one(db)
         .await?
         .flatten()
-        .unwrap_or(0);
+        .unwrap_or(0.0);
 
-    let total_minutes = total_duration_secs as f64 / 60.0;
+    let total_minutes = total_duration_secs / 60.0; 
     let avg_duration = if total > 0 {
-        total_duration_secs as f64 / total as f64
+        total_duration_secs / total as f64
     } else {
         0.0
     };
@@ -3562,16 +3562,15 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         .select_only()
         .column_as(
             CallRecordColumn::BillingBillableSecs
-                .sum()
-                .cast_as("bigint"),
+                .sum(),
             "billing_billable_secs",
         )
         .filter(condition.clone())
-        .into_tuple::<Option<i64>>()
+        .into_tuple::<Option<f64>>()
         .one(db)
         .await?
         .flatten()
-        .unwrap_or(0);
+        .unwrap_or(0.0);
 
     let billing_status_rows: Vec<(Option<String>, Option<i64>)> = CallRecordEntity::find()
         .select_only()
@@ -3630,7 +3629,7 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         }
     }
 
-    let billing_billable_minutes = ((total_billable_secs as f64) / 60.0 * 100.0).round() / 100.0;
+    let billing_billable_minutes = (total_billable_secs / 60.0 * 100.0).round() / 100.0;
     let billing_rated_calls = billing_charged_calls + billing_included_calls;
 
     Ok(json!({

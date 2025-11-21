@@ -50,8 +50,7 @@ impl MigrationTrait for Migration {
                     .col(
                         ColumnDef::new(Column::Spec)
                             .json()
-                            .not_null()
-                            .default(json!({})),
+                            .not_null(),
                     )
                     .col(boolean(Column::IsActive).default(true))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
