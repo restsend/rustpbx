@@ -27,3 +27,4 @@ cdr/
 *.sqlite3
 *.generated.toml
 *.bak
+/.idea/
