@@ -544,6 +544,9 @@ impl CallSession {
         callee: Option<String>,
         callee_answer: Option<String>,
     ) -> Result<()> {
+        // Ensure queue hold tones cease immediately once the call is answered.
+        self.stop_queue_hold().await;
+
         if let Some(callee_addr) = callee {
             let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
             self.connected_callee = Some(resolved_callee);
