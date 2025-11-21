@@ -261,59 +261,112 @@
                                 </label>
                             </template>
                         </div>
-                        <div class="grid gap-5 md:grid-cols-2">
-                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Forward destination
-                                <input type="text" x-model.trim="form.call_forwarding_destination" maxlength="160"
-                                    :disabled="form.call_forwarding_mode === 'none'"
-                                    :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                    class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                    placeholder="SIP URI, PSTN number, or internal extension">
-                                <span class="text-xs font-normal text-slate-400">Required whenever forwarding is
-                                    enabled.</span>
-                                <template x-if="hasForwardingTargets()">
-                                    <div
-                                        class="mt-2 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                            Catalog shortcuts</div>
-                                        <template x-if="queueTargets.length">
-                                            <label class="flex flex-col gap-1 text-[13px] font-medium text-slate-600">
-                                                Queue target
-                                                <select
-                                                    class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    @change="onCatalogSelect($event, 'queue')"
-                                                    :disabled="!queueTargets.length">
-                                                    <option value="">Select queue…</option>
-                                                    <template x-for="queue in queueTargets" :key="queue.reference">
-                                                        <option :value="queue.reference" x-text="queue.name"></option>
-                                                    </template>
-                                                </select>
-                                                <span class="text-[11px] font-normal text-slate-400">Automatically fills
-                                                    destination as <code
-                                                        class="font-mono text-[11px] text-slate-500">queue:reference</code>.</span>
-                                            </label>
-                                        </template>
-                                        <template x-if="ivrTargets.length">
-                                            <label class="flex flex-col gap-1 text-[13px] font-medium text-slate-600">
-                                                IVR target
-                                                <select
-                                                    class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                    @change="onCatalogSelect($event, 'ivr')"
-                                                    :disabled="!ivrTargets.length">
-                                                    <option value="">Select IVR…</option>
-                                                    <template x-for="ivr in ivrTargets" :key="ivr.reference">
-                                                        <option :value="ivr.reference"
-                                                            x-text="ivr.plan_id || ivr.reference"></option>
-                                                    </template>
-                                                </select>
-                                                <span class="text-[11px] font-normal text-slate-400">Fills destination
-                                                    as <code
-                                                        class="font-mono text-[11px] text-slate-500">ivr:reference</code>.</span>
-                                            </label>
-                                        </template>
+                        <template x-if="form.call_forwarding_mode === 'none'">
+                            <div
+                                class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
+                                Enable a forwarding mode above to configure destinations.
+                            </div>
+                        </template>
+                        <div class="grid gap-5 md:grid-cols-2" x-show="form.call_forwarding_mode !== 'none'" x-cloak>
+                            <div class="space-y-3 text-sm font-medium text-slate-700">
+                                <div class="flex flex-col gap-2">
+                                    <span>Destination type</span>
+                                    <div class="flex flex-wrap gap-2 text-xs font-semibold">
+                                        <label
+                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+                                            :class="forwardingTargetType === 'uri' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+                                                :checked="forwardingTargetType === 'uri'"
+                                                @change="setForwardingTargetType('uri')">
+                                            <span>Standard URI</span>
+                                        </label>
+                                        <label
+                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+                                            :class="forwardingTargetType === 'queue' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+                                                :checked="forwardingTargetType === 'queue'"
+                                                @change="setForwardingTargetType('queue')">
+                                            <span>Queue</span>
+                                        </label>
+                                        <label
+                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+                                            :class="forwardingTargetType === 'ivr' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+                                                :checked="forwardingTargetType === 'ivr'"
+                                                @change="setForwardingTargetType('ivr')">
+                                            <span>IVR</span>
+                                        </label>
                                     </div>
-                                </template>
-                            </label>
+                                </div>
+                                <div x-show="forwardingTargetType === 'uri'" x-cloak>
+                                    <label class="flex flex-col gap-2">
+                                        Forward destination
+                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
+                                            @input="syncForwardingDestination()"
+                                            :disabled="form.call_forwarding_mode === 'none'"
+                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
+                                            placeholder="SIP URI, PSTN number, or internal extension">
+                                        <span class="text-xs font-normal text-slate-400">Required whenever forwarding is
+                                            enabled.</span>
+                                    </label>
+                                </div>
+                                <div x-show="forwardingTargetType === 'queue'" x-cloak class="space-y-3">
+                                    <label class="flex flex-col gap-2">
+                                        Queue reference
+                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
+                                            @input="syncForwardingDestination()"
+                                            :disabled="form.call_forwarding_mode === 'none'"
+                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
+                                            placeholder="support">
+                                        <span class="text-xs font-normal text-slate-400">Saved as<br><code
+                                                class="font-mono text-[11px]">queue:reference</code>.</span>
+                                    </label>
+                                    <template x-if="queueTargets.length">
+                                        <label class="flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                            Choose existing queue
+                                            <select
+                                                class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                :disabled="form.call_forwarding_mode === 'none'"
+                                                @change="onCatalogSelect($event, 'queue')">
+                                                <option value="">Select queue…</option>
+                                                <template x-for="queue in queueTargets" :key="queue.reference">
+                                                    <option :value="queue.reference" x-text="queue.name"></option>
+                                                </template>
+                                            </select>
+                                        </label>
+                                    </template>
+                                </div>
+                                <div x-show="forwardingTargetType === 'ivr'" x-cloak class="space-y-3">
+                                    <label class="flex flex-col gap-2">
+                                        IVR reference
+                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
+                                            @input="syncForwardingDestination()"
+                                            :disabled="form.call_forwarding_mode === 'none'"
+                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
+                                            placeholder="afterhours-menu">
+                                        <span class="text-xs font-normal text-slate-400">Saved as<br><code
+                                                class="font-mono text-[11px]">ivr:reference</code>.</span>
+                                    </label>
+                                    <template x-if="ivrTargets.length">
+                                        <label class="flex flex-col gap-1 text-xs font-medium text-slate-600">
+                                            Choose existing IVR
+                                            <select
+                                                class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                :disabled="form.call_forwarding_mode === 'none'"
+                                                @change="onCatalogSelect($event, 'ivr')">
+                                                <option value="">Select IVR…</option>
+                                                <template x-for="ivr in ivrTargets" :key="ivr.reference">
+                                                    <option :value="ivr.reference"
+                                                        x-text="ivr.plan_id || ivr.reference"></option>
+                                                </template>
+                                            </select>
+                                        </label>
+                                    </template>
+                                </div>
+                            </div>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                                 Ring timeout (seconds)
                                 <input type="number" min="5" max="120" step="1"
@@ -575,6 +628,8 @@
                     call_forwarding_timeout: options.model?.call_forwarding_timeout || 30,
                     notes: options.model?.notes || '',
                 },
+                forwardingTargetType: 'uri',
+                forwardingTargetValue: '',
                 sipPasswordVisible: false,
                 sipPasswordDirty: false,
                 sipPasswordStored: existingSipPassword,
@@ -591,9 +646,6 @@
                 },
                 get ivrTargets() {
                     return this.forwardingCatalog.ivrs;
-                },
-                hasForwardingTargets() {
-                    return this.queueTargets.length > 0 || this.ivrTargets.length > 0;
                 },
                 setActiveTab(tabId) {
                     const fallback = this.tabs[0]?.id || 'profile';
@@ -627,6 +679,7 @@
                         .map((dept) => String(dept.id))
                         .filter(Boolean);
                     this.form.call_forwarding_timeout = this.clampTimeout(this.form.call_forwarding_timeout);
+                    this.initializeForwardingTargetUI();
                     if (this.mode === 'edit' && !this.tabs.some((tab) => tab.id === 'registrations')) {
                         this.tabs.push({
                             id: 'registrations',
@@ -848,11 +901,14 @@
                     return trimmed.length ? trimmed : undefined;
                 },
                 applyForwardingReference(reference, kind) {
-                    if (!reference) {
+                    const trimmed = (reference || '').trim();
+                    if (!trimmed) {
                         return;
                     }
-                    const prefix = kind === 'ivr' ? 'ivr' : 'queue';
-                    this.form.call_forwarding_destination = `${prefix}:${reference}`;
+                    const normalizedKind = kind === 'ivr' ? 'ivr' : 'queue';
+                    this.forwardingTargetType = normalizedKind;
+                    this.forwardingTargetValue = trimmed;
+                    this.syncForwardingDestination();
                     if (this.form.call_forwarding_mode === 'none') {
                         this.form.call_forwarding_mode = 'always';
                     }
@@ -865,6 +921,59 @@
                     this.applyForwardingReference(reference, kind);
                     if (event && event.target) {
                         event.target.value = '';
+                    }
+                },
+                initializeForwardingTargetUI() {
+                    const destination = (this.form.call_forwarding_destination || '').trim();
+                    if (!destination) {
+                        this.forwardingTargetType = 'uri';
+                        this.forwardingTargetValue = '';
+                        return;
+                    }
+                    const lower = destination.toLowerCase();
+                    if (lower.startsWith('queue:')) {
+                        this.forwardingTargetType = 'queue';
+                        this.forwardingTargetValue = destination.slice(6);
+                    } else if (lower.startsWith('ivr:')) {
+                        this.forwardingTargetType = 'ivr';
+                        this.forwardingTargetValue = destination.slice(4);
+                    } else {
+                        this.forwardingTargetType = 'uri';
+                        this.forwardingTargetValue = destination;
+                    }
+                },
+                setForwardingTargetType(type) {
+                    const allowed = ['uri', 'queue', 'ivr'];
+                    const normalized = allowed.includes(type) ? type : 'uri';
+                    if (this.forwardingTargetType === normalized) {
+                        return;
+                    }
+                    this.forwardingTargetType = normalized;
+                    if (!this.form.call_forwarding_destination) {
+                        this.forwardingTargetValue = '';
+                    } else if (normalized === 'queue' && this.form.call_forwarding_destination.toLowerCase().startsWith('queue:')) {
+                        this.forwardingTargetValue = this.form.call_forwarding_destination.slice(6);
+                    } else if (normalized === 'ivr' && this.form.call_forwarding_destination.toLowerCase().startsWith('ivr:')) {
+                        this.forwardingTargetValue = this.form.call_forwarding_destination.slice(4);
+                    } else if (normalized === 'uri' && !this.form.call_forwarding_destination.toLowerCase().startsWith('queue:') && !this.form.call_forwarding_destination.toLowerCase().startsWith('ivr:')) {
+                        this.forwardingTargetValue = this.form.call_forwarding_destination;
+                    } else {
+                        this.forwardingTargetValue = '';
+                    }
+                    this.syncForwardingDestination();
+                },
+                syncForwardingDestination() {
+                    const value = this.forwardingTargetValue.trim();
+                    if (!value) {
+                        this.form.call_forwarding_destination = '';
+                        return;
+                    }
+                    if (this.forwardingTargetType === 'queue') {
+                        this.form.call_forwarding_destination = `queue:${value}`;
+                    } else if (this.forwardingTargetType === 'ivr') {
+                        this.form.call_forwarding_destination = `ivr:${value}`;
+                    } else {
+                        this.form.call_forwarding_destination = value;
                     }
                 },
             };
