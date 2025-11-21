@@ -97,13 +97,28 @@ impl ProxyDataContext {
         self.acl_rules.read().await.clone()
     }
 
-    pub async fn resolve_queue_config(&self, name: &str) -> Result<Option<RouteQueueConfig>> {
-        let Some(key) = queue_utils::canonical_queue_key(name) else {
+    pub async fn resolve_queue_config(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+        if reference.trim().is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(config) = self.load_queue_file(reference).await? {
+            return Ok(Some(config));
+        }
+
+        let Some(key) = queue_utils::canonical_queue_key(reference) else {
             return Ok(None);
         };
-        let config = self.config.read().await.clone();
-        let queues = queue_utils::collect_queue_configs(&config)?;
-        Ok(queues.get(&key).cloned())
+
+        let config = self.config.read().await;
+        for (name, queue) in &config.queues {
+            if let Some(existing) = queue_utils::canonical_queue_key(name) {
+                if existing == key {
+                    return Ok(Some(queue.clone()));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub async fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {

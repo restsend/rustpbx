@@ -8,6 +8,7 @@ use crate::models::{
     },
     sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
 };
+use crate::services::queue_utils;
 use axum::{
     Router,
     extract::{Json, Path as AxumPath, State},
@@ -571,14 +572,19 @@ fn build_trunk_options(trunks: &[SipTrunkModel]) -> Vec<Value> {
 fn build_queue_options(queues: &[QueueModel]) -> Vec<Value> {
     queues
         .iter()
-        .map(|queue| {
-            json!({
+        .filter_map(|queue| match queue_utils::convert_queue_model(queue.clone()) {
+            Ok(entry) => Some(json!({
                 "id": queue.id,
-                "name": queue.name,
-                "description": queue.description,
+                "name": entry.name,
+                "description": entry.description,
                 "is_active": queue.is_active,
                 "updated_at": queue.updated_at.to_rfc3339(),
-            })
+                "file_name": entry.file_name(),
+            })),
+            Err(err) => {
+                warn!(queue = %queue.name, error = %err, "failed to convert queue for routing options");
+                None
+            }
         })
         .collect()
 }

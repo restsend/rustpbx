@@ -117,7 +117,7 @@
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="checkbox"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
-                                x-model="form.spec.acceptImmediately">
+                                x-model="form.spec.accept_immediately">
                             <span>Bridge caller to agent before hold audio</span>
                         </label>
                     </div>
@@ -295,12 +295,13 @@
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'queue'" x-cloak>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Queue name
+                            Queue file path
                             <input type="text" x-model.trim="form.spec.fallback.queue_ref"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="support-tier2">
-                            <span class="text-xs font-normal text-slate-400">Enter the destination queue's name. The
-                                match is case-insensitive.</span>
+                                placeholder="3-support.generated.toml">
+                            <span class="text-xs font-normal text-slate-400">Provide the generated queue TOML file
+                                (relative to
+                                <code class="font-mono">config/queue</code>).</span>
                         </label>
                     </div>
                 </div>
@@ -346,7 +347,7 @@
                 is_active: true,
                 tags_input: '',
                 spec: {
-                    acceptImmediately: false,
+                    accept_immediately: false,
                     hold: {
                         audio_file: '',
                         loop_playback: true,
@@ -400,7 +401,7 @@
             },
             normalizeSpec(raw) {
                 const spec = {
-                    acceptImmediately: Boolean(raw.acceptImmediately),
+                    accept_immediately: Boolean(raw.accept_immediately),
                     hold: {
                         audio_file: raw?.hold?.audio_file || '',
                         loop_playback: raw?.hold?.loop_playback !== false,
@@ -471,7 +472,7 @@
             },
             prepareSpec() {
                 const spec = {
-                    acceptImmediately: Boolean(this.form.spec.acceptImmediately),
+                    accept_immediately: Boolean(this.form.spec.accept_immediately),
                 };
                 if (this.holdEnabled) {
                     const audio = (this.form.spec.hold?.audio_file || '').trim();

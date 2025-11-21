@@ -146,6 +146,8 @@ pub struct ActiveCallPreview {
     status: String,
     started_at: String,
     duration: String,
+    #[serde(skip_serializing)]
+    started_at_ts: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -328,46 +330,75 @@ fn format_timeline_label(range: &TimeRange, timestamp: DateTime<Utc>) -> String 
 }
 
 async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCallPreview> {
-    let Some(app_state) = state.app_state() else {
-        return Vec::new();
-    };
+    let mut previews = Vec::new();
 
-    let call_map = app_state.active_calls.lock().unwrap();
-    let mut entries: Vec<(DateTime<Utc>, ActiveCallRef)> = Vec::with_capacity(call_map.len());
-    for call in call_map.values() {
-        if let Ok(state_guard) = call.call_state.read() {
-            entries.push((state_guard.start_time, call.clone()));
+    if let Some(app_state) = state.app_state() {
+        let call_map = app_state.active_calls.lock().unwrap();
+        let mut entries: Vec<(DateTime<Utc>, ActiveCallRef)> = Vec::with_capacity(call_map.len());
+        for call in call_map.values() {
+            if let Ok(state_guard) = call.call_state.read() {
+                entries.push((state_guard.start_time, call.clone()));
+            }
+        }
+        drop(call_map);
+
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, call) in entries.into_iter().take(limit) {
+            let (start_time, answer_time) = match call.call_state.read() {
+                Ok(guard) => (guard.start_time, guard.answer_time),
+                Err(_) => continue,
+            };
+            let status = if answer_time.is_some() {
+                "Talking"
+            } else {
+                "Ringing"
+            };
+            let started_at = start_time.format("%H:%M").to_string();
+            let duration_secs = if let Some(answered_at) = answer_time {
+                (Utc::now() - answered_at).num_seconds().max(0)
+            } else {
+                (Utc::now() - start_time).num_seconds().max(0)
+            };
+            previews.push(ActiveCallPreview {
+                caller: call.session_id.clone(),
+                callee: format!("{:?}", call.call_type),
+                status: status.to_string(),
+                started_at,
+                duration: format_duration(duration_secs),
+                started_at_ts: start_time,
+            });
         }
     }
-    drop(call_map);
 
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut previews = Vec::new();
-    for (_, call) in entries.into_iter().take(limit) {
-        let (start_time, answer_time) = match call.call_state.read() {
-            Ok(guard) => (guard.start_time, guard.answer_time),
-            Err(_) => continue,
-        };
-        let status = if answer_time.is_some() {
-            "Talking"
-        } else {
-            "Ringing"
-        };
-        let started_at = start_time.format("%H:%M").to_string();
-        let duration_secs = if let Some(answered_at) = answer_time {
-            (Utc::now() - answered_at).num_seconds().max(0)
-        } else {
-            (Utc::now() - start_time).num_seconds().max(0)
-        };
-        previews.push(ActiveCallPreview {
-            caller: call.session_id.clone(),
-            callee: format!("{:?}", call.call_type),
-            status: status.to_string(),
-            started_at,
-            duration: format_duration(duration_secs),
-        });
+    if let Some(server) = state.sip_server() {
+        let registry_entries = server.active_call_registry.list_recent(limit);
+        for entry in registry_entries {
+            let duration_secs = if let Some(answered_at) = entry.answered_at {
+                (Utc::now() - answered_at).num_seconds().max(0)
+            } else {
+                (Utc::now() - entry.started_at).num_seconds().max(0)
+            };
+            previews.push(ActiveCallPreview {
+                caller: entry
+                    .caller
+                    .clone()
+                    .unwrap_or_else(|| entry.session_id.clone()),
+                callee: entry
+                    .callee
+                    .clone()
+                    .unwrap_or_else(|| entry.direction.clone()),
+                status: entry.status_label().to_string(),
+                started_at: entry.started_at.format("%H:%M").to_string(),
+                duration: format_duration(duration_secs),
+                started_at_ts: entry.started_at,
+            });
+        }
     }
 
+    previews.sort_by(|a, b| b.started_at_ts.cmp(&a.started_at_ts));
+    if previews.len() > limit {
+        previews.truncate(limit);
+    }
     previews
 }
 

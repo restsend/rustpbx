@@ -6,6 +6,7 @@ use super::common::{
 };
 use crate::call::{SipUser, TransactionCookie};
 use crate::config::{ProxyConfig, RtpConfig};
+use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::auth::AuthModule;
 use crate::proxy::data::ProxyDataContext;
 use crate::proxy::locator::{Locator, MemoryLocator};
@@ -461,6 +462,7 @@ async fn test_guest_call_allowed_extension() {
         ignore_out_of_dialog_request: true,
         locator_events: None,
         sip_flow: None,
+        active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
     });
 
     let module = AuthModule::new(server_inner);

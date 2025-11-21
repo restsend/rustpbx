@@ -1,7 +1,7 @@
 use crate::{
     call::{
-        CallForwardingConfig, CallForwardingMode, DialStrategy, Dialplan, DialplanFlow,
-        DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
+        CallForwardingConfig, CallForwardingMode, DialDirection, DialStrategy, Dialplan,
+        DialplanFlow, DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
         QueueHoldConfig, QueuePlan, TransactionCookie, TransferEndpoint,
         ivr::{
             InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
@@ -23,11 +23,17 @@ use crate::{
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
     },
     net_tool::is_private_ip,
-    proxy::server::SipServerRef,
+    proxy::{
+        active_call_registry::{
+            ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
+            normalize_direction,
+        },
+        server::SipServerRef,
+    },
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{FutureExt, future::BoxFuture};
 use rsip::{Param, StatusCode, Uri, headers::UntypedHeader, prelude::HeadersExt};
 use rsipstack::{
@@ -142,6 +148,8 @@ impl ProxyCallBuilder {
 }
 
 struct CallSession {
+    session_id: String,
+    started_at: DateTime<Utc>,
     server_dialog: ServerInviteDialog,
     callee_dialogs: HashSet<DialogId>,
     last_error: Option<(StatusCode, Option<String>)>,
@@ -169,6 +177,7 @@ struct CallSession {
     queue_hold_audio_file: Option<String>,
     queue_hold_loop_cancel: Option<CancellationToken>,
     queue_hold_loop_handle: Option<JoinHandle<()>>,
+    active_registry: Option<Arc<ActiveProxyCallRegistry>>,
 }
 
 #[derive(Debug)]
@@ -214,9 +223,11 @@ impl CallSession {
         event_sender: EventSender,
         media_config: MediaConfig,
         recorder_option: Option<RecorderOption>,
+        active_registry: Option<Arc<ActiveProxyCallRegistry>>,
     ) -> Self {
+        let started_at = Utc::now();
         let mut builder = MediaStreamBuilder::new(event_sender.clone())
-            .with_id(session_id)
+            .with_id(session_id.clone())
             .with_cancel_token(cancel_token);
         if let Some(option) = recorder_option {
             builder = builder.with_recorder_config(option);
@@ -234,6 +245,8 @@ impl CallSession {
             .and_then(|header| header.uri().ok())
             .map(|uri| uri.to_string());
         Self {
+            session_id,
+            started_at,
             server_dialog,
             callee_dialogs: HashSet::new(),
             last_error: None,
@@ -261,6 +274,7 @@ impl CallSession {
             queue_hold_audio_file: None,
             queue_hold_loop_cancel: None,
             queue_hold_loop_handle: None,
+            active_registry,
         }
     }
 
@@ -284,11 +298,60 @@ impl CallSession {
             .collect()
     }
 
+    fn register_active_call(&mut self, direction: &DialDirection) {
+        if let Some(registry) = self.active_registry.as_ref() {
+            let entry = ActiveProxyCallEntry {
+                session_id: self.session_id.clone(),
+                caller: self.routed_caller.clone().or(self.original_caller.clone()),
+                callee: self.routed_callee.clone().or(self.original_callee.clone()),
+                direction: normalize_direction(direction),
+                started_at: self.started_at,
+                answered_at: None,
+                status: ActiveProxyCallStatus::Ringing,
+            };
+            registry.upsert(entry);
+        }
+    }
+
+    fn refresh_active_call_parties(&self) {
+        if let Some(registry) = self.active_registry.as_ref() {
+            let caller = self.routed_caller.clone().or(self.original_caller.clone());
+            let callee = self.routed_callee.clone().or(self.original_callee.clone());
+            registry.update(&self.session_id, |entry| {
+                if caller.is_some() {
+                    entry.caller = caller.clone();
+                }
+                if callee.is_some() {
+                    entry.callee = callee.clone();
+                }
+            });
+        }
+    }
+
+    fn mark_active_call_answered(&self) {
+        if let Some(registry) = self.active_registry.as_ref() {
+            let resolved_callee = self
+                .connected_callee
+                .clone()
+                .or(self.routed_callee.clone())
+                .or(self.original_callee.clone());
+            let answered_at = Utc::now();
+            registry.update(&self.session_id, |entry| {
+                entry.status = ActiveProxyCallStatus::Talking;
+                entry.answered_at = Some(answered_at);
+                if resolved_callee.is_some() {
+                    entry.callee = resolved_callee.clone();
+                }
+            });
+        }
+    }
+
     fn note_invite_details(&mut self, invite: &InviteOption) {
         self.routed_caller = Some(invite.caller.to_string());
         self.routed_callee = Some(invite.callee.to_string());
         self.routed_contact = Some(invite.contact.to_string());
         self.routed_destination = invite.destination.as_ref().map(|addr| addr.to_string());
+        self.refresh_active_call_parties();
     }
 
     fn is_webrtc_sdp(sdp: &str) -> bool {
@@ -592,6 +655,7 @@ impl CallSession {
         {
             return Err(anyhow!("Failed to send 200 OK: {}", e));
         }
+        self.mark_active_call_answered();
         Ok(())
     }
 
@@ -651,9 +715,11 @@ impl CallSession {
         let mut event_rx = self.event_sender.subscribe();
         let media_stream = self.media_stream.clone();
         let track_id = Self::QUEUE_HOLD_TRACK_ID.to_string();
+        let stream_token = media_stream.cancel_token.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    _ = stream_token.cancelled() => break,
                     _ = cancel.cancelled() => break,
                     event = event_rx.recv() => {
                         match event {
@@ -687,6 +753,14 @@ impl CallSession {
         media_stream
             .update_track(Box::new(track), Some(Self::QUEUE_HOLD_PLAY_ID.to_string()))
             .await;
+    }
+}
+
+impl Drop for CallSession {
+    fn drop(&mut self) {
+        if let Some(registry) = self.active_registry.as_ref() {
+            registry.remove(&self.session_id);
+        }
     }
 }
 
@@ -892,7 +966,9 @@ impl ProxyCall {
             self.event_sender.clone(),
             self.dialplan.media.clone(),
             recorder_option,
+            Some(self.server.active_call_registry.clone()),
         );
+        session.register_active_call(&self.dialplan.direction);
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
             session.callee_offer = session.create_callee_track(all_webrtc_target).await.ok();
@@ -1903,10 +1979,27 @@ impl ProxyCall {
                 reason,
             } => {
                 session.set_error(status_code.clone(), reason.clone(), None);
-                session
+                if !session.is_answered() {
+                    if let Err(err) = session.accept_call(None, None).await {
+                        warn!(
+                            session_id = %self.session_id,
+                            error = %err,
+                            "failed to accept call before playing failure prompt"
+                        );
+                        return Err(err);
+                    }
+                }
+                if let Err(err) = session
                     .play_ringtone(audio_file, Some(self.event_sender.subscribe()))
                     .await
-                    .ok();
+                {
+                    warn!(
+                        session_id = %self.session_id,
+                        error = %err,
+                        "failed to play failure prompt"
+                    );
+                    return Err(err);
+                }
             }
             FailureAction::Transfer(destination) => {
                 warn!(

@@ -313,15 +313,15 @@
                                 </div>
                                 <div x-show="forwardingTargetType === 'queue'" x-cloak class="space-y-3">
                                     <label class="flex flex-col gap-2">
-                                        Queue reference
+                                        Queue file path
                                         <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
                                             @input="syncForwardingDestination()"
                                             :disabled="form.call_forwarding_mode === 'none'"
                                             :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
                                             class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            placeholder="support">
+                                            placeholder="3-support.generated.toml">
                                         <span class="text-xs font-normal text-slate-400">Saved as<br><code
-                                                class="font-mono text-[11px]">queue:reference</code>.</span>
+                                                class="font-mono text-[11px]">queue:&lt;file&gt;</code>.</span>
                                     </label>
                                     <template x-if="queueTargets.length">
                                         <label class="flex flex-col gap-1 text-xs font-medium text-slate-600">
