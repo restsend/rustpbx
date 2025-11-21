@@ -175,7 +175,7 @@
                                 <td class="px-4 py-3">
                                     <div class="text-sm font-semibold text-slate-800" x-text="holdSummary(queue)"></div>
                                     <div class="text-xs text-slate-500"
-                                        x-text="queue.spec?.accept_immediately ? 'Agent picks immediately' : 'Play hold audio until agent joins'">
+                                        x-text="queue.spec?.acceptImmediately ? 'Agent picks immediately' : 'Play hold audio until agent joins'">
                                     </div>
                                 </td>
                                 <td class="px-4 py-3">
@@ -418,7 +418,7 @@
             },
             holdSummary(queue) {
                 const spec = queue?.spec || {};
-                if (spec.accept_immediately) {
+                if (specI) {
                     return 'Answer immediately';
                 }
                 const audio = spec?.hold?.audio_file;

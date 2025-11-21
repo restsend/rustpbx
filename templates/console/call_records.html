@@ -471,10 +471,7 @@
                                         class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                         :class="statusClasses(record.status)">
                                         <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
-                                        <span x-text="statusLabel(record.status)"></span>
-                                        <template x-if="record.status === 'failed' && record.status_code">
-                                            <span class="font-mono text-xs" x-text="`· ${record.status_code}`"></span>
-                                        </template>
+                                        <span class="font-mono text-xs" x-text="statusCodeText(record)"></span>
                                     </span>
                                 </td>
                                 <td class="px-4 py-2">
@@ -1572,6 +1569,12 @@
                     default:
                         return value || 'Unknown';
                 }
+            },
+            statusCodeText(record) {
+                if (record && record.status_code) {
+                    return String(record.status_code);
+                }
+                return this.statusLabel(record && record.status ? record.status : '');
             },
             directionLabel(value) {
                 switch ((value || '').toLowerCase()) {
