@@ -4,7 +4,6 @@ use sea_orm_migration::schema::{boolean, json_null, string, text_null, timestamp
 use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_queues")]
@@ -47,12 +46,7 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Name).char_len(160))
                     .col(text_null(Column::Description))
                     .col(json_null(Column::Metadata))
-                    .col(
-                        ColumnDef::new(Column::Spec)
-                            .json()
-                            .not_null()
-                            .default(json!({})),
-                    )
+                    .col(ColumnDef::new(Column::Spec).json().not_null())
                     .col(boolean(Column::IsActive).default(true))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
