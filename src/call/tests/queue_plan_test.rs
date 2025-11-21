@@ -1,6 +1,6 @@
 use super::super::{
-    DialDirection, Dialplan, DialplanFlow, DialplanIvrConfig, FailureAction, QueueFallbackAction,
-    QueueHoldConfig, QueuePlan, DEFAULT_QUEUE_FAILURE_AUDIO, DEFAULT_QUEUE_HOLD_AUDIO,
+    DEFAULT_QUEUE_FAILURE_AUDIO, DEFAULT_QUEUE_HOLD_AUDIO, DialDirection, Dialplan, DialplanFlow,
+    DialplanIvrConfig, FailureAction, QueueFallbackAction, QueueHoldConfig, QueuePlan,
 };
 use rsip::{Headers, Method, Request, Version};
 
@@ -81,7 +81,9 @@ fn queue_wraps_terminal_flow() {
 fn queue_plan_default_uses_bundled_prompts() {
     let plan = QueuePlan::default();
 
-    let hold = plan.hold.expect("default queue plan should provide hold audio");
+    let hold = plan
+        .hold
+        .expect("default queue plan should provide hold audio");
     assert_eq!(hold.audio_file.as_deref(), Some(DEFAULT_QUEUE_HOLD_AUDIO));
 
     match plan

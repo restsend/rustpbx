@@ -472,6 +472,9 @@
                                         :class="statusClasses(record.status)">
                                         <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
                                         <span x-text="statusLabel(record.status)"></span>
+                                        <template x-if="record.status === 'failed' && record.status_code">
+                                            <span class="font-mono text-xs" x-text="`· ${record.status_code}`"></span>
+                                        </template>
                                     </span>
                                 </td>
                                 <td class="px-4 py-2">

@@ -10,9 +10,10 @@ use crate::{
         sip::{DialogStateReceiverGuard, ServerDialogGuard},
     },
     callrecord::{
-        CallRecord, CallRecordHangupReason, CallRecordMedia, CallRecordPersistArgs,
-        CallRecordSender, apply_record_file_extras, extract_sip_username, extras_map_to_metadata,
-        extras_map_to_option, persist_and_dispatch_record, sipflow::SipMessageItem,
+        CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordMedia,
+        CallRecordPersistArgs, CallRecordSender, apply_record_file_extras, extract_sip_username,
+        extras_map_to_metadata, extras_map_to_option, persist_and_dispatch_record,
+        sipflow::SipMessageItem,
     },
     config::{MediaProxyMode, RouteResult},
     event::{EventReceiver, EventSender, SessionEvent, create_event_sender},
@@ -80,6 +81,23 @@ pub struct ProxyCallBuilder {
     call_record_sender: Option<CallRecordSender>,
 }
 
+#[derive(Clone, Debug)]
+struct SessionHangupMessage {
+    code: u16,
+    reason: Option<String>,
+    target: Option<String>,
+}
+
+impl From<&SessionHangupMessage> for CallRecordHangupMessage {
+    fn from(message: &SessionHangupMessage) -> Self {
+        Self {
+            code: message.code,
+            reason: message.reason.clone(),
+            target: message.target.clone(),
+        }
+    }
+}
+
 impl ProxyCallBuilder {
     pub fn new(cookie: TransactionCookie, dialplan: Dialplan) -> Self {
         Self {
@@ -134,6 +152,7 @@ struct CallSession {
     callee_offer: Option<String>,
     answer: Option<String>,
     hangup_reason: Option<CallRecordHangupReason>,
+    hangup_messages: Vec<SessionHangupMessage>,
     callee_hangup_reason: Option<TerminatedReason>,
     early_media_sent: bool,
     media_stream: Arc<MediaStream>,
@@ -171,8 +190,10 @@ enum ParallelEvent {
         destination: Option<String>,
     },
     Failed {
+        idx: usize,
         code: StatusCode,
         reason: Option<String>,
+        target: Option<String>,
     },
     Terminated {
         idx: usize,
@@ -223,6 +244,7 @@ impl CallSession {
             callee_offer: None,
             answer: None,
             hangup_reason: None,
+            hangup_messages: Vec::new(),
             callee_hangup_reason: None,
             early_media_sent: false,
             media_stream: Arc::new(stream),
@@ -240,6 +262,26 @@ impl CallSession {
             queue_hold_loop_cancel: None,
             queue_hold_loop_handle: None,
         }
+    }
+
+    fn note_attempt_failure(
+        &mut self,
+        code: StatusCode,
+        reason: Option<String>,
+        target: Option<String>,
+    ) {
+        self.hangup_messages.push(SessionHangupMessage {
+            code: u16::from(code),
+            reason,
+            target,
+        });
+    }
+
+    fn recorded_hangup_messages(&self) -> Vec<CallRecordHangupMessage> {
+        self.hangup_messages
+            .iter()
+            .map(CallRecordHangupMessage::from)
+            .collect()
     }
 
     fn note_invite_details(&mut self, invite: &InviteOption) {
@@ -453,10 +495,11 @@ impl CallSession {
         self.last_error.is_some()
     }
 
-    fn set_error(&mut self, code: StatusCode, reason: Option<String>) {
+    fn set_error(&mut self, code: StatusCode, reason: Option<String>, target: Option<String>) {
+        debug!(code = %code, reason = ?reason, target = ?target, "Call session error set");
         self.last_error = Some((code.clone(), reason.clone()));
         self.hangup_reason = Some(CallRecordHangupReason::Failed);
-        debug!(code = %code, reason = ?reason, "Call session error set");
+        self.note_attempt_failure(code, reason, target);
     }
 
     fn is_answered(&self) -> bool {
@@ -855,7 +898,11 @@ impl ProxyCall {
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
             let result = tokio::select! {
                 _ = self.cancel_token.cancelled() => {
-                    session.set_error(StatusCode::RequestTerminated, Some("Cancelled by system".to_string()));
+                    session.set_error(
+                        StatusCode::RequestTerminated,
+                        Some("Cancelled by system".to_string()),
+                        None,
+                    );
                     session.hangup_reason = Some(CallRecordHangupReason::Canceled);
                     Err(anyhow!("Call cancelled"))
                 }
@@ -921,6 +968,7 @@ impl ProxyCall {
             session.set_error(
                 StatusCode::ServerInternalError,
                 Some("No targets in dialplan".to_string()),
+                None,
             );
             return Err(anyhow!("Dialplan has no targets"));
         }
@@ -1086,6 +1134,7 @@ impl ProxyCall {
                     session.set_error(
                         StatusCode::RequestTimeout,
                         Some("Call forwarding timeout elapsed".to_string()),
+                        None,
                     );
                     Err(anyhow!("forwarding timeout elapsed"))
                 }
@@ -1123,7 +1172,7 @@ impl ProxyCall {
             IvrExit::Transfer(action) => self.handle_ivr_transfer(session, action).await,
             IvrExit::Hangup(hangup) => {
                 let status = hangup.code.map(StatusCode::from).unwrap_or(StatusCode::OK);
-                session.set_error(status, hangup.reason.clone());
+                session.set_error(status, hangup.reason.clone(), None);
                 Ok(())
             }
             IvrExit::Queue(_) => Err(anyhow!("Queue actions from IVR are not supported yet")),
@@ -1154,7 +1203,7 @@ impl ProxyCall {
         self.try_single_target(session, &location)
             .await
             .map_err(|(code, reason)| {
-                session.set_error(code.clone(), reason.clone());
+                session.set_error(code.clone(), reason.clone(), None);
                 anyhow!(
                     "IVR transfer failed: {}",
                     reason.unwrap_or_else(|| code.to_string())
@@ -1372,6 +1421,11 @@ impl ProxyCall {
                         reason,
                         "Sequential target failed, trying next"
                     );
+                    session.note_attempt_failure(
+                        code.clone(),
+                        reason.clone(),
+                        Some(target.aor.to_string()),
+                    );
                     continue;
                 }
             }
@@ -1391,6 +1445,7 @@ impl ProxyCall {
             session.set_error(
                 StatusCode::ServerInternalError,
                 Some("No targets provided".to_string()),
+                None,
             );
             return Err(anyhow!("No targets provided for parallel dialing"));
         }
@@ -1411,6 +1466,7 @@ impl ProxyCall {
                 session.set_error(
                     StatusCode::ServerInternalError,
                     Some("No caller specified in dialplan".to_string()),
+                    None,
                 );
                 return Err(anyhow!("No caller specified in dialplan"));
             }
@@ -1506,14 +1562,18 @@ impl ProxyCall {
                                 } else {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
                                     let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                        idx,
                                         code: resp.status_code,
                                         reason,
+                                        target: Some(invite_callee.clone()),
                                     });
                                 }
                             } else {
                                 let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                    idx,
                                     code: StatusCode::RequestTerminated,
                                     reason: Some("Cancelled by callee".to_string()),
+                                    target: Some(invite_callee.clone()),
                                 });
                             }
                         }
@@ -1527,7 +1587,12 @@ impl ProxyCall {
                                     Some("Invite failed".to_string()),
                                 ),
                             };
-                            let _ = ev_tx_c.send(ParallelEvent::Failed { code, reason });
+                            let _ = ev_tx_c.send(ParallelEvent::Failed {
+                                idx,
+                                code,
+                                reason,
+                                target: Some(invite_callee.clone()),
+                            });
                         }
                     }
                 }
@@ -1591,9 +1656,14 @@ impl ProxyCall {
                         }
                     }
                 }
-                ParallelEvent::Failed { code, reason } => {
+                ParallelEvent::Failed {
+                    code,
+                    reason,
+                    target,
+                    ..
+                } => {
                     failures += 1;
-                    session.set_error(code, reason);
+                    session.set_error(code, reason, target);
                     if failures >= targets.len() && accepted_idx.is_none() {
                         return Err(anyhow!("All parallel targets failed"));
                     }
@@ -1816,7 +1886,7 @@ impl ProxyCall {
                     .cloned()
                     .unwrap_or(StatusCode::ServiceUnavailable);
                 if !session.has_error() {
-                    session.set_error(status_code, reason.clone());
+                    session.set_error(status_code, reason.clone(), None);
                 }
             }
             FailureAction::PlayThenHangup {
@@ -1824,7 +1894,7 @@ impl ProxyCall {
                 status_code,
                 reason,
             } => {
-                session.set_error(status_code.clone(), reason.clone());
+                session.set_error(status_code.clone(), reason.clone(), None);
                 session
                     .play_ringtone(audio_file, Some(self.event_sender.subscribe()))
                     .await
@@ -1839,6 +1909,7 @@ impl ProxyCall {
                 session.set_error(
                     StatusCode::ServiceUnavailable,
                     Some("Transfer not implemented".to_string()),
+                    None,
                 );
             }
         }
@@ -1933,6 +2004,22 @@ impl ProxyCall {
             }
         }
 
+        let mut hangup_messages = session.recorded_hangup_messages();
+        if hangup_messages.is_empty() {
+            if let Some((code, reason)) = session.last_error.as_ref() {
+                hangup_messages.push(CallRecordHangupMessage {
+                    code: u16::from(code.clone()),
+                    reason: reason.clone(),
+                    target: None,
+                });
+            }
+        }
+        if !hangup_messages.is_empty() {
+            if let Ok(value) = serde_json::to_value(&hangup_messages) {
+                extras_map.insert("hangup_messages".to_string(), value);
+            }
+        }
+
         let mut rewrite_payload = JsonMap::new();
         rewrite_payload.insert(
             "caller_original".to_string(),
@@ -1994,6 +2081,7 @@ impl ProxyCall {
             offer: session.caller_offer.clone(),
             answer: session.answer.clone(),
             hangup_reason: hangup_reason.clone(),
+            hangup_messages: hangup_messages.clone(),
             recorder: Vec::new(),
             extras: None,
             dump_event_file: None,

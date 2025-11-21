@@ -1585,6 +1585,7 @@ impl ActiveCallState {
             caller,
             callee,
             hangup_reason: self.hangup_reason.clone(),
+            hangup_messages: Vec::new(),
             status_code: self.last_status_code,
             answer: self.answer.clone(),
             offer,

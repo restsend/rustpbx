@@ -46,6 +46,13 @@
                         <span class="h-1.5 w-1.5 rounded-full" :class="statusDot(record.status)"></span>
                         <span x-text="statusLabel(record.status)"></span>
                     </span>
+                    <template x-if="record.status === 'failed' && record.status_code">
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-rose-50 px-3 py-1 text-[11px] font-semibold text-rose-600">
+                            <span class="font-mono" x-text="record.status_code"></span>
+                            <span x-text="statusReasonLabel(record.status_code)"></span>
+                        </span>
+                    </template>
                     <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
                         :class="directionClasses(record.direction)">
                         <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
@@ -63,6 +70,19 @@
                         <span x-text="record.sip_gateway || '—'"></span>
                     </span>
                 </div>
+                <template x-if="record.hangup_messages && record.hangup_messages.length">
+                    <div class="mt-2 space-y-1 text-xs text-slate-500">
+                        <template x-for="(msg, idx) in record.hangup_messages" :key="`hangup-${idx}-${msg.code}`">
+                            <div
+                                class="flex flex-wrap items-center gap-2 rounded border border-slate-100 bg-slate-50 px-2 py-1">
+                                <span class="font-semibold text-slate-700"
+                                    x-text="hangupTargetLabel(msg.target)"></span>
+                                <span class="font-mono text-rose-600" x-text="msg.code"></span>
+                                <span class="text-slate-600" x-text="msg.reason || statusReasonLabel(msg.code)"></span>
+                            </div>
+                        </template>
+                    </div>
+                </template>
             </div>
             <div class="flex flex-wrap items-center gap-3 text-sm">
                 <a :href="actions.download_metadata || '#'"
@@ -1703,6 +1723,66 @@
                     default:
                         return 'border border-slate-200 bg-slate-50 text-slate-700';
                 }
+            },
+            statusReasonLabel(code) {
+                const lookup = {
+                    0: 'Unspecified error',
+                    400: 'Bad request',
+                    401: 'Unauthorized',
+                    402: 'Payment required',
+                    403: 'Forbidden',
+                    404: 'Not found',
+                    405: 'Method not allowed',
+                    407: 'Proxy auth required',
+                    408: 'Request timeout',
+                    410: 'Gone',
+                    413: 'Request entity too large',
+                    415: 'Unsupported media',
+                    416: 'Unsupported URI scheme',
+                    420: 'Bad extension',
+                    423: 'Interval too brief',
+                    480: 'Temporarily unavailable',
+                    481: 'Call leg/transaction does not exist',
+                    482: 'Loop detected',
+                    483: 'Too many hops',
+                    484: 'Address incomplete',
+                    485: 'Ambiguous',
+                    486: 'Busy here',
+                    487: 'Request terminated',
+                    488: 'Not acceptable here',
+                    489: 'Bad event',
+                    491: 'Request pending',
+                    493: 'Undecipherable',
+                    500: 'Server internal error',
+                    501: 'Not implemented',
+                    502: 'Bad gateway',
+                    503: 'Service unavailable',
+                    504: 'Gateway timeout',
+                    505: 'SIP version not supported',
+                    580: 'Precondition failure',
+                    600: 'Busy everywhere',
+                    603: 'Declined',
+                    604: 'Does not exist anywhere',
+                    606: 'Not acceptable',
+                };
+                const normalized = Number(code) || 0;
+                return lookup[normalized] || 'SIP error';
+            },
+            hangupTargetLabel(target) {
+                if (!target) {
+                    return 'Endpoint';
+                }
+                const normalized = String(target).toLowerCase();
+                if (normalized === 'caller') {
+                    return 'Caller leg';
+                }
+                if (normalized === 'callee') {
+                    return 'Callee leg';
+                }
+                if (normalized === 'b2bua') {
+                    return 'B2BUA leg';
+                }
+                return target;
             },
             formatCurrency(amount, currency) {
                 if (amount === null || amount === undefined) {

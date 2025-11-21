@@ -135,8 +135,11 @@
                                 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Direction</label>
                             <select name="direction" x-model="route.direction"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="" x-bind:selected="!route.direction" :disabled="!!route.direction"
+                                    hidden>Select direction</option>
                                 <template x-for="direction in directionOptions" :key="direction">
-                                    <option :value="direction" x-text="direction"></option>
+                                    <option :value="direction" :selected="route.direction === direction"
+                                        x-text="direction"></option>
                                 </template>
                             </select>
                         </div>
@@ -761,6 +764,20 @@
                 { value: 'queue', label: 'Queue' },
                 { value: 'ivr', label: 'IVR' },
             ],
+            selectionOptionAliases: {
+                rr: 'rr',
+                roundrobin: 'rr',
+                'round_robin': 'rr',
+                'round-robin': 'rr',
+                weighted: 'weight',
+                weight: 'weight',
+                hash: 'hash',
+            },
+            selectionCanonicalMap: {
+                rr: 'roundrobin',
+                weight: 'weighted',
+                hash: 'hash',
+            },
             route: {
                 id: null,
                 name: '',
@@ -815,6 +832,9 @@
                 this.route = normalised.route;
                 this.matchHeaders = normalised.matchHeaders;
                 this.rewriteHeaders = normalised.rewriteHeaders;
+                if (this.mode === 'create' && !this.route.id) {
+                    this.route.direction = '';
+                }
             },
             // Regex helper methods
             openRegexPanel(field, headerIndex = null) {
@@ -931,12 +951,7 @@
                 };
                 const queueFile = this.trimString(raw?.action?.queue_file || '');
                 const ivrFile = this.trimString(raw?.action?.ivr_file || '');
-                const normalizeSelection = (value) => {
-                    if (typeof value === 'string' && value.trim().length) {
-                        return value.trim().toLowerCase();
-                    }
-                    return 'rr';
-                };
+                const normalizeSelection = (value) => this.normalizeSelectionOption(value);
                 const route = {
                     id: raw?.id ?? null,
                     name: raw?.name ?? '',
@@ -1073,11 +1088,7 @@
                     this.route.action.hash_key = null;
                     return;
                 }
-                if (typeof value === 'string' && value.trim().length) {
-                    this.route.action.select = value.trim().toLowerCase();
-                } else {
-                    this.route.action.select = 'rr';
-                }
+                this.route.action.select = this.normalizeSelectionOption(value);
                 if (this.route.action.select !== 'hash') {
                     this.route.action.hash_key = null;
                 }
@@ -1169,7 +1180,8 @@
                 return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
             },
             get routeSummary() {
-                return `${this.route.direction} · priority ${this.route.priority}`;
+                const direction = this.trimString(this.route.direction) || 'direction pending';
+                return `${direction} · priority ${this.route.priority}`;
             },
             queuesUrl() {
                 const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
@@ -1185,6 +1197,10 @@
                 const name = this.trimString(this.route.name);
                 if (!name.length) {
                     throw new Error('Route name is required.');
+                }
+                const direction = this.trimString(this.route.direction);
+                if (!direction.length) {
+                    throw new Error('Direction is required.');
                 }
                 const source = this.trimString(this.route.source_trunk);
                 if (source.length) {
@@ -1271,17 +1287,20 @@
                 const description = this.trimString(this.route.description);
                 const owner = this.trimString(this.route.owner);
 
+                const direction = this.trimString(this.route.direction);
+                const selectionValue = this.selectionPayloadValue(this.route.action.select);
+
                 return {
                     id: this.route.id,
                     name: this.trimString(this.route.name),
                     description: description || null,
                     owner: owner || null,
-                    direction: this.route.direction || 'outbound',
+                    direction: direction || null,
                     priority: Math.max(0, Math.round(Number(this.route.priority) || 0)),
                     disabled: Boolean(this.route.disabled),
                     match,
                     rewrite,
-                    action: actionPayload,
+                    action: Object.assign(actionPayload, { select: selectionValue }),
                     source_trunk: this.trimString(this.route.source_trunk) || null,
                     target_trunks: targetTrunks,
                 };
@@ -1323,6 +1342,14 @@
                 } finally {
                     this.saving = false;
                 }
+            },
+            normalizeSelectionOption(value) {
+                const key = this.trimString(value).toLowerCase();
+                return this.selectionOptionAliases[key] || 'rr';
+            },
+            selectionPayloadValue(value) {
+                const option = this.normalizeSelectionOption(value);
+                return this.selectionCanonicalMap[option] || 'roundrobin';
             },
         }));
     });
