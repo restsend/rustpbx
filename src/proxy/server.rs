@@ -13,6 +13,7 @@ use crate::{
     config::{ProxyConfig, RtpConfig},
     proxy::{
         FnCreateRouteInvite,
+        active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector, ProxyCallInspector},
         locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
@@ -67,6 +68,7 @@ pub struct SipServerInner {
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub sip_flow: Option<SipFlow>,
+    pub active_call_registry: Arc<ActiveProxyCallRegistry>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -408,6 +410,8 @@ impl SipServerBuilder {
             )
         };
 
+        let active_call_registry = Arc::new(ActiveProxyCallRegistry::new());
+
         let inner = Arc::new(SipServerInner {
             rtp_config,
             proxy_config: self.config.clone(),
@@ -427,6 +431,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             sip_flow: Some(sip_flow),
+            active_call_registry,
         });
 
         let mut allow_methods = Vec::new();

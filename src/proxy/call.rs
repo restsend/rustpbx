@@ -67,14 +67,14 @@ fn q850_cause_from_status(code: &rsip::StatusCode) -> u16 {
         400 | 401 | 402 | 403 | 405 | 406 | 407 | 421 | 603 => 21, // call rejected / not allowed
         404 | 484 | 604 => 1,                                      // unallocated number
         410 => 22,                                                 // number changed
-        413 | 414 | 416 | 420 => 127,                              // interworking / feature not supported
-        480 | 408 => 18,                                           // no user responding / timeout
-        486 | 600 => 17,                                           // user busy
-        487 => 31,                                                 // request terminated / normal unspecified
-        488 | 606 => 79,                                           // service or option not available
-        502 | 503 => 38,                                           // network out of order
-        500 | 580 => 41,                                           // temporary failure
-        504 => 34,                                                 // no circuit / channel available
+        413 | 414 | 416 | 420 => 127, // interworking / feature not supported
+        480 | 408 => 18,              // no user responding / timeout
+        486 | 600 => 17,              // user busy
+        487 => 31,                    // request terminated / normal unspecified
+        488 | 606 => 79,              // service or option not available
+        502 | 503 => 38,              // network out of order
+        500 | 580 => 41,              // temporary failure
+        504 => 34,                    // no circuit / channel available
         500..=599 => 41,
         _ => 16,
     }
@@ -768,8 +768,8 @@ impl CallModule {
                     vec![rsip::Header::Other("Reason".into(), reason_value)],
                     None,
                 )
-                    .await
-                    .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
+                .await
+                .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
                 return Err(e);
             }
         };
@@ -794,8 +794,8 @@ impl CallModule {
                         vec![rsip::Header::Other("Reason".into(), reason_value)],
                         None,
                     )
-                        .await
-                        .map_err(|e| anyhow!("failed to proxy call: {}", e))?;
+                    .await
+                    .map_err(|e| anyhow!("failed to proxy call: {}", e))?;
                     return Err(anyhow::anyhow!("failed toproxy call"));
                 }
             }

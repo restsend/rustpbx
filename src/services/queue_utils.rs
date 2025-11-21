@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fs, path::Path};
 use tracing::{info, warn};
 
-use crate::{config::ProxyConfig, models::queue, proxy::routing::RouteQueueConfig};
+use crate::{models::queue, proxy::routing::RouteQueueConfig};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +33,7 @@ impl QueueExportEntry {
     pub fn file_name(&self) -> String {
         let prefix = self
             .id
-            .map(|id| format!("{:04}", id))
+            .map(|id| id.to_string())
             .unwrap_or_else(|| "local".to_string());
         let mut slug = slugify_queue_name(&self.name);
         if slug.is_empty() {
@@ -218,52 +218,4 @@ pub fn load_queues_from_files(
         }
     }
     Ok((queues, files))
-}
-
-pub fn load_queues_from_dir(dir: &Path) -> Result<HashMap<String, RouteQueueConfig>> {
-    let mut queues = HashMap::new();
-    if !dir.exists() {
-        return Ok(queues);
-    }
-
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read queue directory {}", dir.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to walk queue directory {}", dir.display()))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        if extension != "toml" {
-            continue;
-        }
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read queue file {}", path.display()))?;
-        let doc: QueueFileDocument = toml::from_str(&contents)
-            .with_context(|| format!("failed to parse queue file {}", path.display()))?;
-        let Some(key) = canonical_queue_key(&doc.name) else {
-            warn!(file = %path.display(), "queue file missing valid name field");
-            continue;
-        };
-        queues.insert(key, doc.queue.clone());
-    }
-
-    Ok(queues)
-}
-
-pub fn collect_queue_configs(config: &ProxyConfig) -> Result<HashMap<String, RouteQueueConfig>> {
-    let mut queues: HashMap<String, RouteQueueConfig> = HashMap::new();
-    for (name, queue) in &config.queues {
-        if let Some(key) = canonical_queue_key(name) {
-            queues.insert(key, queue.clone());
-        }
-    }
-    let dir = config.generated_queue_dir();
-    let dir_queues = load_queues_from_dir(&dir)?;
-    for (key, queue) in dir_queues {
-        queues.insert(key, queue);
-    }
-    Ok(queues)
 }

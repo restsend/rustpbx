@@ -1,5 +1,6 @@
 use crate::call::SipUser;
 use crate::config::{ProxyConfig, RtpConfig};
+use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{
@@ -72,6 +73,7 @@ pub async fn create_test_server_with_config(
         ignore_out_of_dialog_request: true,
         locator_events: None,
         sip_flow: None,
+        active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
     });
 
     // Add test users

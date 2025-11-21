@@ -631,7 +631,7 @@
                                     file path</label>
                                 <input type="text" x-model="route.action.queue_file" maxlength="200"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="0001-support.toml">
+                                    placeholder="3-support.generated.toml">
                                 <p class="text-[11px] text-slate-500">Relative paths resolve from
                                     <code class="font-mono text-[11px]">config/queue</code> by default.
                                 </p>
@@ -1129,10 +1129,14 @@
                     .filter((item) => item.name.length);
             },
             queueSuggestion(option) {
+                const provided = this.trimString(option?.file_name || option?.reference || '');
+                if (provided.length) {
+                    return provided;
+                }
                 const id = Number(option?.id);
-                const prefix = Number.isFinite(id) ? String(id).padStart(4, '0') : 'queue';
+                const prefix = Number.isFinite(id) ? String(id) : 'queue';
                 const slug = this.slugify(option?.name || '') || 'queue';
-                return `${prefix}-${slug}.toml`;
+                return `${prefix}-${slug}.generated.toml`;
             },
             applyQueueSuggestion(option) {
                 this.route.action.queue_file = this.queueSuggestion(option);

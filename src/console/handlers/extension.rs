@@ -12,6 +12,7 @@ use crate::models::{
     queue::{Column as QueueColumn, Entity as QueueEntity},
 };
 use crate::proxy::{routing::RouteIvrConfig, server::SipServerRef};
+use crate::services::queue_utils;
 use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
@@ -322,11 +323,23 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
     };
     catalog.queues = queues
         .into_iter()
-        .map(|queue| ForwardingQueue {
-            id: queue.id,
-            reference: queue.name.clone(),
-            name: queue.name,
-            description: queue.description,
+        .filter_map(|queue| match queue_utils::convert_queue_model(queue) {
+            Ok(entry) => {
+                let Some(id) = entry.id else {
+                    warn!("queue entry missing id when building forwarding catalog");
+                    return None;
+                };
+                Some(ForwardingQueue {
+                    id,
+                    reference: entry.file_name(),
+                    name: entry.name,
+                    description: entry.description,
+                })
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to convert queue when building forwarding catalog");
+                None
+            }
         })
         .collect();
     catalog.ivrs = load_forwarding_ivrs(state).await;

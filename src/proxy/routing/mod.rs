@@ -440,9 +440,7 @@ pub enum ActionType {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct RouteQueueConfig {
-    #[serde(default)]
     pub accept_immediately: bool,
     #[serde(default)]
     pub hold: Option<RouteQueueHoldConfig>,
@@ -460,11 +458,9 @@ pub struct RouteQueueHoldConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct RouteQueueStrategyConfig {
     #[serde(default = "QueueDialMode::default_mode")]
     pub mode: QueueDialMode,
-    #[serde(default)]
     pub wait_timeout_secs: Option<u16>,
     #[serde(default)]
     pub targets: Vec<RouteQueueTargetConfig>,
@@ -503,7 +499,6 @@ impl RouteQueueHoldConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct RouteQueueFallbackConfig {
     pub redirect: Option<String>,
     pub failure_code: Option<u16>,
@@ -513,12 +508,10 @@ pub struct RouteQueueFallbackConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct RouteIvrConfig {
     pub plan_id: Option<String>,
     #[serde(default)]
     pub variables: HashMap<String, String>,
-    #[serde(default)]
     pub availability_override: bool,
     #[serde(default)]
     pub plan: Option<crate::call::ivr::IvrPlan>,
