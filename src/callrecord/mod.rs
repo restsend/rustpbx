@@ -111,6 +111,9 @@ pub struct CallRecord {
     pub hangup_reason: Option<CallRecordHangupReason>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
+    pub hangup_messages: Vec<CallRecordHangupMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub recorder: Vec<CallRecordMedia>,
     pub extras: Option<HashMap<String, serde_json::Value>>,
     pub dump_event_file: Option<String>,
@@ -147,6 +150,16 @@ pub enum CallRecordHangupReason {
     Rejected,
     Failed,
     Other(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRecordHangupMessage {
+    pub code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 impl FromStr for CallRecordHangupReason {
@@ -1308,6 +1321,11 @@ fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<
         .map(|reason| reason.to_string())
     {
         map.insert("hangup_reason".to_string(), Value::String(reason));
+    }
+    if !record.hangup_messages.is_empty() {
+        if let Ok(value) = serde_json::to_value(&record.hangup_messages) {
+            map.insert("hangup_messages".to_string(), value);
+        }
     }
 
     if let Some(option) = &record.option {

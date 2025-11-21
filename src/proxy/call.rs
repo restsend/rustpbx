@@ -4,8 +4,8 @@ use crate::call::{
     RouteInvite, RoutingState, SipUser, TransactionCookie,
 };
 use crate::callrecord::{
-    CallRecord, CallRecordHangupReason, CallRecordPersistArgs, apply_record_file_extras,
-    extract_sip_username, extras_map_to_metadata, extras_map_to_option,
+    CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordPersistArgs,
+    apply_record_file_extras, extract_sip_username, extras_map_to_metadata, extras_map_to_option,
     persist_and_dispatch_record, sipflow::SipMessageItem,
 };
 use crate::config::{ProxyConfig, RouteResult};
@@ -60,6 +60,42 @@ fn dialog_call_id(dialog_id: &DialogId) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn q850_cause_from_status(code: &rsip::StatusCode) -> u16 {
+    match u16::from(code.clone()) {
+        400 | 401 | 402 | 403 | 405 | 406 | 407 | 421 | 603 => 21, // call rejected / not allowed
+        404 | 484 | 604 => 1,                                      // unallocated number
+        410 => 22,                                                 // number changed
+        413 | 414 | 416 | 420 => 127,                              // interworking / feature not supported
+        480 | 408 => 18,                                           // no user responding / timeout
+        486 | 600 => 17,                                           // user busy
+        487 => 31,                                                 // request terminated / normal unspecified
+        488 | 606 => 79,                                           // service or option not available
+        502 | 503 => 38,                                           // network out of order
+        500 | 580 => 41,                                           // temporary failure
+        504 => 34,                                                 // no circuit / channel available
+        500..=599 => 41,
+        _ => 16,
+    }
+}
+
+fn escape_reason_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn q850_reason_value(code: &rsip::StatusCode, detail: Option<&str>) -> String {
+    let fallback = format!("SIP {}", u16::from(code.clone()));
+    let text = detail
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or(fallback);
+    format!(
+        "Q.850;cause={};text=\"{}\"",
+        q850_cause_from_status(code),
+        escape_reason_text(&text)
+    )
 }
 
 #[async_trait]
@@ -721,12 +757,17 @@ impl CallModule {
             Ok(d) => d,
             Err((e, code)) => {
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
-                let reason_phrase = rsip::Header::Other("Reason".into(), e.to_string());
-                warn!(%code, key = %tx.key,"failed to build dialplan: {}", reason_phrase);
-                self.record_failed_call(tx, &cookie, code.clone())
+                let reason_text = e.to_string();
+                let reason_value = q850_reason_value(&code, Some(reason_text.as_str()));
+                warn!(%code, key = %tx.key, reason = %reason_value, "failed to build dialplan");
+                self.record_failed_call(tx, &cookie, code.clone(), Some(reason_text.clone()))
                     .await
                     .ok();
-                tx.reply_with(code, vec![reason_phrase], None)
+                tx.reply_with(
+                    code.clone(),
+                    vec![rsip::Header::Other("Reason".into(), reason_value)],
+                    None,
+                )
                     .await
                     .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
                 return Err(e);
@@ -744,11 +785,15 @@ impl CallModule {
                 Ok(call) => call,
                 Err((code, reason_phrase)) => {
                     warn!(%code, key = %tx.key,"failed to proxy call {}", reason_phrase);
-                    self.record_failed_call(tx, &cookie, code.clone())
+                    self.record_failed_call(tx, &cookie, code.clone(), Some(reason_phrase.clone()))
                         .await
                         .ok();
-                    let reason_phrase = rsip::Header::Other("Reason".into(), reason_phrase);
-                    tx.reply_with(code, vec![reason_phrase], None)
+                    let reason_value = q850_reason_value(&code, Some(reason_phrase.as_str()));
+                    tx.reply_with(
+                        code.clone(),
+                        vec![rsip::Header::Other("Reason".into(), reason_value)],
+                        None,
+                    )
                         .await
                         .map_err(|e| anyhow!("failed to proxy call: {}", e))?;
                     return Err(anyhow::anyhow!("failed toproxy call"));
@@ -792,6 +837,7 @@ impl CallModule {
         tx: &Transaction,
         cookie: &TransactionCookie,
         status_code: rsip::StatusCode,
+        reason_phrase: Option<String>,
     ) -> Result<()> {
         let dialog_id = DialogId::try_from(&tx.original)?;
         let now = Utc::now();
@@ -804,6 +850,16 @@ impl CallModule {
             "status_code".to_string(),
             Value::Number(JsonNumber::from(u16::from(status_code.clone()))),
         );
+
+        let mut hangup_messages: Vec<CallRecordHangupMessage> = Vec::new();
+        hangup_messages.push(CallRecordHangupMessage {
+            code: u16::from(status_code.clone()),
+            reason: reason_phrase.clone(),
+            target: None,
+        });
+        if let Ok(value) = serde_json::to_value(&hangup_messages) {
+            extras_map.insert("hangup_messages".to_string(), value);
+        }
 
         let mut sip_flows: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
         let leg_call_id = dialog_call_id(&dialog_id).unwrap_or_else(|| dialog_id.to_string());
@@ -830,6 +886,7 @@ impl CallModule {
             offer,
             answer: None,
             hangup_reason: Some(CallRecordHangupReason::BySystem),
+            hangup_messages,
             recorder: Vec::new(),
             extras: None,
             dump_event_file: None,
@@ -932,14 +989,13 @@ impl ProxyModule for CallModule {
             rsip::Method::Invite => {
                 if let Err(e) = self.handle_invite(token, tx, cookie).await {
                     if tx.last_response.is_none() {
+                        let code = rsip::StatusCode::ServerInternalError;
+                        let reason_text = e.to_string();
                         tx.reply_with(
-                            rsip::StatusCode::ServerInternalError,
+                            code.clone(),
                             vec![rsip::Header::Other(
                                 "Reason".into(),
-                                format!(
-                                    "SIP;cause=500;text=\"{}\"",
-                                    urlencoding::encode(e.to_string().as_str())
-                                ),
+                                q850_reason_value(&code, Some(reason_text.as_str())),
                             )],
                             None,
                         )

@@ -579,14 +579,15 @@ impl Default for QueuePlan {
         Self {
             accept_immediately: false,
             hold: Some(
-                QueueHoldConfig::default()
-                    .with_audio_file(DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
+                QueueHoldConfig::default().with_audio_file(DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
             ),
-            fallback: Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-                audio_file: DEFAULT_QUEUE_FAILURE_AUDIO.to_string(),
-                status_code: StatusCode::TemporarilyUnavailable,
-                reason: Some("All agents are currently unavailable".to_string()),
-            })),
+            fallback: Some(QueueFallbackAction::Failure(
+                FailureAction::PlayThenHangup {
+                    audio_file: DEFAULT_QUEUE_FAILURE_AUDIO.to_string(),
+                    status_code: StatusCode::TemporarilyUnavailable,
+                    reason: Some("All agents are currently unavailable".to_string()),
+                },
+            )),
             dial_strategy: None,
             ring_timeout: None,
         }

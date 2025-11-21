@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
 use std::{
     collections::{HashMap, HashSet},
+    convert::TryFrom,
     env,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -2309,6 +2310,9 @@ fn build_record_payload(
     let rewrite_contact = json_lookup_nested_str(&record.metadata, &["rewrite", "contact"]);
     let rewrite_destination = json_lookup_nested_str(&record.metadata, &["rewrite", "destination"]);
     let billing = build_billing_payload(record);
+    let status_code = json_lookup_u16(&record.metadata, "status_code");
+    let hangup_reason = json_lookup_str(&record.metadata, "hangup_reason");
+    let hangup_messages = extract_hangup_messages(&record.metadata);
 
     json!({
         "id": record.id,
@@ -2338,6 +2342,9 @@ fn build_record_payload(
         "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
         "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
         "billing": billing,
+        "status_code": status_code,
+        "hangup_reason": hangup_reason,
+        "hangup_messages": hangup_messages,
         "rewrite": {
             "caller": {
                 "original": rewrite_caller_original,
@@ -3419,6 +3426,73 @@ fn json_lookup_nested_str(source: &Option<Value>, path: &[&str]) -> Option<Strin
         current = current.get(*key)?;
     }
     current.as_str().map(|value| value.to_string())
+}
+
+fn json_lookup_u16(source: &Option<Value>, key: &str) -> Option<u16> {
+    let value = source.as_ref()?.get(key)?;
+    if let Some(number) = value.as_u64() {
+        return u16::try_from(number).ok();
+    }
+    if let Some(number) = value.as_i64() {
+        if number < 0 {
+            return None;
+        }
+        return u16::try_from(number as u64).ok();
+    }
+    value
+        .as_f64()
+        .and_then(|number| {
+            if !number.is_finite() {
+                return None;
+            }
+            if number < 0.0 || number > u16::MAX as f64 {
+                return None;
+            }
+            Some(number.round() as u16)
+        })
+}
+
+fn extract_hangup_messages(metadata: &Option<Value>) -> Vec<Value> {
+    let entries = metadata
+        .as_ref()
+        .and_then(|value| value.get("hangup_messages"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let code = entry
+                .get("code")
+                .and_then(|value| value.as_u64().or_else(|| value.as_i64().map(|v| v.max(0) as u64)))
+                .and_then(|value| u16::try_from(value).ok())?;
+
+            let reason = entry
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+
+            let target = entry
+                .get("target")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+
+            let mut object = JsonMap::new();
+            object.insert("code".to_string(), Value::from(code));
+            if let Some(reason_value) = reason {
+                object.insert("reason".to_string(), Value::String(reason_value));
+            }
+            if let Some(target_value) = target {
+                object.insert("target".to_string(), Value::String(target_value));
+            }
+            Some(Value::Object(object))
+        })
+        .collect()
 }
 
 async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
