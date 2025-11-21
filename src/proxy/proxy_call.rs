@@ -413,6 +413,11 @@ impl CallSession {
             return;
         }
 
+        if self.queue_hold_active && !answer.is_empty() {
+            debug!("Queue hold audio active, suppressing remote early-media ringback");
+            return;
+        }
+
         if self.ring_time.is_none() {
             self.ring_time = Some(Instant::now());
         }
