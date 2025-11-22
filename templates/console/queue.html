@@ -174,8 +174,11 @@
                                 </td>
                                 <td class="px-4 py-3">
                                     <div class="text-sm font-semibold text-slate-800" x-text="holdSummary(queue)"></div>
-                                    <div class="text-xs text-slate-500"
-                                        x-text="queue.spec?.accept_immediately ? 'Agent picks immediately' : 'Play hold audio until agent joins'">
+                                    <div class="text-xs text-slate-500" x-text="queue.spec?.accept_immediately
+                                            ? (queue.spec?.passthrough_ringback
+                                                ? 'Answer immediately · passthrough ringback'
+                                                : 'Answer immediately · keep hold audio')
+                                            : 'Play hold audio until agent joins'">
                                     </div>
                                 </td>
                                 <td class="px-4 py-3">
@@ -418,8 +421,10 @@
             },
             holdSummary(queue) {
                 const spec = queue?.spec || {};
-                if (specI) {
-                    return 'Answer immediately';
+                if (spec?.accept_immediately) {
+                    return spec?.passthrough_ringback
+                        ? 'Answer immediately · passthrough ringback'
+                        : 'Answer immediately · hold audio preferred';
                 }
                 const audio = spec?.hold?.audio_file;
                 if (audio) {

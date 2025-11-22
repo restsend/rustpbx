@@ -568,6 +568,7 @@ impl DialplanIvrConfig {
 #[derive(Debug, Clone)]
 pub struct QueuePlan {
     pub accept_immediately: bool,
+    pub passthrough_ringback: bool,
     pub hold: Option<QueueHoldConfig>,
     pub fallback: Option<QueueFallbackAction>,
     pub dial_strategy: Option<DialStrategy>,
@@ -578,6 +579,7 @@ impl Default for QueuePlan {
     fn default() -> Self {
         Self {
             accept_immediately: false,
+            passthrough_ringback: false,
             hold: Some(
                 QueueHoldConfig::default().with_audio_file(DEFAULT_QUEUE_HOLD_AUDIO.to_string()),
             ),
@@ -597,6 +599,10 @@ impl Default for QueuePlan {
 impl QueuePlan {
     pub fn dial_strategy(&self) -> Option<&DialStrategy> {
         self.dial_strategy.as_ref()
+    }
+
+    pub fn passthrough_ringback(&self) -> bool {
+        self.passthrough_ringback
     }
 }
 

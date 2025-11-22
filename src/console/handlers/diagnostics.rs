@@ -1602,6 +1602,7 @@ struct RouteQueueOutcome {
 #[derive(Serialize)]
 struct QueuePlanView {
     accept_immediately: bool,
+    passthrough_ringback: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     hold_audio: Option<String>,
     loop_playback: bool,
@@ -1628,6 +1629,7 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
         });
         Self {
             accept_immediately: plan.accept_immediately,
+            passthrough_ringback: plan.passthrough_ringback,
             hold_audio,
             loop_playback,
             fallback,
