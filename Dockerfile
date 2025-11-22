@@ -10,7 +10,9 @@ RUN --mount=type=cache,target=/build/.cargo/registry \
 
 FROM debian:bookworm
 LABEL maintainer="shenjindi@fourz.cn"
-RUN --mount=type=cache,target=/var/apt apt-get update && apt-get install -y ca-certificates tzdata libopus0
+RUN --mount=type=cache,target=/var/apt apt-get update \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get install -y ca-certificates tzdata libopus0
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
