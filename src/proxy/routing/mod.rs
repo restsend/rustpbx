@@ -443,6 +443,8 @@ pub enum ActionType {
 pub struct RouteQueueConfig {
     pub accept_immediately: bool,
     #[serde(default)]
+    pub passthrough_ringback: bool,
+    #[serde(default)]
     pub hold: Option<RouteQueueHoldConfig>,
     #[serde(default)]
     pub fallback: Option<RouteQueueFallbackConfig>,
@@ -521,6 +523,7 @@ impl RouteQueueConfig {
     pub fn to_queue_plan(&self) -> Result<crate::call::QueuePlan> {
         let mut plan = crate::call::QueuePlan::default();
         plan.accept_immediately = self.accept_immediately;
+        plan.passthrough_ringback = self.passthrough_ringback && self.accept_immediately;
         if let Some(hold) = &self.hold {
             let mut cfg = crate::call::QueueHoldConfig::default();
             if let Some(file) = &hold.audio_file {

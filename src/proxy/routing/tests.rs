@@ -396,6 +396,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
 
     let queue_cfg = RouteQueueConfig {
         accept_immediately: true,
+        passthrough_ringback: true,
         hold: Some(RouteQueueHoldConfig {
             audio_file: Some("moh/support.wav".to_string()),
             loop_playback: true,
@@ -456,6 +457,10 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
             assert!(
                 queue.accept_immediately,
                 "queue must honor accept_immediately flag"
+            );
+            assert!(
+                queue.passthrough_ringback,
+                "queue must honor passthrough_ringback flag"
             );
 
             let hold = queue.hold.expect("queue hold config missing");

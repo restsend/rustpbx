@@ -121,6 +121,18 @@
                             <span>Bridge caller to agent before hold audio</span>
                         </label>
                     </div>
+                    <div class="flex flex-col gap-2 text-sm font-medium text-slate-700"
+                        x-show="form.spec.accept_immediately" x-cloak>
+                        Remote ringback handling
+                        <label class="inline-flex items-start gap-2 text-sm font-medium text-slate-700">
+                            <input type="checkbox"
+                                class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="form.spec.passthrough_ringback">
+                            <span class="text-sm font-normal text-slate-600">Allow downstream color ring tones to
+                                replace hold audio while waiting for agents. Leave unchecked to keep playing queue
+                                hold music.</span>
+                        </label>
+                    </div>
                     <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                         Tags (comma separated)
                         <input type="text" x-model.trim="form.tags_input"
@@ -348,6 +360,7 @@
                 tags_input: '',
                 spec: {
                     accept_immediately: false,
+                    passthrough_ringback: false,
                     hold: {
                         audio_file: '',
                         loop_playback: true,
@@ -402,6 +415,7 @@
             normalizeSpec(raw) {
                 const spec = {
                     accept_immediately: Boolean(raw.accept_immediately),
+                    passthrough_ringback: Boolean(raw.passthrough_ringback),
                     hold: {
                         audio_file: raw?.hold?.audio_file || '',
                         loop_playback: raw?.hold?.loop_playback !== false,
@@ -473,6 +487,7 @@
             prepareSpec() {
                 const spec = {
                     accept_immediately: Boolean(this.form.spec.accept_immediately),
+                    passthrough_ringback: Boolean(this.form.spec.passthrough_ringback && this.form.spec.accept_immediately),
                 };
                 if (this.holdEnabled) {
                     const audio = (this.form.spec.hold?.audio_file || '').trim();

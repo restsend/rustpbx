@@ -35,6 +35,7 @@ fn dialplan_reports_queue_presence() {
 
     let queue = QueuePlan {
         accept_immediately: true,
+        passthrough_ringback: false,
         hold: Some(QueueHoldConfig::default().with_audio_file("moh.wav".to_string())),
         fallback: Some(QueueFallbackAction::Redirect {
             target: "sip:vm@rustpbx.com".try_into().unwrap(),
@@ -52,6 +53,7 @@ fn queue_wraps_terminal_flow() {
     let req = mock_request();
     let queue = QueuePlan {
         accept_immediately: false,
+        passthrough_ringback: false,
         hold: None,
         fallback: None,
         dial_strategy: None,
