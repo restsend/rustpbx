@@ -5,6 +5,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub mod bill_template;
+pub mod call_control;
 pub mod call_record;
 pub mod dashboard;
 pub mod diagnostics;
@@ -48,7 +49,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(queue::urls())
         .merge(routing::urls())
         .merge(call_record::urls())
-        .merge(diagnostics::urls());
+        .merge(diagnostics::urls())
+        .merge(call_control::urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

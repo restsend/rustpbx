@@ -14,6 +14,7 @@ impl ProxyCall {
             .cloned()
             .ok_or_else(|| anyhow!("queue '{}' has no dial targets", reference))?;
         let next_flow = DialplanFlow::Targets(strategy);
+        session.set_queue_name(Some(reference.to_string()));
         self.execute_queue_plan(session, &queue_plan, &next_flow, 0, false)
             .await
     }
@@ -22,16 +23,25 @@ impl ProxyCall {
         if reference.trim().is_empty() {
             return Err(anyhow!("queue reference cannot be empty"));
         }
+        let label = reference.trim().to_string();
         if let Some(config) = self
             .server
             .data_context
             .resolve_queue_config(reference)
             .await?
         {
-            return config.to_queue_plan();
+            let mut plan = config.to_queue_plan()?;
+            if plan.label.is_none() {
+                plan.label = Some(label.clone());
+            }
+            return Ok(plan);
         }
         if let Some(config) = self.server.data_context.load_queue_file(reference).await? {
-            return config.to_queue_plan();
+            let mut plan = config.to_queue_plan()?;
+            if plan.label.is_none() {
+                plan.label = Some(label);
+            }
+            return Ok(plan);
         }
         Err(anyhow!("queue reference '{}' not found", reference))
     }
@@ -51,6 +61,9 @@ impl ProxyCall {
                 "queue chain exceeded maximum depth"
             );
             return self.handle_failure(session).await;
+        }
+        if let Some(name) = plan.label.clone() {
+            session.set_queue_name(Some(name));
         }
         let previous_passthrough = session.queue_ringback_passthrough();
         let enable_passthrough = plan.accept_immediately && plan.passthrough_ringback();
@@ -105,6 +118,7 @@ impl ProxyCall {
         .await;
 
         session.set_queue_ringback_passthrough(previous_passthrough);
+        session.set_queue_name(None);
         result
     }
 
@@ -154,7 +168,10 @@ impl ProxyCall {
                         }
                     };
                     match config.to_queue_plan() {
-                        Ok(plan) => {
+                        Ok(mut plan) => {
+                            if plan.label.is_none() {
+                                plan.label = Some(name.clone());
+                            }
                             self.execute_queue_plan(
                                 session,
                                 &plan,

@@ -573,6 +573,7 @@ pub struct QueuePlan {
     pub fallback: Option<QueueFallbackAction>,
     pub dial_strategy: Option<DialStrategy>,
     pub ring_timeout: Option<Duration>,
+    pub label: Option<String>,
 }
 
 impl Default for QueuePlan {
@@ -592,6 +593,7 @@ impl Default for QueuePlan {
             )),
             dial_strategy: None,
             ring_timeout: None,
+            label: None,
         }
     }
 }
@@ -603,6 +605,11 @@ impl QueuePlan {
 
     pub fn passthrough_ringback(&self) -> bool {
         self.passthrough_ringback
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
@@ -796,7 +803,7 @@ impl MediaConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum DialDirection {
     Outbound, // 1. Outbound call initiated by us, usually to a PSTN gateway or another relay server
     Inbound,  // 2. Inbound call received by us, usually from a PSTN gateway

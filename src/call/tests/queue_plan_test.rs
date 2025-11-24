@@ -42,6 +42,7 @@ fn dialplan_reports_queue_presence() {
         }),
         dial_strategy: None,
         ring_timeout: None,
+        label:None,
     };
 
     let plan = plan.with_queue(queue);
@@ -58,6 +59,7 @@ fn queue_wraps_terminal_flow() {
         fallback: None,
         dial_strategy: None,
         ring_timeout: None,
+        label: None,
     };
 
     let plan = Dialplan::new(
