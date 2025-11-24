@@ -317,7 +317,10 @@ async fn match_invite_impl(
                     .ok_or_else(|| {
                         anyhow!("queue file '{}' not found or unreadable", queue_path)
                     })?;
-                let queue_plan = queue_cfg.to_queue_plan()?;
+                let mut queue_plan = queue_cfg.to_queue_plan()?;
+                if queue_plan.label.is_none() {
+                    queue_plan.label = Some(queue_path.clone());
+                }
                 let needs_trunk = queue_plan.dial_strategy.is_none();
                 if needs_trunk {
                     let dest_config = rule.action.dest.as_ref().ok_or_else(|| {

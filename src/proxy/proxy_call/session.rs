@@ -1,6 +1,12 @@
+#[derive(Clone, Default)]
+struct IvrTrace {
+    reference: Option<String>,
+    plan_id: Option<String>,
+    exit: Option<String>,
+    detail: Option<String>,
+}
+
 struct CallSession {
-    session_id: String,
-    started_at: DateTime<Utc>,
     server_dialog: ServerInviteDialog,
     callee_dialogs: HashSet<DialogId>,
     last_error: Option<(StatusCode, Option<String>)>,
@@ -13,6 +19,7 @@ struct CallSession {
     hangup_reason: Option<CallRecordHangupReason>,
     hangup_messages: Vec<SessionHangupMessage>,
     callee_hangup_reason: Option<TerminatedReason>,
+    state: ProxyCallState,
     early_media_sent: bool,
     media_stream: Arc<MediaStream>,
     event_sender: EventSender,
@@ -29,7 +36,8 @@ struct CallSession {
     queue_hold_audio_file: Option<String>,
     queue_hold_loop_cancel: Option<CancellationToken>,
     queue_hold_loop_handle: Option<JoinHandle<()>>,
-    active_registry: Option<Arc<ActiveProxyCallRegistry>>,
+    last_queue_name: Option<String>,
+    ivr_trace: Option<IvrTrace>,
 }
 
 impl CallSession {
@@ -45,9 +53,8 @@ impl CallSession {
         event_sender: EventSender,
         media_config: MediaConfig,
         recorder_option: Option<RecorderOption>,
-        active_registry: Option<Arc<ActiveProxyCallRegistry>>,
+        state: ProxyCallState,
     ) -> Self {
-        let started_at = Utc::now();
         let mut builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
             .with_cancel_token(cancel_token);
@@ -67,8 +74,6 @@ impl CallSession {
             .and_then(|header| header.uri().ok())
             .map(|uri| uri.to_string());
         Self {
-            session_id,
-            started_at,
             server_dialog,
             callee_dialogs: HashSet::new(),
             last_error: None,
@@ -81,6 +86,7 @@ impl CallSession {
             hangup_reason: None,
             hangup_messages: Vec::new(),
             callee_hangup_reason: None,
+            state,
             early_media_sent: false,
             media_stream: Arc::new(stream),
             event_sender,
@@ -97,7 +103,8 @@ impl CallSession {
             queue_hold_audio_file: None,
             queue_hold_loop_cancel: None,
             queue_hold_loop_handle: None,
-            active_registry,
+            last_queue_name: None,
+            ivr_trace: None,
         }
     }
 
@@ -108,9 +115,15 @@ impl CallSession {
         target: Option<String>,
     ) {
         self.hangup_messages.push(SessionHangupMessage {
-            code: u16::from(code),
-            reason,
+            code: u16::from(code.clone()),
+            reason: reason.clone(),
+            target: target.clone(),
+        });
+        self.state.emit_custom_event(ProxyCallEvent::TargetFailed {
+            session_id: self.state.session_id(),
             target,
+            code: Some(u16::from(code)),
+            reason,
         });
     }
 
@@ -129,52 +142,57 @@ impl CallSession {
         self.queue_passthrough_ringback = enabled;
     }
 
-    fn register_active_call(&mut self, direction: &DialDirection) {
-        if let Some(registry) = self.active_registry.as_ref() {
-            let entry = ActiveProxyCallEntry {
-                session_id: self.session_id.clone(),
-                caller: self.routed_caller.clone().or(self.original_caller.clone()),
-                callee: self.routed_callee.clone().or(self.original_callee.clone()),
-                direction: normalize_direction(direction),
-                started_at: self.started_at,
-                answered_at: None,
-                status: ActiveProxyCallStatus::Ringing,
-            };
-            registry.upsert(entry);
-        }
+    fn register_active_call(&mut self, _direction: &DialDirection) {
+        self.state.register_active_call();
     }
 
-    fn refresh_active_call_parties(&self) {
-        if let Some(registry) = self.active_registry.as_ref() {
-            let caller = self.routed_caller.clone().or(self.original_caller.clone());
-            let callee = self.routed_callee.clone().or(self.original_callee.clone());
-            registry.update(&self.session_id, |entry| {
-                if caller.is_some() {
-                    entry.caller = caller.clone();
-                }
-                if callee.is_some() {
-                    entry.callee = callee.clone();
-                }
-            });
+    fn set_queue_name(&mut self, name: Option<String>) {
+        if let Some(ref queue) = name {
+            self.last_queue_name = Some(queue.clone());
         }
+        self.state.set_queue_name(name);
     }
 
-    fn mark_active_call_answered(&self) {
-        if let Some(registry) = self.active_registry.as_ref() {
-            let resolved_callee = self
-                .connected_callee
-                .clone()
-                .or(self.routed_callee.clone())
-                .or(self.original_callee.clone());
-            let answered_at = Utc::now();
-            registry.update(&self.session_id, |entry| {
-                entry.status = ActiveProxyCallStatus::Talking;
-                entry.answered_at = Some(answered_at);
-                if resolved_callee.is_some() {
-                    entry.callee = resolved_callee.clone();
-                }
-            });
-        }
+    fn last_queue_name(&self) -> Option<String> {
+        self.last_queue_name.clone()
+    }
+
+    fn note_ivr_reference(&mut self, reference: Option<String>, plan_id: Option<String>) {
+        let mut trace = self.ivr_trace.clone().unwrap_or_default();
+        trace.reference = reference;
+        trace.plan_id = plan_id;
+        self.ivr_trace = Some(trace);
+    }
+
+    fn note_ivr_exit(&mut self, exit: &IvrExit) {
+        let mut trace = self.ivr_trace.clone().unwrap_or_default();
+        let (exit_label, detail) = match exit {
+            IvrExit::Completed => ("completed".to_string(), None),
+            IvrExit::Transfer(action) => (
+                "transfer".to_string(),
+                Some(action.target.clone()),
+            ),
+            IvrExit::Queue(action) => (
+                "queue".to_string(),
+                Some(action.queue.clone()),
+            ),
+            IvrExit::Webhook(action) => (
+                "webhook".to_string(),
+                Some(action.url.clone()),
+            ),
+            IvrExit::Playback(_) => ("playback".to_string(), None),
+            IvrExit::Hangup(action) => (
+                "hangup".to_string(),
+                action.reason.clone(),
+            ),
+        };
+        trace.exit = Some(exit_label);
+        trace.detail = detail;
+        self.ivr_trace = Some(trace);
+    }
+
+    fn ivr_trace(&self) -> Option<IvrTrace> {
+        self.ivr_trace.clone()
     }
 
     fn note_invite_details(&mut self, invite: &InviteOption) {
@@ -183,6 +201,16 @@ impl CallSession {
         self.routed_contact = Some(invite.contact.to_string());
         self.routed_destination = invite.destination.as_ref().map(|addr| addr.to_string());
         self.refresh_active_call_parties();
+        let current_target = self
+            .routed_callee
+            .clone()
+            .or_else(|| self.original_callee.clone());
+        self.state.set_current_target(current_target);
+    }
+
+    fn refresh_active_call_parties(&self) {
+        self.state
+            .update_routed_parties(self.routed_caller.clone(), self.routed_callee.clone());
     }
 
     fn is_webrtc_sdp(sdp: &str) -> bool {
@@ -308,6 +336,8 @@ impl CallSession {
             return;
         }
 
+        self.state.transition_to_ringing(!answer.is_empty());
+
         if self.queue_hold_active && !answer.is_empty() {
             if self.queue_passthrough_ringback {
                 debug!("Stopping queue hold audio to passthrough remote ringback");
@@ -382,7 +412,7 @@ impl CallSession {
 
     async fn callee_terminated(&mut self, reason: TerminatedReason) {
         debug!(reason = ?reason, "Callee dialog terminated");
-        self.hangup_reason = Some(match reason {
+        let hangup_reason = match reason {
             TerminatedReason::UasBye | TerminatedReason::UacBye => CallRecordHangupReason::ByCallee,
             TerminatedReason::UacCancel => CallRecordHangupReason::Canceled,
             TerminatedReason::Timeout => CallRecordHangupReason::NoAnswer,
@@ -394,7 +424,9 @@ impl CallSession {
             | TerminatedReason::ProxyAuthRequired
             | TerminatedReason::UacOther(_)
             | TerminatedReason::UasOther(_) => CallRecordHangupReason::Failed,
-        });
+        };
+        self.hangup_reason = Some(hangup_reason.clone());
+        self.state.mark_hangup(hangup_reason);
         self.callee_hangup_reason = Some(reason);
     }
 
@@ -410,7 +442,8 @@ impl CallSession {
         debug!(code = %code, reason = ?reason, target = ?target, "Call session error set");
         self.last_error = Some((code.clone(), reason.clone()));
         self.hangup_reason = Some(CallRecordHangupReason::Failed);
-        self.note_attempt_failure(code, reason, target);
+        self.note_attempt_failure(code.clone(), reason.clone(), target);
+        self.state.note_failure(code, reason);
     }
 
     fn is_answered(&self) -> bool {
@@ -468,14 +501,14 @@ impl CallSession {
         // Ensure queue hold tones cease immediately once the call is answered.
         self.stop_queue_hold().await;
 
+        let first_answer = self.answer_time.is_none();
         if let Some(callee_addr) = callee {
             let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
             self.connected_callee = Some(resolved_callee);
         }
-        if self.answer_time.is_none() {
+        if first_answer {
             self.answer_time = Some(Instant::now());
         }
-
         info!(
             server_dialog_id = %self.server_dialog.id(),
             use_media_proxy = self.use_media_proxy,
@@ -509,7 +542,21 @@ impl CallSession {
             return Err(anyhow!("Failed to send 200 OK: {}", e));
         }
         self.mark_active_call_answered();
+        if first_answer {
+            let callee = self
+                .connected_callee
+                .clone()
+                .or_else(|| self.routed_callee.clone());
+            self.state.emit_custom_event(ProxyCallEvent::TargetAnswered {
+                session_id: self.state.session_id(),
+                callee,
+            });
+        }
         Ok(())
+    }
+
+    fn mark_active_call_answered(&self) {
+        self.state.transition_to_answered();
     }
 
     async fn start_queue_hold(&mut self, hold: QueueHoldConfig) -> Result<()> {
@@ -611,8 +658,6 @@ impl CallSession {
 
 impl Drop for CallSession {
     fn drop(&mut self) {
-        if let Some(registry) = self.active_registry.as_ref() {
-            registry.remove(&self.session_id);
-        }
+        self.state.unregister();
     }
 }

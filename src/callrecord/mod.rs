@@ -134,7 +134,7 @@ pub struct CallRecordMedia {
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum CallRecordHangupReason {
     ByCaller,

@@ -307,20 +307,40 @@ impl ProxyCall {
         let config = self
             .server
             .data_context
-            .load_ivr_file(reference)
+            .resolve_ivr_config(reference)
             .await?
             .ok_or_else(|| anyhow!("ivr reference '{}' not found", reference))?;
         let dialplan_config = config.to_dialplan_config()?;
-        self.run_ivr(session, &dialplan_config).await
+        self.run_ivr(session, &dialplan_config, Some(reference)).await
     }
 
-    async fn run_ivr(&self, session: &mut CallSession, config: &DialplanIvrConfig) -> Result<()> {
+    async fn run_ivr(
+        &self,
+        session: &mut CallSession,
+        config: &DialplanIvrConfig,
+        source_reference: Option<&str>,
+    ) -> Result<()> {
         session.stop_queue_hold().await;
-        let plan = config
-            .plan
-            .as_ref()
-            .ok_or_else(|| anyhow!("IVR config requires inline plan data"))?
-            .clone();
+        session.note_ivr_reference(
+            source_reference.map(|value| value.to_string()).or_else(|| config.plan_id.clone()),
+            config.plan_id.clone(),
+        );
+        let plan = if let Some(plan) = config.plan.clone() {
+            plan
+        } else if let Some(plan_id) = config.plan_id.as_deref() {
+            let fallback = self
+                .server
+                .data_context
+                .resolve_ivr_config(plan_id)
+                .await?
+                .ok_or_else(|| anyhow!("ivr plan '{}' not found", plan_id))?;
+            fallback
+                .to_dialplan_config()?
+                .plan
+                .ok_or_else(|| anyhow!("ivr plan '{}' missing inline data", plan_id))?
+        } else {
+            return Err(anyhow!("IVR config requires inline plan data"));
+        };
         let plan = Arc::new(plan);
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -351,7 +371,10 @@ impl ProxyCall {
         let exit = executor_handle
             .await
             .map_err(|e| anyhow!("IVR executor panic: {e}"))??;
-        self.handle_ivr_exit(session, exit).await
+        let clone = exit.clone();
+        let result = self.handle_ivr_exit(session, exit).await;
+        session.note_ivr_exit(&clone);
+        result
     }
 
     async fn handle_ivr_exit(&self, session: &mut CallSession, exit: IvrExit) -> Result<()> {

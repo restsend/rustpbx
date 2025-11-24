@@ -143,6 +143,17 @@ impl ProxyDataContext {
         Self::read_ivr_document(path)
     }
 
+    pub async fn resolve_ivr_config(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
+        let trimmed = reference.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        if let Some(config) = self.load_ivr_file(trimmed).await? {
+            return Ok(Some(config));
+        }
+        self.find_ivr_by_plan_id(trimmed).await
+    }
+
     fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
         let candidate = Path::new(reference);
         if candidate.is_absolute() {
@@ -179,6 +190,47 @@ impl ProxyDataContext {
                 Err(err).with_context(|| format!("failed to read ivr file {}", path.display()))
             }
         }
+    }
+
+    async fn find_ivr_by_plan_id(&self, plan_id: &str) -> Result<Option<RouteIvrConfig>> {
+        let cfg = self.config.read().await.clone();
+        let base = cfg.generated_ivr_dir();
+        let pattern = format!("{}/**/*.toml", base.display());
+        for entry in glob(pattern.as_str())
+            .map_err(|err| anyhow!("invalid ivr search pattern {}: {}", pattern, err))?
+        {
+            let path = match entry {
+                Ok(path) => path,
+                Err(err) => return Err(anyhow!("failed to read ivr include entry: {}", err)),
+            };
+            let contents = match fs::read_to_string(&path) {
+                Ok(contents) => contents,
+                Err(err) => {
+                    if err.kind() == ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(err)
+                        .with_context(|| format!("failed to read ivr file {}", path.display()));
+                }
+            };
+            let mut config: RouteIvrConfig = match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed to parse ivr file {}", path.display()));
+                }
+            };
+            config.plan_id = sanitize_metadata_string(config.plan_id.take());
+            if config
+                .plan_id
+                .as_deref()
+                .map(|value| value.eq_ignore_ascii_case(plan_id))
+                .unwrap_or(false)
+            {
+                return Ok(Some(config));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {

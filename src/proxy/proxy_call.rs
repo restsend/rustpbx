@@ -23,17 +23,11 @@ use crate::{
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
     },
     net_tool::is_private_ip,
-    proxy::{
-        active_call_registry::{
-            ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
-            normalize_direction,
-        },
-        server::SipServerRef,
-    },
+    proxy::server::SipServerRef,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::{FutureExt, future::BoxFuture};
 use rsip::{Param, StatusCode, Uri, headers::UntypedHeader, prelude::HeadersExt};
 use rsipstack::{
@@ -54,7 +48,7 @@ use std::{
     fs,
     net::IpAddr,
     str::FromStr,
-    sync::{Arc, mpsc as std_mpsc},
+    sync::{Arc, Mutex, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -64,6 +58,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+mod state;
+
+pub use state::{
+    ProxyCallCommand, ProxyCallEvent, ProxyCallHandle, ProxyCallPhase, ProxyCallStateSnapshot,
+};
+use state::{ProxyCallCommandReceiver, ProxyCallController, ProxyCallState};
 
 pub struct ProxyCall {
     server: SipServerRef,
@@ -76,6 +77,13 @@ pub struct ProxyCall {
     cancel_token: CancellationToken,
     call_record_sender: Option<CallRecordSender>,
     event_sender: EventSender,
+    state: ProxyCallState,
+    #[allow(dead_code)]
+    control: ProxyCallController,
+    command_rx: Mutex<Option<ProxyCallCommandReceiver>>,
+    pending_hangup: Arc<Mutex<Option<PendingHangup>>>,
+    command_actions_tx: mpsc::UnboundedSender<ProxyCallCommand>,
+    command_actions_rx: Mutex<Option<mpsc::UnboundedReceiver<ProxyCallCommand>>>,
 }
 
 const MAX_QUEUE_CHAIN_DEPTH: usize = 4;
@@ -133,6 +141,20 @@ impl ProxyCallBuilder {
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dialog_layer = server.dialog_layer.clone();
+        let state = ProxyCallState::new(
+            session_id.clone(),
+            dialplan.direction,
+            dialplan.caller.as_ref().map(|c| c.to_string()),
+            dialplan
+                .first_target()
+                .map(|location| location.aor.to_string()),
+            Some(server.active_call_registry.clone()),
+        );
+        let (control, handle) = ProxyCallController::new(state.clone());
+        let command_rx = control.subscribe_commands();
+        let (command_actions_tx, command_actions_rx) = mpsc::unbounded_channel();
+        server.active_call_registry.register_handle(handle);
+        let pending_hangup = Arc::new(Mutex::new(None));
         ProxyCall {
             server,
             start_time: Instant::now(),
@@ -143,8 +165,21 @@ impl ProxyCallBuilder {
             cancel_token,
             call_record_sender: self.call_record_sender,
             event_sender: create_event_sender(),
+            state,
+            control,
+            command_rx: Mutex::new(Some(command_rx)),
+            pending_hangup,
+            command_actions_tx,
+            command_actions_rx: Mutex::new(Some(command_actions_rx)),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingHangup {
+    reason: Option<CallRecordHangupReason>,
+    code: Option<u16>,
+    initiator: Option<String>,
 }
 
 #[derive(Debug)]
@@ -181,6 +216,142 @@ include!("proxy_call/session.rs");
 impl ProxyCall {
     fn forwarding_config(&self) -> Option<&CallForwardingConfig> {
         self.dialplan.call_forwarding.as_ref()
+    }
+
+    fn spawn_command_listener(&self, shutdown: CancellationToken) -> JoinHandle<()> {
+        let mut command_rx = {
+            let mut slot = self
+                .command_rx
+                .lock()
+                .expect("command receiver mutex poisoned");
+            slot.take().expect("command listener already started")
+        };
+        let cancel_token = self.cancel_token.clone();
+        let pending = self.pending_hangup.clone();
+        let session_id = self.session_id.clone();
+        let actions = self.command_actions_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        break;
+                    }
+                    command = command_rx.recv() => match command {
+                        Ok(command) => {
+                            if let Err(err) = ProxyCall::handle_incoming_command(
+                                &session_id,
+                                &pending,
+                                &cancel_token,
+                                &actions,
+                                command,
+                            ) {
+                                warn!(session_id = %session_id, error = %err, "proxy call command handling failed");
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        })
+    }
+
+    fn take_command_action_receiver(&self) -> mpsc::UnboundedReceiver<ProxyCallCommand> {
+        self.command_actions_rx
+            .lock()
+            .expect("command action receiver mutex poisoned")
+            .take()
+            .expect("command action receiver already taken")
+    }
+
+    fn handle_incoming_command(
+        session_id: &str,
+        pending: &Arc<Mutex<Option<PendingHangup>>>,
+        cancel_token: &CancellationToken,
+        actions: &mpsc::UnboundedSender<ProxyCallCommand>,
+        command: ProxyCallCommand,
+    ) -> Result<()> {
+        match command {
+            ProxyCallCommand::Hangup {
+                reason,
+                code,
+                initiator,
+            } => {
+                Self::store_pending_hangup(pending, reason, code, initiator)?;
+                cancel_token.cancel();
+                Ok(())
+            }
+            other => actions
+                .send(other)
+                .map_err(|_| anyhow!("command action channel closed for {}", session_id)),
+        }
+    }
+
+    fn store_pending_hangup(
+        pending: &Arc<Mutex<Option<PendingHangup>>>,
+        reason: Option<CallRecordHangupReason>,
+        code: Option<u16>,
+        initiator: Option<String>,
+    ) -> Result<()> {
+        let mut guard = pending
+            .lock()
+            .map_err(|_| anyhow!("pending hangup lock poisoned"))?;
+        *guard = Some(PendingHangup {
+            reason,
+            code,
+            initiator,
+        });
+        Ok(())
+    }
+
+    fn resolve_pending_hangup(
+        &self,
+    ) -> (StatusCode, Option<String>, Option<CallRecordHangupReason>) {
+        let pending = self
+            .pending_hangup
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        match pending {
+            Some(request) => {
+                let status_code = request
+                    .code
+                    .and_then(Self::status_code_for_value)
+                    .unwrap_or(StatusCode::RequestTerminated);
+                let message = match (request.initiator.as_deref(), request.reason.as_ref()) {
+                    (Some(initiator), Some(reason)) => Some(format!(
+                        "Cancelled by {} ({})",
+                        initiator,
+                        reason.to_string()
+                    )),
+                    (Some(initiator), None) => Some(format!("Cancelled by {}", initiator)),
+                    (None, Some(reason)) => Some(format!("Cancelled ({})", reason.to_string())),
+                    (None, None) => Some("Cancelled by controller".to_string()),
+                };
+                (status_code, message, request.reason)
+            }
+            None => (
+                StatusCode::RequestTerminated,
+                Some("Cancelled by system".to_string()),
+                Some(CallRecordHangupReason::Canceled),
+            ),
+        }
+    }
+
+    fn status_code_for_value(value: u16) -> Option<StatusCode> {
+        match value {
+            403 => Some(StatusCode::Forbidden),
+            404 => Some(StatusCode::NotFound),
+            480 => Some(StatusCode::TemporarilyUnavailable),
+            486 => Some(StatusCode::BusyHere),
+            487 => Some(StatusCode::RequestTerminated),
+            488 => Some(StatusCode::NotAcceptableHere),
+            500 => Some(StatusCode::ServerInternalError),
+            503 => Some(StatusCode::ServiceUnavailable),
+            600 => Some(StatusCode::BusyEverywhere),
+            603 => Some(StatusCode::Decline),
+            _ => None,
+        }
     }
 
     fn immediate_forwarding_config(&self) -> Option<&CallForwardingConfig> {
@@ -342,6 +513,8 @@ impl ProxyCall {
     }
 
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
+        let command_shutdown = CancellationToken::new();
+        let command_task = self.spawn_command_listener(command_shutdown.clone());
         let (state_tx, state_rx) = mpsc::unbounded_channel();
         let local_contact = self.local_contact_uri();
         let mut server_dialog = self.dialog_layer.get_or_create_server_invite(
@@ -380,7 +553,7 @@ impl ProxyCall {
             self.event_sender.clone(),
             self.dialplan.media.clone(),
             recorder_option,
-            Some(self.server.active_call_registry.clone()),
+            self.state.clone(),
         );
         session.register_active_call(&self.dialplan.direction);
         if use_media_proxy {
@@ -392,25 +565,39 @@ impl ProxyCall {
         }
         let media_stream = session.media_stream.clone();
         let dialog_guard = ServerDialogGuard::new(self.dialog_layer.clone(), server_dialog.id());
+        let mut action_rx = self.take_command_action_receiver();
 
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
             let result = tokio::select! {
                 _ = self.cancel_token.cancelled() => {
-                    session.set_error(
-                        StatusCode::RequestTerminated,
-                        Some("Cancelled by system".to_string()),
-                        None,
-                    );
-                    session.hangup_reason = Some(CallRecordHangupReason::Canceled);
+                    let (status_code, reason_text, hangup_reason) = self.resolve_pending_hangup();
+                    session.set_error(status_code, reason_text.clone(), None);
+                    if let Some(reason) = hangup_reason.clone() {
+                        session.hangup_reason = Some(reason.clone());
+                        self.state.mark_hangup(reason);
+                    } else {
+                        session.hangup_reason = Some(CallRecordHangupReason::Canceled);
+                        self.state.mark_hangup(CallRecordHangupReason::Canceled);
+                    }
                     Err(anyhow!("Call cancelled"))
                 }
                 _ = media_stream.serve() => {Ok(())},
                 r = self.execute_dialplan(&mut session) => r,
                 r = self.handle_server_events(state_rx) => r,
+                command = action_rx.recv() => {
+                    match command {
+                        Some(command) => self.apply_runtime_command(&mut session, command).await,
+                        None => Ok(()),
+                    }
+                },
             };
             drop(dialog_guard);
             result
         });
+        command_shutdown.cancel();
+        if let Err(err) = command_task.await {
+            warn!(session_id = %self.session_id, error = %err, "command listener task stopped unexpectedly");
+        }
 
         self.record_call(&session).await;
         result
@@ -544,6 +731,58 @@ impl ProxyCall {
         .boxed()
     }
 
+    async fn apply_runtime_command(
+        &self,
+        session: &mut CallSession,
+        command: ProxyCallCommand,
+    ) -> Result<()> {
+        match command {
+            ProxyCallCommand::Answer { callee, sdp } => session.accept_call(callee, sdp).await,
+            ProxyCallCommand::EnterQueue { name } => self.transfer_to_queue(session, &name).await,
+            ProxyCallCommand::ExitQueue => {
+                session.stop_queue_hold().await;
+                session.set_queue_name(None);
+                Ok(())
+            }
+            ProxyCallCommand::EnterIvr { reference } => {
+                self.transfer_to_ivr(session, &reference).await
+            }
+            ProxyCallCommand::Transfer { target } => {
+                if let Some(queue) = target.strip_prefix("queue:") {
+                    self.transfer_to_queue(session, queue.trim()).await
+                } else if let Some(ivr) = target.strip_prefix("ivr:") {
+                    self.transfer_to_ivr(session, ivr.trim()).await
+                } else {
+                    self.transfer_to_uri(session, &target).await
+                }
+            }
+            ProxyCallCommand::ProvideEarlyMedia { sdp } => {
+                session.start_ringing(sdp.unwrap_or_default(), self).await;
+                Ok(())
+            }
+            ProxyCallCommand::StartRinging {
+                ringback,
+                passthrough,
+            } => {
+                if passthrough {
+                    session
+                        .start_ringing(ringback.unwrap_or_default(), self)
+                        .await;
+                    return Ok(());
+                }
+                if let Some(audio) = ringback {
+                    session
+                        .play_ringtone(&audio, Some(self.event_sender.subscribe()), true)
+                        .await
+                } else {
+                    session.start_ringing(String::new(), self).await;
+                    Ok(())
+                }
+            }
+            ProxyCallCommand::Hangup { .. } => Ok(()),
+        }
+    }
+
     async fn transfer_to_uri(&self, session: &mut CallSession, uri: &str) -> Result<()> {
         let parsed = Uri::try_from(uri)
             .map_err(|err| anyhow!("invalid forwarding uri '{}': {}", uri, err))?;
@@ -570,7 +809,7 @@ impl ProxyCall {
                 DialplanFlow::Queue { plan, next } => {
                     self.execute_queue_plan(session, plan, next, 0, true).await
                 }
-                DialplanFlow::Ivr(config) => self.run_ivr(session, config).await,
+                DialplanFlow::Ivr(config) => self.run_ivr(session, config, None).await,
             }
         }
         .boxed()
@@ -1245,6 +1484,29 @@ impl ProxyCall {
             }
         }
 
+        if let Some(queue) = session.last_queue_name() {
+            extras_map.insert("last_queue".to_string(), Value::String(queue));
+        }
+
+        if let Some(trace) = session.ivr_trace() {
+            let mut ivr_payload = JsonMap::new();
+            if let Some(reference) = trace.reference.clone() {
+                ivr_payload.insert("reference".to_string(), Value::String(reference));
+            }
+            if let Some(plan_id) = trace.plan_id.clone() {
+                ivr_payload.insert("plan_id".to_string(), Value::String(plan_id));
+            }
+            if let Some(exit) = trace.exit.clone() {
+                ivr_payload.insert("exit".to_string(), Value::String(exit));
+            }
+            if let Some(detail) = trace.detail.clone() {
+                ivr_payload.insert("detail".to_string(), Value::String(detail));
+            }
+            if !ivr_payload.is_empty() {
+                extras_map.insert("ivr".to_string(), Value::Object(ivr_payload));
+            }
+        }
+
         let mut hangup_messages = session.recorded_hangup_messages();
         if hangup_messages.is_empty() {
             if let Some((code, reason)) = session.last_error.as_ref() {
@@ -1377,6 +1639,7 @@ impl ProxyCall {
         persist_args.status = status;
         persist_args.from_number = from_number;
         persist_args.to_number = to_number;
+        persist_args.queue = session.last_queue_name();
         persist_args.sip_trunk_id = sip_trunk_id;
         persist_args.sip_gateway = sip_gateway;
         persist_args.metadata = metadata_value;
