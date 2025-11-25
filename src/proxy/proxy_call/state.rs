@@ -3,12 +3,66 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus, normalize_direction,
 };
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsip::StatusCode;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SessionAction {
+    AcceptCall {
+        callee: Option<String>,
+        sdp: Option<String>,
+    },
+    EnterQueue {
+        name: String,
+    },
+    ExitQueue,
+    EnterIvr {
+        reference: String,
+    },
+    TransferTarget(String),
+    ProvideEarlyMedia(String),
+    StartRinging {
+        ringback: Option<String>,
+        passthrough: bool,
+    },
+    Hangup {
+        reason: Option<CallRecordHangupReason>,
+        code: Option<u16>,
+        initiator: Option<String>,
+    },
+}
+
+impl SessionAction {
+    pub fn enter_queue(name: &str) -> Self {
+        Self::EnterQueue {
+            name: name.trim().to_string(),
+        }
+    }
+
+    pub fn enter_ivr(reference: &str) -> Self {
+        Self::EnterIvr {
+            reference: reference.trim().to_string(),
+        }
+    }
+
+    pub fn from_transfer_target(target: &str) -> Self {
+        let trimmed = target.trim();
+        if let Some(queue) = trimmed.strip_prefix("queue:") {
+            return Self::enter_queue(queue);
+        }
+        if let Some(ivr) = trimmed.strip_prefix("ivr:") {
+            return Self::enter_ivr(ivr);
+        }
+        Self::TransferTarget(trimmed.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProxyCallPhase {
     Initializing,
     Ringing,
@@ -19,37 +73,8 @@ pub enum ProxyCallPhase {
     Ended,
 }
 
-impl ProxyCallPhase {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Initializing => "initializing",
-            Self::Ringing => "ringing",
-            Self::EarlyMedia => "early_media",
-            Self::Bridged => "bridged",
-            Self::Terminating => "terminating",
-            Self::Failed => "failed",
-            Self::Ended => "ended",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ProxyCallStateSnapshot {
-    pub session_id: String,
-    pub phase: ProxyCallPhase,
-    pub started_at: DateTime<Utc>,
-    pub ring_time: Option<DateTime<Utc>>,
-    pub answer_time: Option<DateTime<Utc>>,
-    pub hangup_reason: Option<CallRecordHangupReason>,
-    pub last_error_code: Option<u16>,
-    pub last_error_reason: Option<String>,
-    pub caller: Option<String>,
-    pub callee: Option<String>,
-    pub current_target: Option<String>,
-    pub queue_name: Option<String>,
-}
-
-struct ProxyCallStateInner {
+#[derive(Clone, Debug, Serialize)]
+pub struct ProxyCallStateInner {
     session_id: String,
     phase: ProxyCallPhase,
     started_at: DateTime<Utc>,
@@ -64,6 +89,7 @@ struct ProxyCallStateInner {
     queue_name: Option<String>,
     direction: String,
 }
+pub type ProxyCallStateSnapshot = ProxyCallStateInner;
 
 #[derive(Clone)]
 pub struct ProxyCallState {
@@ -105,23 +131,10 @@ impl ProxyCallState {
 
     pub fn snapshot(&self) -> ProxyCallStateSnapshot {
         let inner = self.inner.read().unwrap();
-        ProxyCallStateSnapshot {
-            session_id: inner.session_id.clone(),
-            phase: inner.phase,
-            started_at: inner.started_at,
-            ring_time: inner.ring_time,
-            answer_time: inner.answer_time,
-            hangup_reason: inner.hangup_reason.clone(),
-            last_error_code: inner.last_error_code,
-            last_error_reason: inner.last_error_reason.clone(),
-            caller: inner.caller.clone(),
-            callee: inner.callee.clone(),
-            current_target: inner.current_target.clone(),
-            queue_name: inner.queue_name.clone(),
-        }
+        inner.clone()
     }
 
-    pub fn register_active_call(&self) {
+    pub fn register_active_call(&self, handle: ProxyCallHandle) {
         if let Some(registry) = &self.registry {
             let inner = self.inner.read().unwrap();
             let entry = ActiveProxyCallEntry {
@@ -133,7 +146,7 @@ impl ProxyCallState {
                 answered_at: inner.answer_time,
                 status: ActiveProxyCallStatus::Ringing,
             };
-            registry.upsert(entry);
+            registry.upsert(entry, handle);
         }
     }
 
@@ -351,45 +364,7 @@ impl ProxyCallState {
     }
 }
 
-const PROXY_CALL_COMMAND_CAPACITY: usize = 32;
-const PROXY_CALL_EVENT_CAPACITY: usize = 64;
-
-pub type ProxyCallCommandSender = broadcast::Sender<ProxyCallCommand>;
-pub type ProxyCallCommandReceiver = broadcast::Receiver<ProxyCallCommand>;
-pub type ProxyCallEventSender = broadcast::Sender<ProxyCallEvent>;
-pub type ProxyCallEventReceiver = broadcast::Receiver<ProxyCallEvent>;
-
-#[derive(Clone, Debug)]
-pub enum ProxyCallCommand {
-    StartRinging {
-        ringback: Option<String>,
-        passthrough: bool,
-    },
-    ProvideEarlyMedia {
-        sdp: Option<String>,
-    },
-    Answer {
-        callee: Option<String>,
-        sdp: Option<String>,
-    },
-    Hangup {
-        reason: Option<CallRecordHangupReason>,
-        code: Option<u16>,
-        initiator: Option<String>,
-    },
-    EnterQueue {
-        name: String,
-    },
-    ExitQueue,
-    EnterIvr {
-        reference: String,
-    },
-    Transfer {
-        target: String,
-    },
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProxyCallEvent {
     PhaseChanged {
         session_id: String,
@@ -423,15 +398,30 @@ pub enum ProxyCallEvent {
     },
 }
 
+pub type SessionActionSender = mpsc::UnboundedSender<SessionAction>;
+pub type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
+pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
 #[derive(Clone)]
 pub struct ProxyCallHandle {
     session_id: String,
     state: ProxyCallState,
-    cmd_tx: ProxyCallCommandSender,
-    event_tx: ProxyCallEventSender,
+    cmd_tx: SessionActionSender,
 }
 
 impl ProxyCallHandle {
+    pub fn with_state(state: ProxyCallState) -> (Self, SessionActionReceiver) {
+        let session_id = state.session_id();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        state.set_event_sender(event_tx);
+        let handle = Self {
+            session_id,
+            state,
+            cmd_tx,
+        };
+        (handle, cmd_rx)
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -440,84 +430,43 @@ impl ProxyCallHandle {
         self.state.snapshot()
     }
 
-    pub fn send_command(
-        &self,
-        command: ProxyCallCommand,
-    ) -> Result<(), broadcast::error::SendError<ProxyCallCommand>> {
-        self.cmd_tx.send(command).map(|_| ())
-    }
-
-    pub fn subscribe_events(&self) -> ProxyCallEventReceiver {
-        self.event_tx.subscribe()
-    }
-
-    pub fn command_sender(&self) -> ProxyCallCommandSender {
-        self.cmd_tx.clone()
+    pub fn send_command(&self, action: SessionAction) -> Result<()> {
+        self.cmd_tx.send(action).map_err(Into::into)
     }
 }
 
-#[allow(dead_code)]
-pub struct ProxyCallController {
-    session_id: String,
-    state: ProxyCallState,
-    cmd_tx: ProxyCallCommandSender,
-    event_tx: ProxyCallEventSender,
-}
+#[cfg(test)]
+mod tests {
+    use super::SessionAction;
 
-#[allow(dead_code)]
-impl ProxyCallController {
-    pub fn new(state: ProxyCallState) -> (Self, ProxyCallHandle) {
-        let snapshot = state.snapshot();
-        let session_id = snapshot.session_id.clone();
-        let state_for_controller = state.clone();
-        let state_for_handle = state.clone();
-        let (cmd_tx, _) = broadcast::channel(PROXY_CALL_COMMAND_CAPACITY);
-        let (event_tx, _) = broadcast::channel(PROXY_CALL_EVENT_CAPACITY);
-        state.set_event_sender(event_tx.clone());
-        let controller = Self {
-            session_id: session_id.clone(),
-            state: state_for_controller,
-            cmd_tx: cmd_tx.clone(),
-            event_tx: event_tx.clone(),
-        };
-        let handle = ProxyCallHandle {
-            session_id,
-            state: state_for_handle,
-            cmd_tx,
-            event_tx,
-        };
-        (controller, handle)
+    #[test]
+    fn transfer_target_detects_queue() {
+        let action = SessionAction::from_transfer_target("queue: support ");
+        assert_eq!(
+            action,
+            SessionAction::EnterQueue {
+                name: "support".to_string()
+            }
+        );
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    #[test]
+    fn transfer_target_detects_ivr() {
+        let action = SessionAction::from_transfer_target("ivr: main_menu");
+        assert_eq!(
+            action,
+            SessionAction::EnterIvr {
+                reference: "main_menu".to_string()
+            }
+        );
     }
 
-    pub fn state(&self) -> &ProxyCallState {
-        &self.state
-    }
-
-    pub fn subscribe_commands(&self) -> ProxyCallCommandReceiver {
-        self.cmd_tx.subscribe()
-    }
-
-    pub fn emit_event(&self, event: ProxyCallEvent) {
-        let _ = self.event_tx.send(event);
-    }
-
-    pub fn notify_phase_change(&self) {
-        let snapshot = self.state.snapshot();
-        let _ = self.event_tx.send(ProxyCallEvent::PhaseChanged {
-            session_id: snapshot.session_id,
-            phase: snapshot.phase,
-        });
-    }
-
-    pub fn command_sender(&self) -> ProxyCallCommandSender {
-        self.cmd_tx.clone()
-    }
-
-    pub fn event_sender(&self) -> ProxyCallEventSender {
-        self.event_tx.clone()
+    #[test]
+    fn transfer_target_keeps_uri() {
+        let action = SessionAction::from_transfer_target("sip:1001@example.com");
+        assert_eq!(
+            action,
+            SessionAction::TransferTarget("sip:1001@example.com".to_string())
+        );
     }
 }

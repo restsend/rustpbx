@@ -311,7 +311,8 @@ impl ProxyCall {
             .await?
             .ok_or_else(|| anyhow!("ivr reference '{}' not found", reference))?;
         let dialplan_config = config.to_dialplan_config()?;
-        self.run_ivr(session, &dialplan_config, Some(reference)).await
+        self.run_ivr(session, &dialplan_config, Some(reference))
+            .await
     }
 
     async fn run_ivr(
@@ -322,7 +323,9 @@ impl ProxyCall {
     ) -> Result<()> {
         session.stop_queue_hold().await;
         session.note_ivr_reference(
-            source_reference.map(|value| value.to_string()).or_else(|| config.plan_id.clone()),
+            source_reference
+                .map(|value| value.to_string())
+                .or_else(|| config.plan_id.clone()),
             config.plan_id.clone(),
         );
         let plan = if let Some(plan) = config.plan.clone() {

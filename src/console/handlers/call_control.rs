@@ -1,15 +1,14 @@
 use crate::callrecord::CallRecordHangupReason;
 use crate::console::handlers::bad_request;
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallRegistry};
-use crate::proxy::proxy_call::{ProxyCallCommand, ProxyCallStateSnapshot};
+use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+use crate::proxy::proxy_call::{ProxyCallStateSnapshot, SessionAction};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -31,60 +30,6 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 pub struct ActiveCallListQuery {
     #[serde(default)]
     limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-struct ActiveCallMeta {
-    session_id: String,
-    caller: Option<String>,
-    callee: Option<String>,
-    direction: String,
-    started_at: DateTime<Utc>,
-    answered_at: Option<DateTime<Utc>>,
-    status: String,
-}
-
-impl From<ActiveProxyCallEntry> for ActiveCallMeta {
-    fn from(entry: ActiveProxyCallEntry) -> Self {
-        let status = entry.status_label().to_string();
-        Self {
-            session_id: entry.session_id,
-            caller: entry.caller,
-            callee: entry.callee,
-            direction: entry.direction,
-            started_at: entry.started_at,
-            answered_at: entry.answered_at,
-            status,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ProxyCallStateDto {
-    session_id: String,
-    phase: String,
-    started_at: DateTime<Utc>,
-    ring_time: Option<DateTime<Utc>>,
-    answer_time: Option<DateTime<Utc>>,
-    hangup_reason: Option<String>,
-    last_error_code: Option<u16>,
-    last_error_reason: Option<String>,
-    caller: Option<String>,
-    callee: Option<String>,
-    current_target: Option<String>,
-    queue_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ActiveCallSummaryDto {
-    meta: ActiveCallMeta,
-    state: Option<ProxyCallStateDto>,
-}
-
-#[derive(Debug, Serialize)]
-struct ActiveCallDetailDto {
-    meta: Option<ActiveCallMeta>,
-    state: ProxyCallStateDto,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,10 +63,10 @@ pub async fn list_active_calls(
         .into_iter()
         .map(|entry| {
             let session_id = entry.session_id.clone();
-            ActiveCallSummaryDto {
-                meta: entry.into(),
-                state: snapshot_for(&registry, &session_id),
-            }
+            json!({
+                "meta": entry,
+                "state": snapshot_for(&registry, &session_id),
+            })
         })
         .collect();
 
@@ -146,12 +91,11 @@ pub async fn show_active_call(
             .into_response();
     };
 
-    let detail = ActiveCallDetailDto {
-        meta: registry.get(&session_id).map(ActiveCallMeta::from),
-        state: snapshot_to_dto(handle.snapshot()),
-    };
-
-    Json(json!({ "data": detail })).into_response()
+    Json(json!({ "data": json!({
+        "meta": registry.get(&session_id),
+        "state": handle.snapshot(),
+    }) }))
+    .into_response()
 }
 
 pub async fn dispatch_call_command(
@@ -173,12 +117,57 @@ pub async fn dispatch_call_command(
             .into_response();
     };
 
-    let command = match command_from_payload(&payload) {
-        Ok(cmd) => cmd,
-        Err(response) => return response,
+    let action_label = payload.action.trim().to_ascii_lowercase();
+    let action = match action_label.as_str() {
+        "hangup" => {
+            let reason = match payload.reason.as_ref() {
+                Some(text) if !text.trim().is_empty() => {
+                    match CallRecordHangupReason::from_str(text.trim()) {
+                        Ok(reason) => Some(reason),
+                        Err(_) => return bad_request("invalid hangup reason"),
+                    }
+                }
+                _ => None,
+            };
+            SessionAction::Hangup {
+                reason,
+                code: payload.code,
+                initiator: payload.initiator.clone(),
+            }
+        }
+        "answer" => SessionAction::AcceptCall {
+            callee: payload.callee.clone(),
+            sdp: payload.sdp.clone(),
+        },
+        "transfer" => {
+            let target = payload
+                .target
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| bad_request("target is required for transfer"));
+            match target {
+                Ok(value) => SessionAction::from_transfer_target(value),
+                Err(response) => return response,
+            }
+        }
+        "enter_queue" | "queue_enter" => {
+            let queue = payload
+                .queue
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| bad_request("queue is required"));
+            match queue {
+                Ok(value) => SessionAction::enter_queue(value),
+                Err(response) => return response,
+            }
+        }
+        "exit_queue" | "queue_exit" => SessionAction::ExitQueue,
+        other => return bad_request(format!("unsupported action: {}", other)),
     };
 
-    match handle.send_command(command) {
+    match handle.send_command(action) {
         Ok(_) => Json(json!({ "message": "Command dispatched" })).into_response(),
         Err(err) => (
             StatusCode::CONFLICT,
@@ -191,79 +180,10 @@ pub async fn dispatch_call_command(
 fn snapshot_for(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: &str,
-) -> Option<ProxyCallStateDto> {
+) -> Option<ProxyCallStateSnapshot> {
     registry
         .get_handle(session_id)
-        .map(|handle| snapshot_to_dto(handle.snapshot()))
-}
-
-fn snapshot_to_dto(snapshot: ProxyCallStateSnapshot) -> ProxyCallStateDto {
-    ProxyCallStateDto {
-        session_id: snapshot.session_id,
-        phase: snapshot.phase.label().to_string(),
-        started_at: snapshot.started_at,
-        ring_time: snapshot.ring_time,
-        answer_time: snapshot.answer_time,
-        hangup_reason: snapshot.hangup_reason.map(|reason| reason.to_string()),
-        last_error_code: snapshot.last_error_code,
-        last_error_reason: snapshot.last_error_reason,
-        caller: snapshot.caller,
-        callee: snapshot.callee,
-        current_target: snapshot.current_target,
-        queue_name: snapshot.queue_name,
-    }
-}
-
-fn command_from_payload(payload: &CallCommandPayload) -> Result<ProxyCallCommand, Response> {
-    let action = payload.action.trim().to_ascii_lowercase();
-    match action.as_str() {
-        "hangup" => {
-            let reason = match payload.reason.as_ref() {
-                Some(text) if !text.trim().is_empty() => {
-                    match CallRecordHangupReason::from_str(text.trim()) {
-                        Ok(reason) => Some(reason),
-                        Err(_) => {
-                            return Err(bad_request("invalid hangup reason"));
-                        }
-                    }
-                }
-                _ => None,
-            };
-            Ok(ProxyCallCommand::Hangup {
-                reason,
-                code: payload.code,
-                initiator: payload.initiator.clone(),
-            })
-        }
-        "answer" => Ok(ProxyCallCommand::Answer {
-            callee: payload.callee.clone(),
-            sdp: payload.sdp.clone(),
-        }),
-        "transfer" => {
-            let target = payload
-                .target
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| bad_request("target is required for transfer"))?;
-            Ok(ProxyCallCommand::Transfer {
-                target: target.to_string(),
-            })
-        }
-        "enter_queue" | "queue_enter" => {
-            let queue = payload
-                .queue
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| bad_request("queue is required"))?;
-            Ok(ProxyCallCommand::EnterQueue {
-                name: queue.to_string(),
-            })
-        }
-        "exit_queue" | "queue_exit" => Ok(ProxyCallCommand::ExitQueue),
-        other => Err(bad_request(format!("unsupported action: {}", other))),
-    }
+        .map(|handle| handle.snapshot())
 }
 
 fn service_unavailable() -> Response {
