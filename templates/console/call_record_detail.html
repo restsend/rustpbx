@@ -223,7 +223,97 @@
                     <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
                         the original media stream.</p>
                     <template x-if="record.recording && record.recording.url">
-                        <audio class="mt-4 w-full" controls preload="none" :src="record.recording.url"></audio>
+                        <div class="mt-4 space-y-3">
+                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <p class="text-sm font-semibold text-slate-900">Stereo waveform (WAV)</p>
+                                    <p class="text-xs text-slate-500">Left channel mirrors caller audio · Right channel
+                                        mirrors callee audio.</p>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <button type="button"
+                                        class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-60"
+                                        :disabled="!waveformReady" @click="toggleWaveformPlayback()">
+                                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5v14M15 5v14"
+                                                x-show="waveformPlaying" x-cloak></path>
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 5v14l10-7z"
+                                                x-show="!waveformPlaying" x-cloak></path>
+                                        </svg>
+                                        <span x-text="waveformPlaying ? 'Pause' : 'Play'">
+                                            Play
+                                        </span>
+                                    </button>
+                                    <button type="button"
+                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:cursor-not-allowed disabled:opacity-60"
+                                        :disabled="!waveformReady" @click="stopWaveform()">
+                                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M8 8h8v8H8z" />
+                                        </svg>
+                                        Stop
+                                    </button>
+                                    <a :href="actions.download_recording || record.recording.url"
+                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-300 hover:text-sky-700"
+                                        target="_blank" rel="noopener">
+                                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                            stroke-width="1.8">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M12 5v12m0 0l-4-4m4 4l4-4" />
+                                        </svg>
+                                        Download WAV
+                                    </a>
+                                </div>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 bg-slate-900/5 p-3">
+                                <div x-ref="waveformCanvas" class="h-20 w-full sm:h-24"></div>
+                                <template x-if="waveformLoading">
+                                    <div class="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                                        <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="1.5">
+                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                d="M12 3v3m0 12v3m9-9h-3M6 12H3m13.95-6.95l-2.12 2.12M8.17 15.83l-2.12 2.12m0-12.12l2.12 2.12m9.66 9.66l2.12 2.12" />
+                                        </svg>
+                                        Loading waveform…
+                                    </div>
+                                </template>
+                                <template x-if="waveformError">
+                                    <div class="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600"
+                                        x-text="waveformError"></div>
+                                </template>
+                            </div>
+                            <div
+                                class="flex flex-col gap-2 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+                                <div class="font-mono text-sm text-slate-700">
+                                    <span x-text="formatWaveformTimestamp(waveformPosition)"></span>
+                                    <span class="text-slate-400">/</span>
+                                    <span x-text="formatWaveformTimestamp(waveformDuration)"></span>
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button"
+                                        class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-1"
+                                        :class="waveformChannels.left ? 'border-sky-200 bg-sky-50 text-sky-600 focus:ring-sky-200' : 'border-slate-200 bg-white text-slate-400 focus:ring-slate-200'"
+                                        :aria-pressed="waveformChannels.left" :disabled="!waveformReady"
+                                        @click="toggleWaveformChannel('left')">
+                                        <span class="h-2 w-2 rounded-full"
+                                            :class="waveformChannels.left ? 'bg-sky-500' : 'bg-slate-300'"></span>
+                                        Left · Caller
+                                    </button>
+                                    <button type="button"
+                                        class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-1"
+                                        :class="waveformChannels.right ? 'border-emerald-200 bg-emerald-50 text-emerald-600 focus:ring-emerald-200' : 'border-slate-200 bg-white text-slate-400 focus:ring-slate-200'"
+                                        :aria-pressed="waveformChannels.right" :disabled="!waveformReady"
+                                        @click="toggleWaveformChannel('right')">
+                                        <span class="h-2 w-2 rounded-full"
+                                            :class="waveformChannels.right ? 'bg-emerald-500' : 'bg-slate-300'"></span>
+                                        Right · Callee
+                                    </button>
+                                </div>
+                            </div>
+                            <audio x-ref="waveformFallbackAudio" class="sr-only" controls preload="none"
+                                :src="record.recording.url"></audio>
+                        </div>
                     </template>
                     <template x-if="!record.recording || !record.recording.url">
                         <div
@@ -722,6 +812,7 @@
     </div>
 </div>
 
+<script defer src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordDetail', (payload) => ({
@@ -809,6 +900,38 @@
                 if (this.record.has_transcript && !this.transcriptVisible && this.transcriptUrl) {
                     this.fetchTranscript();
                 }
+                const recordingDurationHint = (this.record && this.record.recording && Number(this.record.recording.duration_secs))
+                    || Number(this.record.duration_secs)
+                    || 0;
+                this.waveformDuration = Number.isFinite(recordingDurationHint)
+                    ? Math.max(0, recordingDurationHint)
+                    : 0;
+                this.waveformError = '';
+                this.$nextTick(() => {
+                    if (this.record && this.record.recording && this.record.recording.url) {
+                        this.prepareWaveform();
+                    }
+                });
+                this.$watch('detailTab', (value) => {
+                    if (value !== 'overview') {
+                        this.stopWaveform();
+                        return;
+                    }
+                    if (
+                        this.record &&
+                        this.record.recording &&
+                        this.record.recording.url &&
+                        !this.waveSurfer &&
+                        !this.waveformError
+                    ) {
+                        this.prepareWaveform();
+                    }
+                });
+                if (typeof window !== 'undefined') {
+                    const cleanup = () => this.destroyWaveform();
+                    window.addEventListener('pagehide', cleanup, { once: true });
+                    window.addEventListener('beforeunload', cleanup, { once: true });
+                }
             },
             record: {},
             sipFlowEntries: [],
@@ -845,6 +968,18 @@
             selectedLanguage: 'auto',
             languageOptions: [],
             languageSelectionDirty: false,
+            waveSurfer: null,
+            waveformReady: false,
+            waveformLoading: false,
+            waveformPlaying: false,
+            waveformError: '',
+            waveformDuration: 0,
+            waveformPosition: 0,
+            waveformChannels: {
+                left: true,
+                right: true,
+            },
+            waveformOriginalBuffer: null,
             async addTag() {
                 const value = (this.tagInput || '').trim();
                 if (!value) {
@@ -1636,6 +1771,266 @@
                     this.copyTimer = null;
                 }, 1500);
             },
+            waveformChannelHeight() {
+                if (typeof window === 'undefined') {
+                    return 36;
+                }
+                if (window.innerWidth >= 1280) {
+                    return 48;
+                }
+                if (window.innerWidth >= 768) {
+                    return 42;
+                }
+                return 36;
+            },
+            prepareWaveform(attempt) {
+                const tries = Number(attempt) || 0;
+                if (!this.record || !this.record.recording || !this.record.recording.url) {
+                    return;
+                }
+                if (this.waveSurfer || this.waveformLoading) {
+                    return;
+                }
+                const canvas = this.$refs.waveformCanvas;
+                if (!canvas) {
+                    if (tries > 10) {
+                        return;
+                    }
+                    const retry = () => this.prepareWaveform(tries + 1);
+                    if (typeof requestAnimationFrame === 'function') {
+                        requestAnimationFrame(retry);
+                    } else {
+                        setTimeout(retry, 100);
+                    }
+                    return;
+                }
+                if (typeof window === 'undefined' || !window.WaveSurfer) {
+                    if (tries > 30) {
+                        this.waveformError = 'Waveform renderer failed to load.';
+                        return;
+                    }
+                    setTimeout(() => this.prepareWaveform(tries + 1), 150);
+                    return;
+                }
+                this.waveformError = '';
+                this.mountWaveSurfer(canvas);
+            },
+            mountWaveSurfer(container) {
+                this.destroyWaveform();
+                if (!container || typeof window === 'undefined' || !window.WaveSurfer) {
+                    this.waveformError = 'Waveform renderer unavailable.';
+                    return;
+                }
+                this.waveformLoading = true;
+                this.waveformReady = false;
+                this.waveformPlaying = false;
+                this.waveformPosition = 0;
+                try {
+                    const channelHeight = this.waveformChannelHeight();
+                    this.waveSurfer = window.WaveSurfer.create({
+                        container,
+                        height: channelHeight,
+                        backend: 'WebAudio',
+                        fillParent: true,
+                        responsive: true,
+                        normalize: true,
+                        splitChannels: true,
+                        waveColor: '#c7d2fe',
+                        progressColor: '#0ea5e9',
+                        cursorColor: '#475569',
+                        cursorWidth: 1,
+                        barWidth: 2,
+                        barGap: 1,
+                        barRadius: 2,
+                        autoCenter: true,
+                        interact: true,
+                        minPxPerSec: 40,
+                    });
+                } catch (err) {
+                    console.error('Failed to create WaveSurfer instance', err);
+                    this.waveformError = 'Failed to initialize waveform.';
+                    this.waveformLoading = false;
+                    return;
+                }
+                this.waveSurfer.load(this.record.recording.url);
+                const updatePosition = (value) => {
+                    if (!Number.isFinite(value)) {
+                        return;
+                    }
+                    this.waveformPosition = value;
+                };
+                this.waveSurfer.on('ready', () => {
+                    this.waveformReady = true;
+                    this.waveformLoading = false;
+                    const duration = this.waveSurfer && this.waveSurfer.getDuration
+                        ? this.waveSurfer.getDuration()
+                        : null;
+                    if (Number.isFinite(duration) && duration > 0) {
+                        this.waveformDuration = duration;
+                    }
+                    const decoded = this.waveSurfer && this.waveSurfer.getDecodedData
+                        ? this.waveSurfer.getDecodedData()
+                        : null;
+                    if (decoded && !this.waveformOriginalBuffer) {
+                        this.waveformOriginalBuffer = decoded;
+                    }
+                    if (decoded && !this.areAllWaveformChannelsActive()) {
+                        this.applyWaveformChannelMix();
+                    }
+                });
+                this.waveSurfer.on('error', (err) => {
+                    console.error('WaveSurfer error', err);
+                    this.waveformError = (err && err.toString()) || 'Waveform rendering failed.';
+                    this.waveformLoading = false;
+                    this.waveformReady = false;
+                    this.waveformPlaying = false;
+                    this.waveformOriginalBuffer = null;
+                    if (this.waveSurfer) {
+                        try {
+                            this.waveSurfer.destroy();
+                        } catch (destroyErr) {
+                            console.warn('WaveSurfer destroy after error failed', destroyErr);
+                        }
+                        this.waveSurfer = null;
+                    }
+                });
+                this.waveSurfer.on('play', () => {
+                    this.waveformPlaying = true;
+                });
+                this.waveSurfer.on('pause', () => {
+                    this.waveformPlaying = false;
+                });
+                this.waveSurfer.on('finish', () => {
+                    this.waveformPlaying = false;
+                    this.waveformPosition = this.waveformDuration;
+                });
+                this.waveSurfer.on('seek', (progress) => {
+                    const duration = (this.waveSurfer && this.waveSurfer.getDuration
+                        ? this.waveSurfer.getDuration()
+                        : this.waveformDuration) || 0;
+                    updatePosition(progress * duration);
+                });
+                this.waveSurfer.on('audioprocess', updatePosition);
+            },
+            destroyWaveform() {
+                if (this.waveSurfer) {
+                    try {
+                        this.waveSurfer.destroy();
+                    } catch (err) {
+                        console.warn('WaveSurfer destroy failed', err);
+                    }
+                }
+                this.waveSurfer = null;
+                this.waveformReady = false;
+                this.waveformLoading = false;
+                this.waveformPlaying = false;
+                this.waveformPosition = 0;
+                if (this.$refs.waveformCanvas) {
+                    this.$refs.waveformCanvas.innerHTML = '';
+                }
+                this.waveformOriginalBuffer = null;
+            },
+            toggleWaveformPlayback() {
+                if (!this.waveSurfer && !this.waveformLoading && this.record && this.record.recording && this.record.recording.url) {
+                    this.prepareWaveform();
+                }
+                if (this.waveSurfer && this.waveformReady) {
+                    this.waveSurfer.playPause();
+                    return;
+                }
+                if (this.$refs.waveformFallbackAudio) {
+                    const audio = this.$refs.waveformFallbackAudio;
+                    if (audio.paused) {
+                        audio.play().catch(() => { });
+                    } else {
+                        audio.pause();
+                    }
+                }
+            },
+            stopWaveform() {
+                if (this.waveSurfer) {
+                    this.waveSurfer.stop();
+                    this.waveformPlaying = false;
+                    this.waveformPosition = 0;
+                } else if (this.$refs.waveformFallbackAudio) {
+                    const audio = this.$refs.waveformFallbackAudio;
+                    audio.pause();
+                    audio.currentTime = 0;
+                }
+            },
+            toggleWaveformChannel(side) {
+                if (side !== 'left' && side !== 'right') {
+                    return;
+                }
+                const other = side === 'left' ? 'right' : 'left';
+                const nextState = !this.waveformChannels[side];
+                if (!nextState && !this.waveformChannels[other]) {
+                    return;
+                }
+                this.waveformChannels[side] = nextState;
+                if (this.waveSurfer && this.waveformReady) {
+                    this.applyWaveformChannelMix();
+                }
+            },
+            applyWaveformChannelMix() {
+                if (!this.waveSurfer || !this.waveformReady || !this.waveformOriginalBuffer) {
+                    return;
+                }
+                const targetBuffer = this.areAllWaveformChannelsActive()
+                    ? this.waveformOriginalBuffer
+                    : this.buildChannelBuffer(this.waveformOriginalBuffer, this.waveformChannels);
+                if (!targetBuffer) {
+                    return;
+                }
+                const media = this.waveSurfer.media;
+                if (!media) {
+                    return;
+                }
+                const wasPlaying = this.waveSurfer.isPlaying();
+                const currentTime = this.waveSurfer.getCurrentTime();
+                if (wasPlaying) {
+                    this.waveSurfer.pause();
+                }
+                media.buffer = targetBuffer;
+                this.waveSurfer.decodedData = targetBuffer;
+                if (this.waveSurfer.renderer && this.waveSurfer.renderer.render) {
+                    this.waveSurfer.renderer.render(targetBuffer);
+                }
+                const safeTime = Math.min(Math.max(currentTime, 0), targetBuffer.duration || this.waveformDuration || 0);
+                this.waveSurfer.setTime(safeTime);
+                this.waveformDuration = targetBuffer.duration || this.waveformDuration;
+                this.waveformPosition = safeTime;
+                if (wasPlaying) {
+                    this.waveSurfer.play();
+                }
+            },
+            buildChannelBuffer(sourceBuffer, state = this.waveformChannels) {
+                if (!sourceBuffer) {
+                    return null;
+                }
+                const audioContext = this.waveSurfer && this.waveSurfer.media && this.waveSurfer.media.audioContext;
+                if (!audioContext || typeof audioContext.createBuffer !== 'function') {
+                    return null;
+                }
+                const channels = sourceBuffer.numberOfChannels || 1;
+                const buffer = audioContext.createBuffer(channels, sourceBuffer.length, sourceBuffer.sampleRate);
+                for (let index = 0; index < channels; index += 1) {
+                    const target = buffer.getChannelData(index);
+                    const source = sourceBuffer.getChannelData(index);
+                    const shouldCopy = (index === 0 && state.left !== false)
+                        || (index === 1 && state.right !== false)
+                        || index > 1;
+                    if (shouldCopy) {
+                        target.set(source);
+                    } else {
+                        target.fill(0);
+                    }
+                }
+                return buffer;
+            },
+            areAllWaveformChannelsActive() {
+                return this.waveformChannels.left !== false && this.waveformChannels.right !== false;
+            },
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'completed':
@@ -1936,6 +2331,24 @@
                     return '—';
                 }
                 return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            },
+            formatWaveformTimestamp(value) {
+                if (value === null || value === undefined) {
+                    return '00:00.0';
+                }
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric) || numeric < 0) {
+                    return '00:00.0';
+                }
+                const hours = Math.floor(numeric / 3600);
+                const minutes = Math.floor((numeric % 3600) / 60);
+                const seconds = Math.floor(numeric % 60);
+                const tenths = Math.floor((numeric % 1) * 10);
+                const pad = (num) => String(num).padStart(2, '0');
+                if (hours > 0) {
+                    return `${hours}:${pad(minutes)}:${pad(seconds)}.${tenths}`;
+                }
+                return `${minutes}:${pad(seconds)}.${tenths}`;
             },
             formatDuration(value) {
                 const seconds = Number(value || 0);
