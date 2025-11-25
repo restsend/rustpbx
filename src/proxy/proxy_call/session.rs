@@ -142,8 +142,8 @@ impl CallSession {
         self.queue_passthrough_ringback = enabled;
     }
 
-    fn register_active_call(&mut self, _direction: &DialDirection) {
-        self.state.register_active_call();
+    fn register_active_call(&mut self, handle: ProxyCallHandle) {
+        self.state.register_active_call(handle);
     }
 
     fn set_queue_name(&mut self, name: Option<String>) {
@@ -168,23 +168,11 @@ impl CallSession {
         let mut trace = self.ivr_trace.clone().unwrap_or_default();
         let (exit_label, detail) = match exit {
             IvrExit::Completed => ("completed".to_string(), None),
-            IvrExit::Transfer(action) => (
-                "transfer".to_string(),
-                Some(action.target.clone()),
-            ),
-            IvrExit::Queue(action) => (
-                "queue".to_string(),
-                Some(action.queue.clone()),
-            ),
-            IvrExit::Webhook(action) => (
-                "webhook".to_string(),
-                Some(action.url.clone()),
-            ),
+            IvrExit::Transfer(action) => ("transfer".to_string(), Some(action.target.clone())),
+            IvrExit::Queue(action) => ("queue".to_string(), Some(action.queue.clone())),
+            IvrExit::Webhook(action) => ("webhook".to_string(), Some(action.url.clone())),
             IvrExit::Playback(_) => ("playback".to_string(), None),
-            IvrExit::Hangup(action) => (
-                "hangup".to_string(),
-                action.reason.clone(),
-            ),
+            IvrExit::Hangup(action) => ("hangup".to_string(), action.reason.clone()),
         };
         trace.exit = Some(exit_label);
         trace.detail = detail;
@@ -547,10 +535,11 @@ impl CallSession {
                 .connected_callee
                 .clone()
                 .or_else(|| self.routed_callee.clone());
-            self.state.emit_custom_event(ProxyCallEvent::TargetAnswered {
-                session_id: self.state.session_id(),
-                callee,
-            });
+            self.state
+                .emit_custom_event(ProxyCallEvent::TargetAnswered {
+                    session_id: self.state.session_id(),
+                    callee,
+                });
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::{
     call::{
-        CallForwardingConfig, CallForwardingMode, DialDirection, DialStrategy, Dialplan,
-        DialplanFlow, DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
+        CallForwardingConfig, CallForwardingMode, DialStrategy, Dialplan, DialplanFlow,
+        DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
         QueueHoldConfig, QueuePlan, TransactionCookie, TransferEndpoint,
         ivr::{
             InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
@@ -23,7 +23,7 @@ use crate::{
         track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
     },
     net_tool::is_private_ip,
-    proxy::server::SipServerRef,
+    proxy::{proxy_call::state::SessionActionReceiver, server::SipServerRef},
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -58,13 +58,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
 mod state;
-
+use state::ProxyCallState;
 pub use state::{
-    ProxyCallCommand, ProxyCallEvent, ProxyCallHandle, ProxyCallPhase, ProxyCallStateSnapshot,
+    ProxyCallEvent, ProxyCallHandle, ProxyCallPhase, ProxyCallStateSnapshot, SessionAction,
 };
-use state::{ProxyCallCommandReceiver, ProxyCallController, ProxyCallState};
 
 pub struct ProxyCall {
     server: SipServerRef,
@@ -78,12 +76,7 @@ pub struct ProxyCall {
     call_record_sender: Option<CallRecordSender>,
     event_sender: EventSender,
     state: ProxyCallState,
-    #[allow(dead_code)]
-    control: ProxyCallController,
-    command_rx: Mutex<Option<ProxyCallCommandReceiver>>,
     pending_hangup: Arc<Mutex<Option<PendingHangup>>>,
-    command_actions_tx: mpsc::UnboundedSender<ProxyCallCommand>,
-    command_actions_rx: Mutex<Option<mpsc::UnboundedReceiver<ProxyCallCommand>>>,
 }
 
 const MAX_QUEUE_CHAIN_DEPTH: usize = 4;
@@ -150,10 +143,6 @@ impl ProxyCallBuilder {
                 .map(|location| location.aor.to_string()),
             Some(server.active_call_registry.clone()),
         );
-        let (control, handle) = ProxyCallController::new(state.clone());
-        let command_rx = control.subscribe_commands();
-        let (command_actions_tx, command_actions_rx) = mpsc::unbounded_channel();
-        server.active_call_registry.register_handle(handle);
         let pending_hangup = Arc::new(Mutex::new(None));
         ProxyCall {
             server,
@@ -166,11 +155,7 @@ impl ProxyCallBuilder {
             call_record_sender: self.call_record_sender,
             event_sender: create_event_sender(),
             state,
-            control,
-            command_rx: Mutex::new(Some(command_rx)),
             pending_hangup,
-            command_actions_tx,
-            command_actions_rx: Mutex::new(Some(command_actions_rx)),
         }
     }
 }
@@ -201,6 +186,7 @@ enum ParallelEvent {
         destination: Option<String>,
     },
     Failed {
+        #[allow(dead_code)]
         idx: usize,
         code: StatusCode,
         reason: Option<String>,
@@ -218,73 +204,15 @@ impl ProxyCall {
         self.dialplan.call_forwarding.as_ref()
     }
 
-    fn spawn_command_listener(&self, shutdown: CancellationToken) -> JoinHandle<()> {
-        let mut command_rx = {
-            let mut slot = self
-                .command_rx
-                .lock()
-                .expect("command receiver mutex poisoned");
-            slot.take().expect("command listener already started")
-        };
-        let cancel_token = self.cancel_token.clone();
-        let pending = self.pending_hangup.clone();
-        let session_id = self.session_id.clone();
-        let actions = self.command_actions_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        break;
-                    }
-                    command = command_rx.recv() => match command {
-                        Ok(command) => {
-                            if let Err(err) = ProxyCall::handle_incoming_command(
-                                &session_id,
-                                &pending,
-                                &cancel_token,
-                                &actions,
-                                command,
-                            ) {
-                                warn!(session_id = %session_id, error = %err, "proxy call command handling failed");
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            }
-        })
-    }
-
-    fn take_command_action_receiver(&self) -> mpsc::UnboundedReceiver<ProxyCallCommand> {
-        self.command_actions_rx
-            .lock()
-            .expect("command action receiver mutex poisoned")
-            .take()
-            .expect("command action receiver already taken")
-    }
-
-    fn handle_incoming_command(
-        session_id: &str,
-        pending: &Arc<Mutex<Option<PendingHangup>>>,
-        cancel_token: &CancellationToken,
-        actions: &mpsc::UnboundedSender<ProxyCallCommand>,
-        command: ProxyCallCommand,
+    async fn handle_session_actions(
+        &self,
+        session: &mut CallSession,
+        mut action_rx: SessionActionReceiver,
     ) -> Result<()> {
-        match command {
-            ProxyCallCommand::Hangup {
-                reason,
-                code,
-                initiator,
-            } => {
-                Self::store_pending_hangup(pending, reason, code, initiator)?;
-                cancel_token.cancel();
-                Ok(())
-            }
-            other => actions
-                .send(other)
-                .map_err(|_| anyhow!("command action channel closed for {}", session_id)),
+        while let Some(action) = action_rx.recv().await {
+            self.apply_session_action(session, action).await?;
         }
+        Ok(())
     }
 
     fn store_pending_hangup(
@@ -513,8 +441,6 @@ impl ProxyCall {
     }
 
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
-        let command_shutdown = CancellationToken::new();
-        let command_task = self.spawn_command_listener(command_shutdown.clone());
         let (state_tx, state_rx) = mpsc::unbounded_channel();
         let local_contact = self.local_contact_uri();
         let mut server_dialog = self.dialog_layer.get_or_create_server_invite(
@@ -555,7 +481,6 @@ impl ProxyCall {
             recorder_option,
             self.state.clone(),
         );
-        session.register_active_call(&self.dialplan.direction);
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
             session.callee_offer = session.create_callee_track(all_webrtc_target).await.ok();
@@ -565,7 +490,8 @@ impl ProxyCall {
         }
         let media_stream = session.media_stream.clone();
         let dialog_guard = ServerDialogGuard::new(self.dialog_layer.clone(), server_dialog.id());
-        let mut action_rx = self.take_command_action_receiver();
+        let (handle, _action_rx) = ProxyCallHandle::with_state(self.state.clone());
+        session.register_active_call(handle);
 
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
             let result = tokio::select! {
@@ -584,21 +510,10 @@ impl ProxyCall {
                 _ = media_stream.serve() => {Ok(())},
                 r = self.execute_dialplan(&mut session) => r,
                 r = self.handle_server_events(state_rx) => r,
-                command = action_rx.recv() => {
-                    match command {
-                        Some(command) => self.apply_runtime_command(&mut session, command).await,
-                        None => Ok(()),
-                    }
-                },
             };
             drop(dialog_guard);
             result
         });
-        command_shutdown.cancel();
-        if let Err(err) = command_task.await {
-            warn!(session_id = %self.session_id, error = %err, "command listener task stopped unexpectedly");
-        }
-
         self.record_call(&session).await;
         result
     }
@@ -731,36 +646,30 @@ impl ProxyCall {
         .boxed()
     }
 
-    async fn apply_runtime_command(
+    async fn apply_session_action(
         &self,
         session: &mut CallSession,
-        command: ProxyCallCommand,
+        action: SessionAction,
     ) -> Result<()> {
-        match command {
-            ProxyCallCommand::Answer { callee, sdp } => session.accept_call(callee, sdp).await,
-            ProxyCallCommand::EnterQueue { name } => self.transfer_to_queue(session, &name).await,
-            ProxyCallCommand::ExitQueue => {
+        match action {
+            SessionAction::AcceptCall { callee, sdp } => session.accept_call(callee, sdp).await,
+            SessionAction::EnterQueue { name } => self.transfer_to_queue(session, &name).await,
+            SessionAction::ExitQueue => {
                 session.stop_queue_hold().await;
                 session.set_queue_name(None);
                 Ok(())
             }
-            ProxyCallCommand::EnterIvr { reference } => {
+            SessionAction::EnterIvr { reference } => {
                 self.transfer_to_ivr(session, &reference).await
             }
-            ProxyCallCommand::Transfer { target } => {
-                if let Some(queue) = target.strip_prefix("queue:") {
-                    self.transfer_to_queue(session, queue.trim()).await
-                } else if let Some(ivr) = target.strip_prefix("ivr:") {
-                    self.transfer_to_ivr(session, ivr.trim()).await
-                } else {
-                    self.transfer_to_uri(session, &target).await
-                }
+            SessionAction::TransferTarget(target) => {
+                self.transfer_to_uri(session, target.trim()).await
             }
-            ProxyCallCommand::ProvideEarlyMedia { sdp } => {
-                session.start_ringing(sdp.unwrap_or_default(), self).await;
+            SessionAction::ProvideEarlyMedia(sdp) => {
+                session.start_ringing(sdp, self).await;
                 Ok(())
             }
-            ProxyCallCommand::StartRinging {
+            SessionAction::StartRinging {
                 ringback,
                 passthrough,
             } => {
@@ -779,7 +688,15 @@ impl ProxyCall {
                     Ok(())
                 }
             }
-            ProxyCallCommand::Hangup { .. } => Ok(()),
+            SessionAction::Hangup {
+                reason,
+                code,
+                initiator,
+            } => {
+                Self::store_pending_hangup(&self.pending_hangup, reason, code, initiator)?;
+                self.cancel_token.cancel();
+                Ok(())
+            }
         }
     }
 

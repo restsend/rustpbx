@@ -1,25 +1,26 @@
 use crate::call::DialDirection;
 use crate::proxy::proxy_call::ProxyCallHandle;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ActiveProxyCallStatus {
     Ringing,
     Talking,
 }
 
-impl ActiveProxyCallStatus {
-    pub fn label(&self) -> &'static str {
+impl ToString for ActiveProxyCallStatus {
+    fn to_string(&self) -> String {
         match self {
-            Self::Ringing => "Ringing",
-            Self::Talking => "Talking",
+            ActiveProxyCallStatus::Ringing => "ringing".to_string(),
+            ActiveProxyCallStatus::Talking => "talking".to_string(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ActiveProxyCallEntry {
     pub session_id: String,
     pub caller: Option<String>,
@@ -28,12 +29,6 @@ pub struct ActiveProxyCallEntry {
     pub started_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
     pub status: ActiveProxyCallStatus,
-}
-
-impl ActiveProxyCallEntry {
-    pub fn status_label(&self) -> &'static str {
-        self.status.label()
-    }
 }
 
 #[derive(Default)]
@@ -53,9 +48,12 @@ impl ActiveProxyCallRegistry {
         }
     }
 
-    pub fn upsert(&self, entry: ActiveProxyCallEntry) {
+    pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: ProxyCallHandle) {
         let mut guard = self.inner.lock().unwrap();
         guard.entries.insert(entry.session_id.clone(), entry);
+        guard
+            .handles
+            .insert(handle.session_id().to_string(), handle);
     }
 
     pub fn update<F>(&self, session_id: &str, updater: F)
@@ -91,14 +89,6 @@ impl ActiveProxyCallRegistry {
 
     pub fn get(&self, session_id: &str) -> Option<ActiveProxyCallEntry> {
         self.inner.lock().unwrap().entries.get(session_id).cloned()
-    }
-
-    pub fn register_handle(&self, handle: ProxyCallHandle) {
-        self.inner
-            .lock()
-            .unwrap()
-            .handles
-            .insert(handle.session_id().to_string(), handle);
     }
 
     pub fn get_handle(&self, session_id: &str) -> Option<ProxyCallHandle> {

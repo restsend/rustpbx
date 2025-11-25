@@ -42,7 +42,7 @@ fn dialplan_reports_queue_presence() {
         }),
         dial_strategy: None,
         ring_timeout: None,
-        label:None,
+        label: None,
     };
 
     let plan = plan.with_queue(queue);

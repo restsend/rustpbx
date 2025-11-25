@@ -387,7 +387,7 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCall
                     .callee
                     .clone()
                     .unwrap_or_else(|| entry.direction.clone()),
-                status: entry.status_label().to_string(),
+                status: entry.status.to_string(),
                 started_at: entry.started_at.format("%H:%M").to_string(),
                 duration: format_duration(duration_secs),
                 started_at_ts: entry.started_at,
