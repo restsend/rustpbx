@@ -559,18 +559,21 @@ impl CallSession {
             self.answer = Some(answer);
         }
 
-        let headers = if self.answer.is_some() {
-            Some(vec![rsip::Header::ContentType("application/sdp".into())])
-        } else {
-            None
-        };
+        if !self.server_dialog.state().is_confirmed() {
+            let headers = if self.answer.is_some() {
+                Some(vec![rsip::Header::ContentType("application/sdp".into())])
+            } else {
+                None
+            };
 
-        if let Err(e) = self
-            .server_dialog
-            .accept(headers, self.answer.clone().map(|sdp| sdp.into_bytes()))
-        {
-            return Err(anyhow!("Failed to send 200 OK: {}", e));
+            if let Err(e) = self
+                .server_dialog
+                .accept(headers, self.answer.clone().map(|sdp| sdp.into_bytes()))
+            {
+                return Err(anyhow!("Failed to send 200 OK: {}", e));
+            }
         }
+        
         self.mark_active_call_answered();
         if first_answer {
             let callee = self
