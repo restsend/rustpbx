@@ -1,5 +1,5 @@
 use crate::call::DialDirection;
-use crate::proxy::proxy_call::ProxyCallHandle;
+use crate::proxy::proxy_call::CallSessionHandle;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub struct ActiveProxyCallEntry {
 #[derive(Default)]
 struct RegistryState {
     entries: HashMap<String, ActiveProxyCallEntry>,
-    handles: HashMap<String, ProxyCallHandle>,
+    handles: HashMap<String, CallSessionHandle>,
 }
 
 pub struct ActiveProxyCallRegistry {
@@ -48,7 +48,7 @@ impl ActiveProxyCallRegistry {
         }
     }
 
-    pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: ProxyCallHandle) {
+    pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: CallSessionHandle) {
         let mut guard = self.inner.lock().unwrap();
         guard.entries.insert(entry.session_id.clone(), entry);
         guard
@@ -91,7 +91,7 @@ impl ActiveProxyCallRegistry {
         self.inner.lock().unwrap().entries.get(session_id).cloned()
     }
 
-    pub fn get_handle(&self, session_id: &str) -> Option<ProxyCallHandle> {
+    pub fn get_handle(&self, session_id: &str) -> Option<CallSessionHandle> {
         self.inner.lock().unwrap().handles.get(session_id).cloned()
     }
 }

@@ -263,7 +263,7 @@ pub enum UserBackendConfig {
         path: String,
     },
     Database {
-        url: String,
+        url: Option<String>,
         table_name: Option<String>,
         id_column: Option<String>,
         username_column: Option<String>,

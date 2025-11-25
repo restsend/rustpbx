@@ -470,7 +470,7 @@ fn collect_account_entries(
             }
             UserBackendConfig::Database { url, .. } => notes.push(format!(
                 "Database backend {} is configured for authentication.",
-                url
+                url.clone().unwrap_or_default(),
             )),
         }
     }

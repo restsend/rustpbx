@@ -1,0 +1,171 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug executable 'rustpbx' with example",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=rustpbx",
+                    "--",
+                    "--conf",
+                    "config.toml.example"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in library 'rustpbx'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'perfcli'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=perfcli"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'perfcli'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=perfcli"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'rustpbx'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=rustpbx"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'rustpbx'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=rustpbx"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'text2wav'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=text2wav"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'text2wav'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=text2wav"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'wav2text'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=wav2text"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'wav2text'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=wav2text"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'voice-demo'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=voice-demo"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'voice-demo'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=voice-demo"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'webrtc-demo'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=webrtc-demo"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'webrtc-demo'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=webrtc-demo"
+                ]
+            }
+        }
+    ]
+}

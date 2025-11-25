@@ -59,9 +59,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 mod state;
-use state::ProxyCallState;
+use state::CallSessionShared;
 pub use state::{
-    ProxyCallEvent, ProxyCallHandle, ProxyCallPhase, ProxyCallStateSnapshot, SessionAction,
+    CallSessionHandle, CallSessionSnapshot, ProxyCallEvent, ProxyCallPhase, SessionAction,
 };
 
 pub struct ProxyCall {
@@ -75,7 +75,7 @@ pub struct ProxyCall {
     cancel_token: CancellationToken,
     call_record_sender: Option<CallRecordSender>,
     event_sender: EventSender,
-    state: ProxyCallState,
+    session_shared: CallSessionShared,
     pending_hangup: Arc<Mutex<Option<PendingHangup>>>,
 }
 
@@ -134,7 +134,7 @@ impl ProxyCallBuilder {
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dialog_layer = server.dialog_layer.clone();
-        let state = ProxyCallState::new(
+        let session_shared = CallSessionShared::new(
             session_id.clone(),
             dialplan.direction,
             dialplan.caller.as_ref().map(|c| c.to_string()),
@@ -154,7 +154,7 @@ impl ProxyCallBuilder {
             cancel_token,
             call_record_sender: self.call_record_sender,
             event_sender: create_event_sender(),
-            state,
+            session_shared,
             pending_hangup,
         }
     }
@@ -197,6 +197,33 @@ enum ParallelEvent {
     },
     Cancelled,
 }
+
+#[derive(Clone, Default)]
+struct SessionActionInbox {
+    queue: Arc<Mutex<VecDeque<SessionAction>>>,
+}
+
+impl SessionActionInbox {
+    fn push(&self, action: SessionAction) {
+        if let Ok(mut guard) = self.queue.lock() {
+            guard.push_back(action);
+        } else {
+            warn!("Session action inbox lock poisoned");
+        }
+    }
+
+    fn drain(&self) -> Vec<SessionAction> {
+        match self.queue.lock() {
+            Ok(mut guard) => guard.drain(..).collect(),
+            Err(_) => {
+                warn!("Session action inbox lock poisoned while draining");
+                Vec::new()
+            }
+        }
+    }
+}
+
+type ActionInbox<'a> = Option<&'a SessionActionInbox>;
 include!("proxy_call/session.rs");
 
 impl ProxyCall {
@@ -204,6 +231,7 @@ impl ProxyCall {
         self.dialplan.call_forwarding.as_ref()
     }
 
+    #[allow(dead_code)]
     async fn handle_session_actions(
         &self,
         session: &mut CallSession,
@@ -215,6 +243,20 @@ impl ProxyCall {
         Ok(())
     }
 
+    async fn process_pending_actions(
+        &self,
+        session: &mut CallSession,
+        inbox: Option<&SessionActionInbox>,
+    ) -> Result<()> {
+        if let Some(inbox) = inbox {
+            for action in inbox.drain() {
+                self.apply_session_action(session, action).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     fn store_pending_hangup(
         pending: &Arc<Mutex<Option<PendingHangup>>>,
         reason: Option<CallRecordHangupReason>,
@@ -360,6 +402,9 @@ impl ProxyCall {
         if self.dialplan.recording.enabled {
             return true;
         }
+        if self.dialplan.has_queue_hold_audio() {
+            return true;
+        }
         match self.dialplan.media.proxy_mode {
             MediaProxyMode::None => false,
             MediaProxyMode::All => true,
@@ -472,14 +517,14 @@ impl ProxyCall {
             };
 
         let mut session = CallSession::new(
-            self.cancel_token.child_token(),
+            self.cancel_token.clone(),
             self.session_id.clone(),
             server_dialog.clone(),
             use_media_proxy,
             self.event_sender.clone(),
             self.dialplan.media.clone(),
             recorder_option,
-            self.state.clone(),
+            self.session_shared.clone(),
         );
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
@@ -490,8 +535,15 @@ impl ProxyCall {
         }
         let media_stream = session.media_stream.clone();
         let dialog_guard = ServerDialogGuard::new(self.dialog_layer.clone(), server_dialog.id());
-        let (handle, _action_rx) = ProxyCallHandle::with_state(self.state.clone());
+        let (handle, mut action_rx) = CallSessionHandle::with_shared(self.session_shared.clone());
         session.register_active_call(handle);
+        let action_inbox = SessionActionInbox::default();
+        let inbox_forward = action_inbox.clone();
+        tokio::spawn(async move {
+            while let Some(action) = action_rx.recv().await {
+                inbox_forward.push(action);
+            }
+        });
 
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
             let result = tokio::select! {
@@ -500,15 +552,16 @@ impl ProxyCall {
                     session.set_error(status_code, reason_text.clone(), None);
                     if let Some(reason) = hangup_reason.clone() {
                         session.hangup_reason = Some(reason.clone());
-                        self.state.mark_hangup(reason);
+                        self.session_shared.mark_hangup(reason);
                     } else {
                         session.hangup_reason = Some(CallRecordHangupReason::Canceled);
-                        self.state.mark_hangup(CallRecordHangupReason::Canceled);
+                        self.session_shared
+                            .mark_hangup(CallRecordHangupReason::Canceled);
                     }
                     Err(anyhow!("Call cancelled"))
                 }
                 _ = media_stream.serve() => {Ok(())},
-                r = self.execute_dialplan(&mut session) => r,
+                r = self.execute_dialplan(&mut session, Some(&action_inbox)) => r,
                 r = self.handle_server_events(state_rx) => r,
             };
             drop(dialog_guard);
@@ -563,7 +616,12 @@ impl ProxyCall {
         Ok(())
     }
 
-    async fn execute_dialplan(&self, session: &mut CallSession) -> Result<()> {
+    async fn execute_dialplan(
+        &self,
+        session: &mut CallSession,
+        inbox: ActionInbox<'_>,
+    ) -> Result<()> {
+        self.process_pending_actions(session, inbox).await?;
         if self.dialplan.is_empty() {
             session.set_error(
                 StatusCode::ServerInternalError,
@@ -575,7 +633,7 @@ impl ProxyCall {
         if self.try_forwarding_before_dial(session).await? {
             return Ok(());
         }
-        self.execute_flow(session, &self.dialplan.flow).await
+        self.execute_flow(session, &self.dialplan.flow, inbox).await
     }
 
     async fn try_forwarding_before_dial(&self, session: &mut CallSession) -> Result<bool> {
@@ -646,57 +704,103 @@ impl ProxyCall {
         .boxed()
     }
 
-    async fn apply_session_action(
+    fn apply_session_action<'a>(
+        &'a self,
+        session: &'a mut CallSession,
+        action: SessionAction,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            match action {
+                SessionAction::AcceptCall { callee, sdp } => session.accept_call(callee, sdp).await,
+                SessionAction::EnterQueue { name } => self.transfer_to_queue(session, &name).await,
+                SessionAction::ExitQueue => {
+                    session.stop_queue_hold().await;
+                    session.set_queue_name(None);
+                    Ok(())
+                }
+                SessionAction::EnterIvr { reference } => {
+                    self.transfer_to_ivr(session, &reference).await
+                }
+                SessionAction::TransferTarget(target) => {
+                    self.transfer_to_uri(session, target.trim()).await
+                }
+                SessionAction::ProvideEarlyMedia(sdp) => {
+                    session.start_ringing(sdp, self).await;
+                    Ok(())
+                }
+                SessionAction::StartRinging {
+                    ringback,
+                    passthrough,
+                } => {
+                    if passthrough {
+                        session
+                            .start_ringing(ringback.unwrap_or_default(), self)
+                            .await;
+                        return Ok(());
+                    }
+                    if let Some(audio) = ringback {
+                        session
+                            .play_ringtone(&audio, Some(self.event_sender.subscribe()), true)
+                            .await
+                    } else {
+                        session.start_ringing(String::new(), self).await;
+                        Ok(())
+                    }
+                }
+                SessionAction::PlayPrompt {
+                    audio_file,
+                    send_progress,
+                    await_completion,
+                } => {
+                    let event_rx = if await_completion {
+                        Some(self.event_sender.subscribe())
+                    } else {
+                        None
+                    };
+                    session
+                        .play_ringtone(&audio_file, event_rx, send_progress)
+                        .await
+                }
+                SessionAction::SetQueueName(_)
+                | SessionAction::SetQueueRingbackPassthrough(_)
+                | SessionAction::StartQueueHold(_)
+                | SessionAction::StopQueueHold => {
+                    self.handle_session_control(session, action).await
+                }
+                SessionAction::Hangup {
+                    reason,
+                    code,
+                    initiator,
+                } => {
+                    Self::store_pending_hangup(&self.pending_hangup, reason, code, initiator)?;
+                    self.cancel_token.cancel();
+                    Ok(())
+                }
+            }
+        }
+        .boxed()
+    }
+
+    async fn handle_session_control(
         &self,
         session: &mut CallSession,
         action: SessionAction,
     ) -> Result<()> {
         match action {
-            SessionAction::AcceptCall { callee, sdp } => session.accept_call(callee, sdp).await,
-            SessionAction::EnterQueue { name } => self.transfer_to_queue(session, &name).await,
-            SessionAction::ExitQueue => {
+            SessionAction::SetQueueName(name) => {
+                session.set_queue_name(name);
+                Ok(())
+            }
+            SessionAction::SetQueueRingbackPassthrough(enabled) => {
+                session.set_queue_ringback_passthrough(enabled);
+                Ok(())
+            }
+            SessionAction::StartQueueHold(config) => session.start_queue_hold(config).await,
+            SessionAction::StopQueueHold => {
                 session.stop_queue_hold().await;
-                session.set_queue_name(None);
                 Ok(())
             }
-            SessionAction::EnterIvr { reference } => {
-                self.transfer_to_ivr(session, &reference).await
-            }
-            SessionAction::TransferTarget(target) => {
-                self.transfer_to_uri(session, target.trim()).await
-            }
-            SessionAction::ProvideEarlyMedia(sdp) => {
-                session.start_ringing(sdp, self).await;
-                Ok(())
-            }
-            SessionAction::StartRinging {
-                ringback,
-                passthrough,
-            } => {
-                if passthrough {
-                    session
-                        .start_ringing(ringback.unwrap_or_default(), self)
-                        .await;
-                    return Ok(());
-                }
-                if let Some(audio) = ringback {
-                    session
-                        .play_ringtone(&audio, Some(self.event_sender.subscribe()), true)
-                        .await
-                } else {
-                    session.start_ringing(String::new(), self).await;
-                    Ok(())
-                }
-            }
-            SessionAction::Hangup {
-                reason,
-                code,
-                initiator,
-            } => {
-                Self::store_pending_hangup(&self.pending_hangup, reason, code, initiator)?;
-                self.cancel_token.cancel();
-                Ok(())
-            }
+            _ => unreachable!("unsupported session control action"),
         }
     }
 
@@ -719,12 +823,32 @@ impl ProxyCall {
         &'a self,
         session: &'a mut CallSession,
         flow: &'a DialplanFlow,
+        inbox: ActionInbox<'a>,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.execute_flow_with_mode(session, flow, inbox, FlowFailureHandling::Handle)
+    }
+
+    fn execute_flow_with_mode<'a>(
+        &'a self,
+        session: &'a mut CallSession,
+        flow: &'a DialplanFlow,
+        inbox: ActionInbox<'a>,
+        handling: FlowFailureHandling,
     ) -> BoxFuture<'a, Result<()>> {
         async move {
             match flow {
-                DialplanFlow::Targets(strategy) => self.execute_targets(session, strategy).await,
+                DialplanFlow::Targets(strategy) => match handling {
+                    FlowFailureHandling::Handle => {
+                        self.execute_targets(session, strategy, inbox).await
+                    }
+                    FlowFailureHandling::Propagate => {
+                        self.run_targets(session, strategy, inbox).await
+                    }
+                },
                 DialplanFlow::Queue { plan, next } => {
-                    self.execute_queue_plan(session, plan, next, 0, true).await
+                    let propagate_failure = matches!(handling, FlowFailureHandling::Handle);
+                    self.execute_queue_plan(session, plan, next, 0, propagate_failure, inbox)
+                        .await
                 }
                 DialplanFlow::Ivr(config) => self.run_ivr(session, config, None).await,
             }
@@ -736,8 +860,10 @@ impl ProxyCall {
         &self,
         session: &mut CallSession,
         strategy: &DialStrategy,
+        inbox: ActionInbox<'_>,
     ) -> Result<()> {
-        let run_future = self.run_targets(session, strategy);
+        self.process_pending_actions(session, inbox).await?;
+        let run_future = self.run_targets(session, strategy, inbox);
         let result = if let Some(timeout_duration) = self.forwarding_timeout() {
             match timeout(timeout_duration, run_future).await {
                 Ok(outcome) => outcome,
@@ -763,7 +889,13 @@ impl ProxyCall {
         }
     }
 
-    async fn run_targets(&self, session: &mut CallSession, strategy: &DialStrategy) -> Result<()> {
+    async fn run_targets(
+        &self,
+        session: &mut CallSession,
+        strategy: &DialStrategy,
+        inbox: ActionInbox<'_>,
+    ) -> Result<()> {
+        self.process_pending_actions(session, inbox).await?;
         info!(
             session_id = %self.session_id,
             strategy = %strategy,
@@ -772,12 +904,19 @@ impl ProxyCall {
         );
 
         match strategy {
-            DialStrategy::Sequential(targets) => self.dial_sequential(session, targets).await,
-            DialStrategy::Parallel(targets) => self.dial_parallel(session, targets).await,
+            DialStrategy::Sequential(targets) => {
+                self.dial_sequential(session, targets, inbox).await
+            }
+            DialStrategy::Parallel(targets) => self.dial_parallel(session, targets, inbox).await,
         }
     }
 
-    async fn dial_sequential(&self, session: &mut CallSession, targets: &[Location]) -> Result<()> {
+    async fn dial_sequential(
+        &self,
+        session: &mut CallSession,
+        targets: &[Location],
+        inbox: ActionInbox<'_>,
+    ) -> Result<()> {
         info!(
             session_id = %self.session_id,
             target_count = targets.len(),
@@ -785,6 +924,7 @@ impl ProxyCall {
         );
 
         for (index, target) in targets.iter().enumerate() {
+            self.process_pending_actions(session, inbox).await?;
             info!(
                 session_id = %self.session_id, index, %target,
                 "trying sequential target"
@@ -819,7 +959,12 @@ impl ProxyCall {
         Err(anyhow!("All sequential targets failed"))
     }
 
-    async fn dial_parallel(&self, session: &mut CallSession, targets: &[Location]) -> Result<()> {
+    async fn dial_parallel(
+        &self,
+        session: &mut CallSession,
+        targets: &[Location],
+        inbox: ActionInbox<'_>,
+    ) -> Result<()> {
         info!(
             session_id = %self.session_id,
             target_count = targets.len(),
@@ -836,8 +981,17 @@ impl ProxyCall {
         }
 
         if !session.early_media_sent {
-            session.start_ringing(String::new(), self).await;
+            let _ = self
+                .apply_session_action(
+                    session,
+                    SessionAction::StartRinging {
+                        ringback: None,
+                        passthrough: false,
+                    },
+                )
+                .await;
         }
+        self.process_pending_actions(session, inbox).await?;
 
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<ParallelEvent>();
         let dialog_layer = self.dialog_layer.clone();
@@ -1000,15 +1154,26 @@ impl ProxyCall {
         let mut accepted_idx: Option<usize> = None;
 
         while let Some(event) = ev_rx.recv().await {
+            self.process_pending_actions(session, inbox).await?;
             match event {
                 ParallelEvent::Calling { idx, dialog_id } => {
                     known_dialogs[idx] = Some(dialog_id);
                 }
                 ParallelEvent::Early { sdp } => {
                     if let Some(answer) = sdp {
-                        session.start_ringing(answer, self).await;
+                        let _ = self
+                            .apply_session_action(session, SessionAction::ProvideEarlyMedia(answer))
+                            .await;
                     } else if !session.early_media_sent {
-                        session.start_ringing(String::new(), self).await;
+                        let _ = self
+                            .apply_session_action(
+                                session,
+                                SessionAction::StartRinging {
+                                    ringback: None,
+                                    passthrough: false,
+                                },
+                            )
+                            .await;
                     }
                 }
                 ParallelEvent::Accepted {
@@ -1025,7 +1190,16 @@ impl ProxyCall {
                     session.routed_contact = Some(contact.clone());
                     session.routed_destination = destination.clone();
                     if accepted_idx.is_none() {
-                        if let Err(e) = session.accept_call(Some(aor), Some(answer)).await {
+                        if let Err(e) = self
+                            .apply_session_action(
+                                session,
+                                SessionAction::AcceptCall {
+                                    callee: Some(aor),
+                                    sdp: Some(answer),
+                                },
+                            )
+                            .await
+                        {
                             warn!(session_id = %self.session_id, error = %e, "Failed to accept call on parallel branch");
                             continue;
                         }
@@ -1248,6 +1422,11 @@ impl ProxyCall {
             state_rx_guard.handle_proxy_call_state(&self, session, target),
             invite_loop
         );
+        info!(
+            session_id = %self.session_id,
+            target = %target,
+            "INVITE process completed"
+        );
         r
     }
 
@@ -1316,40 +1495,41 @@ impl ProxyCall {
     async fn record_call(&self, session: &CallSession) {
         let now = Utc::now();
         let start_time = now - chrono::Duration::from_std(self.elapsed()).unwrap_or_default();
+        let snapshot = session.record_snapshot();
 
-        let ring_time = session.ring_time.map(|rt| {
+        let ring_time = snapshot.ring_time.map(|rt| {
             start_time
                 + chrono::Duration::from_std(rt.duration_since(self.start_time)).unwrap_or_default()
         });
 
-        let answer_time = session.answer_time.map(|at| {
+        let answer_time = snapshot.answer_time.map(|at| {
             start_time
                 + chrono::Duration::from_std(at.duration_since(self.start_time)).unwrap_or_default()
         });
 
-        let status_code = session
+        let status_code = snapshot
             .last_error
             .as_ref()
             .map(|(code, _)| u16::from(code.clone()))
             .unwrap_or(200);
 
-        let hangup_reason = session.hangup_reason.clone().or_else(|| {
-            if session.last_error.is_some() {
+        let hangup_reason = snapshot.hangup_reason.clone().or_else(|| {
+            if snapshot.last_error.is_some() {
                 Some(CallRecordHangupReason::Failed)
-            } else if session.answer_time.is_some() {
+            } else if snapshot.answer_time.is_some() {
                 Some(CallRecordHangupReason::BySystem)
             } else {
                 Some(CallRecordHangupReason::Failed)
             }
         });
 
-        let original_caller = session
+        let original_caller = snapshot
             .original_caller
             .clone()
             .or_else(|| self.dialplan.caller.as_ref().map(|c| c.to_string()))
             .unwrap_or_default();
 
-        let original_callee = session
+        let original_callee = snapshot
             .original_callee
             .clone()
             .or_else(|| {
@@ -1366,15 +1546,15 @@ impl ProxyCall {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        let caller = session
+        let caller = snapshot
             .routed_caller
             .clone()
             .unwrap_or_else(|| original_caller.clone());
 
-        let callee = session
+        let callee = snapshot
             .routed_callee
             .clone()
-            .or_else(|| session.connected_callee.clone())
+            .or_else(|| snapshot.connected_callee.clone())
             .unwrap_or_else(|| original_callee.clone());
 
         let mut extras_map: HashMap<String, Value> = HashMap::new();
@@ -1388,7 +1568,7 @@ impl ProxyCall {
                 Value::String(reason.to_string()),
             );
         }
-        if let Some((code, reason)) = session.last_error.as_ref() {
+        if let Some((code, reason)) = snapshot.last_error.as_ref() {
             extras_map.insert(
                 "last_error_code".to_string(),
                 Value::Number(JsonNumber::from(u16::from(code.clone()))),
@@ -1401,11 +1581,11 @@ impl ProxyCall {
             }
         }
 
-        if let Some(queue) = session.last_queue_name() {
+        if let Some(queue) = snapshot.last_queue_name.clone() {
             extras_map.insert("last_queue".to_string(), Value::String(queue));
         }
 
-        if let Some(trace) = session.ivr_trace() {
+        if let Some(trace) = snapshot.ivr_trace.clone() {
             let mut ivr_payload = JsonMap::new();
             if let Some(reference) = trace.reference.clone() {
                 ivr_payload.insert("reference".to_string(), Value::String(reference));
@@ -1424,9 +1604,9 @@ impl ProxyCall {
             }
         }
 
-        let mut hangup_messages = session.recorded_hangup_messages();
+        let mut hangup_messages = snapshot.hangup_messages.clone();
         if hangup_messages.is_empty() {
-            if let Some((code, reason)) = session.last_error.as_ref() {
+            if let Some((code, reason)) = snapshot.last_error.as_ref() {
                 hangup_messages.push(CallRecordHangupMessage {
                     code: u16::from(code.clone()),
                     reason: reason.clone(),
@@ -1451,10 +1631,10 @@ impl ProxyCall {
             Value::String(original_callee.clone()),
         );
         rewrite_payload.insert("callee_final".to_string(), Value::String(callee.clone()));
-        if let Some(contact) = session.routed_contact.as_ref() {
+        if let Some(contact) = snapshot.routed_contact.as_ref() {
             rewrite_payload.insert("contact".to_string(), Value::String(contact.clone()));
         }
-        if let Some(destination) = session.routed_destination.as_ref() {
+        if let Some(destination) = snapshot.routed_destination.as_ref() {
             rewrite_payload.insert(
                 "destination".to_string(),
                 Value::String(destination.clone()),
@@ -1463,17 +1643,17 @@ impl ProxyCall {
         extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
 
         let mut sip_flows_map: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
-        let server_dialog_id = session.server_dialog.id();
+        let server_dialog_id = snapshot.server_dialog_id.clone();
         let mut call_ids: HashSet<String> = HashSet::new();
         call_ids.insert(server_dialog_id.call_id.clone());
 
-        for dialog_id in &session.callee_dialogs {
+        for dialog_id in &snapshot.callee_dialogs {
             call_ids.insert(dialog_id.call_id.clone());
         }
 
         let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
         sip_leg_roles.insert(server_dialog_id.call_id.clone(), "primary".to_string());
-        for dialog_id in &session.callee_dialogs {
+        for dialog_id in &snapshot.callee_dialogs {
             sip_leg_roles
                 .entry(dialog_id.call_id.clone())
                 .or_insert_with(|| "b2bua".to_string());
@@ -1498,8 +1678,8 @@ impl ProxyCall {
             caller: caller.clone(),
             callee: callee.clone(),
             status_code,
-            offer: session.caller_offer.clone(),
-            answer: session.answer.clone(),
+            offer: snapshot.caller_offer.clone(),
+            answer: snapshot.answer.clone(),
             hangup_reason: hangup_reason.clone(),
             hangup_messages: hangup_messages.clone(),
             recorder: Vec::new(),
@@ -1556,12 +1736,11 @@ impl ProxyCall {
         persist_args.status = status;
         persist_args.from_number = from_number;
         persist_args.to_number = to_number;
-        persist_args.queue = session.last_queue_name();
+        persist_args.queue = snapshot.last_queue_name.clone();
         persist_args.sip_trunk_id = sip_trunk_id;
         persist_args.sip_gateway = sip_gateway;
         persist_args.metadata = metadata_value;
         persist_args.recording_url = recording_path_for_db;
-
         let (persist_error, send_error) = persist_and_dispatch_record(
             self.server.database.as_ref(),
             self.call_record_sender.as_ref(),
@@ -1569,7 +1748,6 @@ impl ProxyCall {
             persist_args,
         )
         .await;
-
         if let Some(err) = persist_error {
             warn!(
                 session_id = %self.session_id,
@@ -1585,6 +1763,12 @@ impl ProxyCall {
             );
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum FlowFailureHandling {
+    Handle,
+    Propagate,
 }
 
 include!("proxy_call/queue.rs");
@@ -1644,12 +1828,25 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                 DialogState::Terminated(dialog_id, reason) => {
                     info!(
                         session_id = proxy_call.session_id,
+                        is_answered = session.is_answered(),
                         %dialog_id,
                         ?reason,
                         "Established call terminated by callee"
                     );
                     session.add_callee_dialog(dialog_id);
                     session.callee_terminated(reason).await;
+                    if session.is_answered() {
+                        let _ = proxy_call
+                            .apply_session_action(
+                                session,
+                                SessionAction::Hangup {
+                                    reason: Some(CallRecordHangupReason::ByCallee),
+                                    code: None,
+                                    initiator: Some("callee".to_string()),
+                                },
+                            )
+                            .await;
+                    }
                     return Ok(());
                 }
                 DialogState::Calling(dialog_id) => {
@@ -1665,7 +1862,9 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                         %answer,
                         "Callee dialog is ringing/early"
                     );
-                    session.start_ringing(answer, proxy_call).await;
+                    let _ = proxy_call
+                        .apply_session_action(session, SessionAction::ProvideEarlyMedia(answer))
+                        .await;
                 }
                 DialogState::Confirmed(dialog_id, response) => {
                     info!(
@@ -1677,8 +1876,14 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                     proxy_call.update_remote_target_from_response(&dialog_id, &response);
                     session.add_callee_dialog(dialog_id);
                     let answer = String::from_utf8_lossy(response.body()).to_string();
-                    if let Err(e) = session
-                        .accept_call(Some(target.aor.to_string()), Some(answer))
+                    if let Err(e) = proxy_call
+                        .apply_session_action(
+                            session,
+                            SessionAction::AcceptCall {
+                                callee: Some(target.aor.to_string()),
+                                sdp: Some(answer),
+                            },
+                        )
                         .await
                     {
                         warn!(
