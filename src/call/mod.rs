@@ -473,7 +473,7 @@ impl RingbackConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueHoldConfig {
     pub audio_file: Option<String>,
     pub loop_playback: bool,
@@ -680,6 +680,20 @@ impl DialplanFlow {
 
     fn has_queue(&self) -> bool {
         matches!(self, DialplanFlow::Queue { .. })
+    }
+
+    fn has_queue_hold_audio(&self) -> bool {
+        match self {
+            DialplanFlow::Queue { plan, next } => {
+                let hold_audio = plan
+                    .hold
+                    .as_ref()
+                    .and_then(|hold| hold.audio_file.as_ref())
+                    .is_some();
+                hold_audio || next.has_queue_hold_audio()
+            }
+            _ => false,
+        }
     }
 
     fn has_ivr(&self) -> bool {
@@ -960,6 +974,10 @@ impl Dialplan {
 
     pub fn has_queue(&self) -> bool {
         self.flow.has_queue()
+    }
+
+    pub fn has_queue_hold_audio(&self) -> bool {
+        self.flow.has_queue_hold_audio()
     }
 
     /// Check if recording is enabled

@@ -1,4 +1,4 @@
-use crate::call::DialDirection;
+use crate::call::{DialDirection, QueueHoldConfig};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus, normalize_direction,
@@ -29,6 +29,15 @@ pub enum SessionAction {
         ringback: Option<String>,
         passthrough: bool,
     },
+    PlayPrompt {
+        audio_file: String,
+        send_progress: bool,
+        await_completion: bool,
+    },
+    SetQueueName(Option<String>),
+    SetQueueRingbackPassthrough(bool),
+    StartQueueHold(QueueHoldConfig),
+    StopQueueHold,
     Hangup {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,
@@ -74,7 +83,7 @@ pub enum ProxyCallPhase {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ProxyCallStateInner {
+pub struct CallSessionSnapshot {
     session_id: String,
     phase: ProxyCallPhase,
     started_at: DateTime<Utc>,
@@ -89,16 +98,15 @@ pub struct ProxyCallStateInner {
     queue_name: Option<String>,
     direction: String,
 }
-pub type ProxyCallStateSnapshot = ProxyCallStateInner;
 
 #[derive(Clone)]
-pub struct ProxyCallState {
-    inner: Arc<RwLock<ProxyCallStateInner>>,
+pub struct CallSessionShared {
+    inner: Arc<RwLock<CallSessionSnapshot>>,
     registry: Option<Arc<ActiveProxyCallRegistry>>,
     events: Arc<RwLock<Option<ProxyCallEventSender>>>,
 }
 
-impl ProxyCallState {
+impl CallSessionShared {
     pub fn new(
         session_id: String,
         direction: DialDirection,
@@ -107,7 +115,7 @@ impl ProxyCallState {
         registry: Option<Arc<ActiveProxyCallRegistry>>,
     ) -> Self {
         let started_at = Utc::now();
-        let inner = ProxyCallStateInner {
+        let inner = CallSessionSnapshot {
             session_id: session_id.clone(),
             phase: ProxyCallPhase::Initializing,
             started_at,
@@ -129,12 +137,12 @@ impl ProxyCallState {
         }
     }
 
-    pub fn snapshot(&self) -> ProxyCallStateSnapshot {
+    pub fn snapshot(&self) -> CallSessionSnapshot {
         let inner = self.inner.read().unwrap();
         inner.clone()
     }
 
-    pub fn register_active_call(&self, handle: ProxyCallHandle) {
+    pub fn register_active_call(&self, handle: CallSessionHandle) {
         if let Some(registry) = &self.registry {
             let inner = self.inner.read().unwrap();
             let entry = ActiveProxyCallEntry {
@@ -274,7 +282,7 @@ impl ProxyCallState {
 
     fn update<F>(&self, mutate: F) -> bool
     where
-        F: FnOnce(&mut ProxyCallStateInner) -> bool,
+        F: FnOnce(&mut CallSessionSnapshot) -> bool,
     {
         let mut inner = self.inner.write().unwrap();
         let prev_phase = inner.phase;
@@ -401,22 +409,23 @@ pub enum ProxyCallEvent {
 pub type SessionActionSender = mpsc::UnboundedSender<SessionAction>;
 pub type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
 pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
+
 #[derive(Clone)]
-pub struct ProxyCallHandle {
+pub struct CallSessionHandle {
     session_id: String,
-    state: ProxyCallState,
+    shared: CallSessionShared,
     cmd_tx: SessionActionSender,
 }
 
-impl ProxyCallHandle {
-    pub fn with_state(state: ProxyCallState) -> (Self, SessionActionReceiver) {
-        let session_id = state.session_id();
+impl CallSessionHandle {
+    pub fn with_shared(shared: CallSessionShared) -> (Self, SessionActionReceiver) {
+        let session_id = shared.session_id();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        state.set_event_sender(event_tx);
+        shared.set_event_sender(event_tx);
         let handle = Self {
             session_id,
-            state,
+            shared,
             cmd_tx,
         };
         (handle, cmd_rx)
@@ -426,8 +435,8 @@ impl ProxyCallHandle {
         &self.session_id
     }
 
-    pub fn snapshot(&self) -> ProxyCallStateSnapshot {
-        self.state.snapshot()
+    pub fn snapshot(&self) -> CallSessionSnapshot {
+        self.shared.snapshot()
     }
 
     pub fn send_command(&self, action: SessionAction) -> Result<()> {
@@ -437,7 +446,10 @@ impl ProxyCallHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionAction;
+    use super::*;
+    use crate::proxy::active_call_registry::{ActiveProxyCallRegistry, ActiveProxyCallStatus};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     #[test]
     fn transfer_target_detects_queue() {
@@ -468,5 +480,126 @@ mod tests {
             action,
             SessionAction::TransferTarget("sip:1001@example.com".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn shared_emits_queue_events() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let shared = CallSessionShared::new(
+            "test-session".to_string(),
+            DialDirection::Inbound,
+            Some("sip:alice@example.com".to_string()),
+            Some("sip:bob@example.com".to_string()),
+            Some(registry.clone()),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        shared.set_event_sender(tx);
+
+        shared.set_queue_name(Some("support".to_string()));
+        let entered = rx.recv().await.expect("queue entered event");
+        match entered {
+            ProxyCallEvent::QueueEntered { name, .. } => assert_eq!(name, "support"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        shared.set_queue_name(None);
+        let left = rx.recv().await.expect("queue left event");
+        match left {
+            ProxyCallEvent::QueueLeft { name, .. } => {
+                assert_eq!(name, Some("support".to_string()))
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shared_updates_phase_and_registry() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let shared = CallSessionShared::new(
+            "test-session".to_string(),
+            DialDirection::Inbound,
+            Some("sip:alice@example.com".to_string()),
+            Some("sip:bob@example.com".to_string()),
+            Some(registry.clone()),
+        );
+
+        let (handle, _) = CallSessionHandle::with_shared(shared.clone());
+        shared.register_active_call(handle.clone());
+
+        assert!(shared.transition_to_ringing(false));
+        shared.transition_to_answered();
+        shared.mark_hangup(CallRecordHangupReason::ByCaller);
+
+        let snapshot = shared.snapshot();
+        assert_eq!(snapshot.phase, ProxyCallPhase::Ended);
+        assert_eq!(
+            snapshot.hangup_reason,
+            Some(CallRecordHangupReason::ByCaller)
+        );
+
+        let entry = registry.get("test-session").expect("registry entry");
+        assert_eq!(entry.status, ActiveProxyCallStatus::Ringing);
+    }
+
+    #[tokio::test]
+    async fn handle_forwards_session_actions() {
+        let shared = CallSessionShared::new(
+            "session-cmd".to_string(),
+            DialDirection::Inbound,
+            None,
+            None,
+            None,
+        );
+        let (handle, mut rx) = CallSessionHandle::with_shared(shared);
+
+        handle
+            .send_command(SessionAction::ExitQueue)
+            .expect("command send");
+
+        let action = rx.recv().await.expect("command received");
+        assert_eq!(action, SessionAction::ExitQueue);
+    }
+
+    #[test]
+    fn snapshot_tracks_routing_and_queue_state() {
+        let shared = CallSessionShared::new(
+            "session-snapshot".to_string(),
+            DialDirection::Outbound,
+            Some("sip:alice@example.com".to_string()),
+            Some("sip:bob@example.com".to_string()),
+            None,
+        );
+
+        shared.update_routed_parties(Some("sip:carol@example.com".to_string()), None);
+        shared.set_queue_name(Some("sales".to_string()));
+        shared.set_current_target(Some("sip:1001@example.com".to_string()));
+
+        let snapshot = shared.snapshot();
+        assert_eq!(snapshot.caller, Some("sip:carol@example.com".to_string()));
+        assert_eq!(snapshot.queue_name, Some("sales".to_string()));
+        assert_eq!(
+            snapshot.current_target,
+            Some("sip:1001@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn registry_reflects_talking_when_answered() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let shared = CallSessionShared::new(
+            "session-talking".to_string(),
+            DialDirection::Inbound,
+            Some("sip:alice@example.com".to_string()),
+            Some("sip:bob@example.com".to_string()),
+            Some(registry.clone()),
+        );
+        let (handle, _) = CallSessionHandle::with_shared(shared.clone());
+        shared.register_active_call(handle);
+
+        assert!(shared.transition_to_ringing(false));
+        shared.transition_to_answered();
+
+        let entry = registry.get("session-talking").expect("registry entry");
+        assert_eq!(entry.status, ActiveProxyCallStatus::Talking);
     }
 }

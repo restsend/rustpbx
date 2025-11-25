@@ -1,11 +1,3 @@
-type QueueFallbackResult<'a> = (
-    &'a mut CallSession,
-    &'a QueueFallbackAction,
-    &'a DialplanFlow,
-    usize,
-    bool,
-);
-
 impl ProxyCall {
     async fn transfer_to_queue(&self, session: &mut CallSession, reference: &str) -> Result<()> {
         let queue_plan = self.load_queue_plan(reference).await?;
@@ -14,8 +6,12 @@ impl ProxyCall {
             .cloned()
             .ok_or_else(|| anyhow!("queue '{}' has no dial targets", reference))?;
         let next_flow = DialplanFlow::Targets(strategy);
-        session.set_queue_name(Some(reference.to_string()));
-        self.execute_queue_plan(session, &queue_plan, &next_flow, 0, false)
+        self.handle_session_control(
+            session,
+            SessionAction::SetQueueName(Some(reference.to_string())),
+        )
+        .await?;
+        self.execute_queue_plan(session, &queue_plan, &next_flow, 0, false, None)
             .await
     }
 
@@ -53,7 +49,9 @@ impl ProxyCall {
         next: &DialplanFlow,
         depth: usize,
         propagate_failure: bool,
+        inbox: ActionInbox<'_>,
     ) -> Result<()> {
+        self.process_pending_actions(session, inbox).await?;
         if depth >= MAX_QUEUE_CHAIN_DEPTH {
             warn!(
                 session_id = %self.session_id,
@@ -63,26 +61,55 @@ impl ProxyCall {
             return self.handle_failure(session).await;
         }
         if let Some(name) = plan.label.clone() {
-            session.set_queue_name(Some(name));
+            self.handle_session_control(session, SessionAction::SetQueueName(Some(name)))
+                .await?;
         }
         let previous_passthrough = session.queue_ringback_passthrough();
         let enable_passthrough = plan.accept_immediately && plan.passthrough_ringback();
-        session.set_queue_ringback_passthrough(enable_passthrough);
+        self.handle_session_control(
+            session,
+            SessionAction::SetQueueRingbackPassthrough(enable_passthrough),
+        )
+        .await?;
 
         let result = async {
             if plan.accept_immediately {
-                session.accept_call(None, None).await?;
+                self.apply_session_action(
+                    session,
+                    SessionAction::AcceptCall {
+                        callee: None,
+                        sdp: None,
+                    },
+                )
+                .await?;
             } else if !session.early_media_sent {
-                session.start_ringing(String::new(), self).await;
+                self
+                    .apply_session_action(
+                        session,
+                        SessionAction::StartRinging {
+                            ringback: None,
+                            passthrough: false,
+                        },
+                    )
+                    .await?;
             }
 
             if let Some(hold) = plan.hold.clone() {
-                if let Err(e) = session.start_queue_hold(hold).await {
+                if let Err(e) = self
+                    .handle_session_control(session, SessionAction::StartQueueHold(hold))
+                    .await
+                {
                     warn!(session_id = %self.session_id, error = %e, "Failed to start queue hold track");
                 }
             }
 
-            let dial_future = self.execute_flow(session, next);
+            self.process_pending_actions(session, inbox).await?;
+            let dial_future = self.execute_flow_with_mode(
+                session,
+                next,
+                inbox,
+                FlowFailureHandling::Propagate,
+            );
             let dial_result = if let Some(timeout_duration) = plan.ring_timeout {
                 match timeout(timeout_duration, dial_future).await {
                     Ok(result) => result,
@@ -99,13 +126,22 @@ impl ProxyCall {
                 dial_future.await
             };
 
-            session.stop_queue_hold().await;
+            let _ = self
+                .handle_session_control(session, SessionAction::StopQueueHold)
+                .await;
 
             match dial_result {
                 Ok(_) => Ok(()),
                 Err(_) => {
                     if let Some(fallback) = &plan.fallback {
-                        self.execute_queue_fallback((session, fallback, next, depth, propagate_failure))
+                        self.execute_queue_fallback(
+                            session,
+                            inbox,
+                            fallback,
+                            next,
+                            depth,
+                            propagate_failure,
+                        )
                             .await
                     } else if propagate_failure {
                         self.handle_failure(session).await
@@ -117,16 +153,42 @@ impl ProxyCall {
         }
         .await;
 
-        session.set_queue_ringback_passthrough(previous_passthrough);
-        session.set_queue_name(None);
+        if let Err(err) = self
+            .handle_session_control(
+                session,
+                SessionAction::SetQueueRingbackPassthrough(previous_passthrough),
+            )
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                error = %err,
+                "Failed to restore queue ringback passthrough state"
+            );
+        }
+
+        if let Err(err) = self
+            .handle_session_control(session, SessionAction::SetQueueName(None))
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                error = %err,
+                "Failed to clear queue name"
+            );
+        }
         result
     }
 
     fn execute_queue_fallback<'a>(
         &'a self,
-        args: QueueFallbackResult<'a>,
+        session: &'a mut CallSession,
+        inbox: ActionInbox<'a>,
+        fallback: &'a QueueFallbackAction,
+        next: &'a DialplanFlow,
+        depth: usize,
+        propagate_failure: bool,
     ) -> BoxFuture<'a, Result<()>> {
-        let (session, fallback, next, depth, propagate_failure) = args;
         async move {
             match fallback {
                 QueueFallbackAction::Failure(action) => {
@@ -178,6 +240,7 @@ impl ProxyCall {
                                 next,
                                 depth + 1,
                                 propagate_failure,
+                                inbox,
                             )
                             .await
                         }

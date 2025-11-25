@@ -7,7 +7,7 @@ use crate::media::{
 };
 use crate::{AudioFrame, Samples, TrackId};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -24,6 +24,7 @@ pub struct MediaStream {
     pub cancel_token: CancellationToken,
     recorder_option: Mutex<Option<RecorderOption>>,
     tracks: Mutex<HashMap<TrackId, (Box<dyn Track>, DtmfDetector)>>,
+    suppressed_sources: Mutex<HashSet<TrackId>>,
     event_sender: EventSender,
     pub packet_sender: TrackPacketSender,
     packet_receiver: Mutex<Option<TrackPacketReceiver>>,
@@ -31,6 +32,9 @@ pub struct MediaStream {
     recorder_receiver: Mutex<Option<mpsc::UnboundedReceiver<AudioFrame>>>,
     recorder_handle: Mutex<Option<JoinHandle<()>>>,
 }
+
+const CALLEE_TRACK_ID: &str = "callee-track";
+const QUEUE_HOLD_TRACK_ID: &str = "queue-hold-track";
 
 pub struct MediaStreamBuilder {
     cancel_token: Option<CancellationToken>,
@@ -75,6 +79,7 @@ impl MediaStreamBuilder {
             cancel_token,
             recorder_option: Mutex::new(self.recorder_config),
             tracks,
+            suppressed_sources: Mutex::new(HashSet::new()),
             event_sender: self.event_sender,
             packet_sender: track_packet_sender,
             packet_receiver: Mutex::new(Some(track_packet_receiver)),
@@ -132,6 +137,7 @@ impl MediaStream {
 
     pub async fn remove_track(&self, id: &TrackId, graceful: bool) {
         if let Some((track, _)) = self.tracks.lock().await.remove(id) {
+            self.suppressed_sources.lock().await.remove(id);
             let res = if !graceful {
                 track.stop().await
             } else {
@@ -216,6 +222,17 @@ impl MediaStream {
             }
         }
     }
+
+    pub async fn suppress_forwarding(&self, track_id: &TrackId) {
+        self.suppressed_sources
+            .lock()
+            .await
+            .insert(track_id.clone());
+    }
+
+    pub async fn resume_forwarding(&self, track_id: &TrackId) {
+        self.suppressed_sources.lock().await.remove(track_id);
+    }
 }
 
 #[derive(Clone)]
@@ -289,6 +306,12 @@ impl MediaStream {
     async fn handle_forward_track(&self, mut packet_receiver: TrackPacketReceiver) {
         let event_sender = self.event_sender.clone();
         while let Some(packet) = packet_receiver.recv().await {
+            let suppressed = {
+                self.suppressed_sources
+                    .lock()
+                    .await
+                    .contains(&packet.track_id)
+            };
             // Process the packet with each track
             for (track, dtmf_detector) in self.tracks.lock().await.values() {
                 if &packet.track_id == track.id() {
@@ -311,6 +334,12 @@ impl MediaStream {
                         }
                         _ => {}
                     }
+                    continue;
+                }
+                if suppressed {
+                    continue;
+                }
+                if packet.track_id == QUEUE_HOLD_TRACK_ID && track.id() == CALLEE_TRACK_ID {
                     continue;
                 }
                 if let Err(e) = track.send_packet(&packet).await {

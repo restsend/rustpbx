@@ -207,7 +207,11 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 note_column: None,
                 deleted_at_column: None,
             };
-            let backend = DbBackend::new(url.clone(), db_config).await?;
+            let backend = DbBackend::new(
+                url.clone().ok_or(anyhow!("database url is required"))?,
+                db_config,
+            )
+            .await?;
             Ok(Box::new(backend))
         }
         UserBackendConfig::Extension { database_url } => {

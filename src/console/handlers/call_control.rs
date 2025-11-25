@@ -2,7 +2,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::console::handlers::bad_request;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
-use crate::proxy::proxy_call::{ProxyCallStateSnapshot, SessionAction};
+use crate::proxy::proxy_call::{CallSessionSnapshot, SessionAction};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -180,7 +180,7 @@ pub async fn dispatch_call_command(
 fn snapshot_for(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: &str,
-) -> Option<ProxyCallStateSnapshot> {
+) -> Option<CallSessionSnapshot> {
     registry
         .get_handle(session_id)
         .map(|handle| handle.snapshot())
