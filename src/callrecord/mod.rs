@@ -1,6 +1,6 @@
 use self::sipflow::SipMessageItem;
 use crate::{
-    call::{ActiveCallType, CallOption},
+    call::ActiveCallType,
     config::{CallRecordConfig, S3Vendor},
     models::{
         bill_template::{Entity as BillTemplateEntity, Model as BillTemplateModel},
@@ -34,6 +34,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use voice_engine::CallOption;
 
 pub mod sipflow;
 pub mod storage;
@@ -80,7 +81,7 @@ impl CallRecordEvent {
         };
         let event = Self {
             r#type,
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             content,
         };
         match serde_json::to_string(&event) {

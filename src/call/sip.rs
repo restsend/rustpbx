@@ -1,8 +1,5 @@
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
-use crate::event::EventSender;
-use crate::media::TrackId;
-use crate::media::stream::MediaStream;
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
 use chrono::Utc;
@@ -17,6 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use voice_engine::event::EventSender;
+use voice_engine::media::TrackId;
+use voice_engine::media::stream::MediaStream;
 
 pub struct DialogStateReceiverGuard {
     pub(super) dialog_layer: Arc<DialogLayer>,
@@ -173,9 +173,9 @@ impl InviteDialogStates {
             _ => "system".to_string(),
         };
         self.event_sender
-            .send(crate::event::SessionEvent::TrackEnd {
+            .send(voice_engine::event::SessionEvent::TrackEnd {
                 track_id: self.track_id.clone(),
-                timestamp: crate::media::get_timestamp(),
+                timestamp: voice_engine::media::get_timestamp(),
                 duration: call_state_ref
                     .answer_time
                     .map(|t| (Utc::now() - t).num_milliseconds())
@@ -235,9 +235,9 @@ impl DialogStateReceiverGuard {
 
                     states
                         .event_sender
-                        .send(crate::event::SessionEvent::Ringing {
+                        .send(voice_engine::event::SessionEvent::Ringing {
                             track_id: states.track_id.clone(),
-                            timestamp: crate::media::get_timestamp(),
+                            timestamp: voice_engine::media::get_timestamp(),
                             early_media: !answer.is_empty(),
                         })?;
 
@@ -268,11 +268,13 @@ impl DialogStateReceiverGuard {
                     if body_str.starts_with("Signal=") {
                         let digit = body_str.trim_start_matches("Signal=").chars().next();
                         if let Some(digit) = digit {
-                            states.event_sender.send(crate::event::SessionEvent::Dtmf {
-                                track_id: states.track_id.clone(),
-                                timestamp: crate::media::get_timestamp(),
-                                digit: digit.to_string(),
-                            })?;
+                            states
+                                .event_sender
+                                .send(voice_engine::event::SessionEvent::Dtmf {
+                                    track_id: states.track_id.clone(),
+                                    timestamp: voice_engine::media::get_timestamp(),
+                                    digit: digit.to_string(),
+                                })?;
                         }
                     }
                 }

@@ -79,7 +79,7 @@ impl UserAgentBuilder {
         let local_ip = if !config.addr.is_empty() {
             IpAddr::from_str(config.addr.as_str())?
         } else {
-            crate::net_tool::get_first_non_loopback_interface()?
+            voice_engine::net_tool::get_first_non_loopback_interface()?
         };
         let transport_layer = TransportLayer::new(cancel_token.clone());
         let local_addr: SocketAddr = format!("{}:{}", local_ip, config.udp_port).parse()?;

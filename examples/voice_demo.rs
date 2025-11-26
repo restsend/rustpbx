@@ -5,11 +5,7 @@ use cpal::{BufferSize, SampleFormat, SampleRate, SizedSample, StreamConfig};
 use dotenv::dotenv;
 use futures::StreamExt;
 use rustpbx::llm::LlmContent;
-use rustpbx::media::codecs::bytes_to_samples;
-use rustpbx::media::track::file::read_wav_file;
-use rustpbx::media::{PcmBuf, Sample};
-use rustpbx::synthesis::SynthesisEvent;
-use rustpbx::transcription::TencentCloudAsrClientBuilder;
+use rustpbx::llm::{LlmClient, OpenAiClientBuilder};
 use std::collections::VecDeque;
 /// This is a demo application which reads wav file from command line
 /// and processes it with ASR, LLM and TTS. It also supports local microphone input
@@ -17,7 +13,7 @@ use std::collections::VecDeque;
 ///
 /// ```bash
 /// # Use a WAV file as input and write to a WAV file
-/// cargo run --example voice_demo -- --input fixtures/hello_book_course_zh_16k.wav --output out.wav
+/// cargo run --example voice_demo -- --input fixtures/sample.wav --output out.wav
 ///
 /// # Use microphone input and speaker output
 /// cargo run --example voice_demo
@@ -31,10 +27,13 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber;
-
-use rustpbx::{
+use voice_engine::media::codecs::bytes_to_samples;
+use voice_engine::media::track::file::read_wav_file;
+use voice_engine::media::{PcmBuf, Sample};
+use voice_engine::synthesis::SynthesisEvent;
+use voice_engine::transcription::TencentCloudAsrClientBuilder;
+use voice_engine::{
     event::SessionEvent,
-    llm::{LlmClient, OpenAiClientBuilder},
     media::codecs::resample,
     synthesis::{SynthesisOption, TencentCloudTtsClient},
     transcription::{TranscriptionClient, TranscriptionOption},

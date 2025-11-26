@@ -3,8 +3,6 @@ use crate::{
     app::AppStateInner,
     call::{ActiveCall, ActiveCallType, CallOption, Command},
     callrecord::CallRecordHangupReason,
-    event::SessionEvent,
-    media::{engine::StreamEngine, track::TrackConfig},
 };
 use bytes::Bytes;
 use rsipstack::{EndpointBuilder, dialog::dialog_layer::DialogLayer};
@@ -17,6 +15,10 @@ use std::{
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use voice_engine::{
+    event::{EventReceiver, SessionEvent},
+    media::{engine::StreamEngine, track::TrackConfig},
+};
 
 type AppState = Arc<AppStateInner>;
 
@@ -69,7 +71,7 @@ fn create_test_invitation() -> Invitation {
 }
 
 async fn wait_for_event<F>(
-    receiver: &mut crate::event::EventReceiver,
+    receiver: &mut EventReceiver,
     buffer: &mut VecDeque<SessionEvent>,
     predicate: F,
 ) -> Option<SessionEvent>
