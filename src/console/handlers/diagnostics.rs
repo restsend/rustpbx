@@ -620,6 +620,8 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         incoming_from_user_prefix: model.incoming_from_user_prefix.clone(),
         incoming_to_user_prefix: model.incoming_to_user_prefix.clone(),
         origin: routing::ConfigOrigin::embedded(),
+        country: None,
+        policy: None,
     })
 }
 

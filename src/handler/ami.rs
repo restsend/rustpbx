@@ -28,6 +28,10 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .route("/reload/routes", post(reload_routes_handler))
         .route("/reload/acl", post(reload_acl_handler))
         .route("/reload/app", post(reload_app_handler))
+        .route(
+            "/frequency_limits",
+            get(list_frequency_limits).delete(clear_frequency_limits),
+        )
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -422,4 +426,110 @@ async fn reload_app_handler(
         "message": "Configuration validated. Restarting services with updated configuration.",
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct FrequencyLimitQuery {
+    policy_id: Option<String>,
+    scope: Option<String>,
+    scope_value: Option<String>,
+    limit_type: Option<String>,
+}
+
+async fn list_frequency_limits(
+    State(state): State<AppState>,
+    Query(params): Query<FrequencyLimitQuery>,
+) -> Response {
+    let Some(sip_server) = state.sip_server.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "sip_server_not_running",
+            })),
+        )
+            .into_response();
+    };
+
+    let Some(limiter) = sip_server.inner.frequency_limiter.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "frequency_limiter_not_configured",
+            })),
+        )
+            .into_response();
+    };
+
+    match limiter
+        .list_limits(
+            params.policy_id,
+            params.scope,
+            params.scope_value,
+            params.limit_type,
+        )
+        .await
+    {
+        Ok(limits) => Json(limits).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn clear_frequency_limits(
+    State(state): State<AppState>,
+    Query(params): Query<FrequencyLimitQuery>,
+) -> Response {
+    let Some(sip_server) = state.sip_server.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "sip_server_not_running",
+            })),
+        )
+            .into_response();
+    };
+
+    let Some(limiter) = sip_server.inner.frequency_limiter.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "unavailable",
+                "reason": "frequency_limiter_not_configured",
+            })),
+        )
+            .into_response();
+    };
+
+    match limiter
+        .clear_limits(
+            params.policy_id,
+            params.scope,
+            params.scope_value,
+            params.limit_type,
+        )
+        .await
+    {
+        Ok(deleted_count) => Json(serde_json::json!({
+            "status": "ok",
+            "deleted_count": deleted_count,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }

@@ -71,6 +71,10 @@ pub struct TrunkConfig {
     pub incoming_from_user_prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incoming_to_user_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<crate::models::policy::PolicySpec>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -94,6 +98,8 @@ impl Default for TrunkConfig {
             recording: None,
             incoming_from_user_prefix: None,
             incoming_to_user_prefix: None,
+            country: None,
+            policy: None,
             origin: ConfigOrigin::embedded(),
         }
     }
@@ -240,6 +246,8 @@ pub struct RouteRule {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<crate::models::policy::PolicySpec>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -257,6 +265,7 @@ impl Default for RouteRule {
             rewrite: None,
             action: RouteAction::default(),
             disabled: None,
+            policy: None,
             origin: ConfigOrigin::embedded(),
         }
     }

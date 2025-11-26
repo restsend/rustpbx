@@ -300,11 +300,41 @@ impl CallModule {
 
     pub fn new(config: Arc<ProxyConfig>, server: SipServerRef) -> Self {
         let dialog_layer = server.dialog_layer.clone();
+        let mut routing_state = RoutingState::new();
+        let limiter = server
+            .frequency_limiter
+            .clone()
+            .or_else(|| match config.frequency_limiter.as_deref() {
+            Some("db") => {
+                if let Some(db) = server.database.clone() {
+                    let l = crate::call::policy::DbFrequencyLimiter::new(db);
+                    l.clone().start_cleanup(server.cancel_token.child_token());
+                    Some(l)
+                } else {
+                    warn!("Frequency limiter configured as 'db' but no database connection available. Falling back to in-memory.");
+                    let l = crate::call::policy::InMemoryFrequencyLimiter::new();
+                    l.clone().start_cleanup(server.cancel_token.child_token());
+                    Some(l)
+                }
+            }
+            Some(_) => {
+                let l = crate::call::policy::InMemoryFrequencyLimiter::new();
+                l.clone().start_cleanup(server.cancel_token.child_token());
+                Some(l)
+            }
+            None => None,
+        });
+
+        if let Some(limiter) = limiter {
+            routing_state.policy_guard =
+                Some(Arc::new(crate::call::policy::PolicyGuard::new(limiter)));
+        }
+
         let inner = Arc::new(CallModuleInner {
             config,
             server,
             dialog_layer,
-            routing_state: Arc::new(RoutingState::new()),
+            routing_state: Arc::new(routing_state),
         });
         Self { inner }
     }

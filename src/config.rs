@@ -406,6 +406,8 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
     #[serde(default)]
+    pub frequency_limiter: Option<String>,
+    #[serde(default)]
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -578,6 +580,7 @@ impl Default for ProxyConfig {
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyMode::default(),
+            frequency_limiter: None,
             realms: Some(vec![]),
             ws_handler: None,
             routes_files: Vec::new(),
