@@ -1,3 +1,4 @@
+pub mod addons;
 pub mod app;
 pub mod call;
 pub mod callrecord;
@@ -12,3 +13,4 @@ pub mod proxy;
 pub mod services;
 pub mod useragent;
 pub mod version; // Admin console
+pub mod license;

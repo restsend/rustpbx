@@ -53,6 +53,7 @@ pub struct AppStateInner {
     pub config_loaded_at: DateTime<Utc>,
     pub config_path: Option<String>,
     pub reload_requested: AtomicBool,
+    pub addon_registry: Arc<crate::addons::registry::AddonRegistry>,
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
 }
@@ -197,6 +198,8 @@ impl AppStateBuilder {
         let _ = set_cache_dir(&config.media_cache_path);
         let db_conn = crate::models::create_db(&config.database_url).await?;
 
+        let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
+
         let useragent = if let Some(ua) = self.useragent {
             Some(ua)
         } else {
@@ -294,9 +297,15 @@ impl AppStateBuilder {
             config_loaded_at,
             config_path,
             reload_requested: AtomicBool::new(false),
+            addon_registry: addon_registry.clone(),
             #[cfg(feature = "console")]
             console: console_state,
         });
+
+        // Initialize addons
+        if let Err(e) = addon_registry.initialize_all(app_state.clone()).await {
+            tracing::error!("Failed to initialize addons: {}", e);
+        }
 
         #[cfg(feature = "console")]
         {
@@ -444,6 +453,9 @@ fn create_router(state: AppState) -> Router {
         .nest_service("/static", static_files_service)
         .merge(call_routes)
         .layer(cors);
+
+    // Merge Addon Routers
+    router = router.merge(state.addon_registry.get_routers(state.clone()));
 
     #[cfg(feature = "console")]
     if let Some(console_state) = state.console.clone() {

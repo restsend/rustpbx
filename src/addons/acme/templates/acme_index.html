@@ -1,0 +1,133 @@
+{% extends "console/layout.html" %}
+
+{% block title %}SSL Certificates - RustPBX{% endblock %}
+
+{% block content %}
+<div class="p-6" x-data="acmeManager()">
+    <div class="mb-6 flex items-center justify-between">
+        <div>
+            <h2 class="text-2xl font-bold text-slate-900">SSL Certificates (ACME)</h2>
+            <p class="text-sm text-slate-600">Manage your HTTPS and SIP TLS certificates via Let's Encrypt.</p>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <!-- Request Form -->
+        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-900/5">
+            <h3 class="text-base font-semibold leading-7 text-slate-900">Request New Certificate</h3>
+            <div class="mt-4 space-y-4">
+                <div>
+                    <label for="domain" class="block text-sm font-medium leading-6 text-slate-900">Domain Name</label>
+                    <div class="mt-2">
+                        <input type="text" x-model="domain" id="domain"
+                            class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-sky-600 sm:text-sm sm:leading-6"
+                            placeholder="pbx.example.com">
+                    </div>
+                </div>
+                <div>
+                    <label for="email" class="block text-sm font-medium leading-6 text-slate-900">Email Address</label>
+                    <div class="mt-2">
+                        <input type="email" x-model="email" id="email"
+                            class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-sky-600 sm:text-sm sm:leading-6"
+                            placeholder="admin@example.com">
+                    </div>
+                </div>
+
+                <div class="relative flex items-start">
+                    <div class="flex h-6 items-center">
+                        <input id="enable_https" x-model="enable_https" type="checkbox"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-600">
+                    </div>
+                    <div class="ml-3 text-sm leading-6">
+                        <label for="enable_https" class="font-medium text-slate-900">Enable HTTPS/WSS</label>
+                        <p class="text-slate-500">Update config to use this certificate for SSL/TLS.</p>
+                    </div>
+                </div>
+
+                <div class="relative flex items-start">
+                    <div class="flex h-6 items-center">
+                        <input id="enable_sip_tls" x-model="enable_sip_tls" type="checkbox"
+                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-600">
+                    </div>
+                    <div class="ml-3 text-sm leading-6">
+                        <label for="enable_sip_tls" class="font-medium text-slate-900">Enable SIP TLS</label>
+                        <p class="text-slate-500">Enable SIP over TLS on port 5061.</p>
+                    </div>
+                </div>
+
+                <div class="pt-2">
+                    <button @click="requestCert" :disabled="loading"
+                        class="inline-flex justify-center rounded-md bg-sky-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <span x-show="!loading">Request Certificate</span>
+                        <span x-show="loading">Processing...</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status / Logs -->
+        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-900/5">
+            <h3 class="text-base font-semibold leading-7 text-slate-900">Status</h3>
+            <div class="mt-4 rounded-md bg-slate-50 p-4 text-sm text-slate-600 h-48 overflow-y-auto font-mono"
+                x-text="statusMessage || 'Ready'">
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('acmeManager', () => ({
+            domain: '',
+            email: '',
+            enable_https: false,
+            enable_sip_tls: false,
+            loading: false,
+            statusMessage: '',
+
+            async requestCert() {
+                if (!this.domain || !this.email) {
+                    this.statusMessage = 'Please enter both domain and email.';
+                    return;
+                }
+                this.loading = true;
+                this.statusMessage = 'Starting request...';
+
+                try {
+                    const response = await fetch('/api/acme/request', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            domain: this.domain,
+                            email: this.email,
+                            enable_https: this.enable_https,
+                            enable_sip_tls: this.enable_sip_tls,
+                        }),
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Request failed');
+                    }
+
+                    const result = await response.json();
+                    this.statusMessage = result.message;
+
+                    // In a real app, we would poll for status updates here
+                    this.statusMessage += '\n\nCheck server logs for detailed progress. The certificate will be saved to config/certs/ upon success.';
+
+                    if (this.enable_https || this.enable_sip_tls) {
+                        this.statusMessage += '\n\nIMPORTANT: If successful, you must RESTART the service to apply changes.';
+                    }
+
+                } catch (error) {
+                    this.statusMessage = 'Error: ' + error.message;
+                } finally {
+                    this.loading = false;
+                }
+            }
+        }));
+    });
+</script>
+{% endblock %}

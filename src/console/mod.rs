@@ -4,7 +4,7 @@ use crate::console::middleware::RenderTemplate;
 use crate::proxy::server::SipServerRef;
 use anyhow::Result;
 use axum::response::{IntoResponse, Response};
-use minijinja::{Environment, path_loader};
+use minijinja::Environment;
 use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock, Weak};
@@ -93,7 +93,23 @@ impl ConsoleState {
         }
 
         let mut tmpl_env = Environment::new();
-        tmpl_env.set_loader(path_loader("templates"));
+        
+        let mut paths = vec!["templates".to_string()];
+        if let Some(app_state) = self.app_state() {
+             paths.extend(app_state.addon_registry.get_template_dirs());
+        }
+
+        tmpl_env.set_loader(move |name| {
+            for base in &paths {
+                let path = std::path::Path::new(base).join(name);
+                if path.exists() {
+                    return std::fs::read_to_string(path).map(Some).map_err(|_| minijinja::Error::new(
+                        minijinja::ErrorKind::TemplateNotFound, "failed to load template"
+                    ));
+                }
+            }
+            Ok(None)
+        });
 
         RenderTemplate {
             tmpl_env: &tmpl_env,
