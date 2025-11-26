@@ -825,6 +825,8 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         recording,
         incoming_from_user_prefix: model.incoming_from_user_prefix,
         incoming_to_user_prefix: model.incoming_to_user_prefix,
+        country: None,
+        policy: None,
         origin: ConfigOrigin::embedded(),
     };
 
@@ -958,6 +960,7 @@ fn convert_route(
         rewrite: rewrite_rules,
         action,
         disabled: Some(!model.is_active),
+        policy: None,
         origin: ConfigOrigin::embedded(),
     };
     Ok(Some(route))

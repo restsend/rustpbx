@@ -6,17 +6,18 @@ use super::{
 };
 use crate::{
     call::TransactionCookie,
+    call::policy::FrequencyLimiter,
     callrecord::{
         CallRecordSender,
         sipflow::{SipFlow, SipFlowBuilder, SipMessageItem},
     },
     config::{ProxyConfig, RtpConfig},
+    proxy::locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
     proxy::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector, ProxyCallInspector},
-        locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
     },
 };
 use anyhow::{Result, anyhow};
@@ -69,6 +70,7 @@ pub struct SipServerInner {
     pub locator_events: Option<LocatorEventSender>,
     pub sip_flow: Option<SipFlow>,
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
+    pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -97,6 +99,7 @@ pub struct SipServerBuilder {
     data_context: Option<Arc<ProxyDataContext>>,
     ignore_out_of_dialog_request: bool,
     locator_events: Option<LocatorEventSender>,
+    frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
 }
 
 impl SipServerBuilder {
@@ -119,6 +122,7 @@ impl SipServerBuilder {
             data_context: None,
             ignore_out_of_dialog_request: true,
             locator_events: None,
+            frequency_limiter: None,
         }
     }
 
@@ -201,6 +205,11 @@ impl SipServerBuilder {
 
     pub fn with_locator_events(mut self, locator_events: Option<LocatorEventSender>) -> Self {
         self.locator_events = locator_events;
+        self
+    }
+
+    pub fn with_frequency_limiter(mut self, limiter: Arc<dyn FrequencyLimiter>) -> Self {
+        self.frequency_limiter = Some(limiter);
         self
     }
 
@@ -432,6 +441,7 @@ impl SipServerBuilder {
             locator_events: Some(locator_events),
             sip_flow: Some(sip_flow),
             active_call_registry,
+            frequency_limiter: self.frequency_limiter,
         });
 
         let mut allow_methods = Vec::new();

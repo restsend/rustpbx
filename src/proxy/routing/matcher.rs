@@ -13,7 +13,7 @@ use std::{
 use tracing::info;
 
 use crate::{
-    call::{DialDirection, RoutingState},
+    call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
     config::RouteResult,
     proxy::routing::{
         ActionType, RouteIvrConfig, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig,
@@ -206,6 +206,15 @@ async fn match_invite_impl(
             continue;
         }
 
+        // Resolve source trunk country
+        let origin_country = if let Some(source) = source_trunk {
+            trunks
+                .and_then(|t| t.get(&source.name))
+                .and_then(|c| c.country.as_deref())
+        } else {
+            None
+        };
+
         let captures = collect_match_captures(rule, &ctx)?;
 
         if let Some(trace) = &mut trace {
@@ -228,6 +237,35 @@ async fn match_invite_impl(
             "Matched rule: {:?} action:{:?} rewrites:{:?}",
             rule.name, rule.action, rewrites
         );
+
+        // Check Route Policy (using rewritten numbers)
+        if let Some(policy) = &rule.policy {
+            if let Some(guard) = &routing_state.policy_guard {
+                let current_caller = option.caller.user().unwrap_or_default();
+                let current_callee = option.callee.user().unwrap_or_default();
+
+                if let PolicyCheckStatus::Rejected(rejection) = guard
+                    .check_policy(policy, &current_caller, &current_callee, origin_country)
+                    .await?
+                {
+                    let reason = rejection.to_string();
+                    info!(
+                        "Call rejected by route policy: {} reason: {}",
+                        rule.name, reason
+                    );
+                    if let Some(trace) = &mut trace {
+                        trace.abort = Some(RouteAbortTrace {
+                            code: rsip::StatusCode::Forbidden.into(),
+                            reason: Some(reason.clone()),
+                        });
+                    }
+                    return Ok(RouteResult::Abort(
+                        rsip::StatusCode::Forbidden,
+                        Some(reason),
+                    ));
+                }
+            }
+        }
 
         // Handle based on action type
         match rule.action.get_action_type() {
@@ -283,6 +321,40 @@ async fn match_invite_impl(
                             .as_ref()
                             .and_then(|trunks| trunks.get(&selected_trunk))
                         {
+                            // Check Trunk Policy
+                            if let Some(policy) = &trunk_config.policy {
+                                if let Some(guard) = &routing_state.policy_guard {
+                                    let current_caller = option.caller.user().unwrap_or_default();
+                                    let current_callee = option.callee.user().unwrap_or_default();
+
+                                    if let PolicyCheckStatus::Rejected(rejection) = guard
+                                        .check_policy(
+                                            policy,
+                                            &current_caller,
+                                            &current_callee,
+                                            origin_country,
+                                        )
+                                        .await?
+                                    {
+                                        let reason = rejection.to_string();
+                                        info!(
+                                            "Call rejected by trunk policy: {} reason: {}",
+                                            selected_trunk, reason
+                                        );
+                                        if let Some(trace) = &mut trace {
+                                            trace.abort = Some(RouteAbortTrace {
+                                                code: rsip::StatusCode::Forbidden.into(),
+                                                reason: Some(reason.clone()),
+                                            });
+                                        }
+                                        return Ok(RouteResult::Abort(
+                                            rsip::StatusCode::Forbidden,
+                                            Some(reason),
+                                        ));
+                                    }
+                                }
+                            }
+
                             apply_trunk_config(&mut option, trunk_config)?;
                             info!(
                                 "Selected trunk: {} for destination: {}",
@@ -344,6 +416,39 @@ async fn match_invite_impl(
                             .as_ref()
                             .and_then(|trunks| trunks.get(&selected_trunk))
                         {
+                            // Check Trunk Policy
+                            if let Some(policy) = &trunk_config.policy {
+                                if let Some(guard) = &routing_state.policy_guard {
+                                    let current_caller = option.caller.user().unwrap_or_default();
+                                    let current_callee = option.callee.user().unwrap_or_default();
+
+                                    if let PolicyCheckStatus::Rejected(rejection) = guard
+                                        .check_policy(
+                                            policy,
+                                            &current_caller,
+                                            &current_callee,
+                                            origin_country,
+                                        )
+                                        .await?
+                                    {
+                                        let reason = rejection.to_string();
+                                        info!(
+                                            "Call rejected by trunk policy: {} reason: {}",
+                                            selected_trunk, reason
+                                        );
+                                        if let Some(trace) = &mut trace {
+                                            trace.abort = Some(RouteAbortTrace {
+                                                code: rsip::StatusCode::Forbidden.into(),
+                                                reason: Some(reason.clone()),
+                                            });
+                                        }
+                                        return Ok(RouteResult::Abort(
+                                            rsip::StatusCode::Forbidden,
+                                            Some(reason),
+                                        ));
+                                    }
+                                }
+                            }
                             apply_trunk_config(&mut option, trunk_config)?;
                         }
                     }

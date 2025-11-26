@@ -99,6 +99,15 @@
                             <span class="text-[11px] font-normal text-slate-400">Selection strategy & weights</span>
                         </div>
                     </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'policy' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'policy'" aria-controls="routing-tab-policy"
+                        @click="activeTab = 'policy'">
+                        <div class="flex flex-col">
+                            <span class="text-sm">Policy</span>
+                            <span class="text-[11px] font-normal text-slate-400">Limits & restrictions</span>
+                        </div>
+                    </button>
                 </nav>
             </div>
 
@@ -743,6 +752,95 @@
                     </div>
                 </section>
             </div>
+
+            <div x-show="activeTab === 'policy'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-policy"
+                role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-base font-semibold text-slate-900">Call Policy</h2>
+                        <p class="text-xs text-slate-500">Configure frequency limits, concurrency, and time windows for
+                            this route.</p>
+                    </div>
+
+                    <div class="mt-6 grid gap-6 md:grid-cols-2">
+                        <!-- Frequency Limit -->
+                        <div class="space-y-4 rounded-lg border border-slate-200 p-4">
+                            <h3 class="text-sm font-semibold text-slate-800">Frequency Limit</h3>
+                            <div class="grid gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Max
+                                        Calls</label>
+                                    <input type="number" min="0" x-model.number="route.policy.frequency_limit.max_calls"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="e.g. 100">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Duration
+                                        (seconds)</label>
+                                    <input type="number" min="0" x-model.number="route.policy.frequency_limit.duration"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="e.g. 60">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Concurrency & Daily Limit -->
+                        <div class="space-y-4 rounded-lg border border-slate-200 p-4">
+                            <h3 class="text-sm font-semibold text-slate-800">Limits</h3>
+                            <div class="grid gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Max
+                                        Concurrency</label>
+                                    <input type="number" min="0" x-model.number="route.policy.concurrency"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="e.g. 10">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Daily
+                                        Limit</label>
+                                    <input type="number" min="0" x-model.number="route.policy.daily_limit"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="e.g. 1000">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Time Window -->
+                        <div class="md:col-span-2 space-y-4 rounded-lg border border-slate-200 p-4">
+                            <h3 class="text-sm font-semibold text-slate-800">Time Window</h3>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Start
+                                        Time (HH:MM)</label>
+                                    <input type="time" x-model="route.policy.time_window.start_time"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">End Time
+                                        (HH:MM)</label>
+                                    <input type="time" x-model="route.policy.time_window.end_time"
+                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                </div>
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Active
+                                        Days</label>
+                                    <div class="flex flex-wrap gap-3">
+                                        <template x-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']"
+                                            :key="day">
+                                            <label class="inline-flex items-center gap-2">
+                                                <input type="checkbox" :value="day"
+                                                    x-model="route.policy.time_window.days"
+                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                                <span class="text-sm text-slate-700" x-text="day"></span>
+                                            </label>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
         </form>
     </div>
 </div>
@@ -795,6 +893,12 @@
                     target_type: 'sip_trunk',
                     queue_file: '',
                     ivr_file: '',
+                },
+                policy: {
+                    frequency_limit: { max_calls: null, duration: null },
+                    daily_limit: null,
+                    concurrency: null,
+                    time_window: { start_time: '', end_time: '', days: [] },
                 },
                 source_trunk: '',
                 target_trunks: [],
@@ -989,6 +1093,19 @@
                         target_type: normalizeTargetType(raw?.action?.target_type),
                         queue_file: queueFile,
                         ivr_file: ivrFile,
+                    },
+                    policy: {
+                        frequency_limit: {
+                            max_calls: raw?.policy?.frequency_limit?.max_calls || null,
+                            duration: raw?.policy?.frequency_limit?.duration || null,
+                        },
+                        daily_limit: raw?.policy?.daily_limit || null,
+                        concurrency: raw?.policy?.concurrency || null,
+                        time_window: {
+                            start_time: raw?.policy?.time_window?.start_time || '',
+                            end_time: raw?.policy?.time_window?.end_time || '',
+                            days: Array.isArray(raw?.policy?.time_window?.days) ? raw.policy.time_window.days : [],
+                        },
                     },
                     source_trunk: raw?.source_trunk || '',
                     target_trunks: Array.isArray(raw?.target_trunks) ? raw.target_trunks.slice() : [],
@@ -1294,6 +1411,27 @@
                 const direction = this.trimString(this.route.direction);
                 const selectionValue = this.selectionPayloadValue(this.route.action.select);
 
+                const policy = {};
+                if (this.route.policy.frequency_limit.max_calls && this.route.policy.frequency_limit.duration) {
+                    policy.frequency_limit = {
+                        max_calls: Number(this.route.policy.frequency_limit.max_calls),
+                        duration: Number(this.route.policy.frequency_limit.duration),
+                    };
+                }
+                if (this.route.policy.daily_limit) {
+                    policy.daily_limit = Number(this.route.policy.daily_limit);
+                }
+                if (this.route.policy.concurrency) {
+                    policy.concurrency = Number(this.route.policy.concurrency);
+                }
+                if (this.route.policy.time_window.start_time && this.route.policy.time_window.end_time && this.route.policy.time_window.days.length) {
+                    policy.time_window = {
+                        start_time: this.route.policy.time_window.start_time,
+                        end_time: this.route.policy.time_window.end_time,
+                        days: this.route.policy.time_window.days,
+                    };
+                }
+
                 return {
                     id: this.route.id,
                     name: this.trimString(this.route.name),
@@ -1305,6 +1443,7 @@
                     match,
                     rewrite,
                     action: Object.assign(actionPayload, { select: selectionValue }),
+                    policy: Object.keys(policy).length ? policy : null,
                     source_trunk: this.trimString(this.route.source_trunk) || null,
                     target_trunks: targetTrunks,
                 };

@@ -22,6 +22,7 @@ use std::{
 pub mod active_call;
 pub mod cookie;
 pub mod ivr;
+pub mod policy;
 pub mod sip;
 pub mod user;
 pub use active_call::ActiveCall;
@@ -1086,6 +1087,7 @@ pub trait RouteInvite: Sync + Send {
 pub struct RoutingState {
     /// Round-robin counters for each destination group
     round_robin_counters: Arc<Mutex<HashMap<String, usize>>>,
+    pub policy_guard: Option<Arc<crate::call::policy::PolicyGuard>>,
 }
 
 impl Default for RoutingState {
@@ -1098,6 +1100,7 @@ impl RoutingState {
     pub fn new() -> Self {
         Self {
             round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
+            policy_guard: None,
         }
     }
 
