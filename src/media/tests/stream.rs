@@ -2,8 +2,10 @@ use crate::media::processor::ProcessorChain;
 use crate::media::recorder::RecorderOption;
 use crate::media::track::TrackConfig;
 use crate::{
-    AudioFrame, Samples, TrackId,
     event::EventSender,
+    media::AudioFrame,
+    media::Samples,
+    media::TrackId,
     media::{
         stream::MediaStreamBuilder,
         track::{Track, TrackPacketSender},

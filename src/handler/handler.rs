@@ -151,7 +151,7 @@ pub async fn call_handler(
             loop {
                 ticker.tick().await;
                 let payload = Utc::now().to_rfc3339();
-                let event = SessionEvent::Ping { timestamp: crate::get_timestamp(), payload:Some(payload)};
+                let event = SessionEvent::Ping { timestamp: crate::media::get_timestamp(), payload:Some(payload)};
                 if let Err(_) = active_call.event_sender.send(event) {
                     break;
                 }

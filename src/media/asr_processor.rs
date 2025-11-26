@@ -1,5 +1,5 @@
 use super::processor::Processor;
-use crate::{AudioFrame, Samples, transcription::TranscriptionClient};
+use crate::{media::AudioFrame, media::Samples, transcription::TranscriptionClient};
 use anyhow::Result;
 
 pub struct AsrProcessor {

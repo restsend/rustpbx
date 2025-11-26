@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::handle_wait_for_answer_with_audio_drop;
 use crate::event::{EventSender, SessionEvent};
-use crate::{Sample, TrackId};
+use crate::media::{Sample, TrackId};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -129,7 +129,7 @@ impl VoiceApiAsrClientBuilder {
                 Err(e) => {
                     warn!("Failed to connect to VoiceAPI ASR WebSocket: {}", e);
                     let _ = event_sender.send(SessionEvent::Error {
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         track_id,
                         sender: "VoiceApiAsrClient".to_string(),
                         error: format!("Failed to connect to VoiceAPI ASR WebSocket: {}", e),
@@ -218,7 +218,7 @@ impl VoiceApiAsrClientInner {
             while let Some(audio) = audio_rx.recv().await {
                 // Convert samples to websocket binary message
                 if start_time_ref.load(Ordering::Relaxed) == 0 {
-                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
+                    start_time_ref.store(crate::media::get_timestamp(), Ordering::Relaxed);
                 }
                 if let Err(e) = ws_sender.send(Message::Binary(audio.into())).await {
                     warn!("Error sending audio: {}", e);
@@ -239,7 +239,7 @@ impl VoiceApiAsrClientInner {
                                     SessionEvent::AsrFinal {
                                         track_id: track_id_clone.clone(),
                                         text: result.text.clone(),
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         index: result.idx,
                                         start_time: None,
                                         end_time: None,
@@ -248,7 +248,7 @@ impl VoiceApiAsrClientInner {
                                     SessionEvent::AsrDelta {
                                         track_id: track_id_clone.clone(),
                                         index: result.idx,
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         start_time: None,
                                         end_time: None,
                                         text: result.text.clone(),
@@ -258,12 +258,12 @@ impl VoiceApiAsrClientInner {
                                     warn!("Failed to send event: {}", e);
                                     break;
                                 }
-                                let diff_time =
-                                    crate::get_timestamp() - start_time.load(Ordering::Relaxed);
+                                let diff_time = crate::media::get_timestamp()
+                                    - start_time.load(Ordering::Relaxed);
                                 let metrics_event = if result.finished {
                                     start_time.store(0, Ordering::Relaxed);
                                     SessionEvent::Metrics {
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         key: "completed.asr.voiceapi".to_string(),
                                         data: serde_json::json!({
                                             "index": result.idx,
@@ -272,7 +272,7 @@ impl VoiceApiAsrClientInner {
                                     }
                                 } else {
                                     SessionEvent::Metrics {
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         key: "ttfb.asr.voiceapi".to_string(),
                                         data: serde_json::json!({
                                             "index": result.idx,

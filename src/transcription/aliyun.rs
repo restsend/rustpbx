@@ -1,7 +1,8 @@
 use super::{TranscriptionClient, TranscriptionOption, handle_wait_for_answer_with_audio_drop};
 use crate::{
-    Sample, TrackId,
     event::{EventSender, SessionEvent},
+    media::Sample,
+    media::TrackId,
     media::codecs,
 };
 use anyhow::{Result, anyhow};
@@ -280,7 +281,7 @@ impl AliyunAsrClient {
         token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-        let begin_time = crate::get_timestamp();
+        let begin_time = crate::media::get_timestamp();
         let start_msg = RunTaskCommand::new(ctx.track_id.clone(), &ctx.option);
 
         if let Ok(msg_json) = serde_json::to_string(&start_msg) {
@@ -334,7 +335,7 @@ impl AliyunAsrClient {
                                     track_id: task_id.clone(),
                                     index: sentence.sentence_id,
                                     text,
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     start_time: Some(sentence_start_time),
                                     end_time: Some(sentence_end_time),
                                 }
@@ -343,17 +344,17 @@ impl AliyunAsrClient {
                                     track_id: task_id.clone(),
                                     index: sentence.sentence_id,
                                     text,
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     start_time: Some(sentence_start_time),
                                     end_time: Some(sentence_end_time),
                                 }
                             };
                             event_sender.send(event).ok();
 
-                            let diff_time = (crate::get_timestamp() - begin_time) as u32;
+                            let diff_time = (crate::media::get_timestamp() - begin_time) as u32;
                             let metrics_event = if sentence.sentence_end {
                                 SessionEvent::Metrics {
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     key: "completed.asr.aliyun".to_string(),
                                     data: serde_json::json!({
                                         "sentence_id": sentence.sentence_id,
@@ -362,7 +363,7 @@ impl AliyunAsrClient {
                                 }
                             } else {
                                 SessionEvent::Metrics {
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     key: "ttfb.asr.aliyun".to_string(),
                                     data: serde_json::json!({
                                         "sentence_id": sentence.sentence_id,
@@ -524,7 +525,7 @@ impl AliyunAsrClientBuilder {
                 Err(e) => {
                     warn!(track_id, "Failed to connect to Aliyun ASR WebSocket: {}", e);
                     let _ = event_sender.send(SessionEvent::Error {
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         track_id,
                         sender: "AliyunAsrClient".to_string(),
                         error: format!("Failed to connect to Aliyun ASR WebSocket: {}", e),
@@ -556,7 +557,7 @@ impl AliyunAsrClientBuilder {
                     event_sender
                         .send(SessionEvent::Error {
                             track_id,
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             sender: "aliyun_asr".to_string(),
                             error: e.to_string(),
                             code: None,

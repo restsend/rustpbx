@@ -102,7 +102,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd event to trigger wait_input_timeout
         active_call.event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -156,7 +156,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -178,8 +178,8 @@ mod wait_input_timeout_tests {
 
         event_sender.send(SessionEvent::Speaking {
             track_id: session_id.clone(),
-            timestamp: crate::get_timestamp(),
-            start_time: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
+            start_time: crate::media::get_timestamp(),
         })?;
 
         // Check that no Silence event is received in a reasonable time
@@ -220,7 +220,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -242,7 +242,7 @@ mod wait_input_timeout_tests {
 
         event_sender.send(SessionEvent::Dtmf {
             track_id: session_id.clone(),
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             digit: "1".to_string(),
         })?;
 
@@ -285,7 +285,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,

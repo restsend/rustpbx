@@ -1,9 +1,9 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs;
+use crate::media::{Sample, TrackId};
 use crate::transcription::{
     TranscriptionClient, TranscriptionOption, handle_wait_for_answer_with_audio_drop,
 };
-use crate::{Sample, TrackId};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -170,7 +170,7 @@ impl TencentCloudAsrClientBuilder {
                         "Failed to connect to TencentCloud ASR WebSocket: {}", e
                     );
                     let _ = event_sender.send(SessionEvent::Error {
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         track_id: track_id.clone(),
                         sender: "TencentCloudAsrClient".to_string(),
                         error: format!("Failed to connect to TencentCloud ASR WebSocket: {}", e),
@@ -197,7 +197,7 @@ impl TencentCloudAsrClientBuilder {
                     event_sender
                         .send(SessionEvent::Error {
                             track_id,
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             sender: "tencent_cloud_asr".to_string(),
                             error: e.to_string(),
                             code: None,
@@ -348,7 +348,7 @@ impl TencentCloudAsrClient {
         token: CancellationToken,
     ) -> Result<()> {
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-        let begin_time = crate::get_timestamp();
+        let begin_time = crate::media::get_timestamp();
         let start_time = Arc::new(AtomicU64::new(0));
         let start_time_ref = start_time.clone();
         let track_id_clone = track_id.clone();
@@ -378,7 +378,7 @@ impl TencentCloudAsrClient {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
-                                            timestamp: crate::get_timestamp(),
+                                            timestamp: crate::media::get_timestamp(),
                                             start_time: Some(begin_time + result.start_time as u64),
                                             end_time: Some(begin_time + result.end_time as u64),
                                         }
@@ -387,19 +387,19 @@ impl TencentCloudAsrClient {
                                             track_id: track_id.clone(),
                                             index: result.index,
                                             text: result.voice_text_str,
-                                            timestamp: crate::get_timestamp(),
+                                            timestamp: crate::media::get_timestamp(),
                                             start_time: Some(begin_time + result.start_time as u64),
                                             end_time: Some(begin_time + result.end_time as u64),
                                         }
                                     };
                                     event_sender.send(event).ok()?;
 
-                                    let diff_time =
-                                        crate::get_timestamp() - start_time.load(Ordering::Relaxed);
+                                    let diff_time = crate::media::get_timestamp()
+                                        - start_time.load(Ordering::Relaxed);
                                     let metrics_event = if result.slice_type == 2 {
                                         start_time.store(0, Ordering::Relaxed);
                                         SessionEvent::Metrics {
-                                            timestamp: crate::get_timestamp(),
+                                            timestamp: crate::media::get_timestamp(),
                                             key: "completed.asr.tencent".to_string(),
                                             data: serde_json::json!({
                                                 "index": result.index,
@@ -408,7 +408,7 @@ impl TencentCloudAsrClient {
                                         }
                                     } else {
                                         SessionEvent::Metrics {
-                                            timestamp: crate::get_timestamp(),
+                                            timestamp: crate::media::get_timestamp(),
                                             key: "ttfb.asr.tencent".to_string(),
                                             data: serde_json::json!({
                                                 "index": result.index,
@@ -446,12 +446,12 @@ impl TencentCloudAsrClient {
                     ws_sender
                         .send(Message::Text("{\"type\": \"end\"}".into()))
                         .await?;
-                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
+                    start_time_ref.store(crate::media::get_timestamp(), Ordering::Relaxed);
                     continue;
                 }
                 total_bytes_sent += samples.len();
                 if start_time_ref.load(Ordering::Relaxed) == 0 {
-                    start_time_ref.store(crate::get_timestamp(), Ordering::Relaxed);
+                    start_time_ref.store(crate::media::get_timestamp(), Ordering::Relaxed);
                 }
 
                 match ws_sender.send(Message::Binary(samples.into())).await {

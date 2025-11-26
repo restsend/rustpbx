@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 use opusic_sys::{
     OPUS_APPLICATION_VOIP, OPUS_OK, OpusDecoder as OpusDecoderRaw, OpusEncoder as OpusEncoderRaw,
     opus_decode, opus_decoder_create, opus_decoder_destroy, opus_encode, opus_encoder_create,

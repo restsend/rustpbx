@@ -1,6 +1,6 @@
-use crate::{
+use crate::media::{
     AudioFrame, PcmBuf, Sample, Samples,
-    media::recorder::{Recorder, RecorderOption},
+    recorder::{Recorder, RecorderOption},
 };
 use anyhow::Result;
 use std::{path::Path, sync::Arc};

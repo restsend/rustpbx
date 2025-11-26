@@ -1,5 +1,5 @@
 use super::{SessionPool, VADOption, VadEngine};
-use crate::{AudioFrame, PcmBuf, Samples};
+use crate::media::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use ort::session::{Session, builder::GraphOptimizationLevel};

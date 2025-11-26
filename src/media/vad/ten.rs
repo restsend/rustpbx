@@ -1,5 +1,5 @@
 use super::{VADOption, VadEngine};
-use crate::{AudioFrame, PcmBuf, Samples};
+use crate::media::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use tracing::debug;

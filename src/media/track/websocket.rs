@@ -1,7 +1,9 @@
 use super::{Track, TrackConfig, TrackPacketSender, track_codec::TrackCodec};
 use crate::{
-    AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
+    media::AudioFrame,
+    media::Samples,
+    media::TrackId,
     media::{codecs::bytes_to_samples, processor::ProcessorChain},
 };
 use anyhow::Result;
@@ -96,7 +98,7 @@ impl Track for WebsocketTrack {
         };
         let sample_rate = self.config.samplerate;
         let payload_type = self.payload_type;
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         let ssrc = self.ssrc;
         tokio::spawn(async move {
             let track_id_clone = track_id.clone();
@@ -119,7 +121,7 @@ impl Track for WebsocketTrack {
                     let packet = AudioFrame {
                         track_id: track_id_clone.clone(),
                         samples,
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         sample_rate,
                     };
                     match packet_sender.send(packet) {
@@ -144,8 +146,8 @@ impl Track for WebsocketTrack {
             event_sender
                 .send(SessionEvent::TrackEnd {
                     track_id,
-                    timestamp: crate::get_timestamp(),
-                    duration: crate::get_timestamp() - start_time,
+                    timestamp: crate::media::get_timestamp(),
+                    duration: crate::media::get_timestamp() - start_time,
                     ssrc,
                     play_id: None,
                 })
@@ -167,7 +169,7 @@ impl Track for WebsocketTrack {
         self.event_sender
             .send(SessionEvent::Binary {
                 track_id: self.track_id.clone(),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 data: payload,
             })
             .map(|_| ())

@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 
 #[derive(Default)]
 pub struct TelephoneEventDecoder {}

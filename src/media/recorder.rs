@@ -1,4 +1,4 @@
-use crate::{AudioFrame, PcmBuf, Samples, media::codecs::samples_to_bytes};
+use crate::media::{AudioFrame, PcmBuf, Samples, codecs::samples_to_bytes};
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use hound::{SampleFormat, WavSpec};

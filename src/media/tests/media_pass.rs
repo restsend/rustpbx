@@ -1,11 +1,11 @@
-use crate::AudioFrame;
-use crate::Samples;
 use crate::event::SessionEvent;
+use crate::media::AudioFrame;
+use crate::media::Samples;
 use crate::media::codecs::bytes_to_samples;
 use crate::media::track::Track;
 use crate::media::track::media_pass::MediaPassOption;
 use crate::media::track::media_pass::MediaPassTrack;
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 use anyhow::Result;
 use bytes::Bytes;
 use futures::FutureExt;
@@ -239,7 +239,7 @@ async fn test_media_pass() -> Result<()> {
         let audio_frame = AudioFrame {
             track_id: track_id.clone(),
             samples: Samples::PCM { samples: slice },
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             sample_rate: sending_sample_rate,
         };
         track.send_packet(&audio_frame).await?;
@@ -389,7 +389,7 @@ async fn test_resampling_to_output_sample_rate() -> Result<()> {
         let audio_frame = AudioFrame {
             track_id: track_id.clone(),
             samples: Samples::PCM { samples: slice },
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             sample_rate: input_sample_rate, // Different from output_sample_rate
         };
         track.send_packet(&audio_frame).await?;

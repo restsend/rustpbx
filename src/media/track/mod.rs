@@ -1,7 +1,7 @@
 use super::codecs::CodecType;
 use crate::event::EventSender;
 use crate::media::processor::{Processor, ProcessorChain};
-use crate::{AudioFrame, TrackId};
+use crate::media::{AudioFrame, TrackId};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;

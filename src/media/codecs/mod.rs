@@ -1,4 +1,4 @@
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 pub mod g722;
 #[cfg(feature = "g729")]
 pub mod g729;

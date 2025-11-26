@@ -1,5 +1,5 @@
 use super::processor::Processor;
-use crate::AudioFrame;
+use crate::media::AudioFrame;
 use anyhow::Result;
 use std::sync::{
     Arc,
@@ -58,7 +58,7 @@ impl Processor for VolumeControlProcessor {
         // Check if muted
         if self.is_muted() {
             // Mute the audio by zeroing out samples
-            if let crate::Samples::PCM { samples } = &mut frame.samples {
+            if let crate::media::Samples::PCM { samples } = &mut frame.samples {
                 for sample in samples.iter_mut() {
                     *sample = 0;
                 }
@@ -69,7 +69,7 @@ impl Processor for VolumeControlProcessor {
         // Apply volume control
         let volume = self.get_volume();
         if (volume - 1.0).abs() > f32::EPSILON {
-            if let crate::Samples::PCM { samples } = &mut frame.samples {
+            if let crate::media::Samples::PCM { samples } = &mut frame.samples {
                 for sample in samples.iter_mut() {
                     let adjusted = (*sample as f32 * volume) as i16;
                     *sample = adjusted.clamp(i16::MIN, i16::MAX);
@@ -119,7 +119,7 @@ impl Processor for HoldProcessor {
     fn process_frame(&self, frame: &mut AudioFrame) -> Result<()> {
         if self.is_on_hold() {
             // When on hold, replace audio with silence or hold music
-            if let crate::Samples::PCM { samples } = &mut frame.samples {
+            if let crate::media::Samples::PCM { samples } = &mut frame.samples {
                 // Replace with silence for now
                 // TODO: Could be enhanced to play hold music
                 for sample in samples.iter_mut() {
@@ -134,7 +134,7 @@ impl Processor for HoldProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Samples;
+    use crate::media::Samples;
 
     #[test]
     fn test_volume_control() {

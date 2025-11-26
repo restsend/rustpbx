@@ -3,7 +3,7 @@ use crate::media::processor::Processor;
 use crate::media::stream::MuteProcessor;
 use crate::media::track::Track;
 use crate::media::track::file::FileTrack;
-use crate::{AudioFrame, Samples};
+use crate::media::{AudioFrame, Samples};
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
