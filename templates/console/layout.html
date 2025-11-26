@@ -12,6 +12,7 @@
     {% endfor %}
     <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
     <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
     {% block js_ext %}
     {% endblock %}
     <script>
@@ -225,6 +226,16 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Diagnostics</span>
                     </a>
+                    <a href="{{ bp }}/addons"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='addons' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Addons">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                            stroke="currentColor" class="size-6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z" />
+                        </svg>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Addons</span>
+                    </a>
                     <a href="{{ bp }}/settings"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Settings">
@@ -235,6 +246,18 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Settings</span>
                     </a>
+
+                    {% if addon_sidebar_items %}
+                    <div class="my-2 border-t border-slate-100"></div>
+                    {% for item in addon_sidebar_items %}
+                    <a href="{{ item.url }}"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active==item.name else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item.name }}">
+                        <i class="{{ item.icon }} text-2xl" :class="{ 'text-2xl': sidebarCollapsed }"></i>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ item.name }}</span>
+                    </a>
+                    {% endfor %}
+                    {% endif %}
                 </nav>
                 <div class="border-t border-slate-100 p-4 text-xs text-slate-500" x-show="!sidebarCollapsed"
                     x-transition.opacity x-cloak>

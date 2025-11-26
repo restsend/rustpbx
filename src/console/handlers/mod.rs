@@ -16,6 +16,7 @@ pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
 pub mod user;
+pub mod addons;
 mod utils;
 
 pub fn bad_request(message: impl Into<String>) -> axum::response::Response {
@@ -50,7 +51,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(routing::urls())
         .merge(call_record::urls())
         .merge(diagnostics::urls())
-        .merge(call_control::urls());
+        .merge(call_control::urls())
+        .merge(addons::urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

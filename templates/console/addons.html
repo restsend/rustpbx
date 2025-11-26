@@ -1,0 +1,68 @@
+{% extends "console/layout.html" %}
+{% block title %}Addons · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block content %}
+<div class="p-4 sm:p-6">
+    <div class="mx-auto max-w-7xl space-y-6">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div class="space-y-0.5">
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">System</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Addons</h1>
+                <p class="text-sm text-slate-500 sm:max-w-xl">Manage installed addons and extensions.</p>
+            </div>
+        </div>
+
+        <section class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                    <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th scope="col" class="px-4 py-2">Name</th>
+                            <th scope="col" class="px-4 py-2">Description</th>
+                            <th scope="col" class="px-4 py-2">Status</th>
+                            <th scope="col" class="px-4 py-2">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 bg-white text-sm text-slate-600">
+                        {% for addon in addons %}
+                        <tr class="hover:bg-slate-50">
+                            <td class="whitespace-nowrap px-4 py-2">
+                                <div class="font-medium text-slate-900">{{ addon.name }}</div>
+                                <div class="text-xs text-slate-400">{{ addon.id }}</div>
+                            </td>
+                            <td class="px-4 py-2">
+                                {{ addon.description }}
+                            </td>
+                            <td class="whitespace-nowrap px-4 py-2">
+                                {% if addon.enabled %}
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 ring-1 ring-emerald-100">
+                                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                                    Enabled
+                                </span>
+                                {% else %}
+                                <span
+                                    class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                                    <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+                                    Disabled
+                                </span>
+                                {% endif %}
+                            </td>
+                            <td class="px-4 py-2">
+                                <!-- Actions like Configure or Disable could go here -->
+                                <span class="text-slate-400 text-xs">Managed by config</span>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="px-4 py-6 text-center text-sm text-slate-500">
+                                No addons installed.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}

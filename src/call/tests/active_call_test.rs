@@ -57,6 +57,7 @@ fn create_test_app_state_with(mutator: impl FnOnce(&mut crate::config::Config)) 
         reload_requested: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "console")]
         console: None,
+        addon_registry: Arc::new(crate::addons::registry::AddonRegistry::new()),
     })
 }
 
