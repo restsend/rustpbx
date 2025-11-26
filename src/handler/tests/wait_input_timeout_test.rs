@@ -2,17 +2,20 @@
 mod wait_input_timeout_tests {
     use crate::{
         app::{AppState, AppStateBuilder},
-        call::{ActiveCall, ActiveCallType, CallOption},
+        call::{ActiveCall, ActiveCallType},
         callrecord::CallRecordManagerBuilder,
         config::{Config, UseragentConfig},
-        event::SessionEvent,
-        media::track::TrackConfig,
-        synthesis::{SynthesisOption, SynthesisType},
     };
     use anyhow::Result;
     use std::{sync::Arc, time::Duration};
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
+    use voice_engine::{
+        CallOption,
+        event::SessionEvent,
+        media::track::TrackConfig,
+        synthesis::{SynthesisOption, SynthesisType},
+    };
 
     /// Helper function to create a basic app state for testing with unique ports
     async fn create_test_app_state_with_port(port_offset: u16) -> Result<AppState> {
@@ -102,7 +105,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd event to trigger wait_input_timeout
         active_call.event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -156,7 +159,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -178,8 +181,8 @@ mod wait_input_timeout_tests {
 
         event_sender.send(SessionEvent::Speaking {
             track_id: session_id.clone(),
-            timestamp: crate::media::get_timestamp(),
-            start_time: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
+            start_time: voice_engine::media::get_timestamp(),
         })?;
 
         // Check that no Silence event is received in a reasonable time
@@ -220,7 +223,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd to start timeout
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,
@@ -242,7 +245,7 @@ mod wait_input_timeout_tests {
 
         event_sender.send(SessionEvent::Dtmf {
             track_id: session_id.clone(),
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             digit: "1".to_string(),
         })?;
 
@@ -285,7 +288,7 @@ mod wait_input_timeout_tests {
         // Simulate TrackEnd
         event_sender.send(SessionEvent::TrackEnd {
             track_id: active_call.server_side_track_id.clone(),
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             duration: 1000,
             ssrc: 0,
             play_id: None,

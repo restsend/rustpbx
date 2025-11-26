@@ -1,6 +1,5 @@
 use crate::{
     call::{CallRecordingConfig, DialDirection, DialplanIvrConfig, QueuePlan, user::SipUser},
-    media::recorder::RecorderFormat,
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
@@ -10,6 +9,7 @@ use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
+use voice_engine::{IceServer, media::recorder::RecorderFormat};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -208,15 +208,6 @@ impl Default for ConsoleConfig {
             allow_registration: false,
         }
     }
-}
-
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub struct IceServer {
-    pub urls: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]

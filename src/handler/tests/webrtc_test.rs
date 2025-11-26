@@ -1,16 +1,7 @@
 use crate::app::{AppState, AppStateBuilder};
-use crate::call::{CallOption, Command};
+use crate::call::Command;
 use crate::callrecord::CallRecordManagerBuilder;
 use crate::config::{Config, ProxyConfig, UseragentConfig};
-use crate::event::SessionEvent;
-use crate::media::codecs::g722::G722Encoder;
-use crate::media::codecs::resample::resample_mono;
-use crate::media::codecs::{CodecType, Encoder};
-use crate::media::track::file::read_wav_file;
-use crate::media::track::webrtc::WebrtcTrack;
-use crate::synthesis::SynthesisType;
-use crate::transcription::TranscriptionType;
-use crate::{synthesis::SynthesisOption, transcription::TranscriptionOption};
 use anyhow::Result;
 use axum::{
     Router,
@@ -27,6 +18,17 @@ use tokio::{select, time};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tracing::{info, warn};
 use uuid::Uuid;
+use voice_engine::CallOption;
+use voice_engine::event::SessionEvent;
+use voice_engine::media::codecs::g722::G722Encoder;
+use voice_engine::media::codecs::resample::resample_mono;
+use voice_engine::media::codecs::{CodecType, Encoder};
+use voice_engine::media::track::file::read_wav_file;
+use voice_engine::media::track::webrtc::WebrtcTrack;
+use voice_engine::media::vad::VADOption;
+use voice_engine::synthesis::SynthesisType;
+use voice_engine::transcription::TranscriptionType;
+use voice_engine::{synthesis::SynthesisOption, transcription::TranscriptionOption};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::{
     api::APIBuilder, peer_connection::configuration::RTCConfiguration,
@@ -202,7 +204,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     // Create the invite command with proper options
     let option = CallOption {
         offer: Some(offer.sdp.clone()),
-        vad: Some(crate::media::vad::VADOption::default()),
+        vad: Some(VADOption::default()),
         asr: Some(asr_config),
         tts: Some(tts_config),
         ..Default::default()
@@ -259,8 +261,7 @@ async fn test_webrtc_audio_streaming() -> Result<()> {
     };
     let send_audio_loop = async move {
         // Read test audio file
-        let (mut audio_samples, sample_rate) =
-            read_wav_file("fixtures/hello_book_course_zh_16k.wav").unwrap();
+        let (mut audio_samples, sample_rate) = read_wav_file("fixtures/sample.wav").unwrap();
         let mut ticker = time::interval(Duration::from_millis(20));
         let mut encoder = G722Encoder::new();
         let mut packet_timestamp = 0;

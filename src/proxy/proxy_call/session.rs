@@ -300,8 +300,8 @@ impl CallSession {
         // Parse caller's offer to extract rtp_map for correct payload types
         let mut caller_rtp_map = Vec::new();
         if let Some(ref caller_offer) = self.caller_offer {
-            use crate::media::negotiate::select_peer_media;
             use std::io::Cursor;
+            use voice_engine::media::negotiate::select_peer_media;
             use webrtc::sdp::SessionDescription;
 
             let mut reader = Cursor::new(caller_offer.as_bytes());

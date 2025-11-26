@@ -1,10 +1,5 @@
 use self::ivr::IvrPlan;
-use crate::{
-    config::{IceServer, MediaProxyMode, RouteResult},
-    media::{recorder::RecorderOption, track::media_pass::MediaPassOption, vad::VADOption},
-    synthesis::SynthesisOption,
-    transcription::TranscriptionOption,
-};
+use crate::config::{MediaProxyMode, RouteResult};
 use anyhow::Result;
 use rsip::{StatusCode, Transport};
 use rsipstack::{
@@ -17,6 +12,9 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
+};
+use voice_engine::{
+    CallOption, IceServer, ReferOption, media::recorder::RecorderOption, synthesis::SynthesisOption,
 };
 
 pub mod active_call;
@@ -41,123 +39,6 @@ pub type CommandReceiver = tokio::sync::broadcast::Receiver<Command>;
 pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
 pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.wav";
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
-pub struct SipOption {
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub realm: Option<String>,
-    pub headers: Option<HashMap<String, String>>,
-}
-
-#[skip_serializing_none]
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct CallOption {
-    pub denoise: Option<bool>,
-    pub offer: Option<String>,
-    pub callee: Option<String>,
-    pub caller: Option<String>,
-    pub recorder: Option<RecorderOption>,
-    pub vad: Option<VADOption>,
-    pub asr: Option<TranscriptionOption>,
-    pub tts: Option<SynthesisOption>,
-    pub media_pass: Option<MediaPassOption>,
-    pub handshake_timeout: Option<String>,
-    pub enable_ipv6: Option<bool>,
-    pub sip: Option<SipOption>,
-    pub extra: Option<HashMap<String, String>>,
-    pub codec: Option<String>, // pcmu, pcma, g722, pcm, only for websocket call
-    pub eou: Option<EouOption>,
-}
-
-impl Default for CallOption {
-    fn default() -> Self {
-        Self {
-            denoise: None,
-            offer: None,
-            callee: None,
-            caller: None,
-            recorder: None,
-            asr: None,
-            vad: None,
-            tts: None,
-            media_pass: None,
-            handshake_timeout: None,
-            enable_ipv6: None,
-            sip: None,
-            extra: None,
-            codec: None,
-            eou: None,
-        }
-    }
-}
-
-impl CallOption {
-    pub fn check_default(&mut self) {
-        if let Some(tts) = &mut self.tts {
-            tts.check_default();
-        }
-        if let Some(asr) = &mut self.asr {
-            asr.check_default();
-        }
-    }
-
-    pub fn build_invite_option(&self) -> Result<InviteOption> {
-        let mut invite_option = InviteOption::default();
-        if let Some(offer) = &self.offer {
-            invite_option.offer = Some(offer.clone().into());
-        }
-        if let Some(callee) = &self.callee {
-            invite_option.callee = callee.clone().try_into()?;
-        }
-        if let Some(caller) = &self.caller {
-            invite_option.caller = caller.clone().try_into()?;
-            invite_option.contact = invite_option.caller.clone();
-        }
-
-        if let Some(sip) = &self.sip {
-            invite_option.credential = Some(Credential {
-                username: sip.username.clone().unwrap_or_default(),
-                password: sip.password.clone().unwrap_or_default(),
-                realm: sip.realm.clone(),
-            });
-            invite_option.headers = sip.headers.as_ref().map(|h| {
-                h.iter()
-                    .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
-                    .collect::<Vec<_>>()
-            });
-        }
-        Ok(invite_option)
-    }
-}
-
-#[skip_serializing_none]
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ReferOption {
-    pub denoise: Option<bool>,
-    pub timeout: Option<u32>,
-    pub moh: Option<String>,
-    pub asr: Option<TranscriptionOption>,
-    /// hangup after the call is ended
-    pub auto_hangup: Option<bool>,
-    pub sip: Option<SipOption>,
-}
-
-#[skip_serializing_none]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EouOption {
-    pub r#type: Option<String>,
-    pub endpoint: Option<String>,
-    pub secret_key: Option<String>,
-    pub secret_id: Option<String>,
-    /// max timeout in milliseconds
-    pub timeout: Option<u32>,
-    pub extra: Option<HashMap<String, String>>,
-}
 
 // WebSocket Commands
 #[skip_serializing_none]

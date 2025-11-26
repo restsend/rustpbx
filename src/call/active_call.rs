@@ -1,4 +1,4 @@
-use super::{CallOption, Command, ReferOption};
+use super::Command;
 use crate::{
     app::AppState,
     call::{
@@ -6,6 +6,23 @@ use crate::{
         sip::{DialogStateReceiverGuard, Invitation, InviteDialogStates},
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
+    useragent::invitation::PendingDialog,
+};
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+use tokio::{fs::File, select, sync::Mutex, time::sleep};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+use voice_engine::{
+    CallOption, ReferOption,
     event::{EventReceiver, EventSender, SessionEvent},
     media::TrackId,
     media::{
@@ -24,21 +41,7 @@ use crate::{
         },
     },
     synthesis::{SynthesisCommand, SynthesisOption},
-    useragent::invitation::PendingDialog,
 };
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use rsipstack::dialog::{invitation::InviteOption, server_dialog::ServerInviteDialog};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-use tokio::{fs::File, select, sync::Mutex, time::sleep};
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,7 +150,7 @@ impl ActiveCall {
         server_side_track_id: Option<TrackId>,
         extras: Option<HashMap<String, serde_json::Value>>,
     ) -> Self {
-        let event_sender = crate::event::create_event_sender();
+        let event_sender = voice_engine::event::create_event_sender();
         let cmd_sender = tokio::sync::broadcast::Sender::<Command>::new(32);
         let media_stream_builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
@@ -214,7 +217,7 @@ impl ActiveCall {
                         self.event_sender
                             .send(SessionEvent::Error {
                                 track_id: self.session_id.clone(),
-                                timestamp: crate::media::get_timestamp(),
+                                timestamp: voice_engine::media::get_timestamp(),
                                 sender: "command".to_string(),
                                 error: e.to_string(),
                                 code: None,
@@ -259,13 +262,14 @@ impl ActiveCall {
         let wait_input_timeout_loop = async {
             loop {
                 let (start_time, expire) = { *input_timeout_expire.lock().await };
-                if expire > 0 && crate::media::get_timestamp() >= start_time + expire as u64 {
+                if expire > 0 && voice_engine::media::get_timestamp() >= start_time + expire as u64
+                {
                     info!(session_id = self.session_id, "wait input timeout reached");
                     *input_timeout_expire.lock().await = (0, 0);
                     event_sender
                         .send(SessionEvent::Silence {
                             track_id: self.server_side_track_id.clone(),
-                            timestamp: crate::media::get_timestamp(),
+                            timestamp: voice_engine::media::get_timestamp(),
                             start_time,
                             duration: expire as u64,
                             samples: None,
@@ -310,7 +314,7 @@ impl ActiveCall {
                         }
                         if let Some(timeout) = wait_input_timeout.lock().await.take() {
                             let expire = if timeout > 0 {
-                                (crate::media::get_timestamp(), timeout)
+                                (voice_engine::media::get_timestamp(), timeout)
                             } else {
                                 (0, 0)
                             };
@@ -490,9 +494,9 @@ impl ActiveCall {
                 self.app_state
                     .total_failed_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let error_event = crate::event::SessionEvent::Error {
+                let error_event = voice_engine::event::SessionEvent::Error {
                     track_id: self.session_id.clone(),
-                    timestamp: crate::media::get_timestamp(),
+                    timestamp: voice_engine::media::get_timestamp(),
                     sender,
                     error: e.to_string(),
                     code: None,
@@ -734,7 +738,7 @@ impl ActiveCall {
         self.event_sender
             .send(SessionEvent::AddHistory {
                 sender: Some(self.session_id.clone()),
-                timestamp: crate::media::get_timestamp(),
+                timestamp: voice_engine::media::get_timestamp(),
                 speaker,
                 text,
             })
@@ -867,7 +871,7 @@ impl ActiveCall {
             Ok(answer) => {
                 self.event_sender
                     .send(SessionEvent::Answer {
-                        timestamp: crate::media::get_timestamp(),
+                        timestamp: voice_engine::media::get_timestamp(),
                         track_id,
                         sdp: answer,
                     })
@@ -883,7 +887,7 @@ impl ActiveCall {
                         self.event_sender
                             .send(SessionEvent::Reject {
                                 track_id,
-                                timestamp: crate::media::get_timestamp(),
+                                timestamp: voice_engine::media::get_timestamp(),
                                 reason: reason.clone(),
                                 code: Some(code.code() as u32),
                             })
@@ -1070,7 +1074,7 @@ impl ActiveCall {
                     Ok(answer) => {
                         self.event_sender
                             .send(SessionEvent::Answer {
-                                timestamp: crate::media::get_timestamp(),
+                                timestamp: voice_engine::media::get_timestamp(),
                                 track_id: self.session_id.clone(),
                                 sdp: answer,
                             })
@@ -1087,7 +1091,7 @@ impl ActiveCall {
                                 self.event_sender
                                     .send(SessionEvent::Reject {
                                         track_id: self.session_id.clone(),
-                                        timestamp: crate::media::get_timestamp(),
+                                        timestamp: voice_engine::media::get_timestamp(),
                                         reason: reason.clone(),
                                         code: Some(code.code() as u32),
                                     })
@@ -1149,7 +1153,7 @@ impl ActiveCall {
                     info!(session_id = self.session_id, "call answer: {}", answer,);
                     self.event_sender
                         .send(SessionEvent::Answer {
-                            timestamp: crate::media::get_timestamp(),
+                            timestamp: voice_engine::media::get_timestamp(),
                             track_id: self.session_id.clone(),
                             sdp: answer.clone(),
                         })
@@ -1508,14 +1512,14 @@ impl ActiveCallState {
         &self,
         track_id: TrackId,
         initiator: Option<String>,
-    ) -> crate::event::SessionEvent {
+    ) -> voice_engine::event::SessionEvent {
         let from = self.option.as_ref().and_then(|o| o.caller.as_ref());
         let to = self.option.as_ref().and_then(|o| o.callee.as_ref());
         let extra = self.extras.clone();
 
-        crate::event::SessionEvent::Hangup {
+        voice_engine::event::SessionEvent::Hangup {
             track_id,
-            timestamp: crate::media::get_timestamp(),
+            timestamp: voice_engine::media::get_timestamp(),
             reason: Some(format!("{:?}", self.hangup_reason)),
             initiator,
             start_time: self.start_time.to_rfc3339(),

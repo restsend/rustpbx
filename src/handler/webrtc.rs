@@ -1,5 +1,5 @@
 use super::middleware::clientaddr::ClientAddr;
-use crate::{app::AppState, config::IceServer};
+use crate::app::AppState;
 use axum::{
     Json,
     extract::State,
@@ -8,6 +8,7 @@ use axum::{
 use reqwest;
 use std::time::Instant;
 use tracing::{info, warn};
+use voice_engine::IceServer;
 
 pub(crate) async fn get_iceservers(
     client_ip: ClientAddr,

@@ -5,8 +5,6 @@ use crate::{
         ActiveCall, ActiveCallType, Command,
         active_call::{ActiveCallGuard, CallParams},
     },
-    event::SessionEvent,
-    media::track::TrackConfig,
 };
 use axum::{
     Json, Router,
@@ -22,6 +20,7 @@ use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use voice_engine::{event::SessionEvent, media::track::TrackConfig};
 
 pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
@@ -132,7 +131,7 @@ pub async fn call_handler(
         let mut event_receiver = active_call.event_sender.subscribe();
         let send_to_ws_loop = async {
             while let Ok(event) = event_receiver.recv().await {
-                let message = match event.try_into() {
+                let message = match event.into_ws_message() {
                     Ok(msg) => msg,
                     Err(_) => continue,
                 };
@@ -151,7 +150,7 @@ pub async fn call_handler(
             loop {
                 ticker.tick().await;
                 let payload = Utc::now().to_rfc3339();
-                let event = SessionEvent::Ping { timestamp: crate::media::get_timestamp(), payload:Some(payload)};
+                let event = SessionEvent::Ping { timestamp: voice_engine::media::get_timestamp(), payload:Some(payload)};
                 if let Err(_) = active_call.event_sender.send(event) {
                     break;
                 }
@@ -183,7 +182,7 @@ pub async fn call_handler(
         active_call.cleanup().await.ok();
         // Drain remaining events
         while let Ok(event) = event_receiver.try_recv() {
-            let message = match event.try_into() {
+            let message = match event.into_ws_message() {
                 Ok(msg) => msg,
                 Err(_) => continue,
             };
@@ -198,10 +197,12 @@ pub async fn call_handler(
     resp
 }
 
-impl TryInto<Message> for SessionEvent {
-    type Error = serde_json::Error;
+trait IntoWsMessage {
+    fn into_ws_message(self) -> Result<Message, serde_json::Error>;
+}
 
-    fn try_into(self) -> Result<Message, <Self as TryInto<Message>>::Error> {
+impl IntoWsMessage for voice_engine::event::SessionEvent {
+    fn into_ws_message(self) -> Result<Message, serde_json::Error> {
         match self {
             SessionEvent::Binary { data, .. } => Ok(Message::Binary(data.into())),
             SessionEvent::Ping { timestamp, payload } => {

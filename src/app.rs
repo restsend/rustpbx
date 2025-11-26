@@ -3,7 +3,6 @@ use crate::{
     callrecord::{CallRecordManagerBuilder, CallRecordSender},
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
-    media::engine::StreamEngine,
     proxy::{
         acl::AclModule,
         auth::AuthModule,
@@ -38,6 +37,7 @@ use tower_http::{
     services::ServeDir,
 };
 use tracing::{debug, info, warn};
+use voice_engine::media::{cache::set_cache_dir, engine::StreamEngine};
 
 pub struct AppStateInner {
     pub config: Arc<Config>,
@@ -194,7 +194,7 @@ impl AppStateBuilder {
             .unwrap_or_else(|| CancellationToken::new());
         let config_loaded_at = self.config_loaded_at.unwrap_or_else(|| Utc::now());
         let config_path = self.config_path.clone();
-        let _ = crate::media::cache::set_cache_dir(&config.media_cache_path);
+        let _ = set_cache_dir(&config.media_cache_path);
         let db_conn = crate::models::create_db(&config.database_url).await?;
 
         let useragent = if let Some(ua) = self.useragent {

@@ -6,10 +6,6 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use rustpbx::media::{
-    stream::MediaStreamBuilder,
-    track::{TrackConfig, file::FileTrack, webrtc::WebrtcTrack},
-};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -23,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 use tracing::{Level, error, info, warn};
 use uuid::Uuid;
+use voice_engine::media::{
+    stream::MediaStreamBuilder,
+    track::{TrackConfig, file::FileTrack, webrtc::WebrtcTrack},
+};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 use clap::Parser;
@@ -106,7 +106,7 @@ async fn offer_handler(
 async fn process_offer(state: Arc<AppState>, offer: WebRTCOffer) -> Result<(String, WebRTCAnswer)> {
     let connection_id = Uuid::new_v4().to_string();
     let cancel_token = CancellationToken::new();
-    let event_sender = rustpbx::event::create_event_sender();
+    let event_sender = voice_engine::event::create_event_sender();
     let media_stream_builder = MediaStreamBuilder::new(event_sender.clone());
     let media_stream = Arc::new(
         media_stream_builder

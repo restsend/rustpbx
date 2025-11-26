@@ -4,16 +4,11 @@ pub mod callrecord;
 pub mod config;
 #[cfg(feature = "console")]
 pub mod console;
-pub mod event;
 pub mod handler;
 pub mod llm;
-pub mod media;
 pub mod models;
-pub mod net_tool;
 pub mod preflight;
 pub mod proxy;
 pub mod services;
-pub mod synthesis;
-pub mod transcription;
 pub mod useragent;
 pub mod version; // Admin console

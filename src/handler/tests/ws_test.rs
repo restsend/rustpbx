@@ -1,12 +1,7 @@
 use crate::app::{AppState, AppStateBuilder};
-use crate::call::{CallOption, Command};
+use crate::call::Command;
 use crate::callrecord::CallRecordManagerBuilder;
 use crate::config::{Config, ProxyConfig, UseragentConfig};
-use crate::event::SessionEvent;
-use crate::media::codecs::samples_to_bytes;
-use crate::media::track::file::read_wav_file;
-use crate::synthesis::{SynthesisOption, SynthesisType};
-use crate::transcription::{TranscriptionOption, TranscriptionType};
 use anyhow::Result;
 use axum::{
     Router,
@@ -22,6 +17,12 @@ use tokio::{select, time};
 use tokio_tungstenite::tungstenite;
 use tracing::{info, warn};
 use uuid::Uuid;
+use voice_engine::CallOption;
+use voice_engine::event::SessionEvent;
+use voice_engine::media::codecs::samples_to_bytes;
+use voice_engine::media::track::file::read_wav_file;
+use voice_engine::synthesis::{SynthesisOption, SynthesisType};
+use voice_engine::transcription::{TranscriptionOption, TranscriptionType};
 
 // Error handling middleware
 async fn handle_error(
@@ -179,7 +180,7 @@ async fn test_websocket_pcm_streaming() -> Result<()> {
     });
 
     // Read test audio file
-    let (audio_samples, _sample_rate) = read_wav_file("fixtures/hello_book_course_zh_16k.wav")?;
+    let (audio_samples, _sample_rate) = read_wav_file("fixtures/sample.wav")?;
 
     // Wait for at least one event before sending audio
     time::sleep(Duration::from_millis(500)).await;

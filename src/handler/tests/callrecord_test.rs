@@ -3,8 +3,9 @@ use crate::{
     call::{ActiveCallType, active_call::CallParams},
     config::{Config, ProxyConfig, UseragentConfig},
     handler::middleware::clientaddr::ClientAddr,
-    media::engine::StreamEngine,
 };
+use voice_engine::media::engine::StreamEngine;
+
 use axum::{
     extract::{Query, State, WebSocketUpgrade},
     response::Response,
