@@ -93,19 +93,26 @@ impl ConsoleState {
         }
 
         let mut tmpl_env = Environment::new();
-        
+
         let mut paths = vec!["templates".to_string()];
         if let Some(app_state) = self.app_state() {
-             paths.extend(app_state.addon_registry.get_template_dirs());
+            paths.extend(
+                app_state
+                    .addon_registry
+                    .get_template_dirs(app_state.clone()),
+            );
         }
 
         tmpl_env.set_loader(move |name| {
             for base in &paths {
                 let path = std::path::Path::new(base).join(name);
                 if path.exists() {
-                    return std::fs::read_to_string(path).map(Some).map_err(|_| minijinja::Error::new(
-                        minijinja::ErrorKind::TemplateNotFound, "failed to load template"
-                    ));
+                    return std::fs::read_to_string(path).map(Some).map_err(|_| {
+                        minijinja::Error::new(
+                            minijinja::ErrorKind::TemplateNotFound,
+                            "failed to load template",
+                        )
+                    });
                 }
             }
             Ok(None)
