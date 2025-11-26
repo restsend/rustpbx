@@ -418,6 +418,8 @@ pub struct ProxyConfig {
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
     pub sip_flow_max_items: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addons: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub transcript: Option<TranscriptConfig>,
@@ -584,6 +586,7 @@ impl Default for ProxyConfig {
             recording: None,
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,
+            addons: None,
             transcript: None,
         }
     }
@@ -650,6 +653,15 @@ impl Default for Config {
             database_url: default_database_url(),
             recording: None,
         }
+    }
+}
+
+impl Clone for Config {
+    fn clone(&self) -> Self {
+        // This is a bit expensive but Config is not cloned often in hot paths
+        // and implementing Clone manually for all nested structs is tedious
+        let s = toml::to_string(self).unwrap();
+        toml::from_str(&s).unwrap()
     }
 }
 

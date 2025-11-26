@@ -1,7 +1,7 @@
+use crate::app::AppState;
 use async_trait::async_trait;
 use axum::Router;
-use crate::app::AppState;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
@@ -17,18 +17,21 @@ pub struct AddonInfo {
     pub name: String,
     pub description: String,
     pub enabled: bool,
+    pub config_url: Option<String>,
 }
 
 #[async_trait]
 pub trait Addon: Send + Sync {
     /// Unique identifier for the addon
     fn id(&self) -> &'static str;
-    
+
     /// Display name of the addon
     fn name(&self) -> &'static str;
 
     /// Description of the addon
-    fn description(&self) -> &'static str { "" }
+    fn description(&self) -> &'static str {
+        ""
+    }
 
     /// Initialize the addon (migrations, background tasks, etc.)
     async fn initialize(&self, state: AppState) -> anyhow::Result<()>;
@@ -52,5 +55,5 @@ pub trait Addon: Send + Sync {
     }
 }
 
-pub mod registry;
 pub mod acme;
+pub mod registry;

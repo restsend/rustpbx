@@ -1,5 +1,5 @@
-use crate::app::AppState;
 use crate::addons::Addon;
+use crate::app::AppState;
 
 pub struct AddonRegistry {
     addons: Vec<Box<dyn Addon>>,
@@ -17,7 +17,12 @@ impl AddonRegistry {
     }
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
+        let config = &state.config;
         for addon in &self.addons {
+            if !self.is_enabled(addon.id(), &config) {
+                tracing::info!("Addon {} is disabled", addon.name());
+                continue;
+            }
             tracing::info!("Initializing addon: {}", addon.name());
             // Commercial addons would check license here
             if let Err(e) = addon.initialize(state.clone()).await {
@@ -28,8 +33,12 @@ impl AddonRegistry {
     }
 
     pub fn get_routers(&self, state: AppState) -> axum::Router {
+        let config = &state.config;
         let mut router = axum::Router::new();
         for addon in &self.addons {
+            if !self.is_enabled(addon.id(), &config) {
+                continue;
+            }
             if let Some(r) = addon.router(state.clone()) {
                 router = router.merge(r);
             }
@@ -37,20 +46,48 @@ impl AddonRegistry {
         router
     }
 
-    pub fn get_sidebar_items(&self) -> Vec<super::SidebarItem> {
-        self.addons.iter().flat_map(|a| a.sidebar_items()).collect()
+    pub fn get_sidebar_items(&self, state: AppState) -> Vec<super::SidebarItem> {
+        let config = &state.config;
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), &config))
+            .flat_map(|a| a.sidebar_items())
+            .collect()
     }
 
-    pub fn get_template_dirs(&self) -> Vec<String> {
-        self.addons.iter().filter_map(|a| a.template_dir()).collect()
+    pub fn get_template_dirs(&self, state: AppState) -> Vec<String> {
+        let config = &state.config;
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), &config))
+            .filter_map(|a| a.template_dir())
+            .collect()
     }
 
     pub fn list_addons(&self) -> Vec<super::AddonInfo> {
-        self.addons.iter().map(|a| super::AddonInfo {
-            id: a.id().to_string(),
-            name: a.name().to_string(),
-            description: a.description().to_string(),
-            enabled: true, // Currently all loaded addons are enabled
-        }).collect()
+        self.addons
+            .iter()
+            .map(|a| {
+                let sidebar = a.sidebar_items();
+                let config_url = sidebar.first().map(|s| s.url.clone());
+
+                super::AddonInfo {
+                    id: a.id().to_string(),
+                    name: a.name().to_string(),
+                    description: a.description().to_string(),
+                    enabled: true, // Currently all loaded addons are enabled
+                    config_url,
+                }
+            })
+            .collect()
+    }
+
+    pub fn is_enabled(&self, id: &str, config: &crate::config::Config) -> bool {
+        if let Some(proxy) = &config.proxy {
+            if let Some(addons) = &proxy.addons {
+                return addons.iter().any(|a| a == id);
+            }
+        }
+        false
     }
 }

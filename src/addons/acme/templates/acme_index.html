@@ -73,6 +73,40 @@
             </div>
         </div>
     </div>
+
+    <!-- Existing Certificates -->
+    <div class="mt-6 rounded-xl bg-white shadow-sm ring-1 ring-slate-900/5">
+        <div class="border-b border-slate-200 px-4 py-5 sm:px-6">
+            <h3 class="text-base font-semibold leading-6 text-slate-900">Existing Certificates</h3>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-300">
+                <thead class="bg-slate-50">
+                    <tr>
+                        <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-slate-900 sm:pl-6">
+                            Domain</th>
+                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-slate-900">Path</th>
+                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-slate-900">Created At
+                        </th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200 bg-white">
+                    {% for cert in certs %}
+                    <tr>
+                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-slate-900 sm:pl-6">{{
+                            cert.domain }}</td>
+                        <td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">{{ cert.path }}</td>
+                        <td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">{{ cert.created_at }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="3" class="px-4 py-4 text-center text-sm text-slate-500">No certificates found.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <script>
