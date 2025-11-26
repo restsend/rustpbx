@@ -1,6 +1,6 @@
-use crate::AudioFrame;
-use crate::Sample;
 use crate::event::SessionEvent;
+use crate::media::AudioFrame;
+use crate::media::Sample;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

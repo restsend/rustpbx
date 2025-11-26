@@ -9,9 +9,9 @@ use super::{
     vad::{VADOption, VadProcessor, VadType},
 };
 use crate::{
-    TrackId,
     call::{CallOption, EouOption},
     event::EventSender,
+    media::TrackId,
     synthesis::{
         AliyunTtsClient, DeepegramTtsClient, SynthesisClient, SynthesisOption, SynthesisType,
         TencentCloudTtsBasicClient, TencentCloudTtsClient, VoiceApiTtsClient,

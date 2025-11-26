@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 
 const BIAS: i16 = 0x84;
 const CLIP: i16 = 32635;

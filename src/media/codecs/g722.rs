@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::{media::PcmBuf, media::Sample};
 pub enum Bitrate {
     Mode1_64000,
     Mode2_56000,

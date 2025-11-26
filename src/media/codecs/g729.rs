@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 
 const L_FRAME: usize = 80; // 10ms frame at 8kHz
 const L_FRAME_COMPRESSED: usize = 10; // G.729 frame size in bytes

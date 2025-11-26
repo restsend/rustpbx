@@ -1,6 +1,9 @@
 use crate::{
-    AudioFrame, PcmBuf, Sample, Samples,
     event::create_event_sender,
+    media::AudioFrame,
+    media::PcmBuf,
+    media::Sample,
+    media::Samples,
     media::{
         jitter::JitterBuffer,
         processor::Processor,

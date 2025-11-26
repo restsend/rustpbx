@@ -1,4 +1,4 @@
-use crate::AudioFrame;
+use crate::media::AudioFrame;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -151,7 +151,7 @@ impl JitterBuffer {
             return false;
         }
 
-        let now = crate::get_timestamp();
+        let now = crate::media::get_timestamp();
         let oldest_ts = self.frames.front().unwrap().timestamp;
         let buffer_delay = now.saturating_sub(oldest_ts);
 
@@ -164,7 +164,7 @@ impl JitterBuffer {
             return false;
         }
 
-        let now = crate::get_timestamp();
+        let now = crate::media::get_timestamp();
         let oldest_ts = self.frames.front().unwrap().timestamp;
         let buffer_delay = now.saturating_sub(oldest_ts);
 
@@ -185,7 +185,7 @@ impl JitterBuffer {
     // New: Get current buffer delay
     pub fn current_delay(&self) -> u32 {
         if let Some(oldest) = self.frames.front() {
-            let now = crate::get_timestamp();
+            let now = crate::media::get_timestamp();
             now.saturating_sub(oldest.timestamp) as u32
         } else {
             0
@@ -197,7 +197,7 @@ impl JitterBuffer {
         let mut removed = 0;
 
         if self.has_excessive_delay() {
-            let now = crate::get_timestamp();
+            let now = crate::media::get_timestamp();
             let max_age = now.saturating_sub(self.max_delay_ms as u64);
 
             while let Some(oldest) = self.frames.front() {

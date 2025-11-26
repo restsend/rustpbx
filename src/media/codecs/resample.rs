@@ -1,4 +1,4 @@
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 use anyhow::Result;
 use rubato::{FftFixedOut, Resampler};
 

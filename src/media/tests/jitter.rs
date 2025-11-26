@@ -1,4 +1,4 @@
-use crate::{AudioFrame, Samples, media::jitter::JitterBuffer};
+use crate::media::{AudioFrame, Samples, jitter::JitterBuffer};
 
 fn create_test_frame(timestamp: u64) -> AudioFrame {
     AudioFrame {

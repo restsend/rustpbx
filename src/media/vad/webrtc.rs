@@ -1,5 +1,5 @@
 use super::VadEngine;
-use crate::{AudioFrame, Samples};
+use crate::media::{AudioFrame, Samples};
 use anyhow::Result;
 use tracing::debug;
 use webrtc_vad::{SampleRate, Vad, VadMode};

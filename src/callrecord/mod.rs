@@ -80,7 +80,7 @@ impl CallRecordEvent {
         };
         let event = Self {
             r#type,
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             content,
         };
         match serde_json::to_string(&event) {

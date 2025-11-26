@@ -1,6 +1,6 @@
 use super::*;
 use crate::event::{SessionEvent, create_event_sender};
-use crate::{Samples, media::processor::Processor};
+use crate::media::{Samples, processor::Processor};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 

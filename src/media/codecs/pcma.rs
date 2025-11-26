@@ -1,5 +1,5 @@
 use super::{Decoder, Encoder};
-use crate::{PcmBuf, Sample};
+use crate::media::{PcmBuf, Sample};
 
 const SEG_SHIFT: i16 = 4;
 const QUANT_MASK: i16 = 0x0F;

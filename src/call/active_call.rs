@@ -1,6 +1,5 @@
 use super::{CallOption, Command, ReferOption};
 use crate::{
-    TrackId,
     app::AppState,
     call::{
         CommandReceiver, CommandSender,
@@ -8,6 +7,7 @@ use crate::{
     },
     callrecord::{CallRecord, CallRecordEvent, CallRecordEventType, CallRecordHangupReason},
     event::{EventReceiver, EventSender, SessionEvent},
+    media::TrackId,
     media::{
         engine::StreamEngine,
         negotiate::strip_ipv6_candidates,
@@ -214,7 +214,7 @@ impl ActiveCall {
                         self.event_sender
                             .send(SessionEvent::Error {
                                 track_id: self.session_id.clone(),
-                                timestamp: crate::get_timestamp(),
+                                timestamp: crate::media::get_timestamp(),
                                 sender: "command".to_string(),
                                 error: e.to_string(),
                                 code: None,
@@ -259,13 +259,13 @@ impl ActiveCall {
         let wait_input_timeout_loop = async {
             loop {
                 let (start_time, expire) = { *input_timeout_expire.lock().await };
-                if expire > 0 && crate::get_timestamp() >= start_time + expire as u64 {
+                if expire > 0 && crate::media::get_timestamp() >= start_time + expire as u64 {
                     info!(session_id = self.session_id, "wait input timeout reached");
                     *input_timeout_expire.lock().await = (0, 0);
                     event_sender
                         .send(SessionEvent::Silence {
                             track_id: self.server_side_track_id.clone(),
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             start_time,
                             duration: expire as u64,
                             samples: None,
@@ -310,7 +310,7 @@ impl ActiveCall {
                         }
                         if let Some(timeout) = wait_input_timeout.lock().await.take() {
                             let expire = if timeout > 0 {
-                                (crate::get_timestamp(), timeout)
+                                (crate::media::get_timestamp(), timeout)
                             } else {
                                 (0, 0)
                             };
@@ -492,7 +492,7 @@ impl ActiveCall {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let error_event = crate::event::SessionEvent::Error {
                     track_id: self.session_id.clone(),
-                    timestamp: crate::get_timestamp(),
+                    timestamp: crate::media::get_timestamp(),
                     sender,
                     error: e.to_string(),
                     code: None,
@@ -734,7 +734,7 @@ impl ActiveCall {
         self.event_sender
             .send(SessionEvent::AddHistory {
                 sender: Some(self.session_id.clone()),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 speaker,
                 text,
             })
@@ -867,7 +867,7 @@ impl ActiveCall {
             Ok(answer) => {
                 self.event_sender
                     .send(SessionEvent::Answer {
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         track_id,
                         sdp: answer,
                     })
@@ -883,7 +883,7 @@ impl ActiveCall {
                         self.event_sender
                             .send(SessionEvent::Reject {
                                 track_id,
-                                timestamp: crate::get_timestamp(),
+                                timestamp: crate::media::get_timestamp(),
                                 reason: reason.clone(),
                                 code: Some(code.code() as u32),
                             })
@@ -1070,7 +1070,7 @@ impl ActiveCall {
                     Ok(answer) => {
                         self.event_sender
                             .send(SessionEvent::Answer {
-                                timestamp: crate::get_timestamp(),
+                                timestamp: crate::media::get_timestamp(),
                                 track_id: self.session_id.clone(),
                                 sdp: answer,
                             })
@@ -1087,7 +1087,7 @@ impl ActiveCall {
                                 self.event_sender
                                     .send(SessionEvent::Reject {
                                         track_id: self.session_id.clone(),
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         reason: reason.clone(),
                                         code: Some(code.code() as u32),
                                     })
@@ -1149,7 +1149,7 @@ impl ActiveCall {
                     info!(session_id = self.session_id, "call answer: {}", answer,);
                     self.event_sender
                         .send(SessionEvent::Answer {
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             track_id: self.session_id.clone(),
                             sdp: answer.clone(),
                         })
@@ -1515,7 +1515,7 @@ impl ActiveCallState {
 
         crate::event::SessionEvent::Hangup {
             track_id,
-            timestamp: crate::get_timestamp(),
+            timestamp: crate::media::get_timestamp(),
             reason: Some(format!("{:?}", self.hangup_reason)),
             initiator,
             start_time: self.start_time.to_rfc3339(),

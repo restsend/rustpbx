@@ -1,7 +1,9 @@
 use super::track_codec::TrackCodec;
 use crate::{
-    AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
+    media::AudioFrame,
+    media::Samples,
+    media::TrackId,
     media::{
         codecs::CodecType,
         jitter::JitterBuffer,
@@ -738,7 +740,7 @@ impl RtpTrack {
         let samples_per_packet =
             (self.config.samplerate as f64 * self.config.ptime.as_secs_f64()) as u32;
 
-        let now = crate::get_timestamp();
+        let now = crate::media::get_timestamp();
         inner
             .stats
             .last_timestamp_update
@@ -1015,7 +1017,7 @@ impl RtpTrack {
                             payload,
                             sequence_number: packet.header.sequence_number.into(),
                         },
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         sample_rate,
                     };
 
@@ -1307,7 +1309,7 @@ impl Track for RtpTrack {
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
         let ssrc_cname = self.ssrc_cname.clone();
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         let ptime = self.config.ptime;
 
         // Send ICE connectivity check if enabled and remote address is available
@@ -1357,8 +1359,8 @@ impl Track for RtpTrack {
             event_sender
                 .send(SessionEvent::TrackEnd {
                     track_id,
-                    timestamp: crate::get_timestamp(),
-                    duration: crate::get_timestamp() - start_time,
+                    timestamp: crate::media::get_timestamp(),
+                    duration: crate::media::get_timestamp() - start_time,
                     ssrc,
                     play_id: None,
                 })
@@ -1393,7 +1395,7 @@ impl Track for RtpTrack {
             _ => 8000,
         };
 
-        let now = crate::get_timestamp();
+        let now = crate::media::get_timestamp();
         let last_update = stats.last_timestamp_update.load(Ordering::Relaxed);
         let mut skipped_packets: u32 = 0;
 

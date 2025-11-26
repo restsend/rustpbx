@@ -1,11 +1,11 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::codecs::resample::LinearResampler;
 use crate::media::processor::ProcessorChain;
+use crate::media::{AudioFrame, PcmBuf, Samples, TrackId};
 use crate::media::{
     cache,
     track::{Track, TrackConfig, TrackPacketSender},
 };
-use crate::{AudioFrame, PcmBuf, Samples, TrackId};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use hound::WavReader;
@@ -365,7 +365,7 @@ async fn process_audio_reader(
         while let Some((chunk, chunk_sample_rate)) = audio_reader.read_chunk(packet_duration_ms)? {
             let mut packet = AudioFrame {
                 track_id: track_id.to_string(),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 samples: Samples::PCM { samples: chunk },
                 sample_rate: chunk_sample_rate,
             };
@@ -496,7 +496,7 @@ impl Track for FileTrack {
         let packet_duration_ms = self.config.ptime.as_millis() as u32;
         let processor_chain = self.processor_chain.clone();
         let token = self.cancel_token.clone();
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         let ssrc = self.ssrc;
         // Spawn async task to handle file streaming
         tokio::spawn(async move {
@@ -526,7 +526,7 @@ impl Track for FileTrack {
                     event_sender
                         .send(SessionEvent::Error {
                             track_id: id.clone(),
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             sender: format!("filetrack: {}", path),
                             error: e.to_string(),
                             code: None,
@@ -535,8 +535,8 @@ impl Track for FileTrack {
                     event_sender
                         .send(SessionEvent::TrackEnd {
                             track_id: id,
-                            timestamp: crate::get_timestamp(),
-                            duration: crate::get_timestamp() - start_time,
+                            timestamp: crate::media::get_timestamp(),
+                            duration: crate::media::get_timestamp() - start_time,
                             ssrc,
                             play_id: Some(path),
                         })
@@ -564,7 +564,7 @@ impl Track for FileTrack {
                 event_sender
                     .send(SessionEvent::Error {
                         track_id: id.clone(),
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         sender: format!("filetrack: {}", path),
                         error: e.to_string(),
                         code: None,
@@ -576,8 +576,8 @@ impl Track for FileTrack {
             event_sender
                 .send(SessionEvent::TrackEnd {
                     track_id: id,
-                    timestamp: crate::get_timestamp(),
-                    duration: crate::get_timestamp() - start_time,
+                    timestamp: crate::media::get_timestamp(),
+                    duration: crate::media::get_timestamp() - start_time,
                     ssrc,
                     play_id: Some(path),
                 })

@@ -1,6 +1,8 @@
 use crate::{
-    AudioFrame, Samples, TrackId,
     event::{EventSender, SessionEvent},
+    media::AudioFrame,
+    media::Samples,
+    media::TrackId,
     media::{
         codecs::{bytes_to_samples, resample::resample_mono, samples_to_bytes},
         processor::{Processor, ProcessorChain},
@@ -160,7 +162,7 @@ impl Track for MediaPassTrack {
         let session_id = self.session_id.clone();
         let ssrc = self.ssrc;
         let track_id = self.track_id.clone();
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         let cancel_token = self.cancel_token.clone();
         let ptime = self.config.ptime;
         let ptime_ms = ptime.as_millis() as u32;
@@ -211,7 +213,7 @@ impl Track for MediaPassTrack {
                         let frame = AudioFrame {
                             track_id: track_id.clone(),
                             samples: Samples::PCM { samples: samples_vec.clone() },
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             sample_rate: input_sample_rate,
                         };
 
@@ -240,7 +242,7 @@ impl Track for MediaPassTrack {
                                     let frame = AudioFrame {
                                         track_id: track_id.clone(),
                                         samples: Samples::PCM { samples: samples_vec.clone() },
-                                        timestamp: crate::get_timestamp(),
+                                        timestamp: crate::media::get_timestamp(),
                                         sample_rate: input_sample_rate,
                                     };
 
@@ -273,7 +275,7 @@ impl Track for MediaPassTrack {
                                 );
                                 let error = SessionEvent::Error {
                                     track_id: track_id.clone(),
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     sender: format!("media_pass: {}", url),
                                     error: format!("Media pass track error: {:?}", e),
                                     code: None,
@@ -304,7 +306,7 @@ impl Track for MediaPassTrack {
                 ws_sink.close().await.ok();
             };
 
-            let duration = crate::get_timestamp() - start_time;
+            let duration = crate::media::get_timestamp() - start_time;
             let bytes_sent_to_ws = bytes_sent.load(Ordering::Relaxed);
             info!(
                 session_id,
@@ -320,7 +322,7 @@ impl Track for MediaPassTrack {
             event_sender
                 .send(SessionEvent::TrackEnd {
                     track_id,
-                    timestamp: crate::get_timestamp(),
+                    timestamp: crate::media::get_timestamp(),
                     duration,
                     ssrc,
                     play_id: None,

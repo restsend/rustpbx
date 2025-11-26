@@ -1,5 +1,5 @@
 use super::codecs::resample::LinearResampler;
-use crate::{AudioFrame, PcmBuf, Sample, Samples, media::processor::Processor};
+use crate::media::{AudioFrame, PcmBuf, Sample, Samples, processor::Processor};
 use anyhow::Result;
 use nnnoiseless::DenoiseState;
 use std::cell::RefCell;

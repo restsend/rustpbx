@@ -1,8 +1,5 @@
 use crate::media::codecs::samples_to_bytes;
-use crate::{
-    AudioFrame, Samples,
-    media::{denoiser::NoiseReducer, processor::Processor},
-};
+use crate::media::{AudioFrame, Samples, denoiser::NoiseReducer, processor::Processor};
 use std::{fs::File, io::Write};
 
 #[test]

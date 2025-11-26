@@ -1,6 +1,6 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::processor::Processor;
-use crate::{AudioFrame, PcmBuf, Samples};
+use crate::media::{AudioFrame, PcmBuf, Samples};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
@@ -241,7 +241,7 @@ impl VadProcessorInner {
             self.current_speech_start = Some(timestamp);
             let event = SessionEvent::Speaking {
                 track_id: track_id.to_string(),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 start_time: timestamp,
             };
             self.event_sender.send(event).ok();
@@ -273,7 +273,7 @@ impl VadProcessorInner {
 
                             let event = SessionEvent::Silence {
                                 track_id: track_id.to_string(),
-                                timestamp: crate::get_timestamp(),
+                                timestamp: crate::media::get_timestamp(),
                                 start_time,
                                 duration,
                                 samples: Some(samples_vec),
@@ -294,7 +294,7 @@ impl VadProcessorInner {
                     if timeout_duration >= timeout {
                         let event = SessionEvent::Silence {
                             track_id: track_id.to_string(),
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             start_time: temp_end,
                             duration: timeout_duration,
                             samples: None,

@@ -1,6 +1,7 @@
 use crate::{
-    AudioFrame, Samples,
     event::{EventSender, SessionEvent},
+    media::AudioFrame,
+    media::Samples,
     media::{
         cache,
         codecs::bytes_to_samples,
@@ -119,7 +120,7 @@ impl TtsTask {
             provider = %self.client.provider(),
             "tts task started"
         );
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         // seqence number of next tts command in stream, used for non streaming mode
         let mut cmd_seq = if self.streaming { None } else { Some(0) };
         let mut cmd_finished = false;
@@ -246,7 +247,7 @@ impl TtsTask {
                     let mut frame = AudioFrame {
                         track_id: self.track_id.clone(),
                         samples,
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         sample_rate,
                     };
 
@@ -311,7 +312,7 @@ impl TtsTask {
             (a + entry.emitted_bytes, b + entry.total_bytes)
         });
 
-        let duration_ms = (crate::get_timestamp() - start_time) as f64 / 1000.0;
+        let duration_ms = (crate::media::get_timestamp() - start_time) as f64 / 1000.0;
         info!(
             session_id = %self.session_id,
             track_id = %self.track_id,
@@ -331,8 +332,8 @@ impl TtsTask {
         self.event_sender
             .send(SessionEvent::TrackEnd {
                 track_id: self.track_id.clone(),
-                timestamp: crate::get_timestamp(),
-                duration: crate::get_timestamp() - start_time,
+                timestamp: crate::media::get_timestamp(),
+                duration: crate::media::get_timestamp() - start_time,
                 ssrc: self.ssrc,
                 play_id: self.play_id.clone(),
             })
@@ -362,7 +363,7 @@ impl TtsTask {
         let assume_seq = cmd_seq.unwrap_or(0);
         let meta_entry = self.metadatas.entry(assume_seq).or_default();
         meta_entry.text = text.clone();
-        meta_entry.recv_time = crate::get_timestamp();
+        meta_entry.recv_time = crate::media::get_timestamp();
 
         let emit_entry = self.get_emit_entry_mut(assume_seq);
 
@@ -457,7 +458,7 @@ impl TtsTask {
 
                     self.event_sender
                         .send(SessionEvent::Metrics {
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             key: format!("completed.tts.{}", self.client.provider()),
                             data: serde_json::json!({
                                     "speaker": cmd.option.speaker,
@@ -535,7 +536,7 @@ impl TtsTask {
                 );
                 self.event_sender
                     .send(SessionEvent::Metrics {
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         key: format!("completed.tts.{}", self.client.provider()),
                         data: serde_json::json!({
                                 "playId": self.play_id,
@@ -543,7 +544,7 @@ impl TtsTask {
                                 "length": entry.total_bytes,
                                 "cached": false,
                         }),
-                        duration: (crate::get_timestamp() - entry.recv_time) as u32,
+                        duration: (crate::media::get_timestamp() - entry.recv_time) as u32,
                     })
                     .ok();
 
@@ -645,7 +646,7 @@ impl TtsTask {
 
             let interruption = SessionEvent::Interruption {
                 track_id: self.track_id.clone(),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 play_id: self.play_id.clone(),
                 subtitle: Some(text),
                 position,

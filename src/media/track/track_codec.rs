@@ -1,5 +1,7 @@
 use crate::{
-    AudioFrame, PcmBuf, Samples,
+    media::AudioFrame,
+    media::PcmBuf,
+    media::Samples,
     media::codecs::{
         Decoder, Encoder, bytes_to_samples,
         g722::{G722Decoder, G722Encoder},

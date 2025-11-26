@@ -1,7 +1,7 @@
-use crate::TrackId;
 use crate::call::active_call::ActiveCallStateRef;
 use crate::callrecord::CallRecordHangupReason;
 use crate::event::EventSender;
+use crate::media::TrackId;
 use crate::media::stream::MediaStream;
 use crate::useragent::invitation::PendingDialog;
 use anyhow::Result;
@@ -175,7 +175,7 @@ impl InviteDialogStates {
         self.event_sender
             .send(crate::event::SessionEvent::TrackEnd {
                 track_id: self.track_id.clone(),
-                timestamp: crate::get_timestamp(),
+                timestamp: crate::media::get_timestamp(),
                 duration: call_state_ref
                     .answer_time
                     .map(|t| (Utc::now() - t).num_milliseconds())
@@ -237,7 +237,7 @@ impl DialogStateReceiverGuard {
                         .event_sender
                         .send(crate::event::SessionEvent::Ringing {
                             track_id: states.track_id.clone(),
-                            timestamp: crate::get_timestamp(),
+                            timestamp: crate::media::get_timestamp(),
                             early_media: !answer.is_empty(),
                         })?;
 
@@ -270,7 +270,7 @@ impl DialogStateReceiverGuard {
                         if let Some(digit) = digit {
                             states.event_sender.send(crate::event::SessionEvent::Dtmf {
                                 track_id: states.track_id.clone(),
-                                timestamp: crate::get_timestamp(),
+                                timestamp: crate::media::get_timestamp(),
                                 digit: digit.to_string(),
                             })?;
                         }

@@ -1,8 +1,8 @@
 use super::track_codec::TrackCodec;
 use crate::{
-    AudioFrame,
     config::IceServer,
     event::{EventSender, SessionEvent},
+    media::AudioFrame,
     media::{
         codecs::CodecType,
         negotiate::prefer_audio_codec,
@@ -289,12 +289,12 @@ impl WebrtcTrack {
                             if let Some(sender) = packet_sender.as_ref() {
                                 let mut frame = AudioFrame {
                                     track_id: track_id_clone.clone(),
-                                    samples: crate::Samples::RTP {
+                                    samples: crate::media::Samples::RTP {
                                         payload_type: packet.header.payload_type,
                                         payload: packet.payload.to_vec(),
                                         sequence_number: packet.header.sequence_number,
                                     },
-                                    timestamp: crate::get_timestamp(),
+                                    timestamp: crate::media::get_timestamp(),
                                     sample_rate: track_samplerate,
                                     ..Default::default()
                                 };
@@ -449,14 +449,14 @@ impl Track for WebrtcTrack {
         let token_clone = self.cancel_token.clone();
         let event_sender_clone = event_sender.clone();
         let track_id = self.track_id.clone();
-        let start_time = crate::get_timestamp();
+        let start_time = crate::media::get_timestamp();
         let ssrc = self.ssrc;
         tokio::spawn(async move {
             token_clone.cancelled().await;
             let _ = event_sender_clone.send(SessionEvent::TrackEnd {
                 track_id,
-                timestamp: crate::get_timestamp(),
-                duration: crate::get_timestamp() - start_time,
+                timestamp: crate::media::get_timestamp(),
+                duration: crate::media::get_timestamp() - start_time,
                 ssrc,
                 play_id: None,
             });

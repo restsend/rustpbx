@@ -1,6 +1,6 @@
 use crate::{
-    Samples,
     event::SessionEvent,
+    media::Samples,
     media::track::{Track, tts::TtsTrack},
     synthesis::{
         Subtitle, SynthesisClient, SynthesisCommand, SynthesisEvent, SynthesisOption, SynthesisType,

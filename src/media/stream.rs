@@ -1,11 +1,11 @@
 use crate::event::{EventSender, SessionEvent};
 use crate::media::dtmf::DtmfDetector;
+use crate::media::{AudioFrame, Samples, TrackId};
 use crate::media::{
     processor::Processor,
     recorder::{Recorder, RecorderOption},
     track::{Track, TrackPacketReceiver, TrackPacketSender},
 };
-use crate::{AudioFrame, Samples, TrackId};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -182,7 +182,7 @@ impl MediaStream {
                 self.event_sender
                     .send(SessionEvent::TrackStart {
                         track_id,
-                        timestamp: crate::get_timestamp(),
+                        timestamp: crate::media::get_timestamp(),
                         play_id,
                     })
                     .ok();

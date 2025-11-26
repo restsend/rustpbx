@@ -7,9 +7,9 @@ use futures::StreamExt;
 use rustpbx::llm::LlmContent;
 use rustpbx::media::codecs::bytes_to_samples;
 use rustpbx::media::track::file::read_wav_file;
+use rustpbx::media::{PcmBuf, Sample};
 use rustpbx::synthesis::SynthesisEvent;
 use rustpbx::transcription::TencentCloudAsrClientBuilder;
-use rustpbx::{PcmBuf, Sample};
 use std::collections::VecDeque;
 /// This is a demo application which reads wav file from command line
 /// and processes it with ASR, LLM and TTS. It also supports local microphone input
