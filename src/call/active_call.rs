@@ -379,9 +379,13 @@ impl ActiveCall {
             }
             Command::Play {
                 url,
+                play_id,
                 auto_hangup,
                 wait_input_timeout,
-            } => self.do_play(url, auto_hangup, wait_input_timeout).await,
+            } => {
+                self.do_play(url, play_id, auto_hangup, wait_input_timeout)
+                    .await
+            }
             Command::Hangup { reason, initiator } => {
                 let reason = reason.map(|r| {
                     r.parse::<CallRecordHangupReason>()
@@ -607,7 +611,7 @@ impl ActiveCall {
                 ringtone, early_media, "playing ringtone"
             );
             if let Some(ringtone) = ringtone {
-                self.do_play(ringtone, None, None).await.ok();
+                self.do_play(ringtone, None, None, None).await.ok();
             } else {
                 info!(session_id = self.session_id, "no ringtone to play");
             }
@@ -707,6 +711,7 @@ impl ActiveCall {
     async fn do_play(
         &self,
         url: String,
+        play_id: Option<String>,
         auto_hangup: Option<bool>,
         wait_input_timeout: Option<u32>,
     ) -> Result<()> {
@@ -714,12 +719,15 @@ impl ActiveCall {
         let ssrc = rand::random::<u32>();
         info!(
             session_id = self.session_id,
-            ssrc, url, auto_hangup, "play file track"
+            ssrc, url, play_id, auto_hangup, "play file track"
         );
 
+        let play_id = play_id.or(Some(url.clone()));
+
         let file_track = FileTrack::new(self.server_side_track_id.clone())
+            .with_play_id(play_id.clone())
             .with_ssrc(ssrc)
-            .with_path(url.clone())
+            .with_path(url)
             .with_cancel_token(self.cancel_token.child_token());
         match auto_hangup {
             Some(true) => {
@@ -729,7 +737,7 @@ impl ActiveCall {
         }
         *self.wait_input_timeout.lock().await = wait_input_timeout;
         self.media_stream
-            .update_track(Box::new(file_track), Some(url))
+            .update_track(Box::new(file_track), play_id)
             .await;
         Ok(())
     }
@@ -797,7 +805,7 @@ impl ActiveCall {
         refer_option: Option<ReferOption>,
     ) -> Result<()> {
         if let Some(moh) = refer_option.as_ref().and_then(|o| o.moh.clone()) {
-            self.do_play(moh, None, None).await?;
+            self.do_play(moh, None, None, None).await?;
         }
         self.tts_handle.lock().await.take();
         let session_id = self.session_id.clone();
