@@ -84,6 +84,7 @@ pub enum Command {
     },
     Play {
         url: String,
+        play_id: Option<String>,
         auto_hangup: Option<bool>,
         wait_input_timeout: Option<u32>,
     },
