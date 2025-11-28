@@ -13,6 +13,10 @@ impl AddonRegistry {
         #[cfg(feature = "addon-acme")]
         addons.push(Box::new(super::acme::AcmeAddon::new()));
 
+        // Wholesale Addon
+        #[cfg(feature = "addon-wholesale")]
+        addons.push(Box::new(super::wholesale::WholesaleAddon::new()));
+
         Self { addons }
     }
 
@@ -60,7 +64,13 @@ impl AddonRegistry {
         self.addons
             .iter()
             .filter(|a| self.is_enabled(a.id(), &config))
-            .filter_map(|a| a.template_dir())
+            .flat_map(|a| {
+                [
+                    a.template_dir(),
+                    format!("src/{}", a.template_dir()),
+                    format!("templates/{}", a.template_dir()),
+                ]
+            })
             .collect()
     }
 

@@ -52,6 +52,16 @@ impl ConsoleState {
             if let Some(map) = ctx.as_object_mut() {
                 map.entry("base_path")
                     .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
+
+                // Inject addon sidebar items
+                if let Some(app_state) = self.app_state() {
+                    let addon_items = app_state
+                        .addon_registry
+                        .get_sidebar_items(app_state.clone());
+                    map.entry("addon_sidebar_items").or_insert_with(|| {
+                        serde_json::to_value(addon_items).unwrap_or(serde_json::Value::Null)
+                    });
+                }
                 map.entry("logout_url")
                     .or_insert_with(|| serde_json::Value::String(self.url_for("/logout")));
                 map.entry("forgot_url")
@@ -64,6 +74,13 @@ impl ConsoleState {
                 map.entry("email").or_insert(serde_json::Value::Null);
                 map.entry("site_version").or_insert_with(|| {
                     serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string())
+                });
+                map.entry("edition").or_insert_with(|| {
+                    if cfg!(feature = "commerce") {
+                        serde_json::Value::String("commerce".to_string())
+                    } else {
+                        serde_json::Value::String("community".to_string())
+                    }
                 });
                 map.entry("site_name")
                     .or_insert_with(|| serde_json::Value::String("RustPBX".to_string()));

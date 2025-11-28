@@ -1,110 +1,122 @@
 {% extends "console/layout.html" %}
-
-{% block title %}SSL Certificates - RustPBX{% endblock %}
-
+{% block title %}SSL Certificates · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
-<div class="p-6" x-data="acmeManager()">
-    <div class="mb-6 flex items-center justify-between">
-        <div>
-            <h2 class="text-2xl font-bold text-slate-900">SSL Certificates (ACME)</h2>
-            <p class="text-sm text-slate-600">Manage your HTTPS and SIP TLS certificates via Let's Encrypt.</p>
-        </div>
-    </div>
+<div class="p-6">
+    <div class="mx-auto max-w-7xl space-y-6" x-data="acmeManager()">
 
-    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <!-- Request Form -->
-        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-900/5">
-            <h3 class="text-base font-semibold leading-7 text-slate-900">Request New Certificate</h3>
-            <div class="mt-4 space-y-4">
-                <div>
-                    <label for="domain" class="block text-sm font-medium leading-6 text-slate-900">Domain Name</label>
-                    <div class="mt-2">
-                        <input type="text" x-model="domain" id="domain"
-                            class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-sky-600 sm:text-sm sm:leading-6"
+        <!-- Header -->
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
+                <h1 class="text-2xl font-semibold text-slate-900">SSL Certificates</h1>
+                <p class="text-sm text-slate-500">Manage your HTTPS and SIP TLS certificates via Let's Encrypt.</p>
+            </div>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div class="grid gap-6 lg:grid-cols-2">
+
+            <!-- Request Form -->
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Request Certificate</h2>
+                        <p class="text-xs text-slate-500">Generate a new certificate for your domain.</p>
+                    </div>
+                </div>
+
+                <div class="mt-4 space-y-4">
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Domain
+                            Name</label>
+                        <input type="text" x-model="domain"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="pbx.example.com">
                     </div>
-                </div>
-                <div>
-                    <label for="email" class="block text-sm font-medium leading-6 text-slate-900">Email Address</label>
-                    <div class="mt-2">
-                        <input type="email" x-model="email" id="email"
-                            class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-sky-600 sm:text-sm sm:leading-6"
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Email
+                            Address</label>
+                        <input type="email" x-model="email"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="admin@example.com">
                     </div>
-                </div>
 
-                <div class="relative flex items-start">
-                    <div class="flex h-6 items-center">
-                        <input id="enable_https" x-model="enable_https" type="checkbox"
-                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-600">
+                    <div class="space-y-3 pt-2">
+                        <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                            <input type="checkbox" x-model="enable_https"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                            <span>Enable HTTPS/WSS</span>
+                        </label>
+                        <p class="ml-6 text-xs text-slate-500 -mt-2">Update config to use this certificate for SSL/TLS.
+                        </p>
+
+                        <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                            <input type="checkbox" x-model="enable_sip_tls"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                            <span>Enable SIP TLS</span>
+                        </label>
+                        <p class="ml-6 text-xs text-slate-500 -mt-2">Enable SIP over TLS on port 5061.</p>
                     </div>
-                    <div class="ml-3 text-sm leading-6">
-                        <label for="enable_https" class="font-medium text-slate-900">Enable HTTPS/WSS</label>
-                        <p class="text-slate-500">Update config to use this certificate for SSL/TLS.</p>
+
+                    <div class="border-t border-slate-200 pt-4">
+                        <button @click="requestCert" :disabled="loading"
+                            class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                            <span x-show="!loading">Request Certificate</span>
+                            <span x-show="loading">Processing...</span>
+                        </button>
                     </div>
                 </div>
+            </div>
 
-                <div class="relative flex items-start">
-                    <div class="flex h-6 items-center">
-                        <input id="enable_sip_tls" x-model="enable_sip_tls" type="checkbox"
-                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-600">
-                    </div>
-                    <div class="ml-3 text-sm leading-6">
-                        <label for="enable_sip_tls" class="font-medium text-slate-900">Enable SIP TLS</label>
-                        <p class="text-slate-500">Enable SIP over TLS on port 5061.</p>
+            <!-- Status / Logs -->
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Operation Status</h2>
+                        <p class="text-xs text-slate-500">Real-time feedback from the ACME client.</p>
                     </div>
                 </div>
-
-                <div class="pt-2">
-                    <button @click="requestCert" :disabled="loading"
-                        class="inline-flex justify-center rounded-md bg-sky-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 disabled:opacity-50 disabled:cursor-not-allowed">
-                        <span x-show="!loading">Request Certificate</span>
-                        <span x-show="loading">Processing...</span>
-                    </button>
+                <div class="mt-4">
+                    <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 h-64 overflow-y-auto font-mono whitespace-pre-wrap"
+                        x-text="statusMessage || 'Ready to process requests.'">
+                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Status / Logs -->
-        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-900/5">
-            <h3 class="text-base font-semibold leading-7 text-slate-900">Status</h3>
-            <div class="mt-4 rounded-md bg-slate-50 p-4 text-sm text-slate-600 h-48 overflow-y-auto font-mono"
-                x-text="statusMessage || 'Ready'">
+        <!-- Existing Certificates -->
+        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Existing Certificates</h2>
+                    <p class="text-xs text-slate-500">List of certificates managed by this addon.</p>
+                </div>
             </div>
-        </div>
-    </div>
-
-    <!-- Existing Certificates -->
-    <div class="mt-6 rounded-xl bg-white shadow-sm ring-1 ring-slate-900/5">
-        <div class="border-b border-slate-200 px-4 py-5 sm:px-6">
-            <h3 class="text-base font-semibold leading-6 text-slate-900">Existing Certificates</h3>
-        </div>
-        <div class="overflow-x-auto">
-            <table class="min-w-full divide-y divide-slate-300">
-                <thead class="bg-slate-50">
-                    <tr>
-                        <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-slate-900 sm:pl-6">
-                            Domain</th>
-                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-slate-900">Path</th>
-                        <th scope="col" class="px-3 py-3.5 text-left text-sm font-semibold text-slate-900">Created At
-                        </th>
-                    </tr>
-                </thead>
-                <tbody class="divide-y divide-slate-200 bg-white">
-                    {% for cert in certs %}
-                    <tr>
-                        <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-slate-900 sm:pl-6">{{
-                            cert.domain }}</td>
-                        <td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">{{ cert.path }}</td>
-                        <td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">{{ cert.created_at }}</td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="3" class="px-4 py-4 text-center text-sm text-slate-500">No certificates found.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            <div class="mt-4 overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <tr>
+                            <th class="px-4 py-2">Domain</th>
+                            <th class="px-4 py-2">Path</th>
+                            <th class="px-4 py-2">Created At</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        {% for cert in certs %}
+                        <tr>
+                            <td class="px-4 py-3 font-medium text-slate-900">{{ cert.domain }}</td>
+                            <td class="px-4 py-3 text-slate-500 font-mono text-xs">{{ cert.path }}</td>
+                            <td class="px-4 py-3 text-slate-500">{{ cert.created_at }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="3" class="px-4 py-3 text-xs text-slate-400 text-center">No certificates found.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 </div>

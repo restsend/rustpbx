@@ -281,8 +281,10 @@
                         <template x-for="trunk in trunks" :key="trunk.id">
                             <tr class="hover:bg-slate-50">
                                 <td class="whitespace-nowrap px-4 py-2">
-                                    <div class="font-semibold text-slate-900" x-text="trunk.display_name || trunk.name">
-                                    </div>
+                                    <a :href="detailUrl(trunk.id)"
+                                        class="font-semibold text-slate-900 hover:text-sky-600 hover:underline"
+                                        x-text="trunk.display_name || trunk.name">
+                                    </a>
                                     <div class="text-xs text-slate-400">#<span x-text="trunk.name"></span></div>
                                     <template x-if="trunk.is_active === false">
                                         <span

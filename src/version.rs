@@ -35,11 +35,15 @@ pub fn get_short_version() -> &'static str {
     let version = env!("CARGO_PKG_VERSION");
     let git_commit = env!("GIT_COMMIT_HASH");
     let git_dirty = env!("GIT_DIRTY");
-
-    if git_dirty == "dirty" {
-        Box::leak(format!("{}-{}-dirty", version, git_commit).into_boxed_str())
+    let commercial = if cfg!(feature = "commerce") {
+        "commerce"
     } else {
-        Box::leak(format!("{}-{}", version, git_commit).into_boxed_str())
+        "community"
+    };
+    if git_dirty == "dirty" {
+        Box::leak(format!("{}-{}-dirty-{commercial}", version, git_commit).into_boxed_str())
+    } else {
+        Box::leak(format!("{}-{}-{commercial}", version, git_commit).into_boxed_str())
     }
 }
 

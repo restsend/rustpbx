@@ -18,6 +18,8 @@ opus = ["voice-engine/opus"]
 g729 = ["voice-engine/g729"]
 console = ["dep:minijinja"]
 addon-acme = []
+addon-wholesale = []
+commerce = ["addon-wholesale"]
 default = [
     "vad_webrtc",
     "vad_silero",
@@ -36,7 +38,7 @@ wav2text-bin = []
 anyhow = "1"
 async-trait = "0.1.88"
 async-stream = "0.3.6"
-axum = { version = "0.8.7", features = ["ws", "tokio"] }
+axum = { version = "0.8.7", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
 futures = "0.3.31"
 rustls = { version = "0.23.33", features = ["ring"] }
@@ -64,7 +66,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.2.93"
 #rsipstack = { path = "../rsipstack" }
-voice-engine = { version = "0.3.17", default-features = false }
+voice-engine = { version = "0.3.18", default-features = false }
 rsip = "0.4.0"
 reqwest = { version = "0.12.24", features = [
     "json",

@@ -14,6 +14,7 @@ default('RustPBX') }}{% endblock %}
         billTemplate: {{ bill_template_data | tojson }},
         filters: {{ filters | default({}) | tojson }},
         templates: {{ templates | default([]) | tojson }},
+        tenants: {{ tenants | default([]) | tojson }},
         createUrl: {{ create_url | default(null) | tojson }},
         updateUrl: {{ update_url | default(null) | tojson }}
     })' x-init="init()">
@@ -278,6 +279,15 @@ default('RustPBX') }}{% endblock %}
                                 </template>
                             </select>
                         </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Tenant
+                            <select x-model="form.tenant_id"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <template x-for="option in tenantOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
+                            </select>
+                        </label>
                     </div>
                 </section>
 
@@ -388,6 +398,7 @@ default('RustPBX') }}{% endblock %}
             model: options.model || null,
             billTemplate: options.billTemplate || null,
             templatesRaw: Array.isArray(options.templates) ? options.templates : [],
+            tenantsRaw: Array.isArray(options.tenants) ? options.tenants : [],
             filters: options.filters || {},
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || null,
@@ -400,6 +411,7 @@ default('RustPBX') }}{% endblock %}
                 { value: 'tls', label: 'TLS' },
             ],
             templateOptions: [],
+            tenantOptions: [],
             form: {
                 name: '',
                 display_name: '',
@@ -414,6 +426,7 @@ default('RustPBX') }}{% endblock %}
                 auth_password: '',
                 default_route_label: '',
                 billing_template_id: 'none',
+                tenant_id: 'none',
                 max_cps: '',
                 max_concurrent: '',
                 max_call_duration: '',
@@ -432,7 +445,9 @@ default('RustPBX') }}{% endblock %}
             saving: false,
             activeTab: 'general',
             init() {
+                console.log('Model:', this.model);
                 this.loadOptions();
+                console.log('Tenant Options:', this.tenantOptions);
                 if (this.model) {
                     this.populateFromModel();
                 }
@@ -458,8 +473,22 @@ default('RustPBX') }}{% endblock %}
 
                 this.templateOptions = [{ value: 'none', label: 'No template' }].concat(mappedTemplates);
 
+                const mappedTenants = this.tenantsRaw.map((t) => ({
+                    value: String(t.id),
+                    label: t.name || `Tenant #${t.id}`,
+                }));
+                this.tenantOptions = [{ value: 'none', label: 'No tenant' }].concat(mappedTenants);
+
                 if (!this.model && this.mode === 'create') {
                     this.form.billing_template_id = 'none';
+                    this.form.tenant_id = 'none';
+
+                    // Check for tenant_id in URL query params
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const tenantIdParam = urlParams.get('tenant_id');
+                    if (tenantIdParam) {
+                        this.form.tenant_id = tenantIdParam;
+                    }
                 }
             },
             populateFromModel() {
@@ -477,6 +506,7 @@ default('RustPBX') }}{% endblock %}
                 this.form.auth_password = model.auth_password || '';
                 this.form.default_route_label = model.default_route_label || '';
                 this.form.billing_template_id = model.billing_template_id != null ? String(model.billing_template_id) : 'none';
+                this.form.tenant_id = model.tenant_id != null ? String(model.tenant_id) : 'none';
                 this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
                 this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
                 this.form.max_call_duration = model.max_call_duration != null ? String(model.max_call_duration) : '';
@@ -651,6 +681,14 @@ default('RustPBX') }}{% endblock %}
                     }
                 } else if (this.form.billing_template_id) {
                     params.set('billing_template_id', this.form.billing_template_id);
+                }
+
+                if (this.form.tenant_id === 'none') {
+                    if (this.mode === 'edit') {
+                        params.set('clear_tenant', 'true');
+                    }
+                } else if (this.form.tenant_id) {
+                    params.set('tenant_id', this.form.tenant_id);
                 }
 
                 const numericFields = [

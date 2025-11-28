@@ -44,9 +44,9 @@ pub trait Addon: Send + Sync {
         vec![]
     }
 
-    /// Return the path to the addon's templates directory (relative to workspace root)
-    fn template_dir(&self) -> Option<String> {
-        None
+    /// Return the paths to the addon's templates directories (relative to workspace root)
+    fn template_dir(&self) -> String {
+        format!("addons/{}/templates", self.id())
     }
 
     /// Return Settings page injection items (HTML fragments or config definitions)
@@ -57,3 +57,5 @@ pub trait Addon: Send + Sync {
 
 pub mod acme;
 pub mod registry;
+#[cfg(feature = "addon-wholesale")]
+pub mod wholesale;

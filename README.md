@@ -167,10 +167,16 @@ EOF
 
 ### Quick Start with Docker
 
-1. **Pull the Docker image:**
+1. **Pull the community Docker image:**
 ```bash
 docker pull ghcr.io/restsend/rustpbx:latest
 ```
+2.  **Pull the commerce Docker image:**
+> With `wholesale` features
+```bash
+docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
+```
+
 2. **Create config.toml:**
 >  copy from config.toml.example
 
