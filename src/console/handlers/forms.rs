@@ -68,6 +68,8 @@ pub struct SipTrunkForm {
     pub default_route_label: Option<String>,
     pub billing_template_id: Option<i64>,
     pub clear_billing_template: Option<bool>,
+    pub tenant_id: Option<i64>,
+    pub clear_tenant: Option<bool>,
     pub max_cps: Option<i32>,
     pub max_concurrent: Option<i32>,
     pub max_call_duration: Option<i32>,

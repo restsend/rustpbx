@@ -50,6 +50,7 @@ media_proxy = "auto"
 generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
+addons = ["acme", "wholesale"]
 
 [proxy.transcript]
 command = "sensevoice-cli"

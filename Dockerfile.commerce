@@ -1,15 +1,18 @@
-FROM rust:bookworm AS rust-builder
+FROM docker.m.daocloud.io/library/rust:1.91-bookworm AS rust-builder
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
 RUN apt-get update && apt-get install -y libasound2-dev libopus-dev cmake
 RUN mkdir /build
+RUN mkdir -p .cargo && echo '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"' > .cargo/config.toml
 ADD . /build/
 WORKDIR /build
+RUN ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 RUN --mount=type=cache,target=/build/.cargo/registry \
     --mount=type=cache,target=/build/target/release/incremental\
     --mount=type=cache,target=/build/target/release/build\
-    cargo build --release --bin rustpbx
+    cargo build --features commerce --release --bin rustpbx
 
-FROM debian:bookworm
-LABEL maintainer="shenjindi@miuda.ai"
+FROM docker.m.daocloud.io/library/debian:bookworm
+LABEL maintainer="admin@miuda.ai"
 RUN --mount=type=cache,target=/var/apt apt-get update && apt-get install -y ca-certificates tzdata libopus0
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -18,6 +21,7 @@ WORKDIR /app
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
 COPY --from=rust-builder /build/templates /app/templates
 COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme/templates
-COPY --from=rust-builder /build/config /app/config
+COPY --from=rust-builder /build/src/addons/wholesale/templates /app/templates/wholesale/templates
+COPY --from=rust-builder /build/config/sounds /app/config/sounds
 
 ENTRYPOINT ["/app/rustpbx"]

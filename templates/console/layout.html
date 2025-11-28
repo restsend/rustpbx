@@ -261,9 +261,9 @@
                 </nav>
                 <div class="border-t border-slate-100 p-4 text-xs text-slate-500" x-show="!sidebarCollapsed"
                     x-transition.opacity x-cloak>
-                    <a :href='"https://rustpbx.com?version={{site_version}}&utm_source="+location.origin'
+                    <a :href='"https://rustpbx.com?version={{site_version}}&edition={{edition}}&utm_source="+location.origin'
                         target="_blank" class="underline hover:text-slate-700">{{site_name|default('RustPBX')}} -
-                        {{site_version}}</a>
+                        {{site_version}}</a> / <span>{{edition}}</span>
                 </div>
             </div>
         </aside>

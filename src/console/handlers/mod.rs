@@ -4,6 +4,7 @@ use http::StatusCode;
 use serde_json::json;
 use std::sync::Arc;
 
+pub mod addons;
 pub mod bill_template;
 pub mod call_control;
 pub mod call_record;
@@ -16,7 +17,6 @@ pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
 pub mod user;
-pub mod addons;
 mod utils;
 
 pub fn bad_request(message: impl Into<String>) -> axum::response::Response {

@@ -1,9 +1,12 @@
-use async_trait::async_trait;
 use crate::addons::{Addon, SidebarItem};
 use crate::app::AppState;
-use axum::{Router, routing::{get, post}, Extension};
-use std::sync::{Arc, RwLock};
+use async_trait::async_trait;
+use axum::{
+    Extension, Router,
+    routing::{get, post},
+};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 mod handlers;
 
@@ -17,20 +20,26 @@ pub struct AcmeAddon {
 }
 
 impl AcmeAddon {
-    pub fn new() -> Self { 
+    pub fn new() -> Self {
         Self {
             state: AcmeState {
                 challenges: Arc::new(RwLock::new(HashMap::new())),
-            }
+            },
         }
     }
 }
 
 #[async_trait]
 impl Addon for AcmeAddon {
-    fn id(&self) -> &'static str { "acme" }
-    fn name(&self) -> &'static str { "SSL Certificates" }
-    fn description(&self) -> &'static str { "Manage SSL certificates via Let's Encrypt" }
+    fn id(&self) -> &'static str {
+        "acme"
+    }
+    fn name(&self) -> &'static str {
+        "SSL Certificates"
+    }
+    fn description(&self) -> &'static str {
+        "Manage SSL certificates via Let's Encrypt"
+    }
 
     async fn initialize(&self, _state: AppState) -> anyhow::Result<()> {
         // Initialize ACME background tasks or check config
@@ -39,17 +48,29 @@ impl Addon for AcmeAddon {
     }
 
     fn router(&self, state: AppState) -> Option<Router> {
-        let r = Router::new()
+        let mut protected = Router::new()
             .route("/console/acme", get(handlers::ui_index))
-            .route("/api/acme/request", post(handlers::request_cert))
-            .route("/.well-known/acme-challenge/{token}", get(handlers::challenge))
+            .route("/api/acme/request", post(handlers::request_cert));
+
+        #[cfg(feature = "console")]
+        if let Some(console_state) = state.console.clone() {
+            protected = protected.route_layer(axum::middleware::from_extractor_with_state::<
+                crate::console::middleware::AuthRequired,
+                std::sync::Arc<crate::console::ConsoleState>,
+            >(console_state));
+        }
+
+        let public = Router::new().route(
+            "/.well-known/acme-challenge/{token}",
+            get(handlers::challenge),
+        );
+
+        let r = Router::new()
+            .merge(protected)
+            .merge(public)
             .with_state(state)
             .layer(Extension(self.state.clone()));
         Some(r)
-    }
-
-    fn template_dir(&self) -> Option<String> {
-        Some("src/addons/acme/templates".to_string())
     }
 
     fn sidebar_items(&self) -> Vec<SidebarItem> {
@@ -61,4 +82,3 @@ impl Addon for AcmeAddon {
         }]
     }
 }
-

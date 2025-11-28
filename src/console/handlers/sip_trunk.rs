@@ -1,4 +1,12 @@
 use super::bad_request;
+#[cfg(feature = "addon-wholesale")]
+use crate::addons::wholesale::models::{
+    tenant::{Entity as TenantEntity},
+    tenant_trunk::{
+        ActiveModel as TenantTrunkActiveModel, Column as TenantTrunkColumn,
+        Entity as TenantTrunkEntity,
+    },
+};
 use crate::{
     console::handlers::forms::{self, ListQuery, SipTrunkForm},
     console::{ConsoleState, middleware::AuthRequired},
@@ -67,7 +75,7 @@ async fn page_sip_trunks(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let (filters, _) = build_filters_payload(state.db()).await;
+    let (filters, _, _) = build_filters_payload(state.db()).await;
     state.render(
         "console/sip_trunk.html",
         json!({
@@ -82,13 +90,14 @@ async fn page_sip_trunk_create(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let (filters, templates) = build_filters_payload(state.db()).await;
+    let (filters, templates, tenants) = build_filters_payload(state.db()).await;
     state.render(
         "console/sip_trunk_detail.html",
         json!({
             "nav_active": "sip-trunk",
             "filters": filters,
             "templates": templates,
+            "tenants": tenants,
             "mode": "create",
             "create_url": state.url_for("/sip-trunk"),
         }),
@@ -101,26 +110,68 @@ async fn page_sip_trunk_detail(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let (filters, templates) = build_filters_payload(db).await;
+    let (filters, templates, tenants) = build_filters_payload(db).await;
 
     let result = SipTrunkEntity::find_by_id(id)
         .find_also_related(BillTemplateEntity)
         .one(db)
         .await;
 
+    #[cfg(feature = "addon-wholesale")]
+    let tenant_link = match TenantTrunkEntity::find()
+        .filter(TenantTrunkColumn::SipTrunkId.eq(id))
+        .all(db)
+        .await
+    {
+        Ok(links) => {
+            let link = links.into_iter().next();
+            if let Some(ref l) = link {
+                warn!("Found tenant link for trunk {}: tenant_id={}", id, l.tenant_id);
+            } else {
+                warn!("No tenant link found for trunk {}", id);
+            }
+            link
+        }
+        Err(err) => {
+            warn!("Failed to fetch tenant link for trunk {}: {}", id, err);
+            None
+        }
+    };
+
+    #[cfg(not(feature = "addon-wholesale"))]
+    let tenant_link: Option<serde_json::Value> = None;
+
     match result {
-        Ok(Some((model, template))) => state.render(
-            "console/sip_trunk_detail.html",
-            json!({
-                "nav_active": "sip-trunk",
-                "model": model,
-                "bill_template": template,
-                "filters": filters,
-                "templates": templates,
-                "mode": "edit",
-                "update_url": state.url_for(&format!("/sip-trunk/{id}")),
-            }),
-        ),
+        Ok(Some((model, template))) => {
+            #[allow(unused_mut)]
+            let mut model_json = serde_json::to_value(&model).unwrap_or(json!({}));
+            
+            #[cfg(feature = "addon-wholesale")]
+            if let Some(obj) = model_json.as_object_mut() {
+                if let Some(link) = tenant_link {
+                    obj.insert("tenant_id".to_string(), json!(link.tenant_id));
+                }
+            }
+            
+            #[cfg(not(feature = "addon-wholesale"))]
+            {
+                let _ = tenant_link;
+            }
+
+            state.render(
+                "console/sip_trunk_detail.html",
+                json!({
+                    "nav_active": "sip-trunk",
+                    "model": model_json,
+                    "bill_template": template,
+                    "filters": filters,
+                    "templates": templates,
+                    "tenants": tenants,
+                    "mode": "edit",
+                    "update_url": state.url_for(&format!("/sip-trunk/{id}")),
+                }),
+            )
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"message": "SIP trunk not found"})),
@@ -153,7 +204,19 @@ async fn create_sip_trunk(
     }
 
     match active.insert(db).await {
-        Ok(model) => Json(json!({"status": "ok", "id": model.id})).into_response(),
+        Ok(model) => {
+            if let Err(err) = handle_tenant_update(
+                db,
+                model.id,
+                form.tenant_id,
+                form.clear_tenant.unwrap_or(false),
+            )
+            .await
+            {
+                warn!("failed to update tenant link for trunk {}: {}", model.id, err);
+            }
+            Json(json!({"status": "ok", "id": model.id})).into_response()
+        }
         Err(err) => {
             warn!("failed to create sip trunk: {}", err);
             (
@@ -198,7 +261,19 @@ async fn update_sip_trunk(
     }
 
     match active.update(db).await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
+        Ok(model) => {
+            if let Err(err) = handle_tenant_update(
+                db,
+                model.id,
+                form.tenant_id,
+                form.clear_tenant.unwrap_or(false),
+            )
+            .await
+            {
+                warn!("failed to update tenant link for trunk {}: {}", model.id, err);
+            }
+            Json(json!({"status": "ok"})).into_response()
+        }
         Err(err) => {
             warn!("failed to update sip trunk {}: {}", id, err);
             (
@@ -258,7 +333,7 @@ async fn query_sip_trunks(
     let filters_payload;
     let templates;
     {
-        let (payload, list) = build_filters_payload(db).await;
+        let (payload, list, _) = build_filters_payload(db).await;
         filters_payload = payload;
         templates = list;
     }
@@ -400,8 +475,11 @@ async fn query_sip_trunks(
     .into_response()
 }
 
-async fn build_filters_payload(db: &DatabaseConnection) -> (Value, Vec<BillTemplateModel>) {
+async fn build_filters_payload(
+    db: &DatabaseConnection,
+) -> (Value, Vec<BillTemplateModel>, Vec<Value>) {
     let templates = load_bill_templates(db).await;
+    let tenants = load_tenants(db).await;
     let template_values: Vec<Value> = templates
         .iter()
         .map(|tpl| {
@@ -430,6 +508,7 @@ async fn build_filters_payload(db: &DatabaseConnection) -> (Value, Vec<BillTempl
                 .collect::<Vec<_>>(),
         }),
         templates,
+        tenants,
     )
 }
 
@@ -446,6 +525,66 @@ async fn load_bill_templates(db: &DatabaseConnection) -> Vec<BillTemplateModel> 
             vec![]
         }
     }
+}
+
+async fn load_tenants(db: &DatabaseConnection) -> Vec<Value> {
+    #[cfg(feature = "addon-wholesale")]
+    match TenantEntity::find()
+        .order_by_asc(crate::addons::wholesale::models::tenant::Column::Name)
+        .all(db)
+        .await
+    {
+        Ok(list) => list
+            .into_iter()
+            .map(|t| serde_json::to_value(t).unwrap_or(json!({})))
+            .collect(),
+        Err(err) => {
+            warn!("failed to load tenants: {}", err);
+            vec![]
+        }
+    }
+
+    #[cfg(not(feature = "addon-wholesale"))]
+    {
+        let _ = db;
+        vec![]
+    }
+}
+
+async fn handle_tenant_update(
+    db: &DatabaseConnection,
+    trunk_id: i64,
+    tenant_id: Option<i64>,
+    clear_tenant: bool,
+) -> Result<(), sea_orm::DbErr> {
+    #[cfg(feature = "addon-wholesale")]
+    {
+        // Always clear existing links to ensure 1-to-1 relationship (Trunk -> Tenant)
+        // This also handles the case where multiple links might have been created accidentally
+        TenantTrunkEntity::delete_many()
+            .filter(TenantTrunkColumn::SipTrunkId.eq(trunk_id))
+            .exec(db)
+            .await?;
+
+        if !clear_tenant {
+            if let Some(tid) = tenant_id {
+                let active = TenantTrunkActiveModel {
+                    sip_trunk_id: Set(trunk_id),
+                    tenant_id: Set(tid),
+                    ..Default::default()
+                };
+                active.insert(db).await?;
+            }
+        }
+    }
+    #[cfg(not(feature = "addon-wholesale"))]
+    {
+        let _ = db;
+        let _ = trunk_id;
+        let _ = tenant_id;
+        let _ = clear_tenant;
+    }
+    Ok(())
 }
 
 fn apply_form_to_active_model(

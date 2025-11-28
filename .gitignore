@@ -28,3 +28,11 @@ cdr/
 *.generated.toml
 *.bak
 /.idea/
+.vscode/settings.json
+
+
+#
+# ignore commerce addon files
+# 
+src/addons/wholesale
+miuda.docs
