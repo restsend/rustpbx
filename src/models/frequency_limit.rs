@@ -68,7 +68,8 @@ impl MigrationTrait for Migration {
                     .col(
                         MigrationColumnDef::new(Column::UpdatedAt)
                             .timestamp()
-                            .not_null(),
+                            .not_null()
+                            .default(Expr::current_timestamp()),
                     )
                     .to_owned(),
             )

@@ -541,11 +541,11 @@ impl ProxyDataContext {
 #[async_trait]
 impl RouteResourceLookup for ProxyDataContext {
     async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>> {
-        self.load_queue_file(path).await
+        self.resolve_queue_config(path).await
     }
 
     async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>> {
-        self.load_ivr_file(path).await
+        self.resolve_ivr_config(path).await
     }
 }
 

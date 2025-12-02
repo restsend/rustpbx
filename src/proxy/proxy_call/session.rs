@@ -60,6 +60,7 @@ struct CallSession {
     queue_hold_loop_handle: Option<JoinHandle<()>>,
     last_queue_name: Option<String>,
     ivr_trace: Option<IvrTrace>,
+    pub max_forwards: u32,
 }
 
 impl CallSession {
@@ -77,6 +78,7 @@ impl CallSession {
         media_config: MediaConfig,
         recorder_option: Option<RecorderOption>,
         shared: CallSessionShared,
+        max_forwards: u32,
     ) -> Self {
         let mut builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
@@ -128,6 +130,7 @@ impl CallSession {
             queue_hold_loop_handle: None,
             last_queue_name: None,
             ivr_trace: None,
+            max_forwards,
         }
     }
 
