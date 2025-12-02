@@ -50,17 +50,25 @@ impl MigrationTrait for Migration {
                     .col(
                         MigrationColumnDef::new(Column::PolicyId)
                             .string()
+                            .string_len(64)
                             .not_null(),
                     )
-                    .col(MigrationColumnDef::new(Column::Scope).string().not_null())
+                    .col(
+                        MigrationColumnDef::new(Column::Scope)
+                            .string()
+                            .string_len(32)
+                            .not_null(),
+                    )
                     .col(
                         MigrationColumnDef::new(Column::ScopeValue)
                             .string()
+                            .string_len(128)
                             .not_null(),
                     )
                     .col(
                         MigrationColumnDef::new(Column::LimitType)
                             .string()
+                            .string_len(32)
                             .not_null(),
                     )
                     .col(MigrationColumnDef::new(Column::Count).unsigned().not_null())
