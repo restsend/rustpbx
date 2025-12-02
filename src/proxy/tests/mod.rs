@@ -11,4 +11,5 @@ mod user_http_test;
 mod test_call;
 mod test_cdr;
 mod test_proxy_integration;
+mod test_queue;
 pub mod test_ua;

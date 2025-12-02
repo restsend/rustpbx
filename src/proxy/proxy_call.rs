@@ -499,6 +499,19 @@ impl ProxyCall {
         self.sync_server_dialog_remote_target(&server_dialog);
         // Extract initial offer SDP
         let initial_request = server_dialog.initial_request();
+
+        let max_forwards = if let Ok(header) = initial_request.max_forwards_header() {
+            let val = header.value().parse::<u32>().unwrap_or(70);
+            if val <= 0 {
+                info!(session_id = %self.session_id, "Max-Forwards exceeded");
+                tx.reply(rsip::StatusCode::TooManyHops).await?;
+                return Ok(());
+            }
+            val - 1
+        } else {
+            70
+        };
+
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
         let use_media_proxy = self.needs_media_proxy(&offer_sdp);
         let all_webrtc_target = self.dialplan.all_webrtc_target();
@@ -527,6 +540,7 @@ impl ProxyCall {
             self.dialplan.media.clone(),
             recorder_option,
             self.session_shared.clone(),
+            max_forwards,
         );
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
@@ -1030,6 +1044,12 @@ impl ProxyCall {
                 None
             };
 
+            let mut headers = self
+                .dialplan
+                .build_invite_headers(&target)
+                .unwrap_or_default();
+            headers.push(rsip::headers::MaxForwards::from(session.max_forwards).into());
+
             let invite_option = InviteOption {
                 callee: target.aor.clone(),
                 caller: caller.clone(),
@@ -1038,7 +1058,7 @@ impl ProxyCall {
                 destination: target.destination.clone(),
                 contact: local_contact.clone().unwrap_or_else(|| caller.clone()),
                 credential: target.credential.clone(),
-                headers: self.dialplan.build_invite_headers(&target),
+                headers: Some(headers),
                 ..Default::default()
             };
             let invite_caller = invite_option.caller.to_string();
@@ -1275,6 +1295,12 @@ impl ProxyCall {
         };
 
         let enforced_contact = self.local_contact_uri();
+        let mut headers = self
+            .dialplan
+            .build_invite_headers(&target)
+            .unwrap_or_default();
+        headers.push(rsip::headers::MaxForwards::from(session.max_forwards).into());
+
         let invite_option = InviteOption {
             caller_display_name: caller_display_name.cloned(),
             callee: target.aor.clone(),
@@ -1284,7 +1310,7 @@ impl ProxyCall {
             destination: target.destination.clone(),
             contact: enforced_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
-            headers: self.dialplan.build_invite_headers(&target),
+            headers: Some(headers),
             ..Default::default()
         };
 

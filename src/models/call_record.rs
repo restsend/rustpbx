@@ -134,7 +134,7 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::DisplayId).char_len(120))
                     .col(string(Column::Direction).char_len(16))
                     .col(string(Column::Status).char_len(32))
-                    .col(timestamp(Column::StartedAt))
+                    .col(timestamp(Column::StartedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::EndedAt))
                     .col(integer(Column::DurationSecs).not_null().default(0))
                     .col(string_null(Column::FromNumber).char_len(64))
