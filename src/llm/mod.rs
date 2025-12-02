@@ -1,13 +1,10 @@
 use anyhow::Result;
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
-    },
+use async_openai::types::chat::{
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs,
 };
+use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
 use dotenv::dotenv;
 use futures::stream;
