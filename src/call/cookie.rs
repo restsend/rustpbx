@@ -3,6 +3,7 @@ use rsipstack::transaction::key::TransactionKey;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 #[derive(Default)]
@@ -26,6 +27,8 @@ struct TransactionCookieInner {
     values: HashMap<String, String>,
     spam_result: SpamResult,
     source_trunk: Option<String>,
+    max_duration: Option<Duration>,
+    tenant_id: Option<i64>,
 }
 #[derive(Clone, Default)]
 pub struct TransactionCookie {
@@ -40,6 +43,8 @@ impl From<&TransactionKey> for TransactionCookie {
                 values: HashMap::new(),
                 spam_result: SpamResult::Nice,
                 source_trunk: None,
+                max_duration: None,
+                tenant_id: None,
             })),
         }
     }
@@ -123,6 +128,40 @@ impl TransactionCookie {
         self.inner
             .try_read()
             .map(|inner| inner.source_trunk.clone())
+            .ok()
+            .flatten()
+    }
+
+    pub fn set_max_duration(&self, duration: Duration) {
+        self.inner
+            .try_write()
+            .map(|mut inner| {
+                inner.max_duration = Some(duration);
+            })
+            .ok();
+    }
+
+    pub fn get_max_duration(&self) -> Option<Duration> {
+        self.inner
+            .try_read()
+            .map(|inner| inner.max_duration)
+            .ok()
+            .flatten()
+    }
+
+    pub fn set_tenant_id(&self, tenant_id: i64) {
+        self.inner
+            .try_write()
+            .map(|mut inner| {
+                inner.tenant_id = Some(tenant_id);
+            })
+            .ok();
+    }
+
+    pub fn get_tenant_id(&self) -> Option<i64> {
+        self.inner
+            .try_read()
+            .map(|inner| inner.tenant_id)
             .ok()
             .flatten()
     }

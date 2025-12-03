@@ -144,6 +144,7 @@ impl ProxyCallBuilder {
                 .first_target()
                 .map(|location| location.aor.to_string()),
             Some(server.active_call_registry.clone()),
+            self.cookie.get_tenant_id(),
         );
         let pending_hangup = Arc::new(Mutex::new(None));
         ProxyCall {
@@ -1320,6 +1321,7 @@ impl ProxyCall {
                     invite_option,
                     &self.dialplan.original,
                     &self.dialplan.direction,
+                    &self.cookie,
                 )
                 .await
                 .map_err(|e| {
@@ -1347,6 +1349,22 @@ impl ProxyCall {
         } else {
             invite_option
         };
+
+        if let Some(duration) = self.cookie.get_max_duration() {
+            let cancel_token = self.cancel_token.clone();
+            let session_id = self.session_id.clone();
+            info!(session_id = %session_id, ?duration, "Setting max duration timer");
+            tokio::spawn(async move {
+                tokio::time::sleep(duration).await;
+                if !cancel_token.is_cancelled() {
+                    info!(
+                        session_id = %session_id,
+                        "Max duration reached, cancelling call"
+                    );
+                    cancel_token.cancel();
+                }
+            });
+        }
 
         if let Some(contact_uri) = enforced_contact {
             // Preserve the PBX contact even if routing logic rewrites the From header.
@@ -1772,6 +1790,7 @@ impl ProxyCall {
         let (persist_error, send_error) = persist_and_dispatch_record(
             self.server.database.as_ref(),
             self.call_record_sender.as_ref(),
+            &self.server.call_record_hooks,
             record,
             persist_args,
         )

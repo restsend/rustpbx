@@ -464,6 +464,7 @@ async fn test_guest_call_allowed_extension() {
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
+        call_record_hooks: Arc::new(Vec::new()),
     });
 
     let module = AuthModule::new(server_inner);

@@ -40,6 +40,7 @@ pub trait CallRouter: Send + Sync {
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
+        cookie: &TransactionCookie,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
 }
 
@@ -127,6 +128,7 @@ impl RouteInvite for DefaultRouteInvite {
         option: InviteOption,
         origin: &rsip::Request,
         direction: &DialDirection,
+        _cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
             self.build_context(origin, direction).await;
@@ -193,6 +195,7 @@ impl RouteInvite for DefaultRouteInvite {
         option: InviteOption,
         origin: &rsip::Request,
         direction: &DialDirection,
+        _cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
         let (trunks_snapshot, routes_snapshot, source_trunk) =
             self.build_context(origin, direction).await;
@@ -344,6 +347,7 @@ impl CallModule {
         original: &rsip::Request,
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
+        cookie: &TransactionCookie,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
         let callee_uri = original
             .to_header()
@@ -421,7 +425,7 @@ impl CallModule {
         };
 
         let preview_outcome = route_invite
-            .preview_route(preview_option, original, &direction)
+            .preview_route(preview_option, original, &direction, cookie)
             .await
             .map_err(|e| {
                 (
@@ -733,7 +737,12 @@ impl CallModule {
 
         let route_invite: Box<dyn RouteInvite> =
             if let Some(f) = self.inner.server.create_route_invite.as_ref() {
-                f(self.inner.server.clone(), self.inner.config.clone()).map_err(|e| (e, None))?
+                f(
+                    self.inner.server.clone(),
+                    self.inner.config.clone(),
+                    self.inner.routing_state.clone(),
+                )
+                .map_err(|e| (e, None))?
             } else {
                 Box::new(DefaultRouteInvite {
                     routing_state: self.inner.routing_state.clone(),
@@ -743,9 +752,11 @@ impl CallModule {
             };
 
         let dialplan = if let Some(resolver) = self.inner.server.call_router.as_ref() {
-            resolver.resolve(&tx.original, route_invite, &caller).await
+            resolver
+                .resolve(&tx.original, route_invite, &caller, &cookie)
+                .await
         } else {
-            self.default_resolve(&tx.original, route_invite, &caller)
+            self.default_resolve(&tx.original, route_invite, &caller, &cookie)
                 .await
         }?;
 
@@ -956,6 +967,7 @@ impl CallModule {
         let (persist_error, send_error) = persist_and_dispatch_record(
             self.inner.server.database.as_ref(),
             self.inner.server.callrecord_sender.as_ref(),
+            &self.inner.server.call_record_hooks,
             record,
             persist_args,
         )

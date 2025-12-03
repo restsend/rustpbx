@@ -21,8 +21,8 @@ ENV LANG=C.UTF-8
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
 COPY --from=rust-builder /build/templates /app/templates
-COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme/templates
-COPY --from=rust-builder /build/src/addons/wholesale/templates /app/templates/wholesale/templates
-COPY --from=rust-builder /build/config/sounds /app/config/sounds
+COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/
+COPY --from=rust-builder /build/src/addons/wholesale/templates /app/templates/
+COPY --from=rust-builder /build/config/sounds /app/sounds
 
 ENTRYPOINT ["/app/rustpbx"]

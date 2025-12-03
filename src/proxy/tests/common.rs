@@ -75,6 +75,7 @@ pub async fn create_test_server_with_config(
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
+        call_record_hooks: Arc::new(Vec::new()),
     });
 
     // Add test users

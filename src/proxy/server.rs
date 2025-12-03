@@ -71,6 +71,7 @@ pub struct SipServerInner {
     pub sip_flow: Option<SipFlow>,
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
+    pub call_record_hooks: Arc<Vec<Box<dyn crate::callrecord::CallRecordHook>>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -100,6 +101,7 @@ pub struct SipServerBuilder {
     ignore_out_of_dialog_request: bool,
     locator_events: Option<LocatorEventSender>,
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
+    call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
 }
 
 impl SipServerBuilder {
@@ -123,6 +125,7 @@ impl SipServerBuilder {
             ignore_out_of_dialog_request: true,
             locator_events: None,
             frequency_limiter: None,
+            call_record_hooks: Vec::new(),
         }
     }
 
@@ -210,6 +213,14 @@ impl SipServerBuilder {
 
     pub fn with_frequency_limiter(mut self, limiter: Arc<dyn FrequencyLimiter>) -> Self {
         self.frequency_limiter = Some(limiter);
+        self
+    }
+
+    pub fn with_call_record_hooks(
+        mut self,
+        hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
+    ) -> Self {
+        self.call_record_hooks = hooks;
         self
     }
 
@@ -442,6 +453,7 @@ impl SipServerBuilder {
             sip_flow: Some(sip_flow),
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
+            call_record_hooks: Arc::new(self.call_record_hooks),
         });
 
         let mut allow_methods = Vec::new();

@@ -288,14 +288,28 @@ pub fn extras_map_to_metadata(extras: &HashMap<String, Value>) -> Option<Value> 
     Some(Value::Object(map))
 }
 
+#[derive(Clone, Copy)]
+pub struct CallRecordSavedContext<'a> {
+    pub db: &'a DatabaseConnection,
+    pub record: &'a CallRecord,
+    pub args: &'a CallRecordPersistArgs,
+    pub billing_amount_total: Option<f64>,
+}
+
+#[async_trait::async_trait]
+pub trait CallRecordHook: Send + Sync {
+    async fn on_record_saved(&self, ctx: CallRecordSavedContext<'_>) -> anyhow::Result<()>;
+}
+
 pub async fn persist_and_dispatch_record(
     db: Option<&DatabaseConnection>,
     sender: Option<&CallRecordSender>,
+    hooks: &[Box<dyn CallRecordHook>],
     record: CallRecord,
     args: CallRecordPersistArgs,
 ) -> (Option<anyhow::Error>, Option<SendError<CallRecord>>) {
     let persist_error = match db {
-        Some(db_conn) => match persist_call_record(db_conn, &record, args).await {
+        Some(db_conn) => match persist_call_record(db_conn, hooks, &record, args).await {
             Ok(_) => None,
             Err(err) => Some(err),
         },
@@ -1031,8 +1045,10 @@ impl Default for CallRecordPersistArgs {
     }
 }
 
+#[allow(unused_variables)]
 pub async fn persist_call_record(
     db: &DatabaseConnection,
+    hooks: &[Box<dyn CallRecordHook>],
     record: &CallRecord,
     args: CallRecordPersistArgs,
 ) -> Result<()> {
@@ -1127,6 +1143,19 @@ pub async fn persist_call_record(
         active.signaling = Set(signaling_value.clone());
         active.updated_at = Set(record.end_time);
         active.update(db).await?;
+
+        let ctx = CallRecordSavedContext {
+            db,
+            record,
+            args: &args,
+            billing_amount_total,
+        };
+        for hook in hooks {
+            if let Err(e) = hook.on_record_saved(ctx).await {
+                warn!("CallRecordHook failed: {}", e);
+            }
+        }
+
         return Ok(());
     }
 
@@ -1181,6 +1210,19 @@ pub async fn persist_call_record(
     };
 
     active.insert(db).await?;
+
+    let ctx = CallRecordSavedContext {
+        db,
+        record,
+        args: &args,
+        billing_amount_total,
+    };
+    for hook in hooks {
+        if let Err(e) = hook.on_record_saved(ctx).await {
+            warn!("CallRecordHook failed: {}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -1381,6 +1423,7 @@ struct BillingParameters {
     initial_increment_secs: i32,
     billing_increment_secs: i32,
     overage_rate_per_minute: f64,
+    setup_fee: f64,
     tax_percent: f64,
 }
 
@@ -1414,6 +1457,7 @@ impl BillingParameters {
             initial_increment_secs: template.initial_increment_secs.max(1),
             billing_increment_secs: template.billing_increment_secs.max(1),
             overage_rate_per_minute: template.overage_rate_per_minute.max(0.0),
+            setup_fee: template.setup_fee.max(0.0),
             tax_percent: template.tax_percent.max(0.0),
         }
     }
@@ -1430,6 +1474,7 @@ impl BillingParameters {
             initial_increment_secs: snapshot.initial_increment_secs.unwrap_or(60).max(1),
             billing_increment_secs: snapshot.billing_increment_secs.unwrap_or(60).max(1),
             overage_rate_per_minute: snapshot.overage_rate_per_minute.unwrap_or(0.0).max(0.0),
+            setup_fee: snapshot.setup_fee.unwrap_or(0.0).max(0.0),
             tax_percent: snapshot.tax_percent.unwrap_or(0.0).max(0.0),
         }
     }
@@ -1615,7 +1660,8 @@ fn compute_billing(duration_secs: i32, context: &BillingContext) -> BillingCompu
     );
     let billable_minutes = billed_secs as f64 / 60.0;
     let rate = params.overage_rate_per_minute.max(0.0);
-    let subtotal = round_currency((billable_minutes * rate).max(0.0));
+    let setup_fee = params.setup_fee.max(0.0);
+    let subtotal = round_currency((billable_minutes * rate + setup_fee).max(0.0));
     let tax = round_currency((subtotal * params.tax_percent / 100.0).max(0.0));
     let total = round_currency((subtotal + tax).max(0.0));
 
