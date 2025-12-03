@@ -130,6 +130,12 @@
             enable_sip_tls: false,
             loading: false,
             statusMessage: '',
+            pollInterval: null,
+
+            init() {
+                // Check status on load in case a process is already running
+                this.pollStatus();
+            },
 
             async requestCert() {
                 if (!this.domain || !this.email) {
@@ -158,20 +164,54 @@
                     }
 
                     const result = await response.json();
-                    this.statusMessage = result.message;
-
-                    // In a real app, we would poll for status updates here
-                    this.statusMessage += '\n\nCheck server logs for detailed progress. The certificate will be saved to config/certs/ upon success.';
-
-                    if (this.enable_https || this.enable_sip_tls) {
-                        this.statusMessage += '\n\nIMPORTANT: If successful, you must RESTART the service to apply changes.';
-                    }
+                    // Start polling for updates
+                    this.pollStatus();
 
                 } catch (error) {
                     this.statusMessage = 'Error: ' + error.message;
-                } finally {
                     this.loading = false;
                 }
+            },
+
+            async pollStatus() {
+                if (this.pollInterval) clearTimeout(this.pollInterval);
+
+                const check = async () => {
+                    try {
+                        const res = await fetch('/api/acme/status');
+                        const status = await res.json();
+
+                        // Handle Rust enum serialization: {"Running": "msg"} or "None"
+                        if (status === 'None') {
+                            this.loading = false;
+                            return;
+                        }
+
+                        if (status.Running) {
+                            this.loading = true;
+                            this.statusMessage = 'Running: ' + status.Running;
+                            this.pollInterval = setTimeout(check, 1000);
+                        } else if (status.Success) {
+                            this.loading = false;
+                            this.statusMessage = 'Success: ' + status.Success;
+                            if (this.enable_https || this.enable_sip_tls) {
+                                this.statusMessage += '\n\nIMPORTANT: You must RESTART the service to apply changes.';
+                            }
+                            // Optional: reload to see new certs
+                            // setTimeout(() => window.location.reload(), 2000);
+                        } else if (status.Error) {
+                            this.loading = false;
+                            this.statusMessage = 'Error: ' + status.Error;
+                        } else {
+                            this.loading = false;
+                        }
+                    } catch (e) {
+                        console.error('Poll error', e);
+                        this.loading = false;
+                    }
+                };
+
+                check();
             }
         }));
     });

@@ -5,14 +5,24 @@ use axum::{
     Extension, Router,
     routing::{get, post},
 };
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 mod handlers;
 
+#[derive(Clone, Debug, Serialize)]
+pub enum AcmeStatus {
+    None,
+    Running(String),
+    Success(String),
+    Error(String),
+}
+
 #[derive(Clone)]
 pub struct AcmeState {
     pub challenges: Arc<RwLock<HashMap<String, String>>>,
+    pub status: Arc<RwLock<AcmeStatus>>,
 }
 
 pub struct AcmeAddon {
@@ -24,6 +34,7 @@ impl AcmeAddon {
         Self {
             state: AcmeState {
                 challenges: Arc::new(RwLock::new(HashMap::new())),
+                status: Arc::new(RwLock::new(AcmeStatus::None)),
             },
         }
     }
@@ -50,7 +61,8 @@ impl Addon for AcmeAddon {
     fn router(&self, state: AppState) -> Option<Router> {
         let mut protected = Router::new()
             .route("/console/acme", get(handlers::ui_index))
-            .route("/api/acme/request", post(handlers::request_cert));
+            .route("/api/acme/request", post(handlers::request_cert))
+            .route("/api/acme/status", get(handlers::status));
 
         #[cfg(feature = "console")]
         if let Some(console_state) = state.console.clone() {

@@ -952,6 +952,7 @@ pub trait RouteInvite: Sync + Send {
         option: InviteOption,
         origin: &rsip::Request,
         direction: &DialDirection,
+        cookie: &TransactionCookie,
     ) -> Result<RouteResult>;
 
     async fn preview_route(
@@ -959,8 +960,9 @@ pub trait RouteInvite: Sync + Send {
         option: InviteOption,
         origin: &rsip::Request,
         direction: &DialDirection,
+        cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
-        self.route_invite(option, origin, direction).await
+        self.route_invite(option, origin, direction, cookie).await
     }
 }
 

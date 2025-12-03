@@ -112,6 +112,7 @@ phonenumber = "0.3.7"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 instant-acme = "0.8.4"
 rcgen = "0.14.5"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 [dev-dependencies]
 tempfile = "3.8"

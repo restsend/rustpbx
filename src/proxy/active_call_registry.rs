@@ -29,6 +29,7 @@ pub struct ActiveProxyCallEntry {
     pub started_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
     pub status: ActiveProxyCallStatus,
+    pub tenant_id: Option<i64>,
 }
 
 #[derive(Default)]
@@ -93,6 +94,16 @@ impl ActiveProxyCallRegistry {
 
     pub fn get_handle(&self, session_id: &str) -> Option<CallSessionHandle> {
         self.inner.lock().unwrap().handles.get(session_id).cloned()
+    }
+
+    pub fn count_by_tenant(&self, tenant_id: i64) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .entries
+            .values()
+            .filter(|e| e.tenant_id == Some(tenant_id))
+            .count()
     }
 }
 

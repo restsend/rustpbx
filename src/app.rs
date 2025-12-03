@@ -22,6 +22,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
@@ -258,15 +259,27 @@ impl AppStateBuilder {
 
                     proxy_config.ensure_recording_defaults();
                     let proxy_config = Arc::new(proxy_config);
-                    let builder = SipServerBuilder::new(proxy_config.clone())
+                    let call_record_hooks = addon_registry.get_call_record_hooks(&config);
+
+                    #[allow(unused_mut)]
+                    let mut builder = SipServerBuilder::new(proxy_config.clone())
                         .with_cancel_token(token.child_token())
                         .with_callrecord_sender(callrecord_sender.clone())
                         .with_rtp_config(config.rtp_config())
                         .with_database_connection(db_conn.clone())
+                        .with_call_record_hooks(call_record_hooks)
                         .register_module("acl", AclModule::create)
                         .register_module("auth", AuthModule::create)
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
+
+                    #[cfg(feature = "addon-wholesale")]
+                    {
+                        builder = builder.with_create_route_invite(
+                            crate::addons::wholesale::route::create_wholesale_route_invite,
+                        );
+                    }
+
                     match builder.build().await {
                         Ok(server) => Some(server),
                         Err(err) => {
@@ -355,10 +368,71 @@ pub async fn run(state: AppState) -> Result<()> {
         }
     }
 
+    // Check for HTTPS config
+    let mut ssl_config = None;
+    if let (Some(cert), Some(key)) = (&state.config.ssl_certificate, &state.config.ssl_private_key)
+    {
+        ssl_config = Some((cert.clone(), key.clone()));
+    } else {
+        // Auto-detect from config/certs
+        let cert_dir = std::path::Path::new("config/certs");
+        if cert_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(cert_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("crt") {
+                        let key_path = path.with_extension("key");
+                        if key_path.exists() {
+                            ssl_config = Some((
+                                path.to_string_lossy().to_string(),
+                                key_path.to_string_lossy().to_string(),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let https_config = if let Some((cert, key)) = ssl_config {
+        match RustlsConfig::from_pem_file(&cert, &key).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!("Failed to load SSL certs: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let https_addr = if https_config.is_some() {
+        let addr_str = state.config.https_addr.as_deref().unwrap_or("0.0.0.0:8443");
+        match addr_str.parse::<SocketAddr>() {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::error!("Invalid HTTPS address {}: {}", addr_str, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(addr) = https_addr {
+        info!("HTTPS enabled on {}", addr);
+    }
+
     let http_task = axum::serve(
         listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
+        router
+            .clone()
+            .into_make_service_with_connect_info::<SocketAddr>(),
     );
+
+    let https_router = router;
+
     select! {
         http_result = http_task => {
             match http_result {
@@ -366,6 +440,23 @@ pub async fn run(state: AppState) -> Result<()> {
                 Err(e) => {
                     tracing::error!("Server error: {}", e);
                     return Err(anyhow::anyhow!("Server error: {}", e));
+                }
+            }
+        }
+        https_result = async {
+            if let (Some(config), Some(addr)) = (https_config, https_addr) {
+                 axum_server::bind_rustls(addr, config)
+                    .serve(https_router.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+            } else {
+                std::future::pending().await
+            }
+        } => {
+             match https_result {
+                Ok(_) => info!("HTTPS Server shut down gracefully"),
+                Err(e) => {
+                    tracing::error!("HTTPS Server error: {}", e);
+                    return Err(anyhow::anyhow!("HTTPS Server error: {}", e));
                 }
             }
         }

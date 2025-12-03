@@ -97,6 +97,7 @@ pub struct CallSessionSnapshot {
     current_target: Option<String>,
     queue_name: Option<String>,
     direction: String,
+    tenant_id: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -113,6 +114,7 @@ impl CallSessionShared {
         caller: Option<String>,
         callee: Option<String>,
         registry: Option<Arc<ActiveProxyCallRegistry>>,
+        tenant_id: Option<i64>,
     ) -> Self {
         let started_at = Utc::now();
         let inner = CallSessionSnapshot {
@@ -129,6 +131,7 @@ impl CallSessionShared {
             current_target: None,
             queue_name: None,
             direction: normalize_direction(&direction),
+            tenant_id,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -153,6 +156,7 @@ impl CallSessionShared {
                 started_at: inner.started_at,
                 answered_at: inner.answer_time,
                 status: ActiveProxyCallStatus::Ringing,
+                tenant_id: inner.tenant_id,
             };
             registry.upsert(entry, handle);
         }
@@ -491,6 +495,7 @@ mod tests {
             Some("sip:alice@example.com".to_string()),
             Some("sip:bob@example.com".to_string()),
             Some(registry.clone()),
+            None,
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
         shared.set_event_sender(tx);
@@ -521,6 +526,7 @@ mod tests {
             Some("sip:alice@example.com".to_string()),
             Some("sip:bob@example.com".to_string()),
             Some(registry.clone()),
+            None,
         );
 
         let (handle, _) = CallSessionHandle::with_shared(shared.clone());
@@ -549,6 +555,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let (handle, mut rx) = CallSessionHandle::with_shared(shared);
 
@@ -567,6 +574,7 @@ mod tests {
             DialDirection::Outbound,
             Some("sip:alice@example.com".to_string()),
             Some("sip:bob@example.com".to_string()),
+            None,
             None,
         );
 
@@ -592,6 +600,7 @@ mod tests {
             Some("sip:alice@example.com".to_string()),
             Some("sip:bob@example.com".to_string()),
             Some(registry.clone()),
+            None,
         );
         let (handle, _) = CallSessionHandle::with_shared(shared.clone());
         shared.register_active_call(handle);

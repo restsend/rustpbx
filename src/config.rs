@@ -162,6 +162,9 @@ impl RecordingPolicy {
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
     pub http_addr: String,
+    pub https_addr: Option<String>,
+    pub ssl_certificate: Option<String>,
+    pub ssl_private_key: Option<String>,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -634,6 +637,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             http_addr: default_config_http_addr(),
+            https_addr: None,
+            ssl_certificate: None,
+            ssl_private_key: None,
             log_level: None,
             log_file: None,
             http_access_skip_paths: Vec::new(),

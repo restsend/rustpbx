@@ -53,6 +53,11 @@ pub trait Addon: Send + Sync {
     fn settings_items(&self) -> Option<String> {
         None
     }
+
+    /// Return a hook for call record processing
+    fn call_record_hook(&self) -> Option<Box<dyn crate::callrecord::CallRecordHook>> {
+        None
+    }
 }
 
 pub mod acme;
