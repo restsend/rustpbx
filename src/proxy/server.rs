@@ -336,28 +336,50 @@ impl SipServerBuilder {
             }
 
             if well_done {
-                let tls_config = TlsConfig {
-                    cert: Some(cert_path.clone().into_bytes()),
-                    key: Some(key_path.clone().into_bytes()),
-                    client_cert: None,
-                    client_key: None,
-                    ca_certs: None,
-                };
-                match TlsListenerConnection::new(local_addr.into(), external_addr, tls_config).await
+                match async {
+                    let cert = tokio::fs::read(cert_path)
+                        .await
+                        .map_err(|e| anyhow!("failed to read cert: {}", e))?;
+                    let key = tokio::fs::read(key_path)
+                        .await
+                        .map_err(|e| anyhow!("failed to read key: {}", e))?;
+                    Ok::<_, anyhow::Error>((cert, key))
+                }
+                .await
                 {
-                    Ok(conn) => {
-                        info!(
-                            "start proxy, tls port: {} cert: {}, key: {}",
-                            conn.get_addr(),
-                            cert_path,
-                            key_path
-                        );
-                        transport_layer.add_transport(conn.into());
+                    Ok((cert_data, key_data)) => {
+                        let tls_config = TlsConfig {
+                            cert: Some(cert_data),
+                            key: Some(key_data),
+                            client_cert: None,
+                            client_key: None,
+                            ca_certs: None,
+                        };
+                        match TlsListenerConnection::new(
+                            local_addr.into(),
+                            external_addr,
+                            tls_config,
+                        )
+                        .await
+                        {
+                            Ok(conn) => {
+                                info!(
+                                    "start proxy, tls port: {} cert: {}, key: {}",
+                                    conn.get_addr(),
+                                    cert_path,
+                                    key_path
+                                );
+                                transport_layer.add_transport(conn.into());
+                            }
+                            Err(e) => {
+                                warn!("failed to create TLS connection: {}", e);
+                            }
+                        };
                     }
                     Err(e) => {
-                        warn!("failed to create TLS connection: {}", e);
+                        warn!("failed to read TLS files: {}", e);
                     }
-                };
+                }
             } else {
                 warn!("skip starting TLS transport due to missing certificate or key");
             }

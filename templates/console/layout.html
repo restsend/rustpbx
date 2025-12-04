@@ -10,9 +10,10 @@
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
-    <script defer src="{{alpine_js|default('https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js')}}"></script>
-    <script src="{{tailwind_js|default('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4')}}"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+    <script defer
+        src="{{alpine_js|default('https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js')}}"></script>
+    <script
+        src="{{tailwind_js|default('https://cdnjs.cloudflare.com/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js')}}"></script>
     {% block js_ext %}
     {% endblock %}
     <script>
@@ -343,6 +344,7 @@
         window.dataLayer = window.dataLayer || [];
         function gtag() { dataLayer.push(arguments); }
         gtag('js', new Date());
+
         gtag('config', "{{ga|default('G-6YYK5T2TWT')}}");
     </script>
 </body>

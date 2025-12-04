@@ -85,6 +85,7 @@ pub fn build_sensevoice_download_command(
     hf_endpoint: Option<&str>,
 ) -> Command {
     let mut cmd = Command::new(command);
+    cmd.env("NO_COLOR", "1");
 
     let trimmed_models_path = models_path.trim();
     if !trimmed_models_path.is_empty() {
@@ -100,7 +101,6 @@ pub fn build_sensevoice_download_command(
         cmd.env("HF_MIRROR", endpoint);
         cmd.arg("--hf-endpoint").arg(endpoint);
     }
-
     cmd.arg("--download-only");
     cmd
 }

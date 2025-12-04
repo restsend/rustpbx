@@ -60,11 +60,15 @@ impl ConsoleState {
         Some(user_id)
     }
 
-    pub fn clear_session_cookie(&self) -> Option<HeaderValue> {
+    pub fn clear_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
+        let _is_secure = self.secure_cookie || request_secure;
+        // let secure_attr = if is_secure { "; Secure" } else { "" };
+        let secure_attr = "";
         let cookie = format!(
-            "{}=; Path={}; HttpOnly; SameSite=Lax; Max-Age=0",
+            "{}=; Path={}; HttpOnly; Max-Age=0{}",
             SESSION_COOKIE_NAME,
-            self.cookie_path()
+            self.cookie_path(),
+            secure_attr
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),
@@ -75,7 +79,7 @@ impl ConsoleState {
         }
     }
 
-    pub fn session_cookie_header(&self, user_id: i64) -> Option<HeaderValue> {
+    pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
         let expires_at = Utc::now() + Duration::from_secs(SESSION_TTL_HOURS * 3600);
         let payload = format!("{}:{}", user_id, expires_at.timestamp());
         let signature = match self.sign(&payload) {
@@ -86,12 +90,15 @@ impl ConsoleState {
             }
         };
         let value = format!("{}:{}", payload, signature);
+        let _is_secure = self.secure_cookie || request_secure;
+        let secure_attr = "";
         let cookie = format!(
-            "{}={}; Path={}; HttpOnly; SameSite=Lax; Max-Age={}",
+            "{}={}; Path={}; HttpOnly; Max-Age={}{}",
             SESSION_COOKIE_NAME,
             value,
             self.cookie_path(),
-            SESSION_TTL_HOURS * 3600
+            SESSION_TTL_HOURS * 3600,
+            secure_attr
         );
         match HeaderValue::from_str(&cookie) {
             Ok(header) => Some(header),
@@ -331,6 +338,7 @@ mod tests {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),
                 allow_registration,
+                secure_cookie: false,
             },
         )
         .await

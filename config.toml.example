@@ -7,7 +7,7 @@ log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 # Paths can include a trailing * to skip whole subtrees
 # http_access_skip_paths = ["/health", "/metrics*"]
-media_cache_path = "/tmp/mediacache"
+media_cache_path = "./config/mediacache"
 # SQLite database (default)
 database_url = "sqlite://rustpbx.sqlite3"
 # MySQL database example:
@@ -34,6 +34,8 @@ database_url = "sqlite://rustpbx.sqlite3"
 base_path = "/console"
 # allow self-service administrator signup after the first account
 allow_registration = false
+# set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
+secure_cookie = false
 
 [ua]
 addr="0.0.0.0"
@@ -93,7 +95,7 @@ auto_start = true
 
 [callrecord]
 type = "local"
-root = "/tmp/cdr"
+root = "./config/cdr"
 
 
 # [proxy.trunks.wuhoo]
