@@ -41,11 +41,9 @@ where
 }
 
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookie_str| {
-            cookie_str.split(';').find_map(|pair| {
+    for cookie_header in headers.get_all(COOKIE) {
+        if let Ok(s) = cookie_header.to_str() {
+            let found = s.split(';').find_map(|pair| {
                 let mut parts = pair.trim().splitn(2, '=');
                 let key = parts.next()?.trim();
                 if key == super::auth::SESSION_COOKIE_NAME {
@@ -53,8 +51,13 @@ pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
                 } else {
                     None
                 }
-            })
-        })
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    None
 }
 
 pub struct RenderTemplate<'a> {

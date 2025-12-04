@@ -20,16 +20,16 @@ pub(crate) struct Cli {
 
 pub(crate) fn default_config_recorder_path() -> String {
     #[cfg(target_os = "windows")]
-    return "./recorder".to_string();
+    return "./config/recorders".to_string();
     #[cfg(not(target_os = "windows"))]
-    return "/tmp/recorder".to_string();
+    return "./config/recorders".to_string();
 }
 
 fn default_config_media_cache_path() -> String {
     #[cfg(target_os = "windows")]
-    return "./mediacache".to_string();
+    return "./config/mediacache".to_string();
     #[cfg(not(target_os = "windows"))]
-    return "/tmp/mediacache".to_string();
+    return "./config/mediacache".to_string();
 }
 
 fn default_config_http_addr() -> String {
@@ -201,6 +201,8 @@ pub struct ConsoleConfig {
     pub base_path: String,
     #[serde(default)]
     pub allow_registration: bool,
+    #[serde(default)]
+    pub secure_cookie: bool,
 }
 
 impl Default for ConsoleConfig {
@@ -209,6 +211,7 @@ impl Default for ConsoleConfig {
             session_secret: default_console_session_secret(),
             base_path: default_console_base_path(),
             allow_registration: false,
+            secure_cookie: false,
         }
     }
 }
@@ -626,9 +629,9 @@ impl Default for CallRecordConfig {
     fn default() -> Self {
         Self::Local {
             #[cfg(target_os = "windows")]
-            root: "./cdr".to_string(),
+            root: "./config/cdr".to_string(),
             #[cfg(not(target_os = "windows"))]
-            root: "/tmp/cdr".to_string(),
+            root: "./config/cdr".to_string(),
         }
     }
 }

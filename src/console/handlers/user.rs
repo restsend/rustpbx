@@ -9,13 +9,22 @@ use crate::{
 use axum::{
     Router,
     extract::{Form, Path as AxumPath, Query, State},
-    http::{StatusCode, header::SET_COOKIE},
+    http::{HeaderMap, StatusCode, header::SET_COOKIE},
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+fn is_secure_request(headers: &HeaderMap) -> bool {
+    if let Some(proto) = headers.get("x-forwarded-proto") {
+        if let Ok(proto_str) = proto.to_str() {
+            return proto_str.eq_ignore_ascii_case("https");
+        }
+    }
+    false
+}
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
@@ -63,6 +72,7 @@ pub async fn login_page(
 
 pub async fn login_post(
     client_addr: ClientAddr,
+    headers: HeaderMap,
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
     Form(form): Form<LoginForm>,
@@ -111,7 +121,8 @@ pub async fn login_post(
             }
             let redirect_target = resolve_next_redirect(state.as_ref(), next.clone());
             let mut response = Redirect::to(&redirect_target).into_response();
-            if let Some(header) = state.session_cookie_header(user.id) {
+            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            {
                 response.headers_mut().append(SET_COOKIE, header);
             }
             response
@@ -153,12 +164,13 @@ fn resolve_next_redirect(state: &ConsoleState, next: Option<String>) -> String {
 }
 
 pub async fn logout(
+    headers: HeaderMap,
     State(state): State<Arc<ConsoleState>>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
     let next = query.next.unwrap_or_else(|| state.url_for("/"));
     let mut response = Redirect::to(&next).into_response();
-    if let Some(header) = state.clear_session_cookie() {
+    if let Some(header) = state.clear_session_cookie(is_secure_request(&headers)) {
         response.headers_mut().append(SET_COOKIE, header);
     }
     response
@@ -204,6 +216,7 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
 }
 
 pub async fn register_post(
+    headers: HeaderMap,
     State(state): State<Arc<ConsoleState>>,
     Form(form): Form<RegisterForm>,
 ) -> Response {
@@ -295,7 +308,8 @@ pub async fn register_post(
                 info!("created initial superuser account: {}", user.username);
             }
             let mut response = Redirect::to(&state.url_for("/")).into_response();
-            if let Some(header) = state.session_cookie_header(user.id) {
+            if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers))
+            {
                 response.headers_mut().append(SET_COOKIE, header);
             }
             response
@@ -422,6 +436,7 @@ pub async fn reset_page(
 }
 
 pub async fn reset_post(
+    headers: HeaderMap,
     State(state): State<Arc<ConsoleState>>,
     AxumPath(token): AxumPath<String>,
     Form(form): Form<ResetForm>,
@@ -465,7 +480,9 @@ pub async fn reset_post(
             match state.update_password(&user, password).await {
                 Ok(updated_user) => {
                     let mut response = Redirect::to(&state.url_for("/")).into_response();
-                    if let Some(header) = state.session_cookie_header(updated_user.id) {
+                    if let Some(header) =
+                        state.session_cookie_header(updated_user.id, is_secure_request(&headers))
+                    {
                         response.headers_mut().append(SET_COOKIE, header);
                     }
                     response

@@ -20,6 +20,7 @@ pub struct ConsoleState {
     session_key: Arc<Vec<u8>>,
     base_path: String,
     allow_registration: bool,
+    secure_cookie: bool,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
 }
@@ -30,6 +31,7 @@ impl ConsoleState {
             session_secret,
             base_path,
             allow_registration,
+            secure_cookie,
         } = config;
 
         let key_material: [u8; 32] = Sha256::digest(session_secret.as_bytes()).into();
@@ -41,6 +43,7 @@ impl ConsoleState {
             session_key,
             base_path,
             allow_registration,
+            secure_cookie,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
         }))

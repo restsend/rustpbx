@@ -3685,6 +3685,7 @@ mod tests {
                 session_secret: "secret".into(),
                 base_path: "/console".into(),
                 allow_registration: false,
+                secure_cookie: false,
             },
         )
         .await

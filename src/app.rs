@@ -431,7 +431,17 @@ pub async fn run(state: AppState) -> Result<()> {
             .into_make_service_with_connect_info::<SocketAddr>(),
     );
 
-    let https_router = router;
+    let https_router = if https_addr.is_some() {
+        router.layer(middleware::from_fn(
+            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                req.headers_mut()
+                    .insert("x-forwarded-proto", "https".parse().unwrap());
+                next.run(req).await
+            },
+        ))
+    } else {
+        router
+    };
 
     select! {
         http_result = http_task => {
