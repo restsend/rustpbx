@@ -906,11 +906,19 @@ fn convert_route(
             rules
         });
 
+    #[derive(Deserialize)]
+    struct RouteTrunkDocument {
+        name: String,
+    }
+
     let target_trunks: Vec<String> = model
         .target_trunks
         .clone()
-        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
-        .unwrap_or_default();
+        .and_then(|value| serde_json::from_value::<Vec<RouteTrunkDocument>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|trunk| trunk.name)
+        .collect::<Vec<_>>();
 
     let dest = if target_trunks.is_empty() {
         None
