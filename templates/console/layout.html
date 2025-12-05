@@ -254,7 +254,7 @@
                     <a href="{{ item.url }}"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active==item.name else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item.name }}">
-                        <i class="{{ item.icon }} text-2xl" :class="{ 'text-2xl': sidebarCollapsed }"></i>
+                        {{ item.icon | safe }}
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ item.name }}</span>
                     </a>
                     {% endfor %}
