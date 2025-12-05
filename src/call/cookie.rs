@@ -165,4 +165,19 @@ impl TransactionCookie {
             .ok()
             .flatten()
     }
+
+    pub fn get_values_prefix(&self, prefix: &str) -> HashMap<String, String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|inner| {
+                inner
+                    .values
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(prefix))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }

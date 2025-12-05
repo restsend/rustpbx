@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
     pub name: String,
-    pub icon: String, // FontAwesome class or SVG
+    pub icon: String, // SVG content
     pub url: String,
     pub permission: Option<String>, // Permission required
 }
