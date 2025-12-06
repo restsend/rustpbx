@@ -726,28 +726,6 @@
                                     </template>
                                 </select>
                             </div>
-                            <div class="space-y-2" x-show="isSipTrunkTarget" x-cloak>
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
-                                    trunks (optional)</label>
-                                <div class="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
-                                    <template x-for="option in trunkOptions" :key="'target-' + option.name">
-                                        <label class="mb-2 flex items-center gap-2">
-                                            <input type="checkbox" :value="option.name"
-                                                @change="toggleTarget(option.name)"
-                                                :checked="route.target_trunks.includes(option.name)"
-                                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                                            <span x-text="option.display_name || option.name"></span>
-                                        </label>
-                                    </template>
-                                    <template x-if="!trunkOptions.length">
-                                        <p class="text-slate-400">No trunks available. Add trunks first.</p>
-                                    </template>
-                                </div>
-                            </div>
-                            <div class="rounded-lg border border-dashed border-slate-200 p-3 text-xs text-slate-500"
-                                x-show="!isSipTrunkTarget" x-cloak>
-                                Target trunk selection is controlled by the chosen destination type.
-                            </div>
                         </div>
                     </div>
                 </section>

@@ -41,7 +41,7 @@ pub async fn ui_index(
             let certs = list_certificates().unwrap_or_default();
             let status = acme_state.status.read().unwrap().clone();
             return console.render(
-                "acme_index.html",
+                "acme/acme_index.html",
                 serde_json::json!({
                     "certs": certs,
                     "status": status

@@ -162,6 +162,8 @@ impl RecordingPolicy {
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
     pub http_addr: String,
+    #[serde(default)]
+    pub http_gzip: bool,
     pub https_addr: Option<String>,
     pub ssl_certificate: Option<String>,
     pub ssl_private_key: Option<String>,
@@ -228,6 +230,7 @@ pub struct UseragentConfig {
     pub graceful_shutdown: Option<bool>,
     pub handler: Option<InviteHandlerConfig>,
     pub accept_timeout: Option<String>,
+    pub external_ip: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -621,6 +624,7 @@ impl Default for UseragentConfig {
             graceful_shutdown: Some(true),
             handler: None,
             accept_timeout: Some("50s".to_string()),
+            external_ip: None,
         }
     }
 }
@@ -640,6 +644,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             http_addr: default_config_http_addr(),
+            http_gzip: false,
             https_addr: None,
             ssl_certificate: None,
             ssl_private_key: None,

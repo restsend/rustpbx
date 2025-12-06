@@ -4,7 +4,6 @@ use sea_orm_migration::MigratorTrait;
 use sqlx::Connection;
 use url::Url;
 
-pub mod bill_template;
 pub mod call_record;
 pub mod department;
 pub mod extension;

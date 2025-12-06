@@ -5,7 +5,6 @@ use sea_orm_migration::schema::{
     timestamp_null,
 };
 use sea_orm_migration::sea_query::ColumnDef;
-use sea_orm_migration::sea_query::ForeignKeyAction as MigrationForeignKeyAction;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +113,6 @@ pub struct Model {
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub default_route_label: Option<String>,
-    pub billing_template_id: Option<i64>,
     pub max_cps: Option<i32>,
     pub max_concurrent: Option<i32>,
     pub max_call_duration: Option<i32>,
@@ -135,22 +133,7 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::bill_template::Entity",
-        from = "Column::BillingTemplateId",
-        to = "super::bill_template::Column::Id",
-        on_delete = "SetNull",
-        on_update = "Cascade"
-    )]
-    BillTemplate,
-}
-
-impl Related<super::bill_template::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::BillTemplate.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
@@ -195,11 +178,6 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::AuthUsername).char_len(160))
                     .col(string_null(Column::AuthPassword).char_len(160))
                     .col(string_null(Column::DefaultRouteLabel).char_len(160))
-                    .col(
-                        ColumnDef::new(Column::BillingTemplateId)
-                            .big_integer()
-                            .null(),
-                    )
                     .col(integer_null(Column::MaxCps))
                     .col(integer_null(Column::MaxConcurrent))
                     .col(integer_null(Column::MaxCallDuration))
@@ -217,17 +195,6 @@ impl MigrationTrait for Migration {
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::LastHealthCheckAt))
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_trunk_bill_template")
-                            .from(Entity, Column::BillingTemplateId)
-                            .to(
-                                super::bill_template::Entity,
-                                super::bill_template::Column::Id,
-                            )
-                            .on_delete(MigrationForeignKeyAction::SetNull)
-                            .on_update(MigrationForeignKeyAction::Cascade),
-                    )
                     .to_owned(),
             )
             .await?;
