@@ -28,7 +28,6 @@ pub struct Model {
     pub department_id: Option<i64>,
     pub extension_id: Option<i64>,
     pub sip_trunk_id: Option<i64>,
-    pub billing_template_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
     pub caller_uri: Option<String>,
@@ -95,23 +94,9 @@ pub enum Relation {
         on_update = "Cascade"
     )]
     Route,
-    #[sea_orm(
-        belongs_to = "super::bill_template::Entity",
-        from = "Column::BillingTemplateId",
-        to = "super::bill_template::Column::Id",
-        on_delete = "SetNull",
-        on_update = "Cascade"
-    )]
-    BillTemplate,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-
-impl Related<super::bill_template::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::BillTemplate.def()
-    }
-}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -145,11 +130,6 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Column::DepartmentId).big_integer().null())
                     .col(ColumnDef::new(Column::ExtensionId).big_integer().null())
                     .col(ColumnDef::new(Column::SipTrunkId).big_integer().null())
-                    .col(
-                        ColumnDef::new(Column::BillingTemplateId)
-                            .big_integer()
-                            .null(),
-                    )
                     .col(ColumnDef::new(Column::RouteId).big_integer().null())
                     .col(string_null(Column::SipGateway).char_len(160))
                     .col(text_null(Column::CallerUri))
@@ -213,17 +193,6 @@ impl MigrationTrait for Migration {
                             .name("fk_call_records_route")
                             .from(Entity, Column::RouteId)
                             .to(super::routing::Entity, super::routing::Column::Id)
-                            .on_delete(MigrationForeignKeyAction::SetNull)
-                            .on_update(MigrationForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_call_records_bill_template")
-                            .from(Entity, Column::BillingTemplateId)
-                            .to(
-                                super::bill_template::Entity,
-                                super::bill_template::Column::Id,
-                            )
                             .on_delete(MigrationForeignKeyAction::SetNull)
                             .on_update(MigrationForeignKeyAction::Cascade),
                     )

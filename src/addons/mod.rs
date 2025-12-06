@@ -44,11 +44,6 @@ pub trait Addon: Send + Sync {
         vec![]
     }
 
-    /// Return the paths to the addon's templates directories (relative to workspace root)
-    fn template_dir(&self) -> String {
-        format!("addons/{}/templates", self.id())
-    }
-
     /// Return Settings page injection items (HTML fragments or config definitions)
     fn settings_items(&self) -> Option<String> {
         None

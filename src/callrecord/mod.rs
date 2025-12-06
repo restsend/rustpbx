@@ -3,9 +3,7 @@ use crate::{
     call::ActiveCallType,
     config::{CallRecordConfig, S3Vendor},
     models::{
-        bill_template::{Entity as BillTemplateEntity, Model as BillTemplateModel},
         call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
-        sip_trunk::Entity as SipTrunkEntity,
     },
 };
 use anyhow::Result;
@@ -1113,7 +1111,6 @@ pub async fn persist_call_record(
         active.department_id = Set(department_id);
         active.extension_id = Set(extension_id);
         active.sip_trunk_id = Set(sip_trunk_id);
-        active.billing_template_id = Set(billing_context.template_id);
         active.route_id = Set(route_id);
         active.sip_gateway = Set(sip_gateway.clone());
         active.caller_uri = Set(caller_uri.clone());
@@ -1175,7 +1172,6 @@ pub async fn persist_call_record(
         department_id: Set(department_id),
         extension_id: Set(extension_id),
         sip_trunk_id: Set(sip_trunk_id),
-        billing_template_id: Set(billing_context.template_id),
         route_id: Set(route_id),
         sip_gateway: Set(sip_gateway.clone()),
         caller_uri: Set(caller_uri.clone()),
@@ -1427,125 +1423,15 @@ struct BillingParameters {
     tax_percent: f64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct BillingTemplateSnapshot {
-    id: Option<i64>,
-    name: Option<String>,
-    display_name: Option<String>,
-    description: Option<String>,
-    currency: Option<String>,
-    billing_interval: Option<Value>,
-    included_minutes: Option<i32>,
-    included_messages: Option<i32>,
-    initial_increment_secs: Option<i32>,
-    billing_increment_secs: Option<i32>,
-    overage_rate_per_minute: Option<f64>,
-    setup_fee: Option<f64>,
-    tax_percent: Option<f64>,
-    metadata: Option<Value>,
-    captured_at: Option<Value>,
-}
-
-impl BillingParameters {
-    fn from_template(template: &BillTemplateModel) -> Self {
-        Self {
-            template_id: Some(template.id),
-            template_name: Some(template.name.clone()),
-            display_name: template.display_name.clone(),
-            currency: template.currency.clone(),
-            initial_increment_secs: template.initial_increment_secs.max(1),
-            billing_increment_secs: template.billing_increment_secs.max(1),
-            overage_rate_per_minute: template.overage_rate_per_minute.max(0.0),
-            setup_fee: template.setup_fee.max(0.0),
-            tax_percent: template.tax_percent.max(0.0),
-        }
-    }
-
-    fn from_snapshot(snapshot: &BillingTemplateSnapshot) -> Self {
-        Self {
-            template_id: snapshot.id,
-            template_name: snapshot.name.clone(),
-            display_name: snapshot.display_name.clone(),
-            currency: snapshot
-                .currency
-                .clone()
-                .unwrap_or_else(|| "USD".to_string()),
-            initial_increment_secs: snapshot.initial_increment_secs.unwrap_or(60).max(1),
-            billing_increment_secs: snapshot.billing_increment_secs.unwrap_or(60).max(1),
-            overage_rate_per_minute: snapshot.overage_rate_per_minute.unwrap_or(0.0).max(0.0),
-            setup_fee: snapshot.setup_fee.unwrap_or(0.0).max(0.0),
-            tax_percent: snapshot.tax_percent.unwrap_or(0.0).max(0.0),
-        }
-    }
-}
 
 async fn resolve_billing_context(
-    db: &DatabaseConnection,
-    sip_trunk_id: Option<i64>,
+    _db: &DatabaseConnection,
+    _sip_trunk_id: Option<i64>,
 ) -> Result<BillingContext> {
-    let Some(trunk_id) = sip_trunk_id else {
-        return Ok(BillingContext::default());
-    };
-
-    let Some(trunk) = SipTrunkEntity::find_by_id(trunk_id).one(db).await? else {
-        return Ok(BillingContext::default());
-    };
-
-    let mut context = BillingContext {
-        template_id: trunk.billing_template_id,
-        snapshot: trunk.billing_snapshot.clone(),
-        parameters: None,
-    };
-
-    if let Some(snapshot) = context.snapshot.clone() {
-        if let Some(params) = extract_billing_parameters(&snapshot) {
-            if context.template_id.is_none() {
-                context.template_id = params.template_id;
-            }
-            context.parameters = Some(params);
-        }
-    }
-
-    if context.parameters.is_none() {
-        if let Some(template_id) = context.template_id {
-            if let Some(template) = BillTemplateEntity::find_by_id(template_id).one(db).await? {
-                context.parameters = Some(BillingParameters::from_template(&template));
-                if context.snapshot.is_none() {
-                    context.snapshot = Some(build_bill_template_snapshot(&template));
-                }
-            }
-        }
-    }
-
-    Ok(context)
+    Ok(BillingContext::default())
 }
 
-fn build_bill_template_snapshot(template: &BillTemplateModel) -> Value {
-    json!({
-        "id": template.id,
-        "name": template.name,
-        "display_name": template.display_name,
-        "description": template.description,
-        "currency": template.currency,
-        "billing_interval": template.billing_interval,
-        "included_minutes": template.included_minutes,
-        "included_messages": template.included_messages,
-        "initial_increment_secs": template.initial_increment_secs,
-        "billing_increment_secs": template.billing_increment_secs,
-        "overage_rate_per_minute": template.overage_rate_per_minute,
-        "setup_fee": template.setup_fee,
-        "tax_percent": template.tax_percent,
-        "metadata": template.metadata.clone(),
-        "captured_at": Utc::now(),
-    })
-}
 
-fn extract_billing_parameters(snapshot: &Value) -> Option<BillingParameters> {
-    serde_json::from_value::<BillingTemplateSnapshot>(snapshot.clone())
-        .map(|data| BillingParameters::from_snapshot(&data))
-        .ok()
-}
 
 #[derive(Debug, Clone)]
 struct BillingComputation {

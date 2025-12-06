@@ -5,7 +5,6 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub mod addons;
-pub mod bill_template;
 pub mod call_control;
 pub mod call_record;
 pub mod dashboard;
@@ -44,7 +43,6 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     let routes = Router::new()
         .merge(user::urls())
         .merge(extension::urls())
-        .merge(bill_template::urls())
         .merge(sip_trunk::urls())
         .merge(setting::urls())
         .merge(queue::urls())

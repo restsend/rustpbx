@@ -66,9 +66,8 @@ impl AddonRegistry {
             .filter(|a| self.is_enabled(a.id(), &config))
             .flat_map(|a| {
                 [
-                    a.template_dir(),
-                    format!("src/{}", a.template_dir()),
-                    format!("templates/{}", a.template_dir()),
+                    format!("src/addons/{}/templates", a.id()),
+                    format!("templates/{}", a.id()),
                 ]
             })
             .collect()

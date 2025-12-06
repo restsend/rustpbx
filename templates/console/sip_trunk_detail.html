@@ -2,7 +2,6 @@
 {% set has_model = model is defined and model is not none %}
 {% set mode_text = '"edit"' if has_model else '"create"' %}
 {% set model_data = model if has_model else {} %}
-{% set bill_template_data = bill_template if bill_template is defined and bill_template is not none else {} %}
 {% block title %}{{ model_data.display_name | default(model_data.name | default('New SIP trunk')) }} · {{ site_name |
 default('RustPBX') }}{% endblock %}
 {% block content %}
@@ -11,9 +10,7 @@ default('RustPBX') }}{% endblock %}
         basePath: {{ base_url | tojson }},
         mode: {{ mode_text }},
         model: {{ model_data | tojson }},
-        billTemplate: {{ bill_template_data | tojson }},
         filters: {{ filters | default({}) | tojson }},
-        templates: {{ templates | default([]) | tojson }},
         tenants: {{ tenants | default([]) | tojson }},
         createUrl: {{ create_url | default(null) | tojson }},
         updateUrl: {{ update_url | default(null) | tojson }}
@@ -54,10 +51,7 @@ default('RustPBX') }}{% endblock %}
                         <dt class="uppercase tracking-wide">Carrier</dt>
                         <dd class="text-sm text-slate-700" x-text="form.carrier || '—'"></dd>
                     </div>
-                    <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Linked template</dt>
-                        <dd class="text-sm text-slate-700" x-text="selectedTemplateLabel"></dd>
-                    </div>
+
                     <div class="flex items-center justify-between gap-6">
                         <dt class="uppercase tracking-wide">Updated</dt>
                         <dd class="text-sm text-slate-700" x-text="formatDate(model?.updated_at)"></dd>
@@ -270,15 +264,7 @@ default('RustPBX') }}{% endblock %}
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="Internal label for default routing">
                         </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Billing template
-                            <select x-model="form.billing_template_id"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <template x-for="option in templateOptions" :key="option.value">
-                                    <option :value="option.value" x-text="option.label"></option>
-                                </template>
-                            </select>
-                        </label>
+
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             Tenant
                             <select x-model="form.tenant_id"
@@ -396,8 +382,6 @@ default('RustPBX') }}{% endblock %}
             basePath: options.basePath || '/console',
             mode: options.mode || 'create',
             model: options.model || null,
-            billTemplate: options.billTemplate || null,
-            templatesRaw: Array.isArray(options.templates) ? options.templates : [],
             tenantsRaw: Array.isArray(options.tenants) ? options.tenants : [],
             filters: options.filters || {},
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
@@ -410,7 +394,6 @@ default('RustPBX') }}{% endblock %}
                 { value: 'tcp', label: 'TCP' },
                 { value: 'tls', label: 'TLS' },
             ],
-            templateOptions: [],
             tenantOptions: [],
             form: {
                 name: '',
@@ -425,7 +408,6 @@ default('RustPBX') }}{% endblock %}
                 auth_username: '',
                 auth_password: '',
                 default_route_label: '',
-                billing_template_id: 'none',
                 tenant_id: 'none',
                 max_cps: '',
                 max_concurrent: '',
@@ -466,13 +448,6 @@ default('RustPBX') }}{% endblock %}
                     label: this.directionLabel(value),
                 }));
 
-                const mappedTemplates = this.templatesRaw.map((tpl) => ({
-                    value: String(tpl.id),
-                    label: tpl.display_name || tpl.name || `Template #${tpl.id}`,
-                }));
-
-                this.templateOptions = [{ value: 'none', label: 'No template' }].concat(mappedTemplates);
-
                 const mappedTenants = this.tenantsRaw.map((t) => ({
                     value: String(t.id),
                     label: t.name || `Tenant #${t.id}`,
@@ -480,7 +455,6 @@ default('RustPBX') }}{% endblock %}
                 this.tenantOptions = [{ value: 'none', label: 'No tenant' }].concat(mappedTenants);
 
                 if (!this.model && this.mode === 'create') {
-                    this.form.billing_template_id = 'none';
                     this.form.tenant_id = 'none';
 
                     // Check for tenant_id in URL query params
@@ -505,7 +479,6 @@ default('RustPBX') }}{% endblock %}
                 this.form.auth_username = model.auth_username || '';
                 this.form.auth_password = model.auth_password || '';
                 this.form.default_route_label = model.default_route_label || '';
-                this.form.billing_template_id = model.billing_template_id != null ? String(model.billing_template_id) : 'none';
                 this.form.tenant_id = model.tenant_id != null ? String(model.tenant_id) : 'none';
                 this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
                 this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
@@ -525,13 +498,6 @@ default('RustPBX') }}{% endblock %}
                     return `Edit ${this.form.display_name || this.form.name || 'SIP trunk'}`;
                 }
                 return 'Create SIP trunk';
-            },
-            get selectedTemplateLabel() {
-                if (this.form.billing_template_id === 'none') {
-                    return 'Not linked';
-                }
-                const found = this.templateOptions.find((opt) => opt.value === this.form.billing_template_id);
-                return found ? found.label : `Template #${this.form.billing_template_id}`;
             },
             statusBadgeLabel(value) {
                 const normalized = String(value || '').toLowerCase();
@@ -674,14 +640,6 @@ default('RustPBX') }}{% endblock %}
                 if (this.form.auth_username.trim()) params.set('auth_username', this.form.auth_username.trim());
                 if (this.form.auth_password.trim()) params.set('auth_password', this.form.auth_password.trim());
                 if (this.form.default_route_label.trim()) params.set('default_route_label', this.form.default_route_label.trim());
-
-                if (this.form.billing_template_id === 'none') {
-                    if (this.mode === 'edit') {
-                        params.set('clear_billing_template', 'true');
-                    }
-                } else if (this.form.billing_template_id) {
-                    params.set('billing_template_id', this.form.billing_template_id);
-                }
 
                 if (this.form.tenant_id === 'none') {
                     if (this.mode === 'edit') {

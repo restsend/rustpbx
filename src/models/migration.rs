@@ -7,7 +7,6 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(super::user::Migration),
             Box::new(super::department::Migration),
-            Box::new(super::bill_template::Migration),
             Box::new(super::extension::Migration),
             Box::new(super::extension_department::Migration),
             Box::new(super::sip_trunk::Migration),

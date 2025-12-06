@@ -1,7 +1,7 @@
 use super::bad_request;
 #[cfg(feature = "addon-wholesale")]
 use crate::addons::wholesale::models::{
-    tenant::{Entity as TenantEntity},
+    tenant::Entity as TenantEntity,
     tenant_trunk::{
         ActiveModel as TenantTrunkActiveModel, Column as TenantTrunkColumn,
         Entity as TenantTrunkEntity,
@@ -10,14 +10,9 @@ use crate::addons::wholesale::models::{
 use crate::{
     console::handlers::forms::{self, ListQuery, SipTrunkForm},
     console::{ConsoleState, middleware::AuthRequired},
-    models::{
-        bill_template::{
-            Column as BillTemplateColumn, Entity as BillTemplateEntity, Model as BillTemplateModel,
-        },
-        sip_trunk::{
-            ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
-            SipTransport, SipTrunkDirection, SipTrunkStatus,
-        },
+    models::sip_trunk::{
+        ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
+        SipTransport, SipTrunkDirection, SipTrunkStatus,
     },
 };
 use axum::{
@@ -35,7 +30,7 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::warn;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -48,8 +43,6 @@ struct QuerySipTrunkFilters {
     direction: Option<SipTrunkDirection>,
     #[serde(default)]
     transport: Option<SipTransport>,
-    #[serde(default)]
-    billing_template_ids: Option<Vec<i64>>,
     #[serde(default)]
     only_active: Option<bool>,
 }
@@ -75,7 +68,7 @@ async fn page_sip_trunks(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let (filters, _, _) = build_filters_payload(state.db()).await;
+    let (filters, _) = build_filters_payload(state.db()).await;
     state.render(
         "console/sip_trunk.html",
         json!({
@@ -90,13 +83,12 @@ async fn page_sip_trunk_create(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    let (filters, templates, tenants) = build_filters_payload(state.db()).await;
+    let (filters, tenants) = build_filters_payload(state.db()).await;
     state.render(
         "console/sip_trunk_detail.html",
         json!({
             "nav_active": "sip-trunk",
             "filters": filters,
-            "templates": templates,
             "tenants": tenants,
             "mode": "create",
             "create_url": state.url_for("/sip-trunk"),
@@ -110,12 +102,9 @@ async fn page_sip_trunk_detail(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let (filters, templates, tenants) = build_filters_payload(db).await;
+    let (filters, tenants) = build_filters_payload(db).await;
 
-    let result = SipTrunkEntity::find_by_id(id)
-        .find_also_related(BillTemplateEntity)
-        .one(db)
-        .await;
+    let result = SipTrunkEntity::find_by_id(id).one(db).await;
 
     #[cfg(feature = "addon-wholesale")]
     let tenant_link = match TenantTrunkEntity::find()
@@ -126,7 +115,10 @@ async fn page_sip_trunk_detail(
         Ok(links) => {
             let link = links.into_iter().next();
             if let Some(ref l) = link {
-                warn!("Found tenant link for trunk {}: tenant_id={}", id, l.tenant_id);
+                warn!(
+                    "Found tenant link for trunk {}: tenant_id={}",
+                    id, l.tenant_id
+                );
             } else {
                 warn!("No tenant link found for trunk {}", id);
             }
@@ -142,17 +134,17 @@ async fn page_sip_trunk_detail(
     let tenant_link: Option<serde_json::Value> = None;
 
     match result {
-        Ok(Some((model, template))) => {
+        Ok(Some(model)) => {
             #[allow(unused_mut)]
             let mut model_json = serde_json::to_value(&model).unwrap_or(json!({}));
-            
+
             #[cfg(feature = "addon-wholesale")]
             if let Some(obj) = model_json.as_object_mut() {
                 if let Some(link) = tenant_link {
                     obj.insert("tenant_id".to_string(), json!(link.tenant_id));
                 }
             }
-            
+
             #[cfg(not(feature = "addon-wholesale"))]
             {
                 let _ = tenant_link;
@@ -163,9 +155,7 @@ async fn page_sip_trunk_detail(
                 json!({
                     "nav_active": "sip-trunk",
                     "model": model_json,
-                    "bill_template": template,
                     "filters": filters,
-                    "templates": templates,
                     "tenants": tenants,
                     "mode": "edit",
                     "update_url": state.url_for(&format!("/sip-trunk/{id}")),
@@ -213,7 +203,10 @@ async fn create_sip_trunk(
             )
             .await
             {
-                warn!("failed to update tenant link for trunk {}: {}", model.id, err);
+                warn!(
+                    "failed to update tenant link for trunk {}: {}",
+                    model.id, err
+                );
             }
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
@@ -270,7 +263,10 @@ async fn update_sip_trunk(
             )
             .await
             {
-                warn!("failed to update tenant link for trunk {}: {}", model.id, err);
+                warn!(
+                    "failed to update tenant link for trunk {}: {}",
+                    model.id, err
+                );
             }
             Json(json!({"status": "ok"})).into_response()
         }
@@ -331,14 +327,10 @@ async fn query_sip_trunks(
 ) -> Response {
     let db = state.db();
     let filters_payload;
-    let templates;
     {
-        let (payload, list, _) = build_filters_payload(db).await;
+        let (payload, _) = build_filters_payload(db).await;
         filters_payload = payload;
-        templates = list;
     }
-    let template_lookup: HashMap<i64, BillTemplateModel> =
-        templates.into_iter().map(|tpl| (tpl.id, tpl)).collect();
 
     let filters = payload.filters.clone().unwrap_or_default();
     let (_, per_page) = payload.normalize();
@@ -367,14 +359,6 @@ async fn query_sip_trunks(
 
     if let Some(transport) = filters.transport {
         selector = selector.filter(SipTrunkColumn::SipTransport.eq(transport));
-    }
-
-    if let Some(template_ids) = filters
-        .billing_template_ids
-        .as_ref()
-        .filter(|ids| !ids.is_empty())
-    {
-        selector = selector.filter(SipTrunkColumn::BillingTemplateId.is_in(template_ids.clone()));
     }
 
     if filters.only_active.unwrap_or(false) {
@@ -439,27 +423,7 @@ async fn query_sip_trunks(
 
     let enriched_items: Vec<Value> = items
         .into_iter()
-        .map(|model| {
-            let mut value = serde_json::to_value(&model).unwrap_or_else(|_| json!({}));
-            if let Some(obj) = value.as_object_mut() {
-                if let Some(template_id) = model.billing_template_id {
-                    if let Some(template) = template_lookup.get(&template_id) {
-                        obj.insert(
-                            "billing_template".to_string(),
-                            json!({
-                                "id": template.id,
-                                "name": template.name,
-                                "display_name": template
-                                    .display_name
-                                    .clone()
-                                    .unwrap_or_else(|| template.name.clone()),
-                            }),
-                        );
-                    }
-                }
-            }
-            value
-        })
+        .map(|model| serde_json::to_value(&model).unwrap_or_else(|_| json!({})))
         .collect();
 
     Json(json!({
@@ -475,28 +439,11 @@ async fn query_sip_trunks(
     .into_response()
 }
 
-async fn build_filters_payload(
-    db: &DatabaseConnection,
-) -> (Value, Vec<BillTemplateModel>, Vec<Value>) {
-    let templates = load_bill_templates(db).await;
+async fn build_filters_payload(db: &DatabaseConnection) -> (Value, Vec<Value>) {
     let tenants = load_tenants(db).await;
-    let template_values: Vec<Value> = templates
-        .iter()
-        .map(|tpl| {
-            json!({
-                "id": tpl.id,
-                "name": tpl.name,
-                "display_name": tpl
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| tpl.name.clone()),
-            })
-        })
-        .collect();
 
     (
         json!({
-            "bill_templates": template_values,
             "statuses": SipTrunkStatus::iter()
                 .map(|status| status.as_str())
                 .collect::<Vec<_>>(),
@@ -507,24 +454,8 @@ async fn build_filters_payload(
                 .map(|transport| transport.as_str())
                 .collect::<Vec<_>>(),
         }),
-        templates,
         tenants,
     )
-}
-
-async fn load_bill_templates(db: &DatabaseConnection) -> Vec<BillTemplateModel> {
-    match BillTemplateEntity::find()
-        .order_by_asc(BillTemplateColumn::DisplayName)
-        .order_by_asc(BillTemplateColumn::Name)
-        .all(db)
-        .await
-    {
-        Ok(list) => list,
-        Err(err) => {
-            warn!("failed to load bill templates: {}", err);
-            vec![]
-        }
-    }
 }
 
 async fn load_tenants(db: &DatabaseConnection) -> Vec<Value> {
@@ -658,16 +589,6 @@ fn apply_form_to_active_model(
     if !is_update || form.default_route_label.is_some() {
         active.default_route_label =
             Set(super::normalize_optional_string(&form.default_route_label));
-    }
-
-    let clear_billing_template = form.clear_billing_template.unwrap_or(false);
-
-    if clear_billing_template {
-        active.billing_template_id = Set(None);
-    } else if let Some(template_id) = form.billing_template_id {
-        active.billing_template_id = Set(Some(template_id));
-    } else if !is_update {
-        active.billing_template_id = Set(None);
     }
 
     if !is_update || form.max_cps.is_some() {

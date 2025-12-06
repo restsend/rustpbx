@@ -2,7 +2,10 @@ use crate::models::policy::PolicySpec;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Local, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -706,59 +709,74 @@ impl FrequencyLimiter for DbFrequencyLimiter {
     ) -> Result<bool> {
         use crate::models::frequency_limit;
         let now = Utc::now();
+        let policy_id = policy_id.to_string();
+        let scope = scope.to_string();
+        let scope_value = scope_value.to_string();
 
-        let record = frequency_limit::Entity::find()
-            .filter(frequency_limit::Column::PolicyId.eq(policy_id))
-            .filter(frequency_limit::Column::Scope.eq(scope))
-            .filter(frequency_limit::Column::ScopeValue.eq(scope_value))
-            .filter(frequency_limit::Column::LimitType.eq("frequency"))
-            .one(&self.db)
-            .await?;
+        let result = self
+            .db
+            .transaction::<_, bool, anyhow::Error>(|txn| {
+                Box::pin(async move {
+                    let record = frequency_limit::Entity::find()
+                        .filter(frequency_limit::Column::PolicyId.eq(&policy_id))
+                        .filter(frequency_limit::Column::Scope.eq(&scope))
+                        .filter(frequency_limit::Column::ScopeValue.eq(&scope_value))
+                        .filter(frequency_limit::Column::LimitType.eq("frequency"))
+                        .one(txn)
+                        .await?;
 
-        if let Some(model) = record {
-            if let Some(window_end) = model.window_end {
-                if now > window_end {
-                    let mut active: frequency_limit::ActiveModel = model.into();
-                    active.count = Set(1);
-                    active.window_end =
-                        Set(Some(now + chrono::Duration::hours(window_hours as i64)));
-                    active.updated_at = Set(now);
-                    active.update(&self.db).await?;
-                    Ok(true)
-                } else {
-                    if model.count >= limit {
-                        Ok(false)
+                    if let Some(model) = record {
+                        if let Some(window_end) = model.window_end {
+                            if now > window_end {
+                                let mut active: frequency_limit::ActiveModel = model.into();
+                                active.count = Set(1);
+                                active.window_end =
+                                    Set(Some(now + chrono::Duration::hours(window_hours as i64)));
+                                active.updated_at = Set(now);
+                                active.update(txn).await?;
+                                Ok(true)
+                            } else {
+                                if model.count >= limit {
+                                    Ok(false)
+                                } else {
+                                    let count = model.count;
+                                    let mut active: frequency_limit::ActiveModel = model.into();
+                                    active.count = Set(count + 1);
+                                    active.updated_at = Set(now);
+                                    active.update(txn).await?;
+                                    Ok(true)
+                                }
+                            }
+                        } else {
+                            let mut active: frequency_limit::ActiveModel = model.into();
+                            active.count = Set(1);
+                            active.window_end =
+                                Set(Some(now + chrono::Duration::hours(window_hours as i64)));
+                            active.updated_at = Set(now);
+                            active.update(txn).await?;
+                            Ok(true)
+                        }
                     } else {
-                        let count = model.count;
-                        let mut active: frequency_limit::ActiveModel = model.into();
-                        active.count = Set(count + 1);
-                        active.updated_at = Set(now);
-                        active.update(&self.db).await?;
+                        let active = frequency_limit::ActiveModel {
+                            policy_id: Set(policy_id),
+                            scope: Set(scope),
+                            scope_value: Set(scope_value),
+                            limit_type: Set("frequency".to_string()),
+                            count: Set(1),
+                            window_end: Set(Some(
+                                now + chrono::Duration::hours(window_hours as i64),
+                            )),
+                            updated_at: Set(now),
+                            ..Default::default()
+                        };
+                        active.insert(txn).await?;
                         Ok(true)
                     }
-                }
-            } else {
-                let mut active: frequency_limit::ActiveModel = model.into();
-                active.count = Set(1);
-                active.window_end = Set(Some(now + chrono::Duration::hours(window_hours as i64)));
-                active.updated_at = Set(now);
-                active.update(&self.db).await?;
-                Ok(true)
-            }
-        } else {
-            let active = frequency_limit::ActiveModel {
-                policy_id: Set(policy_id.to_string()),
-                scope: Set(scope.to_string()),
-                scope_value: Set(scope_value.to_string()),
-                limit_type: Set("frequency".to_string()),
-                count: Set(1),
-                window_end: Set(Some(now + chrono::Duration::hours(window_hours as i64))),
-                updated_at: Set(now),
-                ..Default::default()
-            };
-            active.insert(&self.db).await?;
-            Ok(true)
-        }
+                })
+            })
+            .await?;
+
+        Ok(result)
     }
 
     async fn check_daily_limit(

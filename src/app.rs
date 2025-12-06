@@ -34,6 +34,7 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
+    compression::CompressionLayer,
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
 };
@@ -204,13 +205,15 @@ impl AppStateBuilder {
         let useragent = if let Some(ua) = self.useragent {
             Some(ua)
         } else {
-            let config = config.ua.clone();
-            if let Some(config) = config {
+            if let Some(mut ua_config) = config.ua.clone() {
+                if ua_config.external_ip.is_none() {
+                    ua_config.external_ip = config.external_ip.clone();
+                }
                 let invite_handler = self.create_invitation_handler.take();
                 let ua_builder = crate::useragent::UserAgentBuilder::new()
                     .with_cancel_token(token.child_token())
                     .with_create_invitation_handler(invite_handler)
-                    .with_config(Some(config));
+                    .with_config(Some(ua_config));
                 Some(Arc::new(ua_builder.build().await?))
             } else {
                 None
@@ -565,8 +568,14 @@ fn create_router(state: AppState) -> Router {
 
     let access_log_skip_paths = Arc::new(state.config.http_access_skip_paths.clone());
 
-    router.layer(middleware::from_fn_with_state(
+    router = router.layer(middleware::from_fn_with_state(
         access_log_skip_paths,
         crate::handler::middleware::request_log::log_requests,
-    ))
+    ));
+
+    if state.config.http_gzip {
+        router = router.layer(CompressionLayer::new().gzip(true));
+    }
+
+    router
 }

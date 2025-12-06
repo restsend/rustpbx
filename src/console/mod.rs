@@ -114,6 +114,21 @@ impl ConsoleState {
 
         let mut tmpl_env = Environment::new();
 
+        tmpl_env.add_filter(
+            "format",
+            |format_str: &str, value: minijinja::Value| -> Result<String, minijinja::Error> {
+                if let Ok(num) = f64::try_from(value.clone()) {
+                    match format_str {
+                        "%.2f" => Ok(format!("{:.2}", num)),
+                        "%.4f" => Ok(format!("{:.4}", num)),
+                        _ => Ok(format!("{}", num)),
+                    }
+                } else {
+                    Ok(value.to_string())
+                }
+            },
+        );
+
         let mut paths = vec!["templates".to_string()];
         if let Some(app_state) = self.app_state() {
             paths.extend(

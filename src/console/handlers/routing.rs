@@ -78,8 +78,6 @@ pub(crate) struct RouteDocument {
     #[serde(default)]
     source_trunk: Option<String>,
     #[serde(default)]
-    target_trunks: Vec<String>,
-    #[serde(default)]
     notes: Vec<String>,
 }
 
@@ -97,7 +95,6 @@ impl Default for RouteDocument {
             rewrite: JsonMap::new(),
             action: RouteActionDocument::default(),
             source_trunk: None,
-            target_trunks: Vec::new(),
             notes: Vec::new(),
         }
     }
@@ -245,7 +242,6 @@ impl RouteDocument {
                 ..RouteActionDocument::default()
             },
             source_trunk: None,
-            target_trunks: Vec::new(),
             notes: parse_notes_value(model.notes.clone()),
         };
         doc.ensure_consistency();
@@ -302,34 +298,26 @@ impl RouteDocument {
             RouteTargetKind::Queue => {
                 self.action.ivr_file = None;
                 self.action.trunks.clear();
-                self.target_trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
             }
             RouteTargetKind::Ivr => {
                 self.action.queue_file = None;
                 self.action.trunks.clear();
-                self.target_trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
             }
         }
 
         let mut dedup = HashSet::new();
-        let mut targets = Vec::new();
-        for name in std::mem::take(&mut self.target_trunks) {
-            if let Some(clean) = sanitize_optional_string(Some(name)) {
-                if dedup.insert(clean.clone()) {
-                    targets.push(clean);
-                }
-            }
-        }
-        for trunk in &self.action.trunks {
+        let mut unique_trunks = Vec::new();
+
+        for trunk in std::mem::take(&mut self.action.trunks) {
             if dedup.insert(trunk.name.clone()) {
-                targets.push(trunk.name.clone());
+                unique_trunks.push(trunk);
             }
         }
-        self.target_trunks = targets;
+        self.action.trunks = unique_trunks;
 
         self.notes = self
             .notes
@@ -364,15 +352,19 @@ impl RouteDocument {
             return;
         }
 
-        if self.target_trunks.is_empty() {
+        if self.action.trunks.is_empty() {
             if let Some(default_id) = model.default_trunk_id {
                 if let Some(trunk) = trunks.get(&default_id) {
                     if !self
-                        .target_trunks
+                        .action
+                        .trunks
                         .iter()
-                        .any(|name| name.eq_ignore_ascii_case(&trunk.name))
+                        .any(|t| t.name.eq_ignore_ascii_case(&trunk.name))
                     {
-                        self.target_trunks.push(trunk.name.clone());
+                        self.action.trunks.push(RouteTrunkDocument {
+                            name: trunk.name.clone(),
+                            weight: DEFAULT_PRIORITY,
+                        });
                     }
                 }
             }
@@ -614,7 +606,7 @@ fn build_route_console_payload(
             "ivr_file": doc.action.ivr_file.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
-        "target_trunks": doc.target_trunks.clone(),
+        "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
         "notes": doc.notes.clone(),
         "created_at": model.created_at.to_rfc3339(),
         "last_modified": model.updated_at.to_rfc3339(),
@@ -743,7 +735,7 @@ fn apply_document_to_active(
     active.rewrite_rules = Set(value_from_map(&doc.rewrite));
     active.target_trunks = Set(value_from_trunks(&doc.action.trunks));
     active.source_trunk_id = Set(resolve_trunk_id(trunk_lookup, doc.source_trunk.as_deref()));
-    let default_target = doc.target_trunks.first().map(|name| name.as_str());
+    let default_target = doc.action.trunks.first().map(|t| t.name.as_str());
     active.default_trunk_id = Set(resolve_trunk_id(trunk_lookup, default_target));
     active.notes = Set(notes_value(&doc.notes));
     let metadata = doc.metadata_value();

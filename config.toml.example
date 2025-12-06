@@ -3,6 +3,7 @@
 # cargo run . --bin rustpbx --conf config.toml
 
 http_addr = "0.0.0.0:8080"
+# http_gzip = true
 log_level = "debug"
 #log_file = "/tmp/rustpbx.log"
 # Paths can include a trailing * to skip whole subtrees

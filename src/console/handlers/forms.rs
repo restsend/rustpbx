@@ -1,4 +1,3 @@
-use crate::models::bill_template::BillingInterval;
 use crate::models::sip_trunk::{SipTransport, SipTrunkDirection, SipTrunkStatus};
 use crate::proxy::routing::RouteQueueConfig;
 use sea_orm::{DatabaseConnection, DbErr, Paginator, SelectorTrait};
@@ -66,8 +65,6 @@ pub struct SipTrunkForm {
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub default_route_label: Option<String>,
-    pub billing_template_id: Option<i64>,
-    pub clear_billing_template: Option<bool>,
     pub tenant_id: Option<i64>,
     pub clear_tenant: Option<bool>,
     pub max_cps: Option<i32>,
@@ -95,23 +92,6 @@ pub struct QueuePayload {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub spec: Option<RouteQueueConfig>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-pub struct BillTemplatePayload {
-    pub name: Option<String>,
-    pub display_name: Option<String>,
-    pub description: Option<String>,
-    pub currency: Option<String>,
-    pub billing_interval: Option<BillingInterval>,
-    pub included_minutes: Option<i32>,
-    pub included_messages: Option<i32>,
-    pub initial_increment_secs: Option<i32>,
-    pub billing_increment_secs: Option<i32>,
-    pub overage_rate_per_minute: Option<f64>,
-    pub setup_fee: Option<f64>,
-    pub tax_percent: Option<f64>,
-    pub metadata: Option<String>,
 }
 
 fn default_per_page_min() -> u32 {
