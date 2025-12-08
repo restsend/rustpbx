@@ -14,6 +14,18 @@
         src="{{alpine_js|default('https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js')}}"></script>
     <script
         src="{{tailwind_js|default('https://cdnjs.cloudflare.com/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js')}}"></script>
+    <script>
+        window.RustPBX = window.RustPBX || {};
+        window.RustPBX.plugins = [];
+        window.registerConsolePlugin = (plugin) => {
+            window.RustPBX.plugins.push(plugin);
+        };
+    </script>
+    {% if addon_scripts %}
+    {% for script in addon_scripts %}
+    <script src="{{ script }}"></script>
+    {% endfor %}
+    {% endif %}
     {% block js_ext %}
     {% endblock %}
     <script>

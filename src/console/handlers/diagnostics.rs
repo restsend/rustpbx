@@ -118,11 +118,19 @@ pub async fn page_diagnostics(
 ) -> Response {
     let bootstrap = diagnostics_bootstrap(&state).await;
 
+    let mut addon_scripts = Vec::new();
+    if let Some(app_state) = state.app_state() {
+        addon_scripts = app_state
+            .addon_registry
+            .get_injected_scripts("/console/diagnostics", &app_state.config);
+    }
+
     state.render(
         "console/diagnostics.html",
         json!({
             "nav_active": "diagnostics",
-            "test_data": bootstrap
+            "test_data": bootstrap,
+            "addon_scripts": addon_scripts
         }),
     )
 }

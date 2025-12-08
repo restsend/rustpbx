@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::console::ConsoleState;
 use axum::{
     Router,
-    extract::{Json, State},
+    extract::{Json, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/addons", get(index))
         .route("/addons/toggle", post(toggle_addon))
+        .route("/addons/{id}", get(detail))
 }
 
 pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
@@ -34,7 +35,29 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
 
         let mut list = app_state.addon_registry.list_addons();
         for addon in &mut list {
-            addon.enabled = app_state.addon_registry.is_enabled(&addon.id, &config);
+            let enabled_in_disk = app_state.addon_registry.is_enabled(&addon.id, &config);
+            let enabled_in_mem = app_state
+                .addon_registry
+                .is_enabled(&addon.id, &app_state.config);
+
+            addon.enabled = enabled_in_disk;
+            addon.restart_required = enabled_in_disk != enabled_in_mem;
+
+            if addon.category == crate::addons::AddonCategory::Commercial {
+                if let Some(addon_config) = config.addons.get(&addon.id) {
+                    if let Some(key) = addon_config.get("license_key") {
+                        if let Ok(info) = crate::license::verify_license(key).await {
+                            addon.license_status = Some(if info.valid {
+                                "Valid".to_string()
+                            } else {
+                                "Invalid".to_string()
+                            });
+                            addon.license_expiry =
+                                info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
+                        }
+                    }
+                }
+            }
         }
         list
     } else {
@@ -127,6 +150,66 @@ pub async fn toggle_addon(
         "message": "Addon state updated. Restart RustPBX to apply changes."
     }))
     .into_response()
+}
+
+pub async fn detail(
+    State(state): State<Arc<ConsoleState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let addon = if let Some(app_state) = state.app_state() {
+        let list = app_state.addon_registry.list_addons();
+        list.into_iter().find(|a| a.id == id)
+    } else {
+        None
+    };
+
+    if let Some(mut addon) = addon {
+        if let Some(app_state) = state.app_state() {
+            let config = if let Some(path) = &app_state.config_path {
+                match fs::read_to_string(path) {
+                    Ok(content) => toml::from_str::<Config>(&content)
+                        .unwrap_or_else(|_| (*app_state.config).clone()),
+                    Err(_) => (*app_state.config).clone(),
+                }
+            } else {
+                (*app_state.config).clone()
+            };
+
+            let enabled_in_disk = app_state.addon_registry.is_enabled(&addon.id, &config);
+            let enabled_in_mem = app_state
+                .addon_registry
+                .is_enabled(&addon.id, &app_state.config);
+            addon.enabled = enabled_in_disk;
+            addon.restart_required = enabled_in_disk != enabled_in_mem;
+
+            if addon.category == crate::addons::AddonCategory::Commercial {
+                if let Some(addon_config) = config.addons.get(&addon.id) {
+                    if let Some(key) = addon_config.get("license_key") {
+                        if let Ok(info) = crate::license::verify_license(key).await {
+                            addon.license_status = Some(if info.valid {
+                                "Valid".to_string()
+                            } else {
+                                "Invalid".to_string()
+                            });
+                            addon.license_expiry =
+                                info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        state.render(
+            "console/addon_detail.html",
+            serde_json::json!({
+                "addon": addon,
+                "page_title": format!("Addon: {}", addon.name),
+                "nav_active": "addons"
+            }),
+        )
+    } else {
+        (StatusCode::NOT_FOUND, "Addon not found").into_response()
+    }
 }
 
 fn get_config_path(state: &ConsoleState) -> Result<String, Response> {

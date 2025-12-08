@@ -18,6 +18,7 @@
                         <tr>
                             <th scope="col" class="px-4 py-2">Name</th>
                             <th scope="col" class="px-4 py-2">Description</th>
+                            <th scope="col" class="px-4 py-2">License</th>
                             <th scope="col" class="px-4 py-2">Status</th>
                             <th scope="col" class="px-4 py-2">Actions</th>
                         </tr>
@@ -26,11 +27,46 @@
                         {% for addon in addons %}
                         <tr class="hover:bg-slate-50">
                             <td class="whitespace-nowrap px-4 py-2">
-                                <div class="font-medium text-slate-900">{{ addon.name }}</div>
+                                <div class="font-medium text-slate-900">
+                                    <a href="/console/addons/{{ addon.id }}" class="hover:text-sky-600">{{ addon.name
+                                        }}</a>
+                                </div>
                                 <div class="text-xs text-slate-400">{{ addon.id }}</div>
+                                {% if addon.restart_required %}
+                                <span
+                                    class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20 mt-1">Restart
+                                    Required</span>
+                                {% endif %}
                             </td>
                             <td class="px-4 py-2">
-                                {{ addon.description }}
+                                <div>{{ addon.description }}</div>
+                                <div class="mt-1 text-xs text-slate-500">
+                                    <span class="font-semibold">{{ addon.category }}</span>
+                                    {% if addon.bundle %}
+                                    <span class="mx-1">·</span>
+                                    <span>{{ addon.bundle }}</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td class="whitespace-nowrap px-4 py-2">
+                                {% if addon.license_status %}
+                                {% if addon.license_status == "Valid" %}
+                                <span
+                                    class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Valid</span>
+                                {% else %}
+                                <span
+                                    class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/10">Invalid</span>
+                                {% endif %}
+                                {% if addon.license_expiry %}
+                                <div class="text-xs text-slate-500 mt-1">Exp: {{ addon.license_expiry }}</div>
+                                {% endif %}
+                                {% else %}
+                                {% if addon.category == "Commercial" %}
+                                <span class="text-slate-400 text-xs">Not Licensed</span>
+                                {% else %}
+                                <span class="text-slate-400 text-xs">Free</span>
+                                {% endif %}
+                                {% endif %}
                             </td>
                             <td class="whitespace-nowrap px-4 py-2">
                                 <button type="button"
@@ -54,7 +90,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="px-4 py-6 text-center text-sm text-slate-500">
+                            <td colspan="5" class="px-4 py-6 text-center text-sm text-slate-500">
                                 No addons installed.
                             </td>
                         </tr>

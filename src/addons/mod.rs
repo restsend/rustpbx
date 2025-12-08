@@ -18,6 +18,27 @@ pub struct AddonInfo {
     pub description: String,
     pub enabled: bool,
     pub config_url: Option<String>,
+    pub category: AddonCategory,
+    pub bundle: Option<String>,
+    pub developer: String,
+    pub website: String,
+    pub cost: String,
+    pub screenshots: Vec<String>,
+    pub restart_required: bool,
+    pub license_status: Option<String>,
+    pub license_expiry: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AddonCategory {
+    Community,
+    Commercial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptInjection {
+    pub url_path_regex: &'static str,
+    pub script_url: String,
 }
 
 #[async_trait]
@@ -31,6 +52,30 @@ pub trait Addon: Send + Sync {
     /// Description of the addon
     fn description(&self) -> &'static str {
         ""
+    }
+
+    fn category(&self) -> AddonCategory {
+        AddonCategory::Community
+    }
+
+    fn bundle(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn developer(&self) -> &'static str {
+        "miuda.ai"
+    }
+
+    fn website(&self) -> &'static str {
+        ""
+    }
+
+    fn cost(&self) -> &'static str {
+        "Free"
+    }
+
+    fn screenshots(&self) -> Vec<&'static str> {
+        vec![]
     }
 
     /// Initialize the addon (migrations, background tasks, etc.)
@@ -47,6 +92,11 @@ pub trait Addon: Send + Sync {
     /// Return Settings page injection items (HTML fragments or config definitions)
     fn settings_items(&self) -> Option<String> {
         None
+    }
+
+    /// Return scripts to be injected into specific pages
+    fn inject_scripts(&self) -> Vec<ScriptInjection> {
+        vec![]
     }
 
     /// Return a hook for call record processing

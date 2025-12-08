@@ -193,6 +193,8 @@ pub struct Config {
     pub database_url: String,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
+    #[serde(default)]
+    pub addons: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -666,6 +668,7 @@ impl Default for Config {
             console: None,
             database_url: default_database_url(),
             recording: None,
+            addons: HashMap::new(),
         }
     }
 }

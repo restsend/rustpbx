@@ -50,6 +50,23 @@ impl AddonRegistry {
         router
     }
 
+    pub fn get_injected_scripts(&self, path: &str, config: &crate::config::Config) -> Vec<String> {
+        let mut scripts = Vec::new();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            for injection in addon.inject_scripts() {
+                if let Ok(re) = regex::Regex::new(injection.url_path_regex) {
+                    if re.is_match(path) {
+                        scripts.push(injection.script_url);
+                    }
+                }
+            }
+        }
+        scripts
+    }
+
     pub fn get_sidebar_items(&self, state: AppState) -> Vec<super::SidebarItem> {
         let config = &state.config;
         self.addons
@@ -84,8 +101,17 @@ impl AddonRegistry {
                     id: a.id().to_string(),
                     name: a.name().to_string(),
                     description: a.description().to_string(),
-                    enabled: true, // Currently all loaded addons are enabled
+                    enabled: false, // Caller should set this
                     config_url,
+                    category: a.category(),
+                    bundle: a.bundle().map(|s| s.to_string()),
+                    developer: a.developer().to_string(),
+                    website: a.website().to_string(),
+                    cost: a.cost().to_string(),
+                    screenshots: a.screenshots().iter().map(|s| s.to_string()).collect(),
+                    restart_required: false, // Caller should set this
+                    license_status: None,
+                    license_expiry: None,
                 }
             })
             .collect()
