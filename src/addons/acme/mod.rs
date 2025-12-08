@@ -51,7 +51,9 @@ impl Addon for AcmeAddon {
     fn description(&self) -> &'static str {
         "Manage SSL certificates via Let's Encrypt"
     }
-
+    fn screenshots(&self) -> Vec<&'static str> {
+        vec!["/static/acme/screenshot.png"]
+    }
     async fn initialize(&self, _state: AppState) -> anyhow::Result<()> {
         // Initialize ACME background tasks or check config
         tracing::info!("ACME Addon initialized");
@@ -59,7 +61,15 @@ impl Addon for AcmeAddon {
     }
 
     fn router(&self, state: AppState) -> Option<Router> {
-        let mut protected = Router::new()
+        let mut protected = Router::new();
+
+        #[cfg(debug_assertions)]
+        {
+            use tower_http::services::ServeDir;
+            protected =
+                protected.nest_service("/static/acme/", ServeDir::new("src/addons/acme/static"));
+        }
+        protected = protected
             .route("/console/acme", get(handlers::ui_index))
             .route("/api/acme/request", post(handlers::request_cert))
             .route("/api/acme/status", get(handlers::status));

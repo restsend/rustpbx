@@ -1198,7 +1198,10 @@
                                 and place quick diagnostic calls.</p>
                         </div>
                         <div class="mt-4 space-y-4">
-                            <div class="grid gap-4 md:grid-cols-2">
+                            <template x-for="plugin in activePlugins" :key="plugin.id">
+                                <div x-html="plugin.ui_top" class="mb-4"></div>
+                            </template>
+                            <div class="grid gap-4 md:grid-cols-2" x-show="callMode === 'standard'">
                                 <label class="flex flex-col gap-1.5">
                                     <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">WebSocket
                                         SIP URL</span>
@@ -1229,6 +1232,9 @@
                                         placeholder="••••••">
                                 </label>
                             </div>
+                            <template x-for="plugin in activePlugins" :key="plugin.id">
+                                <div x-html="plugin.ui_form" x-show="callMode === plugin.mode" class="mb-4"></div>
+                            </template>
                             <div class="flex flex-wrap items-center gap-3">
                                 <button type="button" @click="registerSip" :disabled="sipRegistering"
                                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
@@ -1547,7 +1553,18 @@
                         this.$watch(() => this.sipForm.uri, (value) => {
                             this.updateSipDomain(value);
                         });
+
+                        if (window.RustPBX && window.RustPBX.plugins) {
+                            this.activePlugins = window.RustPBX.plugins.map(p => {
+                                if (typeof p.init === 'function') {
+                                    p.init(this);
+                                }
+                                return p;
+                            });
+                        }
                     },
+                    callMode: 'standard',
+                    activePlugins: [],
                     basePath: '',
                     lastAudit: null,
                     trunks: [],
@@ -2453,6 +2470,11 @@
                         this.setSipStatus('Unregistered', 'idle');
                     },
                     async placeSipCall() {
+                        const handler = this.activePlugins.find(p => p.mode === this.callMode && p.handleCall);
+                        if (handler) {
+                            await handler.handleCall(this);
+                            return;
+                        }
                         if (!sipUa || !this.sipRegistered) {
                             this.sipCallError = 'Register before placing a call.';
                             return;
