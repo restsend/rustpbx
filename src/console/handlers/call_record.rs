@@ -1,11 +1,8 @@
-use crate::callrecord::{
-    CallRecord,
-    sipflow::{SipFlowDirection, SipMessageItem},
-    storage::{self, CdrStorage},
-};
-use crate::config::TranscriptConfig;
+use crate::callrecord::CallRecord;
+use crate::callrecord::sipflow::{SipFlowDirection, SipMessageItem};
+use crate::callrecord::storage;
+use crate::callrecord::storage::CdrStorage;
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
-use anyhow::{Context as AnyhowContext, Result as AnyResult};
 use axum::{
     Json, Router,
     body::Body,
@@ -25,20 +22,13 @@ use serde_json::{Map as JsonMap, Value, json};
 use std::{
     collections::{HashMap, HashSet},
     convert::TryFrom,
-    env,
-    io::ErrorKind,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
-    time::{Duration, Instant},
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
-use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
-use tracing::{info, warn};
+use tracing::warn;
 use urlencoding::encode;
-use uuid::Uuid;
-
-use super::utils::{build_sensevoice_transcribe_command, command_exists, model_file_path};
 
 const BILLING_STATUS_CHARGED: &str = "charged";
 const BILLING_STATUS_INCLUDED: &str = "included";
@@ -90,15 +80,6 @@ struct DownloadRequest {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct TranscriptRequest {
-    #[serde(default)]
-    force: bool,
-    #[serde(default)]
-    language: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
 struct UpdateCallRecordPayload {
     #[serde(default)]
     tags: Option<Vec<String>>,
@@ -113,75 +94,6 @@ struct UpdateCallRecordNote {
     text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredTranscript {
-    version: u8,
-    source: String,
-    generated_at: DateTime<Utc>,
-    #[serde(default)]
-    language: Option<String>,
-    #[serde(default)]
-    duration_secs: Option<f64>,
-    #[serde(default)]
-    sample_rate: Option<u32>,
-    #[serde(default)]
-    segments: Vec<StoredTranscriptSegment>,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    analysis: Option<StoredTranscriptAnalysis>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredTranscriptSegment {
-    #[serde(default)]
-    idx: Option<u32>,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    start: Option<f64>,
-    #[serde(default)]
-    end: Option<f64>,
-    #[serde(default)]
-    channel: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredTranscriptAnalysis {
-    #[serde(default)]
-    elapsed: Option<f64>,
-    #[serde(default)]
-    rtf: Option<f64>,
-    #[serde(default)]
-    word_count: usize,
-    #[serde(default)]
-    asr_model: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SenseVoiceCliSegment {
-    #[serde(default)]
-    start_sec: Option<f64>,
-    #[serde(default)]
-    end_sec: Option<f64>,
-    #[serde(default)]
-    text: String,
-    #[serde(default, rename = "tags")]
-    _tags: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SenseVoiceCliChannel {
-    #[serde(default)]
-    channel: Option<u32>,
-    #[serde(default)]
-    duration_sec: Option<f64>,
-    #[serde(default)]
-    rtf: Option<f64>,
-    #[serde(default)]
-    segments: Vec<SenseVoiceCliSegment>,
-}
-
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route(
@@ -193,10 +105,6 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             get(page_call_record_detail)
                 .patch(update_call_record)
                 .delete(delete_call_record),
-        )
-        .route(
-            "/call-records/{id}/transcript",
-            get(get_call_record_transcript).post(trigger_call_record_transcript),
         )
         .route(
             "/call-records/{id}/metadata",
@@ -755,714 +663,6 @@ async fn query_call_records(
     .into_response()
 }
 
-async fn get_call_record_transcript(
-    AxumPath(pk): AxumPath<i64>,
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-) -> Response {
-    let db = state.db();
-    let record = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(
-                id = pk,
-                "failed to load call record for transcript: {}", err
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": err.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    let cdr_data = load_cdr_data(&state, &record).await;
-    match load_stored_transcript(&record, cdr_data.as_ref()).await {
-        Ok(Some(stored)) => {
-            let payload = build_transcript_payload_value(&record, Some(&stored));
-            Json(json!({
-                "status": record.transcript_status,
-                "transcript": payload,
-            }))
-            .into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "message": "Transcript not available" })),
-        )
-            .into_response(),
-        Err(err) => {
-            warn!(call_id = %record.call_id, "failed to load stored transcript: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load transcript" })),
-            )
-                .into_response()
-        }
-    }
-}
-
-async fn trigger_call_record_transcript(
-    AxumPath(pk): AxumPath<i64>,
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-    Json(payload): Json<TranscriptRequest>,
-) -> Response {
-    let db = state.db();
-    let mut record = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(
-                id = pk,
-                "failed to load call record for transcription: {}", err
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": err.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    let TranscriptRequest { force, language } = payload;
-
-    let app_state = match state.app_state() {
-        Some(app) => app,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "message": "Application state unavailable" })),
-            )
-                .into_response();
-        }
-    };
-
-    let transcript_cfg = match app_state
-        .config
-        .proxy
-        .as_ref()
-        .and_then(|cfg| cfg.transcript.as_ref())
-    {
-        Some(cfg) => cfg.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "message": "SenseVoice CLI transcription is not configured" })),
-            )
-                .into_response();
-        }
-    };
-
-    let cdr_data = load_cdr_data(&state, &record).await;
-    let recording_path = match select_recording_path(&record, cdr_data.as_ref()) {
-        Some(path) => path,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Recording file not found for this call" })),
-            )
-                .into_response();
-        }
-    };
-
-    if record.has_transcript && !force {
-        if let Ok(Some(stored)) = load_stored_transcript(&record, cdr_data.as_ref()).await {
-            let payload = build_transcript_payload_value(&record, Some(&stored));
-            return Json(json!({
-                "status": record.transcript_status,
-                "transcript": payload,
-            }))
-            .into_response();
-        }
-    }
-
-    if record.transcript_status.eq_ignore_ascii_case("processing") && !force {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "message": "Transcription already in progress" })),
-        )
-            .into_response();
-    }
-
-    let asr_model = Some("sensevoice-cli".to_string());
-    let command = transcript_cfg
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|cmd| !cmd.is_empty())
-        .unwrap_or("sensevoice-cli")
-        .to_string();
-
-    if !command_exists(&command) {
-        return (
-            StatusCode::FAILED_DEPENDENCY,
-            Json(json!({
-                "message": format!(
-                    "sensevoice-cli is not available (looked for '{}'). Install via `cargo install sensevoice-cli` or configure proxy.transcript.command.",
-                    command
-                )
-            })),
-        )
-            .into_response();
-    }
-
-    let models_path = match resolve_models_path(&transcript_cfg) {
-        Some(path) => path,
-        None => {
-            return (
-                StatusCode::FAILED_DEPENDENCY,
-                Json(json!({
-                    "message": "SenseVoice model path is not configured. Set MODEL_PATH or proxy.transcript.models_path and download the model before transcribing.",
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let model_file = model_file_path(&models_path);
-    if tokio::fs::metadata(&model_file).await.is_err() {
-        return (
-            StatusCode::FAILED_DEPENDENCY,
-            Json(json!({
-                "message": format!(
-                    "SenseVoice model not found at {}. Download it from Settings → ASR integrations before retrying.",
-                    model_file.display()
-                )
-            })),
-        )
-            .into_response();
-    }
-
-    let storage = cdr_data.as_ref().and_then(|cdr| cdr.storage.clone());
-
-    let transcript_storage_path = if let Some(cdr_ref) = cdr_data.as_ref() {
-        let mut path = PathBuf::from(&cdr_ref.cdr_path);
-        path.set_extension("transcript.json");
-        path.to_string_lossy().into_owned()
-    } else {
-        let mut path = PathBuf::from(&recording_path);
-        path.set_extension("transcript.json");
-        path.to_string_lossy().into_owned()
-    };
-
-    let local_transcript_path = match storage.as_ref() {
-        Some(storage_ref) => storage_ref
-            .local_full_path(&transcript_storage_path)
-            .unwrap_or_else(|| {
-                let mut temp_path = env::temp_dir();
-                temp_path.push(format!(
-                    "rustpbx-{}-{}.transcript.json",
-                    record.call_id,
-                    Uuid::new_v4()
-                ));
-                temp_path
-            }),
-        None => PathBuf::from(&transcript_storage_path),
-    };
-
-    if let Some(parent) = local_transcript_path.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            warn!(dir = %parent.display(), "failed to ensure transcript directory: {}", err);
-        }
-    }
-
-    if tokio::fs::metadata(&local_transcript_path).await.is_ok() {
-        if let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
-            warn!(
-                file = %local_transcript_path.display(),
-                "failed to remove existing transcript before transcription: {}",
-                err
-            );
-        }
-    }
-
-    let transcript_output_path = local_transcript_path.to_string_lossy().into_owned();
-
-    let now = Utc::now();
-    if let Err(err) = (CallRecordActiveModel {
-        id: Set(record.id),
-        transcript_status: Set("processing".to_string()),
-        updated_at: Set(now),
-        ..Default::default()
-    })
-    .update(db)
-    .await
-    {
-        warn!(call_id = %record.call_id, "failed to update transcript status: {}", err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "message": "Failed to update call record" })),
-        )
-            .into_response();
-    }
-    record.transcript_status = "processing".to_string();
-    record.updated_at = now;
-    let mut cmd: tokio::process::Command = build_sensevoice_transcribe_command(
-        &command,
-        &recording_path,
-        Some(models_path.as_str()),
-        Some(transcript_output_path.as_str()),
-    );
-    let command_args: Vec<String> = cmd
-        .as_std()
-        .get_args()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-
-    let start_instant = Instant::now();
-    let output_result = if let Some(timeout_secs) = transcript_cfg.timeout_secs {
-        match timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
-            Ok(result) => result,
-            Err(_) => {
-                warn!(call_id = %record.call_id, timeout_secs, "sensevoice-cli timed out");
-                let _ = (CallRecordActiveModel {
-                    id: Set(record.id),
-                    transcript_status: Set("failed".to_string()),
-                    updated_at: Set(Utc::now()),
-                    ..Default::default()
-                })
-                .update(db)
-                .await;
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(json!({
-                        "message": format!(
-                            "sensevoice-cli timed out after {} seconds",
-                            timeout_secs
-                        )
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        cmd.output().await
-    };
-
-    let output = match output_result {
-        Ok(output) => output,
-        Err(err) => {
-            warn!(call_id = %record.call_id, "sensevoice-cli failed to execute: {}", err);
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": format!("Failed to execute sensevoice-cli: {}", err) })),
-            )
-                .into_response();
-        }
-    };
-
-    if !output.status.success() {
-        let stderr_full = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stderr_preview = stderr_full.chars().take(160).collect::<String>();
-        let mut client_message = "sensevoice-cli transcription failed".to_string();
-        let mut status_code = StatusCode::BAD_GATEWAY;
-
-        if stderr_full.to_ascii_lowercase().contains("unsupported")
-            && stderr_full.to_ascii_lowercase().contains("codec")
-        {
-            client_message = "SenseVoice CLI cannot process this recording codec. Convert the audio to PCM (16 kHz) or enable a supported codec before retrying.".to_string();
-            status_code = StatusCode::UNPROCESSABLE_ENTITY;
-        }
-        warn!(
-            call_id = %record.call_id,
-            %command,
-            args = %command_args.join(" "),
-            code = output.status.code(),
-            stderr = %stderr_preview,
-            "sensevoice-cli exited with failure"
-        );
-        let _ = (CallRecordActiveModel {
-            id: Set(record.id),
-            transcript_status: Set("failed".to_string()),
-            updated_at: Set(Utc::now()),
-            ..Default::default()
-        })
-        .update(db)
-        .await;
-        return (status_code, Json(json!({ "message": client_message }))).into_response();
-    }
-
-    let elapsed_secs = start_instant.elapsed().as_secs_f64();
-
-    info!(
-        call_id = %record.call_id,
-        %command,
-        args = %command_args.join(" "),
-        elapsed_secs,
-        "sensevoice-cli transcription completed successfully"
-    );
-
-    let transcript_bytes = match tokio::fs::read(&local_transcript_path).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(
-                call_id = %record.call_id,
-                file = %local_transcript_path.display(),
-                "sensevoice-cli succeeded but transcript file missing: {}",
-                err
-            );
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": "SenseVoice CLI did not produce transcript data" })),
-            )
-                .into_response();
-        }
-    };
-
-    let cli_output: Vec<SenseVoiceCliChannel> = match serde_json::from_slice(&transcript_bytes) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            let preview = String::from_utf8_lossy(&transcript_bytes)
-                .chars()
-                .take(160)
-                .collect::<String>();
-            warn!(
-                call_id = %record.call_id,
-                error = %err,
-                file = %local_transcript_path.display(),
-                preview = %preview,
-                "failed to parse sensevoice-cli transcript file"
-            );
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "message": "Invalid sensevoice-cli output" })),
-            )
-                .into_response();
-        }
-    };
-
-    let mut stored_segments: Vec<StoredTranscriptSegment> = Vec::new();
-    let mut idx_counter: u32 = 0;
-    let mut max_end = 0.0_f64;
-    let mut rtfs: Vec<f64> = Vec::new();
-    let mut durations: Vec<f64> = Vec::new();
-
-    for channel in cli_output.into_iter() {
-        if let Some(rtf_value) = channel.rtf {
-            rtfs.push(rtf_value);
-        }
-        if let Some(duration_value) = channel.duration_sec {
-            durations.push(duration_value);
-        }
-        for segment in channel.segments.into_iter() {
-            let text = segment.text.trim();
-            if text.is_empty() {
-                continue;
-            }
-            if let Some(end) = segment.end_sec {
-                if end > max_end {
-                    max_end = end;
-                }
-            }
-            stored_segments.push(StoredTranscriptSegment {
-                idx: Some(idx_counter),
-                text: text.to_string(),
-                start: segment.start_sec,
-                end: segment.end_sec,
-                channel: channel.channel,
-            });
-            idx_counter += 1;
-        }
-    }
-
-    if stored_segments.is_empty() {
-        info!(
-            call_id = %record.call_id,
-            "sensevoice-cli returned no transcript segments; treating as empty transcript"
-        );
-    }
-
-    let average_rtf = if rtfs.is_empty() {
-        None
-    } else {
-        Some(rtfs.iter().copied().sum::<f64>() / rtfs.len() as f64)
-    };
-
-    let audio_duration = durations.into_iter().fold(None, |acc: Option<f64>, value| {
-        Some(acc.map_or(value, |current| current.max(value)))
-    });
-
-    let elapsed = Some(elapsed_secs);
-    let rtf = average_rtf;
-
-    let mut dedup = HashSet::new();
-    let mut text_parts: Vec<String> = Vec::new();
-    for segment in &stored_segments {
-        let trimmed = segment.text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let key = format!(
-            "{}::{:.3}-{:.3}",
-            trimmed,
-            segment.start.unwrap_or_default(),
-            segment.end.unwrap_or_default()
-        );
-        if dedup.insert(key) {
-            text_parts.push(trimmed.to_string());
-        }
-    }
-
-    let transcript_text = text_parts.join(" ");
-    let word_count = transcript_text.split_whitespace().count();
-    let max_end = stored_segments
-        .iter()
-        .filter_map(|segment| segment.end)
-        .fold(0.0_f64, f64::max);
-    let duration_secs = audio_duration.or_else(|| if max_end > 0.0 { Some(max_end) } else { None });
-
-    let analysis = StoredTranscriptAnalysis {
-        elapsed,
-        rtf,
-        word_count,
-        asr_model,
-    };
-
-    let language_final = language
-        .clone()
-        .or(record.transcript_language.clone())
-        .or(transcript_cfg.default_language.clone());
-    let stored_transcript = StoredTranscript {
-        version: 1,
-        source: "sensevoice-cli".to_string(),
-        generated_at: Utc::now(),
-        language: language_final.clone(),
-        duration_secs,
-        sample_rate: transcript_cfg.samplerate,
-        segments: stored_segments,
-        text: transcript_text.clone(),
-        analysis: Some(analysis),
-    };
-
-    let excerpt = transcript_excerpt(&transcript_text, 240);
-
-    let serialized_transcript = match serde_json::to_vec_pretty(&stored_transcript) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(call_id = %record.call_id, "failed to serialize transcript: {}", err);
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to serialize transcript" })),
-            )
-                .into_response();
-        }
-    };
-
-    let transcript_metadata_path = if let Some(storage_ref) = storage.as_ref() {
-        match storage_ref
-            .write_bytes(&transcript_storage_path, &serialized_transcript)
-            .await
-        {
-            Ok(stored_path) => {
-                if !storage_ref.is_local() {
-                    if let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
-                        if err.kind() != ErrorKind::NotFound {
-                            warn!(
-                                file = %local_transcript_path.display(),
-                                "failed to remove transient transcript file: {}",
-                                err
-                            );
-                        }
-                    }
-                }
-                stored_path
-            }
-            Err(err) => {
-                warn!(
-                    call_id = %record.call_id,
-                    path = %transcript_storage_path,
-                    "failed to persist transcript via call record storage: {}",
-                    err
-                );
-                let _ = (CallRecordActiveModel {
-                    id: Set(record.id),
-                    transcript_status: Set("failed".to_string()),
-                    updated_at: Set(Utc::now()),
-                    ..Default::default()
-                })
-                .update(db)
-                .await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "message": "Failed to persist transcript" })),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        if let Err(err) = tokio::fs::write(&local_transcript_path, &serialized_transcript).await {
-            warn!(
-                file = %local_transcript_path.display(),
-                "failed to write transcript file: {}",
-                err
-            );
-            let _ = (CallRecordActiveModel {
-                id: Set(record.id),
-                transcript_status: Set("failed".to_string()),
-                updated_at: Set(Utc::now()),
-                ..Default::default()
-            })
-            .update(db)
-            .await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to persist transcript" })),
-            )
-                .into_response();
-        }
-        local_transcript_path.to_string_lossy().into_owned()
-    };
-
-    update_cdr_with_transcript(
-        cdr_data.as_ref(),
-        &stored_transcript,
-        &transcript_metadata_path,
-        &excerpt,
-    )
-    .await;
-
-    let mut metadata_map = match record.metadata.clone() {
-        Some(Value::Object(map)) => map,
-        _ => JsonMap::new(),
-    };
-    metadata_map.insert(
-        "transcript".to_string(),
-        json!({
-            "file": transcript_metadata_path,
-            "language": language_final,
-            "generated_at": stored_transcript.generated_at.to_rfc3339(),
-            "duration_secs": stored_transcript.duration_secs,
-            "excerpt": excerpt,
-            "model": stored_transcript
-                .analysis
-                .as_ref()
-                .and_then(|analysis| analysis.asr_model.clone()),
-            "word_count": stored_transcript
-                .analysis
-                .as_ref()
-                .map(|analysis| analysis.word_count),
-        }),
-    );
-    let metadata_value = if metadata_map.is_empty() {
-        None
-    } else {
-        Some(Value::Object(metadata_map))
-    };
-
-    let mut analytics_map = match record.analytics.clone() {
-        Some(Value::Object(map)) => map,
-        _ => JsonMap::new(),
-    };
-    analytics_map.insert(
-        "transcript".to_string(),
-        json!({
-            "segment_count": stored_transcript.segments.len(),
-            "word_count": stored_transcript
-                .analysis
-                .as_ref()
-                .map(|analysis| analysis.word_count)
-                .unwrap_or(word_count),
-            "duration_secs": stored_transcript.duration_secs,
-            "model": stored_transcript
-                .analysis
-                .as_ref()
-                .and_then(|analysis| analysis.asr_model.clone()),
-            "elapsed_secs": stored_transcript
-                .analysis
-                .as_ref()
-                .and_then(|analysis| analysis.elapsed),
-            "rtf": stored_transcript
-                .analysis
-                .as_ref()
-                .and_then(|analysis| analysis.rtf),
-        }),
-    );
-    let analytics_value = if analytics_map.is_empty() {
-        None
-    } else {
-        Some(Value::Object(analytics_map))
-    };
-
-    let updated_at = Utc::now();
-    if let Err(err) = (CallRecordActiveModel {
-        id: Set(record.id),
-        has_transcript: Set(true),
-        transcript_status: Set("completed".to_string()),
-        transcript_language: Set(stored_transcript.language.clone()),
-        metadata: Set(metadata_value.clone()),
-        analytics: Set(analytics_value.clone()),
-        updated_at: Set(updated_at),
-        ..Default::default()
-    })
-    .update(db)
-    .await
-    {
-        warn!(call_id = %record.call_id, "failed to update call record after transcription: {}", err);
-    }
-
-    record.has_transcript = true;
-    record.transcript_status = "completed".to_string();
-    record.transcript_language = stored_transcript.language.clone();
-    record.metadata = metadata_value;
-    record.analytics = analytics_value;
-    record.updated_at = updated_at;
-
-    info!(call_id = %record.call_id, "transcript generated successfully");
-
-    let payload = build_transcript_payload_value(&record, Some(&stored_transcript));
-    Json(json!({
-        "status": record.transcript_status,
-        "transcript": payload,
-    }))
-    .into_response()
-}
-
 async fn page_call_record_detail(
     AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
@@ -1508,18 +708,6 @@ async fn page_call_record_detail(
     };
 
     let cdr_data = load_cdr_data(&state, &model).await;
-    let stored_transcript = match load_stored_transcript(&model, cdr_data.as_ref()).await {
-        Ok(value) => value,
-        Err(err) => {
-            warn!(
-                id = pk,
-                call_id = %model.call_id,
-                "failed to load stored transcript for detail view: {}",
-                err
-            );
-            None
-        }
-    };
 
     let mut sip_flow_items: Vec<LeggedSipMessage> = if let Some(ref cdr) = cdr_data {
         load_sip_flow_from_files(cdr.storage.as_ref(), &cdr.sip_flow_paths).await
@@ -1576,14 +764,7 @@ async fn page_call_record_detail(
         sip_flow_items.sort_by(|a, b| a.item.timestamp.cmp(&b.item.timestamp));
     }
 
-    let payload = build_detail_payload(
-        &model,
-        &related,
-        &state,
-        sip_flow_items,
-        cdr_data.as_ref(),
-        stored_transcript.as_ref(),
-    );
+    let payload = build_detail_payload(&model, &related, &state, sip_flow_items, cdr_data.as_ref());
 
     state.render(
         "console/call_record_detail.html",
@@ -1592,6 +773,8 @@ async fn page_call_record_detail(
             "page_title": format!("Call record · {}", pk),
             "call_id": model.call_id,
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
+
+            "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", pk)),
         }),
     )
 }
@@ -2049,10 +1232,10 @@ fn resolve_cdr_storage(state: &ConsoleState) -> Option<CdrStorage> {
 }
 
 #[derive(Debug, Clone)]
-struct SipFlowFileRef {
-    leg: Option<String>,
-    leg_role: Option<String>,
-    path: String,
+pub struct SipFlowFileRef {
+    pub leg: Option<String>,
+    pub leg_role: Option<String>,
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2240,12 +1423,12 @@ fn friendly_leg_role_label(role: &str) -> &'static str {
     }
 }
 
-struct CdrData {
-    record: CallRecord,
-    raw_content: String,
-    sip_flow_paths: Vec<SipFlowFileRef>,
-    cdr_path: String,
-    storage: Option<CdrStorage>,
+pub struct CdrData {
+    pub record: CallRecord,
+    pub raw_content: String,
+    pub sip_flow_paths: Vec<SipFlowFileRef>,
+    pub cdr_path: String,
+    pub storage: Option<CdrStorage>,
 }
 
 fn build_record_payload(
@@ -2403,7 +1586,7 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
     }
 }
 
-async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
+pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
     let storage = resolve_cdr_storage(state);
 
     let mut candidates: Vec<String> = Vec::new();
@@ -2458,104 +1641,6 @@ async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option
     None
 }
 
-async fn load_stored_transcript(
-    record: &CallRecordModel,
-    cdr: Option<&CdrData>,
-) -> AnyResult<Option<StoredTranscript>> {
-    let mut candidates: Vec<String> = Vec::new();
-
-    if let Some(path) = transcript_file_from_metadata(&record.metadata) {
-        candidates.push(path);
-    }
-
-    if let Some(cdr_data) = cdr {
-        if let Some(path) = transcript_file_from_cdr(&cdr_data.record) {
-            candidates.push(path);
-        } else {
-            let mut fallback = PathBuf::from(&cdr_data.cdr_path);
-            fallback.set_extension("transcript.json");
-            candidates.push(fallback.to_string_lossy().into_owned());
-        }
-    }
-
-    candidates.retain(|candidate| !candidate.trim().is_empty());
-    candidates.dedup();
-
-    let storage = cdr.and_then(|data| data.storage.as_ref());
-
-    for candidate in candidates {
-        let path = candidate.trim();
-        match read_transcript_file(storage, path).await {
-            Ok(mut transcript) => {
-                if transcript.source.trim().is_empty() {
-                    transcript.source = "sensevoice-cli".to_string();
-                }
-                return Ok(Some(transcript));
-            }
-            Err(err) => {
-                warn!(call_id = %record.call_id, file = %path, "failed to read transcript file: {}", err);
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn resolve_models_path(cfg: &TranscriptConfig) -> Option<String> {
-    if let Ok(env_path) = std::env::var("MODEL_PATH") {
-        let trimmed = env_path.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    cfg.models_path
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-}
-
-async fn read_transcript_file(
-    storage: Option<&CdrStorage>,
-    path: &str,
-) -> AnyResult<StoredTranscript> {
-    if let Some(storage_ref) = storage {
-        if let Ok(content) = storage_ref.read_to_string(path).await {
-            let transcript: StoredTranscript = serde_json::from_str(&content)
-                .with_context(|| format!("parse transcript file {}", path))?;
-            return Ok(transcript);
-        }
-    }
-
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("read transcript file {}", path))?;
-    let transcript: StoredTranscript = serde_json::from_str(&content)
-        .with_context(|| format!("parse transcript file {}", path))?;
-    Ok(transcript)
-}
-
-fn transcript_file_from_cdr(record: &CallRecord) -> Option<String> {
-    record
-        .extras
-        .as_ref()
-        .and_then(|extras| extras.get("transcript_file"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn transcript_file_from_metadata(metadata: &Option<Value>) -> Option<String> {
-    metadata
-        .as_ref()
-        .and_then(|value| value.get("transcript"))
-        .and_then(|value| value.get("file"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn extract_cdr_path_from_metadata(metadata: &Option<Value>) -> Option<String> {
     metadata
         .as_ref()
@@ -2607,76 +1692,6 @@ fn extract_sip_flow_paths_from_cdr(record: &CallRecord) -> Vec<SipFlowFileRef> {
     paths
 }
 
-fn build_transcript_payload_value(
-    record: &CallRecordModel,
-    transcript: Option<&StoredTranscript>,
-) -> Value {
-    if let Some(data) = transcript {
-        let segments: Vec<Value> = data
-            .segments
-            .iter()
-            .map(|segment| {
-                let speaker = segment
-                    .channel
-                    .map(|ch| format!("Channel {}", ch + 1))
-                    .unwrap_or_else(|| "Speaker".to_string());
-                json!({
-                    "idx": segment.idx,
-                    "text": segment.text,
-                    "start": segment.start,
-                    "end": segment.end,
-                    "channel": segment.channel,
-                    "speaker": speaker,
-                })
-            })
-            .collect();
-
-        json!({
-            "available": true,
-            "status": record.transcript_status,
-            "language": data
-                .language
-                .clone()
-                .or(record.transcript_language.clone()),
-            "generated_at": data.generated_at.to_rfc3339(),
-            "duration_secs": data.duration_secs,
-            "text": data.text,
-            "segments": segments,
-            "source": data.source,
-            "analysis": data.analysis,
-        })
-    } else {
-        json!({
-            "available": record.has_transcript,
-            "status": record.transcript_status,
-            "language": record.transcript_language,
-            "generated_at": record.updated_at.to_rfc3339(),
-            "duration_secs": Value::Null,
-            "text": "",
-            "segments": Value::Array(vec![]),
-            "source": Value::Null,
-            "analysis": Value::Null,
-        })
-    }
-}
-
-fn transcript_excerpt(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    if limit == 0 {
-        return String::new();
-    }
-    let mut end = limit.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == 0 {
-        return String::new();
-    }
-    format!("{}…", &text[..end])
-}
-
 fn guess_audio_mime(file_name: &str) -> &'static str {
     let ext = Path::new(file_name)
         .extension()
@@ -2691,7 +1706,7 @@ fn guess_audio_mime(file_name: &str) -> &'static str {
     }
 }
 
-fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) -> Option<String> {
+pub fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) -> Option<String> {
     if let Some(cdr_data) = cdr {
         for media in &cdr_data.record.recorder {
             let path = media.path.trim();
@@ -2712,57 +1727,6 @@ fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) -> Opt
     }
 
     None
-}
-
-async fn update_cdr_with_transcript(
-    cdr: Option<&CdrData>,
-    transcript: &StoredTranscript,
-    path: &str,
-    excerpt: &str,
-) {
-    let Some(cdr_data) = cdr else {
-        return;
-    };
-
-    let mut record = cdr_data.record.clone();
-    let mut extras = record.extras.unwrap_or_default();
-    extras.insert(
-        "transcript_file".to_string(),
-        Value::String(path.to_string()),
-    );
-    extras.insert(
-        "transcript_generated_at".to_string(),
-        Value::String(transcript.generated_at.to_rfc3339()),
-    );
-    if let Some(language) = transcript.language.as_ref() {
-        extras.insert(
-            "transcript_language".to_string(),
-            Value::String(language.clone()),
-        );
-    }
-    extras.insert(
-        "transcript_excerpt".to_string(),
-        Value::String(excerpt.to_string()),
-    );
-    record.extras = Some(extras);
-
-    match serde_json::to_string_pretty(&record) {
-        Ok(serialized) => {
-            if let Some(storage_ref) = cdr_data.storage.as_ref() {
-                if let Err(err) = storage_ref
-                    .write_bytes(&cdr_data.cdr_path, serialized.as_bytes())
-                    .await
-                {
-                    warn!(file = %cdr_data.cdr_path, "failed to write CDR with transcript metadata: {}", err);
-                }
-            } else if let Err(err) = tokio::fs::write(&cdr_data.cdr_path, serialized).await {
-                warn!(file = %cdr_data.cdr_path, "failed to write CDR with transcript metadata: {}", err);
-            }
-        }
-        Err(err) => {
-            warn!(file = %cdr_data.cdr_path, "failed to serialize CDR with transcript metadata: {}", err);
-        }
-    }
 }
 
 async fn load_sip_flow_from_files(
@@ -2819,7 +1783,6 @@ fn build_detail_payload(
     state: &ConsoleState,
     mut sip_flow: Vec<LeggedSipMessage>,
     cdr: Option<&CdrData>,
-    transcript: Option<&StoredTranscript>,
 ) -> Value {
     let inline_recording_url = select_recording_path(record, cdr)
         .map(|_| state.url_for(&format!("/call-records/{}/recording", record.id)));
@@ -2830,77 +1793,6 @@ fn build_detail_payload(
         .get("billing")
         .cloned()
         .unwrap_or_else(|| build_billing_payload(record));
-    let transcript_payload = build_transcript_payload_value(record, transcript);
-    let transcript_preview = transcript
-        .map(|data| {
-            json!({
-                "excerpt": transcript_excerpt(&data.text, 360),
-                "language": data.language,
-                "generated_at": data.generated_at.to_rfc3339(),
-            })
-        })
-        .unwrap_or(Value::Null);
-
-    let transcript_capabilities = {
-        let mut configured = false;
-        let mut command: Option<String> = None;
-        let mut command_exists_flag = false;
-        let mut models_path: Option<String> = None;
-        let mut model_exists_flag = false;
-        let mut issues: Vec<String> = Vec::new();
-
-        if let Some(app) = state.app_state() {
-            if let Some(proxy_cfg) = app.config.proxy.as_ref() {
-                if let Some(transcript_cfg) = proxy_cfg.transcript.as_ref() {
-                    configured = true;
-                    let resolved_command = transcript_cfg
-                        .command
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("sensevoice-cli");
-                    command = Some(resolved_command.to_string());
-                    command_exists_flag = command_exists(resolved_command);
-
-                    if let Some(path) = resolve_models_path(transcript_cfg) {
-                        models_path = Some(path.clone());
-                        let model_path = model_file_path(&path);
-                        model_exists_flag = model_path.exists();
-                        if !model_exists_flag {
-                            issues.push(format!(
-                                "SenseVoice model not found at {}.",
-                                model_path.display()
-                            ));
-                        }
-                    } else {
-                        issues.push("SenseVoice models_path is not configured.".to_string());
-                    }
-
-                    if !command_exists_flag {
-                        issues.push("sensevoice-cli binary not found on server PATH.".to_string());
-                    }
-                } else {
-                    issues.push("SenseVoice CLI transcription is not configured.".to_string());
-                }
-            } else {
-                issues.push("Proxy configuration unavailable.".to_string());
-            }
-        } else {
-            issues.push("Application state unavailable.".to_string());
-        }
-
-        json!({
-            "sensevoice_cli": {
-                "configured": configured,
-                "command": command,
-                "command_exists": command_exists_flag,
-                "models_path": models_path,
-                "model_exists": model_exists_flag,
-                "ready": configured && command_exists_flag && model_exists_flag,
-                "missing": issues,
-            }
-        })
-    };
 
     let media_metrics = json!({
         "audio_codec": json_lookup_str(&record.metadata, "audio_codec"),
@@ -2987,8 +1879,6 @@ fn build_detail_payload(
         "record": record_payload,
         "sip_flow": sip_flow_value,
         "media_metrics": media_metrics,
-        "transcript": transcript_payload,
-        "transcript_preview": transcript_preview,
         "notes": build_console_note_payload(&record.metadata),
         "participants": participants,
         "signaling": signaling,
@@ -2998,7 +1888,6 @@ fn build_detail_payload(
             "snapshot": record.billing_snapshot.clone().unwrap_or(Value::Null),
             "result": record.billing_result.clone().unwrap_or(Value::Null),
         }),
-        "transcript_capabilities": transcript_capabilities,
         "actions": json!({
             "download_recording": download_recording,
             "download_metadata": metadata_download,

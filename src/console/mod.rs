@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock, Weak};
 
 pub mod auth;
-mod handlers;
+pub mod handlers;
 pub mod middleware;
 pub use handlers::router;
 
@@ -129,6 +129,18 @@ impl ConsoleState {
             },
         );
 
+        tmpl_env.add_filter(
+            "json",
+            |value: minijinja::Value| -> Result<String, minijinja::Error> {
+                serde_json::to_string(&value).map_err(|e| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("failed to serialize to json: {}", e),
+                    )
+                })
+            },
+        );
+
         let mut paths = vec!["templates".to_string()];
         if let Some(app_state) = self.app_state() {
             paths.extend(
@@ -186,6 +198,14 @@ impl ConsoleState {
             .read()
             .ok()
             .and_then(|opt| opt.as_ref().and_then(|weak| weak.upgrade()))
+    }
+
+    pub fn get_injected_scripts(&self, path: &str) -> Option<Vec<String>> {
+        self.app_state().map(|app_state| {
+            app_state
+                .addon_registry
+                .get_injected_scripts(path, &app_state.config)
+        })
     }
 
     pub fn url_for(&self, suffix: &str) -> String {

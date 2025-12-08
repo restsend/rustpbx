@@ -105,7 +105,11 @@ pub trait Addon: Send + Sync {
     }
 }
 
-pub mod acme;
 pub mod registry;
+
+#[cfg(feature = "addon-acme")]
+pub mod acme;
+#[cfg(feature = "addon-transcript")]
+pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;

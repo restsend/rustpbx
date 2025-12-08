@@ -79,32 +79,6 @@ pub fn build_sensevoice_transcribe_command(
     cmd
 }
 
-pub fn build_sensevoice_download_command(
-    command: &str,
-    models_path: &str,
-    hf_endpoint: Option<&str>,
-) -> Command {
-    let mut cmd = Command::new(command);
-    cmd.env("NO_COLOR", "1");
-
-    let trimmed_models_path = models_path.trim();
-    if !trimmed_models_path.is_empty() {
-        cmd.env("MODELS_PATH", trimmed_models_path);
-        cmd.arg("--models-path").arg(trimmed_models_path);
-    }
-
-    if let Some(endpoint) = hf_endpoint
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        cmd.env("HF_ENDPOINT", endpoint);
-        cmd.env("HF_MIRROR", endpoint);
-        cmd.arg("--hf-endpoint").arg(endpoint);
-    }
-    cmd.arg("--download-only");
-    cmd
-}
-
 pub fn model_file_path(base_dir: &str) -> PathBuf {
     Path::new(base_dir).join("model.int8.onnx")
 }

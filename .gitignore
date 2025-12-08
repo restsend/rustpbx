@@ -38,9 +38,11 @@ src/addons/wholesale
 miuda.docs
 config/cdr
 config/recorders
+config/models
 config/acl/*.toml
 config/queue/*.toml
 config/routes/*.toml
 config/trunks/*.toml
 *.bak
 *.jsonl
+config.toml.dev

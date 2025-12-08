@@ -915,108 +915,8 @@
                 </div>
             </div>
         </section>
-        <section x-show="activeTab === 'transcript'" x-cloak x-transition.opacity class="space-y-6"
-            id="settings-tab-transcript" role="tabpanel" tabindex="0">
-            <div class="space-y-6">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                            <h2 class="text-base font-semibold text-slate-900">SenseVoice CLI</h2>
-                            <p class="text-xs text-slate-500">Configure the local transcription workflow powered by
-                                <a class="underline text-bold text-gray-800"
-                                    href="https://github.com/restsend/sensevoice-cli"
-                                    target="_blank">sensevoice-cli</a>.
-                            </p>
-                        </div>
-                        <span class="rounded-full px-3 py-1 text-[11px] font-semibold"
-                            :class="sensevoiceModelReady ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'">
-                            <span x-text="sensevoiceModelReady ? 'Model ready' : 'Model missing'"></span>
-                        </span>
-                    </div>
-                    <form class="mt-4 space-y-4" @submit.prevent="downloadSensevoiceModel">
-                        <div class="grid gap-4 lg:grid-cols-2">
-                            <label
-                                class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                                CLI command
-                                <input type="text" x-model="sensevoiceDraft.command" :disabled="sensevoiceProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="sensevoice-cli" />
-                            </label>
-                            <label
-                                class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                                Models path
-                                <input type="text" x-model="sensevoiceDraft.models_path"
-                                    :disabled="sensevoiceProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="/opt/sensevoice" />
-                            </label>
-                        </div>
-                        <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            HF endpoint (optional)
-                            <input type="text" x-model="sensevoiceDraft.hf_endpoint" :disabled="sensevoiceProcessing"
-                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="https://hf-mirror.com" />
-                        </label>
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                            <div class="flex flex-col gap-1">
-                                <div>
-                                    <span class="font-semibold text-slate-700">Effective path:</span>
-                                    <span class="font-mono"
-                                        x-text="sensevoice?.effective_models_path || sensevoiceDraft.models_path || '—'"></span>
-                                </div>
-                                <div>
-                                    <span class="font-semibold text-slate-700">Model file:</span>
-                                    <span class="font-mono break-all" x-text="sensevoice?.model_file || '—'"></span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-                            <div class="text-xs text-slate-500" x-show="sensevoiceStatus" x-cloak>
-                                <span class="font-semibold" x-text="sensevoiceStatus?.message"></span>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <button type="button"
-                                    class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                    @click="resetSensevoiceDraft()" :disabled="sensevoiceProcessing">
-                                    Reset
-                                </button>
-                                <button type="submit"
-                                    class="inline-flex items-center justify-center gap-2 rounded-md bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                                    :disabled="sensevoiceProcessing || !(sensevoiceDraft.models_path || '').trim().length">
-                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.6">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 11l3 3 7-7" />
-                                    </svg>
-                                    <span
-                                        x-text="sensevoiceProcessing ? 'Downloading…' : 'Download / Update model'"></span>
-                                </button>
-                            </div>
-                        </div>
-                    </form>
-                    <template x-if="sensevoiceHasOutput">
-                        <div class="mt-4 space-y-3 text-xs text-slate-600">
-                            <div>
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Stdout
-                                </div>
-                                <pre class="mt-1 max-h-48 overflow-y-auto rounded-md bg-slate-900/95 p-3 font-mono text-[11px] text-emerald-200"
-                                    x-text="sensevoiceOutput?.stdout || ''"></pre>
-                            </div>
-                            <template x-if="(sensevoiceOutput?.stderr || '').length">
-                                <div>
-                                    <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Stderr
-                                    </div>
-                                    <pre class="mt-1 max-h-48 overflow-y-auto rounded-md bg-slate-900/95 p-3 font-mono text-[11px] text-rose-200"
-                                        x-text="sensevoiceOutput?.stderr || ''"></pre>
-                                </div>
-                            </template>
-                        </div>
-                    </template>
-                </div>
-            </div>
-        </section>
 
-        <section x-show="activeTab === 'departments'" x-cloak x-transition.opacity class="space-y-6"
-            id="settings-tab-departments" role="tabpanel" tabindex="0">
+        <section x-show="activeTab === 'departments'" id="settings-tab-departments" role="tabpanel" tabindex="0">
             <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
@@ -1559,7 +1459,6 @@
                 { id: 'storage', label: 'Storage & retention' },
                 { id: 'recording', label: 'Recording policy' },
                 { id: 'security', label: 'Security posture' },
-                { id: 'transcript', label: 'Transcript' },
                 { id: 'departments', label: 'Departments' },
                 { id: 'users', label: 'Users', requiresSuperuser: true },
             ],
@@ -1625,15 +1524,6 @@
             recordingPolicy: null,
             retention: {},
             security: {},
-            sensevoice: {},
-            sensevoiceDraft: {
-                command: 'sensevoice-cli',
-                models_path: '',
-                hf_endpoint: '',
-            },
-            sensevoiceProcessing: false,
-            sensevoiceStatus: null,
-            sensevoiceOutput: null,
             directory: { departments: [], users: [], pending_invites: [] },
             selectedStorageProfile: '',
             selectedDepartmentId: '',
@@ -1741,17 +1631,6 @@
                     this.security.rate_limits.max_registration_concurrency = 0;
                 }
                 this.security.acl_rules = this.formatAclRules(this.acl.active_rules);
-                this.sensevoice = data.sensevoice || {};
-                if (!this.sensevoice || typeof this.sensevoice !== 'object') {
-                    this.sensevoice = {};
-                }
-                if (!Array.isArray(this.sensevoice.extra_args)) {
-                    this.sensevoice.extra_args = Array.isArray(data.sensevoice?.extra_args)
-                        ? data.sensevoice.extra_args
-                        : [];
-                }
-                this.sensevoice.model_ready = Boolean(this.sensevoice.model_ready);
-                this.initSensevoiceDraft();
                 const storageMeta = this.server.storage || {};
                 this.selectedStorageProfile = storageMeta.active_profile
                     || storageMeta.mode
@@ -1916,14 +1795,6 @@
                 }
                 const label = user.last_login_at ? this.formatDateTime(user.last_login_at) : '—';
                 return `Last login · ${label}`;
-            },
-            get sensevoiceModelReady() {
-                return Boolean(this.sensevoice && this.sensevoice.model_ready);
-            },
-            get sensevoiceHasOutput() {
-                const stdout = this.sensevoiceOutput?.stdout;
-                const stderr = this.sensevoiceOutput?.stderr;
-                return Boolean((stdout && stdout.trim().length) || (stderr && stderr.trim().length));
             },
             formatDateTime(value) {
                 if (!value) {
@@ -3416,107 +3287,6 @@
             },
             resetSecurityDraft() {
                 this.initSecurityDraft();
-            },
-            initSensevoiceDraft() {
-                const base = this.sensevoice || {};
-                this.sensevoiceDraft.command = (base.command || 'sensevoice-cli');
-                this.sensevoiceDraft.models_path = base.models_path || base.effective_models_path || '';
-                this.sensevoiceDraft.hf_endpoint = base.hf_endpoint || '';
-                this.sensevoiceStatus = null;
-                this.sensevoiceOutput = null;
-            },
-            resetSensevoiceDraft() {
-                this.initSensevoiceDraft();
-            },
-            async downloadSensevoiceModel() {
-                if (this.sensevoiceProcessing) {
-                    return;
-                }
-                if (!this.sensevoice || typeof this.sensevoice !== 'object') {
-                    this.sensevoice = {};
-                }
-                const command = (this.sensevoiceDraft.command || '').trim();
-                const modelsPath = (this.sensevoiceDraft.models_path || '').trim();
-                const hfEndpoint = (this.sensevoiceDraft.hf_endpoint || '').trim();
-                this.sensevoiceDraft.command = command;
-                this.sensevoiceDraft.models_path = modelsPath;
-                this.sensevoiceDraft.hf_endpoint = hfEndpoint;
-                if (!modelsPath.length) {
-                    this.sensevoiceStatus = {
-                        state: 'error',
-                        message: 'Models path is required.',
-                    };
-                    return;
-                }
-                const body = {};
-                if (command.length) {
-                    body.command = command;
-                }
-                if (modelsPath.length) {
-                    body.models_path = modelsPath;
-                }
-                if (hfEndpoint.length) {
-                    body.hf_endpoint = hfEndpoint;
-                }
-                this.sensevoiceProcessing = true;
-                this.sensevoiceStatus = {
-                    state: 'running',
-                    message: 'Downloading SenseVoice model…',
-                };
-                this.sensevoiceOutput = null;
-                try {
-                    const response = await fetch(`${this.basePath}/settings/asr/sensevoice/download`, {
-                        method: 'POST',
-                        headers: {
-                            Accept: 'application/json',
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(body),
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'SenseVoice model download failed');
-                    }
-                    const previousExtras = Array.isArray(this.sensevoice?.extra_args)
-                        ? this.sensevoice.extra_args
-                        : (Array.isArray(data?.extra_args) ? data.extra_args : []);
-                    this.sensevoice = {
-                        ...this.sensevoice,
-                        ...data,
-                        command: command || this.sensevoice?.command || 'sensevoice-cli',
-                        models_path: data?.models_path || modelsPath,
-                        effective_models_path: data?.models_path || modelsPath,
-                        hf_endpoint: hfEndpoint || this.sensevoice?.hf_endpoint || '',
-                        extra_args: previousExtras,
-                        model_ready: Boolean(data?.model_ready),
-                        model_file: data?.model_file || this.sensevoice?.model_file || null,
-                    };
-                    this.sensevoiceStatus = {
-                        state: 'success',
-                        message: data?.message || 'SenseVoice model download completed.',
-                    };
-                    this.sensevoiceOutput = {
-                        stdout: data?.stdout || '',
-                        stderr: data?.stderr || '',
-                    };
-                    this.$dispatch('toast', {
-                        title: 'SenseVoice updated',
-                        message: data?.message || 'Model download completed.',
-                    });
-                } catch (err) {
-                    console.error(err);
-                    this.sensevoiceStatus = {
-                        state: 'error',
-                        message: err?.message || 'Unable to download SenseVoice model.',
-                    };
-                    this.$dispatch('toast', {
-                        title: 'SenseVoice download failed',
-                        message: err?.message || 'Unable to download SenseVoice model.',
-                    });
-                } finally {
-                    this.sensevoiceProcessing = false;
-                    this.sensevoice.model_ready = Boolean(this.sensevoice?.model_ready);
-                }
             },
             async saveSecuritySettings() {
                 if (this.securityProcessing) {
