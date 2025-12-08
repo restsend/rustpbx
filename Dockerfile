@@ -17,6 +17,7 @@ ENV LANG=C.UTF-8
 WORKDIR /app
 COPY --from=rust-builder /build/target/static /app/static
 COPY --from=rust-builder /build/src/addons/acme/static /app/static/acme
+COPY --from=rust-builder /build/src/addons/transcript/static /app/static/transcript
 
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
 COPY --from=rust-builder /build/templates /app/templates

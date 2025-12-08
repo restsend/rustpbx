@@ -17,6 +17,10 @@ impl AddonRegistry {
         #[cfg(feature = "addon-wholesale")]
         addons.push(Box::new(super::wholesale::WholesaleAddon::new()));
 
+        // Transcript Addon
+        #[cfg(feature = "addon-transcript")]
+        addons.push(Box::new(super::transcript::TranscriptAddon::new()));
+
         Self { addons }
     }
 

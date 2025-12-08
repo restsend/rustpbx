@@ -1,0 +1,206 @@
+{% extends "console/layout.html" %}
+{% block title %}Transcript Settings · {{site_name|default('RustPBX')}}{% endblock %}
+{% block content %}
+<div class="p-6" x-data='transcriptSettings({
+    config: {{ config | default({}) | tojson }},
+    modelReady: {{ model_ready | default(false) | tojson }},
+    basePath: {{ base_path | default("/console") | tojson }}
+})'>
+    <div class="mx-auto max-w-7xl space-y-6">
+        <!-- Header -->
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Transcript Settings</h1>
+                <p class="text-sm text-slate-500">Configuration for SenseVoice call transcription.</p>
+            </div>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-1">
+            <form @submit.prevent="saveSettings" class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Configuration</h2>
+                        <p class="text-xs text-slate-500">Configure SenseVoice execution parameters.</p>
+                    </div>
+                    <button type="submit"
+                        class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                        :disabled="saving">
+                        <span x-text="saving ? 'Saving...' : 'Save Changes'"></span>
+                    </button>
+                </div>
+
+                <div class="mt-6 grid gap-6 sm:grid-cols-2">
+                    <div>
+                        <label
+                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Command</label>
+                        <input type="text" x-model="config.command"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sensevoice-cli">
+                        <p class="mt-1 text-xs text-slate-400">Path to the sensevoice-cli executable.</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Models
+                            Path</label>
+                        <input type="text" x-model="config.models_path"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="/path/to/models">
+                        <p class="mt-1 text-xs text-slate-400">Directory containing SenseVoice models.</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Default
+                            Language</label>
+                        <select x-model="config.default_language"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="auto">Auto Detect</option>
+                            <option value="zh">Chinese</option>
+                            <option value="en">English</option>
+                            <option value="ja">Japanese</option>
+                            <option value="ko">Korean</option>
+                            <option value="yue">Cantonese</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
+                            (seconds)</label>
+                        <input type="number" x-model.number="config.timeout_secs"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">HuggingFace
+                            Endpoint</label>
+                        <input type="text" x-model="config.hf_endpoint"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="https://hf-mirror.com">
+                        <p class="mt-1 text-xs text-slate-400">Optional mirror for model downloads (e.g.,
+                            https://hf-mirror.com).</p>
+                    </div>
+                </div>
+
+                <div class="mt-8 border-t border-slate-100 pt-6">
+                    <h3 class="text-sm font-semibold text-slate-900">Model Status</h3>
+                    <div
+                        class="mt-4 flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-4">
+                        <div class="flex items-center gap-3">
+                            <div class="flex h-10 w-10 items-center justify-center rounded-full"
+                                :class="modelReady ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'">
+                                <svg x-show="modelReady" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                                    stroke="currentColor" stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                                </svg>
+                                <svg x-show="!modelReady" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                                    stroke="currentColor" stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="text-sm font-semibold text-slate-900"
+                                    x-text="modelReady ? 'Model Available' : 'Model Missing'"></div>
+                                <div class="text-xs text-slate-500"
+                                    x-text="modelReady ? 'SenseVoice model is installed and ready.' : 'Model files not found in the configured path.'">
+                                </div>
+                            </div>
+                        </div>
+                        <button type="button"
+                            class="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                            @click="downloadModel" :disabled="downloading || modelReady">
+                            <span
+                                x-text="downloading ? 'Downloading...' : (modelReady ? 'Re-download' : 'Download Model')"></span>
+                        </button>
+                    </div>
+
+                    <div x-show="downloadMessage" x-transition class="mt-4 rounded-md p-3 text-xs"
+                        :class="downloadStatus === 'success' ? 'bg-emerald-50 text-emerald-700' : (downloadStatus === 'error' ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-700')">
+                        <p x-text="downloadMessage"></p>
+                    </div>
+                </div>
+
+                <div x-show="message" x-transition class="mt-4 rounded-md p-3 text-xs"
+                    :class="status === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'">
+                    <p x-text="message"></p>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('transcriptSettings', (initialData) => ({
+            config: initialData.config,
+            modelReady: initialData.modelReady,
+            basePath: initialData.basePath,
+            saving: false,
+            downloading: false,
+            message: '',
+            status: '',
+            downloadMessage: '',
+            downloadStatus: '',
+
+            async saveSettings() {
+                this.saving = true;
+                this.message = '';
+                try {
+                    const response = await fetch(window.location.pathname, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.config)
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.status = 'success';
+                        this.message = 'Settings saved successfully.';
+                        setTimeout(() => this.message = '', 3000);
+                    } else {
+                        throw new Error(data.message || 'Failed to save settings');
+                    }
+                } catch (e) {
+                    this.status = 'error';
+                    this.message = e.message;
+                } finally {
+                    this.saving = false;
+                }
+            },
+
+            async downloadModel() {
+                if (!confirm('This will download ~500MB of model files. Continue?')) return;
+
+                this.downloading = true;
+                this.downloadMessage = 'Starting download... this may take a while.';
+                this.downloadStatus = 'info';
+
+                try {
+                    const url = `${this.basePath}/transcript/download-model`;
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            command: this.config.command,
+                            models_path: this.config.models_path,
+                            hf_endpoint: this.config.hf_endpoint
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.downloadStatus = 'success';
+                        this.downloadMessage = 'Model downloaded successfully.';
+                        this.modelReady = true;
+                    } else {
+                        throw new Error(data.message || 'Download failed');
+                    }
+                } catch (e) {
+                    this.downloadStatus = 'error';
+                    this.downloadMessage = e.message;
+                } finally {
+                    this.downloading = false;
+                }
+            }
+        }));
+    });
+</script>
+{% endblock %}

@@ -119,17 +119,7 @@
                         x-text="formatNumber(record.quality?.packet_loss) + '%'"></span> · Jitter <span
                         class="font-semibold" x-text="formatNumber(record.quality?.jitter_ms) + ' ms'"></span></p>
             </div>
-            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Transcript</div>
-                <div class="mt-1 flex items-center gap-1.5 text-xl font-semibold"
-                    :class="transcript.available || transcriptVisible ? 'text-emerald-600' : 'text-slate-400'">
-                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 12l5 5L20 7" />
-                    </svg>
-                    <span x-text="transcript.available || transcriptVisible ? 'Ready' : 'Pending'"></span>
-                </div>
-                <p class="mt-1 text-xs text-slate-500" x-text="transcriptGeneratedLabel()"></p>
-            </div>
+
             <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
                 <div class="mt-1 flex items-center justify-between gap-1.5">
@@ -321,152 +311,7 @@
                             No media recording stored for this session.
                         </div>
                     </template>
-                    <div class="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                                <h3 class="text-sm font-semibold text-slate-900">Transcript</h3>
-                                <p class="text-xs text-slate-500">Generate speech-to-text to accelerate QA and
-                                    analytics.</p>
-                                <div class="mt-2 flex items-center gap-2 text-xs font-semibold"
-                                    :class="transcriptStatusTone(transcriptStatus)">
-                                    <svg x-cloak
-                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'ready'"
-                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.6">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4L15 6" />
-                                    </svg>
-                                    <svg x-cloak
-                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'processing'"
-                                        class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
-                                        stroke="currentColor" stroke-width="1.6">
-                                        <circle class="opacity-25" cx="10" cy="10" r="8" stroke-width="1.5"></circle>
-                                        <path class="opacity-75" fill="currentColor"
-                                            d="M10 2a8 8 0 0 1 8 8h-2a6 6 0 0 0-6-6V2Z" />
-                                    </svg>
-                                    <svg x-cloak
-                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'failed'"
-                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.6">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14L14 6" />
-                                    </svg>
-                                    <svg x-cloak
-                                        x-show="transcriptStatusIcon(transcriptStatus, record.has_transcript, transcriptVisible) === 'pending'"
-                                        class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                        stroke-width="1.6">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                    </svg>
-                                    <span x-text="transcriptStatusLabel(transcriptStatus)"></span>
-                                </div>
-                                <p class="text-[11px] text-slate-400" x-text="transcriptStatusDescription()"></p>
-                            </div>
-                            <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end sm:justify-end">
-                                <div class="w-full sm:w-48">
-                                    <label
-                                        class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                                        Language
-                                    </label>
-                                    <div class="relative">
-                                        <select
-                                            class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:cursor-not-allowed disabled:opacity-60"
-                                            x-model="selectedLanguage"
-                                            @change="updateSelectedLanguage($event.target.value)"
-                                            :disabled="asrProcessing || transcriptLoading">
-                                            <template x-for="option in languageOptions" :key="option.value">
-                                                <option :value="option.value" x-text="option.label"></option>
-                                            </template>
-                                        </select>
-                                    </div>
-                                </div>
-                                <button type="button"
-                                    class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                                    :disabled="asrProcessing || transcriptLoading || !canRequestTranscript()"
-                                    :aria-disabled="asrProcessing || transcriptLoading || !canRequestTranscript()"
-                                    :title="!canRequestTranscript() ? (transcriptCapabilityIssues()[0] || 'SenseVoice CLI is not ready.') : ''"
-                                    @click="requestTranscript(transcriptVisible && transcriptStatus !== 'processing')">
-                                    <svg x-cloak x-show="!(asrProcessing || transcriptLoading)" class="h-4 w-4"
-                                        viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                    </svg>
-                                    <svg x-cloak x-show="asrProcessing || transcriptLoading"
-                                        class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none"
-                                        stroke="currentColor" stroke-width="1.5">
-                                        <circle class="opacity-25" cx="10" cy="10" r="7" stroke-width="1.5"></circle>
-                                        <path class="opacity-75" fill="currentColor"
-                                            d="M10 3a7 7 0 0 1 7 7h-1.8a5.2 5.2 0 0 0-5.2-5.2V3Z" />
-                                    </svg>
-                                    <span x-text="transcriptButtonLabel()"></span>
-                                </button>
-                            </div>
-                        </div>
-                        <template x-if="transcriptError">
-                            <div class="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600"
-                                x-text="transcriptError"></div>
-                        </template>
-                        <template x-if="transcriptVisible">
-                            <div class="mt-4 space-y-3 text-sm text-slate-600">
-                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                                    <span>Language</span>
-                                    <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                        x-text="languageLabel(selectedLanguage)"></span>
-                                    <span x-show="formatGeneratedTimestamp(transcript.generated_at)"
-                                        x-text="formatGeneratedTimestamp(transcript.generated_at)"></span>
-                                </div>
-                                <template x-if="transcriptTimeline().length">
-                                    <div class="max-h-96 space-y-3 overflow-y-auto pr-2">
-                                        <template x-for="item in transcriptTimeline()" :key="item.key">
-                                            <div class="flex" :class="transcriptAlignmentClass(item.side)">
-                                                <div class="flex max-w-xl flex-col gap-1 rounded-lg border px-3 py-2 text-sm text-slate-700 shadow-sm"
-                                                    :class="transcriptCardTone(item.side)">
-                                                    <div
-                                                        class="flex items-center justify-between text-[11px] text-slate-500">
-                                                        <span class="font-semibold text-slate-600"
-                                                            x-text="item.label"></span>
-                                                        <span class="font-mono"
-                                                            x-text="formatSegmentRange(item.segment.start, item.segment.end)"></span>
-                                                    </div>
-                                                    <p class="leading-relaxed text-slate-800"
-                                                        x-text="item.segment.text"></p>
-                                                </div>
-                                            </div>
-                                        </template>
-                                    </div>
-                                </template>
-                                <template x-if="!transcriptTimeline().length">
-                                    <div
-                                        class="rounded border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
-                                        Transcript generated without segment breakdown.
-                                    </div>
-                                </template>
-                            </div>
-                        </template>
-                        <template x-if="!transcriptVisible">
-                            <div class="mt-4 space-y-2 text-xs text-slate-500">
-                                <template x-if="transcriptLoading">
-                                    <div class="rounded border border-slate-200 bg-white px-3 py-2">Loading transcript…
-                                    </div>
-                                </template>
-                                <template x-if="asrProcessing">
-                                    <div class="rounded border border-slate-200 bg-white px-3 py-2">Submitting recording
-                                        to sensevoice-cli ...</div>
-                                </template>
-                                <template x-if="!transcriptLoading && !asrProcessing && canRequestTranscript()">
-                                    <div
-                                        class="rounded border border-dashed border-slate-200 px-4 py-3 text-center text-xs text-slate-400">
-                                        No transcript generated yet.
-                                    </div>
-                                </template>
-                                <template x-if="!canRequestTranscript()">
-                                    <div
-                                        class="space-y-1 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                                        <p class="font-semibold">SenseVoice CLI is not ready.</p>
-                                        <template x-for="reason in transcriptCapabilityIssues()" :key="reason">
-                                            <p x-text="reason"></p>
-                                        </template>
-                                    </div>
-                                </template>
-                            </div>
-                        </template>
-                    </div>
+
                 </div>
 
             </div>
@@ -858,25 +703,15 @@
                 const firstEntryTs = this.sipFlowEntries.length ? this.parseTimestamp(this.sipFlowEntries[0].timestamp) : null;
                 this.flowStartEpoch = Number.isFinite(recordStartTs) ? recordStartTs : firstEntryTs;
                 this.mediaMetrics = data.media_metrics || {};
-                const initialTranscript = (data.transcript && typeof data.transcript === 'object')
-                    ? data.transcript
-                    : { available: false, segments: [] };
-                this.transcriptPreview = data.transcript_preview || null;
-                this.transcriptCapabilities = data.transcript_capabilities || {};
+
                 this.actions = data.actions || {};
                 this.backUrl = data.back_url || '/console/call-records';
                 const fallbackUpdateUrl = this.determineRecordUrl(this.record.id);
                 this.updateUrl = (this.actions && this.actions.update_record)
                     ? this.actions.update_record
                     : fallbackUpdateUrl;
-                this.transcriptUrl = this.determineTranscriptUrl(
-                    this.actions ? this.actions.transcript_url : '',
-                    this.record.id,
-                );
-                this.applyTranscriptPayload({
-                    status: initialTranscript?.status || this.record.transcript_status,
-                    transcript: initialTranscript,
-                }, { resetLanguage: true });
+                this.transcriptUrl = (this.actions && this.actions.transcript_url) ? this.actions.transcript_url : '';
+
                 const initialNotes = (data.notes && typeof data.notes === 'object') ? data.notes : {};
                 this.notes = {
                     text: initialNotes.text || '',
@@ -897,9 +732,7 @@
                 }
                 this.durationHint = this.record.ended_at ? `Ended ${this.formatDateTime(this.record.ended_at)}` : 'No hangup timestamp recorded';
                 this.detailTab = 'overview';
-                if (this.record.has_transcript && !this.transcriptVisible && this.transcriptUrl) {
-                    this.fetchTranscript();
-                }
+
                 const recordingDurationHint = (this.record && this.record.recording && Number(this.record.recording.duration_secs))
                     || Number(this.record.duration_secs)
                     || 0;
@@ -939,15 +772,9 @@
             selectedSipEntry: null,
             flowStartEpoch: null,
             mediaMetrics: {},
-            transcript: {},
-            transcriptPreview: null,
-            transcriptCapabilities: {},
-            transcriptVisible: false,
-            transcriptStatus: 'pending',
-            transcriptError: null,
-            transcriptLoading: false,
-            transcriptUrl: '',
+
             updateUrl: '',
+            transcriptUrl: '',
             notes: {},
             noteDraft: '',
             participants: [],
@@ -1350,81 +1177,7 @@
                     this.asrProcessing = false;
                 }
             },
-            async fetchTranscript() {
-                if (!this.transcriptUrl) {
-                    this.transcriptError = 'Transcript endpoint unavailable.';
-                    return;
-                }
-                if (this.transcriptLoading || this.asrProcessing) {
-                    return;
-                }
-                this.transcriptLoading = true;
-                this.transcriptError = null;
-                try {
-                    const response = await fetch(this.transcriptUrl, {
-                        headers: { 'Accept': 'application/json' },
-                    });
-                    if (response.status === 404) {
-                        this.applyTranscriptPayload({ status: 'pending', transcript: { available: false } });
-                        return;
-                    }
-                    if (!response.ok) {
-                        this.transcriptError = await this.extractErrorMessage(response);
-                        return;
-                    }
-                    const data = await response.json();
-                    this.applyTranscriptPayload(data);
-                } catch (err) {
-                    console.error('Failed to load transcript', err);
-                    this.transcriptError = 'Failed to load transcript';
-                } finally {
-                    this.transcriptLoading = false;
-                }
-            },
-            applyTranscriptPayload(payload = {}, options = {}) {
-                const { resetLanguage = false } = options;
-                const previousTranscript = this.transcript || {};
-                const previousGeneratedAt = previousTranscript?.generated_at || null;
-                const previousRecordLanguage = this.normalizeLanguage(this.record?.transcript_language);
-                const transcript = (payload.transcript && typeof payload.transcript === 'object')
-                    ? payload.transcript
-                    : { available: false, segments: [] };
-                const normalizedRaw = (payload.status || transcript.status || this.record?.transcript_status || 'pending')
-                    .toString()
-                    .toLowerCase();
-                const normalized = normalizedRaw || 'pending';
-                this.transcript = transcript;
-                this.transcriptVisible = Boolean(transcript.available);
-                this.transcriptStatus = normalized;
-                if (this.record) {
-                    this.record.transcript_status = normalized;
-                    if (typeof transcript.available === 'boolean') {
-                        this.record.has_transcript = transcript.available;
-                    }
-                }
-                const currentGeneratedAt = transcript?.generated_at || null;
-                const isNewTranscript = Boolean(
-                    currentGeneratedAt && currentGeneratedAt !== previousGeneratedAt,
-                );
-                const candidateLanguage = this.normalizeLanguage(transcript.language)
-                    || previousRecordLanguage
-                    || this.normalizeLanguage(this.selectedLanguage)
-                    || 'auto';
-                const shouldSyncLanguage = resetLanguage
-                    || !this.selectedLanguage
-                    || this.selectedLanguage === ''
-                    || isNewTranscript
-                    || (!this.languageSelectionDirty
-                        && (transcript.available || normalized === 'completed'));
-                if (shouldSyncLanguage) {
-                    this.selectedLanguage = candidateLanguage || 'auto';
-                    this.languageSelectionDirty = false;
-                }
-                if (this.record) {
-                    this.record.transcript_language = this.selectedLanguage || 'auto';
-                }
-                this.languageOptions = this.buildLanguageOptions();
-            },
+
             async updateRecord(update) {
                 if (!update || typeof update !== 'object') {
                     throw new Error('No update payload provided.');
@@ -1479,18 +1232,7 @@
                 }
                 return fallback;
             },
-            determineTranscriptUrl(hint, recordId) {
-                const hinted = this.normalizeConsoleUrl(hint);
-                if (hinted) {
-                    return hinted;
-                }
-                if (!recordId) {
-                    return '';
-                }
-                const base = this.normalizeConsoleUrl(this.backUrl || '/console/call-records');
-                const trimmed = base.endsWith('/') ? base.slice(0, -1) : base;
-                return this.normalizeConsoleUrl(`${trimmed}/${recordId}/transcript`);
-            },
+
             determineRecordUrl(recordId) {
                 if (!recordId) {
                     return '';
@@ -2244,88 +1986,7 @@
                 }
                 return 'text-slate-400';
             },
-            transcriptStatusTone(status) {
-                switch ((status || '').toLowerCase()) {
-                    case 'completed':
-                        return 'text-emerald-600';
-                    case 'processing':
-                        return 'text-amber-500';
-                    case 'failed':
-                        return 'text-rose-500';
-                    default:
-                        return 'text-slate-400';
-                }
-            },
-            transcriptStatusLabel(status) {
-                switch ((status || '').toLowerCase()) {
-                    case 'completed':
-                        return 'Ready';
-                    case 'processing':
-                        return 'Processing';
-                    case 'failed':
-                        return 'Failed';
-                    default:
-                        return 'Pending';
-                }
-            },
-            transcriptStatusDescription() {
-                const status = (this.transcriptStatus || '').toLowerCase();
-                if (status === 'completed') {
-                    if (this.transcript && this.transcript.generated_at) {
-                        return `Generated ${this.formatDateTime(this.transcript.generated_at)}`;
-                    }
-                    return 'Transcript ready.';
-                }
-                if (status === 'processing') {
-                    return 'Transcription in progress. Refresh to check status.';
-                }
-                if (status === 'failed') {
-                    return 'Previous transcription failed. Retry to run again.';
-                }
-                if (!this.canRequestTranscript()) {
-                    const reasons = this.transcriptCapabilityIssues();
-                    if (reasons.length) {
-                        return reasons[0];
-                    }
-                    return 'SenseVoice CLI is not ready.';
-                }
-                return 'Request on demand to analyse conversation outcome.';
-            },
-            transcriptStatusIcon(status, hasTranscript = false, visible = false) {
-                const value = (status || '').toLowerCase();
-                if (value === 'completed' || hasTranscript || visible) {
-                    return 'ready';
-                }
-                if (value === 'processing') {
-                    return 'processing';
-                }
-                if (value === 'failed') {
-                    return 'failed';
-                }
-                return 'pending';
-            },
-            transcriptButtonLabel() {
-                if (this.asrProcessing) {
-                    return 'Submitting…';
-                }
-                if (this.transcriptLoading) {
-                    return 'Loading…';
-                }
-                const status = (this.transcriptStatus || '').toLowerCase();
-                if (status === 'processing') {
-                    return 'Refresh status';
-                }
-                if (status === 'failed') {
-                    return 'Retry transcript';
-                }
-                if (this.transcriptVisible) {
-                    return 'Re-run transcript';
-                }
-                if (this.record && this.record.has_transcript) {
-                    return 'Load transcript';
-                }
-                return 'Request transcript';
-            },
+
             formatNumber(value) {
                 if (value === null || value === undefined || Number.isNaN(Number(value))) {
                     return '—';

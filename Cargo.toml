@@ -19,6 +19,7 @@ g729 = ["voice-engine/g729"]
 console = ["dep:minijinja"]
 addon-acme = []
 addon-wholesale = []
+addon-transcript = []
 commerce = ["addon-wholesale"]
 default = [
     "vad_webrtc",
@@ -28,6 +29,7 @@ default = [
     "g729",
     "console",
     "addon-acme",
+    "addon-transcript",
 ]
 not_vad = []
 perfcli-bin = []

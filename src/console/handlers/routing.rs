@@ -775,7 +775,7 @@ pub async fn page_routing(
     )
 }
 
-pub async fn query_routing(
+pub(crate) async fn query_routing(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(payload): Json<forms::ListQuery<QueryRoutingFilters>>,
@@ -1255,7 +1255,7 @@ pub async fn toggle_routing(
     }
 }
 
-pub async fn create_routing(
+pub(crate) async fn create_routing(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
     Json(mut doc): Json<RouteDocument>,
@@ -1351,7 +1351,7 @@ pub async fn create_routing(
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
-pub async fn update_routing(
+pub(crate) async fn update_routing(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,

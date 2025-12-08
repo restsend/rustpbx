@@ -7,13 +7,13 @@ use crate::{
         middleware::AuthRequired,
     },
     models::sip_trunk,
-    proxy::server::SipServerRef,
     proxy::{
         data::load_routes_from_db,
         routing::{
             self, SourceTrunk, TrunkDirection, build_source_trunk,
             matcher::{RouteResourceLookup, RouteTrace, match_invite_with_trace},
         },
+        server::SipServerRef,
     },
 };
 use axum::{
@@ -117,20 +117,12 @@ pub async fn page_diagnostics(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let bootstrap = diagnostics_bootstrap(&state).await;
-
-    let mut addon_scripts = Vec::new();
-    if let Some(app_state) = state.app_state() {
-        addon_scripts = app_state
-            .addon_registry
-            .get_injected_scripts("/console/diagnostics", &app_state.config);
-    }
-
     state.render(
         "console/diagnostics.html",
         json!({
             "nav_active": "diagnostics",
             "test_data": bootstrap,
-            "addon_scripts": addon_scripts
+            "addon_scripts": state.get_injected_scripts("/console/diagnostics"),
         }),
     )
 }
