@@ -1881,8 +1881,17 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                         "Established call terminated by callee"
                     );
                     session.add_callee_dialog(dialog_id);
-                    session.callee_terminated(reason).await;
-                    if session.is_answered() {
+                    session.callee_terminated(reason.clone()).await;
+
+                    // skip hangup when it come from targets of queue
+                    let should_skip_hangup = session.last_queue_name().is_some()
+                        && matches!(
+                            reason,
+                            TerminatedReason::UasBusy
+                                | TerminatedReason::UasDecline
+                                | TerminatedReason::UasOther(_)
+                        );
+                    if session.is_answered() && !should_skip_hangup {
                         let _ = proxy_call
                             .apply_session_action(
                                 session,
