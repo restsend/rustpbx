@@ -1397,7 +1397,11 @@ impl ProxyCall {
                         ));
                     }
                     Ok(None) => {
-                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, continue");
+                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, reject");
+                        return Err((
+                            rsip::StatusCode::NotFound,
+                            Some("User not found".to_string()),
+                        ));
                     }
                     Err(e) => {
                         warn!(session_id = ?dialplan.session_id, callee = %callee_uri, "failed to lookup user in auth backend: {}", e);
