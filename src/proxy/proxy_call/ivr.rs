@@ -1,3 +1,28 @@
+use crate::{
+    call::{
+        DialplanIvrConfig, Location,
+        ivr::{
+            InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
+            PromptPlayback, PromptSource, ResolvedTransferAction,
+        },
+    },
+    proxy::proxy_call::{ProxyCall, session::CallSession},
+};
+use anyhow::{Result, anyhow};
+use rsip::{StatusCode, Uri};
+
+use std::{
+    collections::VecDeque,
+    sync::{Arc, mpsc as std_mpsc},
+    time::Duration,
+};
+use tokio::sync::{broadcast, mpsc};
+use tracing::warn;
+use voice_engine::{
+    event::{EventReceiver, SessionEvent},
+    media::track::file::FileTrack,
+};
+
 type PromptResponseSender = std_mpsc::Sender<Result<PromptPlayback>>;
 type InputResponseSender = std_mpsc::Sender<Result<InputEvent>>;
 
@@ -300,22 +325,25 @@ enum DigitWaitResult {
 }
 
 impl ProxyCall {
-    async fn transfer_to_ivr(&self, session: &mut CallSession, reference: &str) -> Result<()> {
+    pub(super) async fn transfer_to_ivr(
+        &self,
+        session: &mut CallSession,
+        reference: &str,
+    ) -> Result<()> {
         if reference.trim().is_empty() {
             return Err(anyhow!("ivr reference cannot be empty"));
         }
         let config = self
             .server
             .data_context
-            .resolve_ivr_config(reference)
-            .await?
+            .resolve_ivr_config(reference)?
             .ok_or_else(|| anyhow!("ivr reference '{}' not found", reference))?;
         let dialplan_config = config.to_dialplan_config()?;
         self.run_ivr(session, &dialplan_config, Some(reference))
             .await
     }
 
-    async fn run_ivr(
+    pub(super) async fn run_ivr(
         &self,
         session: &mut CallSession,
         config: &DialplanIvrConfig,
@@ -334,8 +362,7 @@ impl ProxyCall {
             let fallback = self
                 .server
                 .data_context
-                .resolve_ivr_config(plan_id)
-                .await?
+                .resolve_ivr_config(plan_id)?
                 .ok_or_else(|| anyhow!("ivr plan '{}' not found", plan_id))?;
             fallback
                 .to_dialplan_config()?
@@ -380,7 +407,11 @@ impl ProxyCall {
         result
     }
 
-    async fn handle_ivr_exit(&self, session: &mut CallSession, exit: IvrExit) -> Result<()> {
+    pub(super) async fn handle_ivr_exit(
+        &self,
+        session: &mut CallSession,
+        exit: IvrExit,
+    ) -> Result<()> {
         match exit {
             IvrExit::Completed => Ok(()),
             IvrExit::Transfer(action) => self.handle_ivr_transfer(session, action).await,
@@ -395,7 +426,7 @@ impl ProxyCall {
         }
     }
 
-    async fn handle_ivr_transfer(
+    pub(super) async fn handle_ivr_transfer(
         &self,
         session: &mut CallSession,
         action: ResolvedTransferAction,

@@ -2,7 +2,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::console::handlers::bad_request;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
-use crate::proxy::proxy_call::{CallSessionSnapshot, SessionAction};
+use crate::proxy::proxy_call::state::{CallSessionSnapshot, SessionAction};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

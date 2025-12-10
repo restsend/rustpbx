@@ -95,7 +95,7 @@ impl Default for SipTransport {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, Default)]
 #[sea_orm(table_name = "rustpbx_sip_trunks")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]

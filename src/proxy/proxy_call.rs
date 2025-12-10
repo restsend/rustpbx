@@ -1,26 +1,21 @@
 use crate::{
     call::{
         CallForwardingConfig, CallForwardingMode, DialStrategy, Dialplan, DialplanFlow,
-        DialplanIvrConfig, FailureAction, Location, MediaConfig, QueueFallbackAction,
-        QueueHoldConfig, QueuePlan, TransactionCookie, TransferEndpoint,
-        ivr::{
-            InputEvent, InputStep, IvrExecutor, IvrExit, IvrPlan, IvrRuntime, PromptMedia,
-            PromptPlayback, PromptSource, ResolvedTransferAction,
-        },
+        FailureAction, Location, TransactionCookie, TransferEndpoint,
         sip::{DialogStateReceiverGuard, ServerDialogGuard},
     },
-    callrecord::{
-        CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordMedia,
-        CallRecordPersistArgs, CallRecordSender, apply_record_file_extras, extract_sip_username,
-        extras_map_to_metadata, extras_map_to_option, persist_and_dispatch_record,
-        sipflow::SipMessageItem,
-    },
+    callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender},
     config::{MediaProxyMode, RouteResult},
-    proxy::{proxy_call::state::SessionActionReceiver, server::SipServerRef},
+    proxy::{
+        proxy_call::{
+            session::CallSession,
+            state::{CallSessionHandle, CallSessionShared, SessionAction, SessionActionReceiver},
+        },
+        server::SipServerRef,
+    },
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono::Utc;
 use futures::{FutureExt, future::BoxFuture};
 use rsip::{Param, StatusCode, Uri, headers::UntypedHeader, prelude::HeadersExt};
 use rsipstack::{
@@ -35,42 +30,32 @@ use rsipstack::{
     transaction::transaction::Transaction,
     transport::SipConnection,
 };
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    fs,
+    collections::VecDeque,
     net::IpAddr,
     str::FromStr,
-    sync::{Arc, Mutex, mpsc as std_mpsc},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{broadcast, mpsc},
-    task::{JoinHandle, JoinSet},
-    time::timeout,
-};
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use voice_engine::{
-    event::{EventReceiver, EventSender, SessionEvent, create_event_sender},
-    media::{
-        recorder::RecorderOption,
-        stream::{MediaStream, MediaStreamBuilder},
-        track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
-    },
+    event::{EventSender, create_event_sender},
     net_tool::is_private_ip,
 };
-mod state;
-use state::CallSessionShared;
-pub use state::{
-    CallSessionHandle, CallSessionSnapshot, ProxyCallEvent, ProxyCallPhase, SessionAction,
-};
+
+pub(crate) mod ivr;
+pub(crate) mod queue;
+pub(crate) mod reporter;
+pub(crate) mod session;
+pub(crate) mod state;
 
 pub struct ProxyCall {
     server: SipServerRef,
     start_time: Instant,
     session_id: String,
-    dialplan: Dialplan,
+    dialplan: Arc<Dialplan>,
     #[allow(dead_code)]
     cookie: TransactionCookie,
     dialog_layer: Arc<DialogLayer>,
@@ -151,7 +136,7 @@ impl ProxyCallBuilder {
             server,
             start_time: Instant::now(),
             session_id,
-            dialplan,
+            dialplan: Arc::new(dialplan),
             cookie: self.cookie,
             dialog_layer,
             cancel_token,
@@ -227,7 +212,6 @@ impl SessionActionInbox {
 }
 
 type ActionInbox<'a> = Option<&'a SessionActionInbox>;
-include!("proxy_call/session.rs");
 
 impl ProxyCall {
     fn forwarding_config(&self) -> Option<&CallForwardingConfig> {
@@ -532,6 +516,15 @@ impl ProxyCall {
                 None
             };
 
+        let reporter = crate::proxy::proxy_call::reporter::CallReporter {
+            server: self.server.clone(),
+            start_time: self.start_time,
+            session_id: self.session_id.clone(),
+            dialplan: self.dialplan.clone(),
+            cookie: self.cookie.clone(),
+            call_record_sender: self.call_record_sender.clone(),
+        };
+
         let mut session = CallSession::new(
             self.cancel_token.clone(),
             self.session_id.clone(),
@@ -542,6 +535,7 @@ impl ProxyCall {
             recorder_option,
             self.session_shared.clone(),
             max_forwards,
+            Some(reporter),
         );
         if use_media_proxy {
             session.caller_offer = Some(offer_sdp);
@@ -584,7 +578,6 @@ impl ProxyCall {
             drop(dialog_guard);
             result
         });
-        self.record_call(&session).await;
         result
     }
 
@@ -1541,279 +1534,6 @@ impl ProxyCall {
         }
         Ok(())
     }
-
-    async fn record_call(&self, session: &CallSession) {
-        let now = Utc::now();
-        let start_time = now - chrono::Duration::from_std(self.elapsed()).unwrap_or_default();
-        let snapshot = session.record_snapshot();
-
-        let ring_time = snapshot.ring_time.map(|rt| {
-            start_time
-                + chrono::Duration::from_std(rt.duration_since(self.start_time)).unwrap_or_default()
-        });
-
-        let answer_time = snapshot.answer_time.map(|at| {
-            start_time
-                + chrono::Duration::from_std(at.duration_since(self.start_time)).unwrap_or_default()
-        });
-
-        let status_code = snapshot
-            .last_error
-            .as_ref()
-            .map(|(code, _)| u16::from(code.clone()))
-            .unwrap_or(200);
-
-        let hangup_reason = snapshot.hangup_reason.clone().or_else(|| {
-            if snapshot.last_error.is_some() {
-                Some(CallRecordHangupReason::Failed)
-            } else if snapshot.answer_time.is_some() {
-                Some(CallRecordHangupReason::BySystem)
-            } else {
-                Some(CallRecordHangupReason::Failed)
-            }
-        });
-
-        let original_caller = snapshot
-            .original_caller
-            .clone()
-            .or_else(|| self.dialplan.caller.as_ref().map(|c| c.to_string()))
-            .unwrap_or_default();
-
-        let original_callee = snapshot
-            .original_callee
-            .clone()
-            .or_else(|| {
-                self.dialplan
-                    .original
-                    .to_header()
-                    .ok()
-                    .and_then(|to_header| to_header.uri().ok().map(|uri| uri.to_string()))
-            })
-            .or_else(|| {
-                self.dialplan
-                    .first_target()
-                    .map(|location| location.aor.to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let caller = snapshot
-            .routed_caller
-            .clone()
-            .unwrap_or_else(|| original_caller.clone());
-
-        let callee = snapshot
-            .routed_callee
-            .clone()
-            .or_else(|| snapshot.connected_callee.clone())
-            .unwrap_or_else(|| original_callee.clone());
-
-        let mut extras_map: HashMap<String, Value> = HashMap::new();
-        extras_map.insert(
-            "status_code".to_string(),
-            Value::Number(JsonNumber::from(status_code)),
-        );
-        if let Some(reason) = hangup_reason.as_ref() {
-            extras_map.insert(
-                "hangup_reason".to_string(),
-                Value::String(reason.to_string()),
-            );
-        }
-        if let Some((code, reason)) = snapshot.last_error.as_ref() {
-            extras_map.insert(
-                "last_error_code".to_string(),
-                Value::Number(JsonNumber::from(u16::from(code.clone()))),
-            );
-            if let Some(reason) = reason {
-                extras_map.insert(
-                    "last_error_reason".to_string(),
-                    Value::String(reason.clone()),
-                );
-            }
-        }
-
-        if let Some(queue) = snapshot.last_queue_name.clone() {
-            extras_map.insert("last_queue".to_string(), Value::String(queue));
-        }
-
-        if let Some(trace) = snapshot.ivr_trace.clone() {
-            let mut ivr_payload = JsonMap::new();
-            if let Some(reference) = trace.reference.clone() {
-                ivr_payload.insert("reference".to_string(), Value::String(reference));
-            }
-            if let Some(plan_id) = trace.plan_id.clone() {
-                ivr_payload.insert("plan_id".to_string(), Value::String(plan_id));
-            }
-            if let Some(exit) = trace.exit.clone() {
-                ivr_payload.insert("exit".to_string(), Value::String(exit));
-            }
-            if let Some(detail) = trace.detail.clone() {
-                ivr_payload.insert("detail".to_string(), Value::String(detail));
-            }
-            if !ivr_payload.is_empty() {
-                extras_map.insert("ivr".to_string(), Value::Object(ivr_payload));
-            }
-        }
-
-        let mut hangup_messages = snapshot.hangup_messages.clone();
-        if hangup_messages.is_empty() {
-            if let Some((code, reason)) = snapshot.last_error.as_ref() {
-                hangup_messages.push(CallRecordHangupMessage {
-                    code: u16::from(code.clone()),
-                    reason: reason.clone(),
-                    target: None,
-                });
-            }
-        }
-        if !hangup_messages.is_empty() {
-            if let Ok(value) = serde_json::to_value(&hangup_messages) {
-                extras_map.insert("hangup_messages".to_string(), value);
-            }
-        }
-
-        let mut rewrite_payload = JsonMap::new();
-        rewrite_payload.insert(
-            "caller_original".to_string(),
-            Value::String(original_caller.clone()),
-        );
-        rewrite_payload.insert("caller_final".to_string(), Value::String(caller.clone()));
-        rewrite_payload.insert(
-            "callee_original".to_string(),
-            Value::String(original_callee.clone()),
-        );
-        rewrite_payload.insert("callee_final".to_string(), Value::String(callee.clone()));
-        if let Some(contact) = snapshot.routed_contact.as_ref() {
-            rewrite_payload.insert("contact".to_string(), Value::String(contact.clone()));
-        }
-        if let Some(destination) = snapshot.routed_destination.as_ref() {
-            rewrite_payload.insert(
-                "destination".to_string(),
-                Value::String(destination.clone()),
-            );
-        }
-        extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
-
-        let mut sip_flows_map: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
-        let server_dialog_id = snapshot.server_dialog_id.clone();
-        let mut call_ids: HashSet<String> = HashSet::new();
-        call_ids.insert(server_dialog_id.call_id.clone());
-
-        for dialog_id in &snapshot.callee_dialogs {
-            call_ids.insert(dialog_id.call_id.clone());
-        }
-
-        let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
-        sip_leg_roles.insert(server_dialog_id.call_id.clone(), "primary".to_string());
-        for dialog_id in &snapshot.callee_dialogs {
-            sip_leg_roles
-                .entry(dialog_id.call_id.clone())
-                .or_insert_with(|| "b2bua".to_string());
-        }
-
-        for call_id in call_ids.iter() {
-            if let Some(items) = self.server.drain_sip_flow(call_id) {
-                if !items.is_empty() {
-                    sip_flows_map.insert(call_id.clone(), items);
-                }
-            }
-        }
-
-        let mut record = CallRecord {
-            call_type: crate::call::ActiveCallType::Sip,
-            option: None,
-            call_id: self.session_id.clone(),
-            start_time,
-            ring_time,
-            answer_time,
-            end_time: now,
-            caller: caller.clone(),
-            callee: callee.clone(),
-            status_code,
-            offer: snapshot.caller_offer.clone(),
-            answer: snapshot.answer.clone(),
-            hangup_reason: hangup_reason.clone(),
-            hangup_messages: hangup_messages.clone(),
-            recorder: Vec::new(),
-            extras: None,
-            dump_event_file: None,
-            refer_callrecord: None,
-            sip_flows: sip_flows_map,
-            sip_leg_roles,
-        };
-
-        if self.dialplan.recording.enabled {
-            if let Some(recorder_config) = self.dialplan.recording.option.as_ref() {
-                if !recorder_config.recorder_file.is_empty() {
-                    let size = fs::metadata(&recorder_config.recorder_file)
-                        .map(|meta| meta.len())
-                        .unwrap_or(0);
-                    record.recorder.push(CallRecordMedia {
-                        track_id: "mixed".to_string(),
-                        path: recorder_config.recorder_file.clone(),
-                        size,
-                        extra: None,
-                    });
-                }
-            }
-        }
-
-        let recording_path_for_db = record.recorder.first().map(|media| media.path.clone());
-
-        apply_record_file_extras(&record, &mut extras_map);
-        record.extras = extras_map_to_option(&extras_map);
-
-        let direction = match self.dialplan.direction {
-            crate::call::DialDirection::Inbound => "inbound".to_string(),
-            crate::call::DialDirection::Outbound => "outbound".to_string(),
-            crate::call::DialDirection::Internal => "internal".to_string(),
-        };
-        let status = resolve_call_status(session);
-        let from_number = extract_sip_username(&caller);
-        let to_number = extract_sip_username(&callee);
-
-        let trunk_name = self.cookie.get_source_trunk();
-        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
-            let trunks = self.server.data_context.trunks_snapshot().await;
-            let trunk_id = trunks.get(name).and_then(|config| config.id);
-            (Some(name.clone()), trunk_id)
-        } else {
-            (None, None)
-        };
-
-        let metadata_value = extras_map_to_metadata(&extras_map);
-
-        let mut persist_args = CallRecordPersistArgs::default();
-        persist_args.direction = direction;
-        persist_args.status = status;
-        persist_args.from_number = from_number;
-        persist_args.to_number = to_number;
-        persist_args.queue = snapshot.last_queue_name.clone();
-        persist_args.sip_trunk_id = sip_trunk_id;
-        persist_args.sip_gateway = sip_gateway;
-        persist_args.metadata = metadata_value;
-        persist_args.recording_url = recording_path_for_db;
-        let (persist_error, send_error) = persist_and_dispatch_record(
-            self.server.database.as_ref(),
-            self.call_record_sender.as_ref(),
-            &self.server.call_record_hooks,
-            record,
-            persist_args,
-        )
-        .await;
-        if let Some(err) = persist_error {
-            warn!(
-                session_id = %self.session_id,
-                error = %err,
-                "Failed to persist call record"
-            );
-        }
-        if let Some(err) = send_error {
-            warn!(
-                session_id = %self.session_id,
-                error = %err,
-                "Failed to send call record"
-            );
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1821,9 +1541,6 @@ enum FlowFailureHandling {
     Handle,
     Propagate,
 }
-
-include!("proxy_call/queue.rs");
-include!("proxy_call/ivr.rs");
 
 fn compute_remote_target_from_request(
     request: &rsip::Request,
@@ -1972,19 +1689,6 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
             }
         }
         Ok(())
-    }
-}
-
-fn resolve_call_status(session: &CallSession) -> String {
-    if session.answer_time.is_some() {
-        return "completed".to_string();
-    }
-
-    match session.hangup_reason.as_ref() {
-        Some(CallRecordHangupReason::NoAnswer)
-        | Some(CallRecordHangupReason::Autohangup)
-        | Some(CallRecordHangupReason::Canceled) => "missed".to_string(),
-        _ => "failed".to_string(),
     }
 }
 

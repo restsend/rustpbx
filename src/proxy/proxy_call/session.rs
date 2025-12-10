@@ -1,9 +1,39 @@
+use crate::{
+    call::{MediaConfig, QueueHoldConfig, ivr::IvrExit},
+    callrecord::{CallRecordHangupMessage, CallRecordHangupReason},
+    proxy::proxy_call::{
+        ProxyCall, SessionHangupMessage,
+        state::{CallSessionHandle, CallSessionShared, ProxyCallEvent},
+    },
+};
+use anyhow::{Result, anyhow};
+use rsip::{StatusCode, prelude::HeadersExt};
+use rsipstack::dialog::{
+    DialogId, dialog::TerminatedReason, invitation::InviteOption, server_dialog::ServerInviteDialog,
+};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{sync::broadcast, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
+use voice_engine::{
+    event::{EventReceiver, EventSender, SessionEvent},
+    media::{
+        recorder::RecorderOption,
+        stream::{MediaStream, MediaStreamBuilder},
+        track::{Track, TrackConfig, file::FileTrack, rtp::RtpTrackBuilder, webrtc::WebrtcTrack},
+    },
+};
+
 #[derive(Clone, Default)]
 pub(super) struct IvrTrace {
-    reference: Option<String>,
-    plan_id: Option<String>,
-    exit: Option<String>,
-    detail: Option<String>,
+    pub reference: Option<String>,
+    pub plan_id: Option<String>,
+    pub exit: Option<String>,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone)]
@@ -28,48 +58,49 @@ pub(super) struct CallSessionRecordSnapshot {
     pub server_dialog_id: DialogId,
 }
 
-struct CallSession {
-    server_dialog: ServerInviteDialog,
-    callee_dialogs: HashSet<DialogId>,
-    last_error: Option<(StatusCode, Option<String>)>,
-    connected_callee: Option<String>,
-    ring_time: Option<Instant>,
-    answer_time: Option<Instant>,
-    caller_offer: Option<String>,
-    callee_offer: Option<String>,
-    answer: Option<String>,
-    hangup_reason: Option<CallRecordHangupReason>,
-    hangup_messages: Vec<SessionHangupMessage>,
-    callee_hangup_reason: Option<TerminatedReason>,
-    shared: CallSessionShared,
-    early_media_sent: bool,
-    media_stream: Arc<MediaStream>,
-    event_sender: EventSender,
-    use_media_proxy: bool,
-    media_config: MediaConfig,
-    original_caller: Option<String>,
-    original_callee: Option<String>,
-    routed_caller: Option<String>,
-    routed_callee: Option<String>,
-    routed_contact: Option<String>,
-    routed_destination: Option<String>,
-    queue_hold_active: bool,
-    queue_passthrough_ringback: bool,
-    queue_hold_audio_file: Option<String>,
-    queue_hold_loop_cancel: Option<CancellationToken>,
-    queue_hold_loop_handle: Option<JoinHandle<()>>,
-    last_queue_name: Option<String>,
+pub(super) struct CallSession {
+    pub server_dialog: ServerInviteDialog,
+    pub callee_dialogs: HashSet<DialogId>,
+    pub last_error: Option<(StatusCode, Option<String>)>,
+    pub connected_callee: Option<String>,
+    pub ring_time: Option<Instant>,
+    pub answer_time: Option<Instant>,
+    pub caller_offer: Option<String>,
+    pub callee_offer: Option<String>,
+    pub answer: Option<String>,
+    pub hangup_reason: Option<CallRecordHangupReason>,
+    pub hangup_messages: Vec<SessionHangupMessage>,
+    pub callee_hangup_reason: Option<TerminatedReason>,
+    pub shared: CallSessionShared,
+    pub early_media_sent: bool,
+    pub media_stream: Arc<MediaStream>,
+    pub event_sender: EventSender,
+    pub use_media_proxy: bool,
+    pub media_config: MediaConfig,
+    pub original_caller: Option<String>,
+    pub original_callee: Option<String>,
+    pub routed_caller: Option<String>,
+    pub routed_callee: Option<String>,
+    pub routed_contact: Option<String>,
+    pub routed_destination: Option<String>,
+    pub queue_hold_active: bool,
+    pub queue_passthrough_ringback: bool,
+    pub queue_hold_audio_file: Option<String>,
+    pub queue_hold_loop_cancel: Option<CancellationToken>,
+    pub queue_hold_loop_handle: Option<JoinHandle<()>>,
+    pub last_queue_name: Option<String>,
     ivr_trace: Option<IvrTrace>,
     pub max_forwards: u32,
+    pub reporter: Option<crate::proxy::proxy_call::reporter::CallReporter>,
 }
 
 impl CallSession {
-    const QUEUE_HOLD_TRACK_ID: &'static str = "queue-hold-track";
-    const QUEUE_HOLD_PLAY_ID: &'static str = "queue-hold";
-    const IVR_PROMPT_TRACK_ID: &'static str = "ivr-prompt-track";
-    const CALLEE_TRACK_ID: &'static str = "callee-track";
+    pub const QUEUE_HOLD_TRACK_ID: &'static str = "queue-hold-track";
+    pub const QUEUE_HOLD_PLAY_ID: &'static str = "queue-hold";
+    pub const IVR_PROMPT_TRACK_ID: &'static str = "ivr-prompt-track";
+    pub const CALLEE_TRACK_ID: &'static str = "callee-track";
 
-    fn new(
+    pub fn new(
         cancel_token: CancellationToken,
         session_id: String,
         server_dialog: ServerInviteDialog,
@@ -79,6 +110,7 @@ impl CallSession {
         recorder_option: Option<RecorderOption>,
         shared: CallSessionShared,
         max_forwards: u32,
+        reporter: Option<crate::proxy::proxy_call::reporter::CallReporter>,
     ) -> Self {
         let mut builder = MediaStreamBuilder::new(event_sender.clone())
             .with_id(session_id.clone())
@@ -131,10 +163,11 @@ impl CallSession {
             last_queue_name: None,
             ivr_trace: None,
             max_forwards,
+            reporter,
         }
     }
 
-    fn note_attempt_failure(
+    pub fn note_attempt_failure(
         &mut self,
         code: StatusCode,
         reason: Option<String>,
@@ -160,37 +193,37 @@ impl CallSession {
             .collect()
     }
 
-    fn queue_ringback_passthrough(&self) -> bool {
+    pub fn queue_ringback_passthrough(&self) -> bool {
         self.queue_passthrough_ringback
     }
 
-    fn set_queue_ringback_passthrough(&mut self, enabled: bool) {
+    pub fn set_queue_ringback_passthrough(&mut self, enabled: bool) {
         self.queue_passthrough_ringback = enabled;
     }
 
-    fn register_active_call(&mut self, handle: CallSessionHandle) {
+    pub fn register_active_call(&mut self, handle: CallSessionHandle) {
         self.shared.register_active_call(handle);
     }
 
-    fn set_queue_name(&mut self, name: Option<String>) {
+    pub fn set_queue_name(&mut self, name: Option<String>) {
         if let Some(ref queue) = name {
             self.last_queue_name = Some(queue.clone());
         }
         self.shared.set_queue_name(name);
     }
 
-    fn last_queue_name(&self) -> Option<String> {
+    pub fn last_queue_name(&self) -> Option<String> {
         self.last_queue_name.clone()
     }
 
-    fn note_ivr_reference(&mut self, reference: Option<String>, plan_id: Option<String>) {
+    pub fn note_ivr_reference(&mut self, reference: Option<String>, plan_id: Option<String>) {
         let mut trace = self.ivr_trace.clone().unwrap_or_default();
         trace.reference = reference;
         trace.plan_id = plan_id;
         self.ivr_trace = Some(trace);
     }
 
-    fn note_ivr_exit(&mut self, exit: &IvrExit) {
+    pub fn note_ivr_exit(&mut self, exit: &IvrExit) {
         let mut trace = self.ivr_trace.clone().unwrap_or_default();
         let (exit_label, detail) = match exit {
             IvrExit::Completed => ("completed".to_string(), None),
@@ -205,7 +238,7 @@ impl CallSession {
         self.ivr_trace = Some(trace);
     }
 
-    fn record_snapshot(&self) -> CallSessionRecordSnapshot {
+    pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
         CallSessionRecordSnapshot {
             ring_time: self.ring_time,
             answer_time: self.answer_time,
@@ -228,7 +261,7 @@ impl CallSession {
         }
     }
 
-    fn note_invite_details(&mut self, invite: &InviteOption) {
+    pub fn note_invite_details(&mut self, invite: &InviteOption) {
         self.routed_caller = Some(invite.caller.to_string());
         self.routed_callee = Some(invite.callee.to_string());
         self.routed_contact = Some(invite.contact.to_string());
@@ -296,7 +329,7 @@ impl CallSession {
         Ok(processed_answer)
     }
 
-    async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
+    pub async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
         let track_id = "callee-track".to_string();
         let config = TrackConfig::default();
 
@@ -355,14 +388,14 @@ impl CallSession {
             .await
     }
 
-    fn add_callee_dialog(&mut self, dialog_id: DialogId) {
+    pub fn add_callee_dialog(&mut self, dialog_id: DialogId) {
         if self.callee_dialogs.contains(&dialog_id) {
             return;
         }
         self.callee_dialogs.insert(dialog_id);
     }
 
-    async fn start_ringing(&mut self, mut answer: String, proxy_call: &ProxyCall) {
+    pub async fn start_ringing(&mut self, mut answer: String, proxy_call: &ProxyCall) {
         let call_answered = self.answer_time.is_some();
         if self.early_media_sent && !call_answered {
             debug!("Early media already sent, skipping ringing");
@@ -443,7 +476,7 @@ impl CallSession {
         }
     }
 
-    async fn callee_terminated(&mut self, reason: TerminatedReason) {
+    pub async fn callee_terminated(&mut self, reason: TerminatedReason) {
         debug!(reason = ?reason, "Callee dialog terminated");
         let hangup_reason = match reason {
             TerminatedReason::UasBye | TerminatedReason::UacBye => CallRecordHangupReason::ByCallee,
@@ -463,15 +496,15 @@ impl CallSession {
         self.callee_hangup_reason = Some(reason);
     }
 
-    async fn callee_dialog_request(&mut self, _request: rsip::Request) -> Result<()> {
+    pub async fn callee_dialog_request(&mut self, _request: rsip::Request) -> Result<()> {
         Ok(())
     }
 
-    fn has_error(&self) -> bool {
+    pub fn has_error(&self) -> bool {
         self.last_error.is_some()
     }
 
-    fn set_error(&mut self, code: StatusCode, reason: Option<String>, target: Option<String>) {
+    pub fn set_error(&mut self, code: StatusCode, reason: Option<String>, target: Option<String>) {
         debug!(code = %code, reason = ?reason, target = ?target, "Call session error set");
         self.last_error = Some((code.clone(), reason.clone()));
         self.hangup_reason = Some(CallRecordHangupReason::Failed);
@@ -479,11 +512,11 @@ impl CallSession {
         self.shared.note_failure(code, reason);
     }
 
-    fn is_answered(&self) -> bool {
+    pub fn is_answered(&self) -> bool {
         self.answer_time.is_some()
     }
 
-    async fn play_ringtone(
+    pub async fn play_ringtone(
         &mut self,
         audio_file: &String,
         event_rx: Option<EventReceiver>,
@@ -526,7 +559,7 @@ impl CallSession {
         Ok(())
     }
 
-    async fn accept_call(
+    pub async fn accept_call(
         &mut self,
         callee: Option<String>,
         callee_answer: Option<String>,
@@ -593,7 +626,7 @@ impl CallSession {
         self.shared.transition_to_answered();
     }
 
-    async fn start_queue_hold(&mut self, hold: QueueHoldConfig) -> Result<()> {
+    pub async fn start_queue_hold(&mut self, hold: QueueHoldConfig) -> Result<()> {
         if self.queue_hold_active {
             return Ok(());
         }
@@ -642,7 +675,7 @@ impl CallSession {
         Ok(())
     }
 
-    async fn stop_queue_hold(&mut self) {
+    pub async fn stop_queue_hold(&mut self) {
         if !self.queue_hold_active {
             return;
         }
@@ -722,5 +755,9 @@ impl CallSession {
 impl Drop for CallSession {
     fn drop(&mut self) {
         self.shared.unregister();
+        if let Some(reporter) = self.reporter.take() {
+            let snapshot = self.record_snapshot();
+            reporter.report(snapshot);
+        }
     }
 }

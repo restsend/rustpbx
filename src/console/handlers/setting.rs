@@ -429,7 +429,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize) {
     if let Some(server) = app_state.sip_server.as_ref() {
         let context = server.inner.data_context.clone();
-        let snapshot = context.acl_rules_snapshot().await;
+        let snapshot = context.acl_rules_snapshot();
 
         let embedded = if let Some(path) = app_state.config_path.as_ref() {
             match Config::load(path) {
@@ -1790,11 +1790,7 @@ pub(crate) async fn update_security_settings(
 
     if let Some(app_state) = state.app_state() {
         if let Some(server) = app_state.sip_server.as_ref() {
-            server
-                .inner
-                .data_context
-                .set_acl_rules(acl_rules.clone())
-                .await;
+            server.inner.data_context.set_acl_rules(acl_rules.clone());
         }
     }
 

@@ -61,7 +61,7 @@ pub async fn create_test_server_with_config(
         data_context,
         database: None,
         user_backend: user_backend,
-        auth_backend: None,
+        auth_backend: Vec::new(),
         call_router: None,
         locator: locator,
         callrecord_sender: None,

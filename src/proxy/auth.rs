@@ -1,5 +1,6 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::TransactionCookie;
+use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use anyhow::Result;
@@ -191,7 +192,7 @@ impl ProxyModule for AuthModule {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        if let Some(backend) = self.server.auth_backend.as_ref() {
+        for backend in self.server.auth_backend.iter() {
             match backend.authenticate(&tx.original).await {
                 Ok(Some(mut user)) => {
                     user.merge_with(&tx_user);
@@ -262,6 +263,7 @@ impl ProxyModule for AuthModule {
                                 %source,
                                 "User not found, don't send authentication challenge"
                             );
+                            cookie.mark_as_spam(SpamResult::Spam);
                             return Ok(ProxyAction::Abort);
                         }
                     };

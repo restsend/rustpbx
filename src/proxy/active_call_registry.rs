@@ -1,5 +1,5 @@
 use crate::call::DialDirection;
-use crate::proxy::proxy_call::CallSessionHandle;
+use crate::proxy::proxy_call::state::CallSessionHandle;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;

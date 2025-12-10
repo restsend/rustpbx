@@ -107,24 +107,6 @@ default('RustPBX') }}{% endblock %}
                             </div>
                         </div>
                     </button>
-                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
-                        :class="activeTab === 'metadata' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-                        :aria-selected="activeTab === 'metadata'" aria-controls="sip-trunk-tab-metadata"
-                        @click="activeTab = 'metadata'">
-                        <div class="flex items-center gap-2">
-                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 5h16v4H4z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 11h16v4H4z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M4 17h10v4H4z" />
-                            </svg>
-                            <div>
-                                <span class="text-sm">Metadata</span>
-                                <span class="block text-[11px] font-normal text-slate-400">Snapshots, analytics,
-                                    tags</span>
-                            </div>
-                        </div>
-                    </button>
                 </nav>
             </div>
 
@@ -278,24 +260,6 @@ default('RustPBX') }}{% endblock %}
                 </section>
 
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
-                    <div class="mt-4 grid gap-4 md:grid-cols-2">
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Allowed IPs (one per line)
-                            <textarea rows="6" x-model="form.allowed_ips"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="203.0.113.10/32&#10;198.51.100.5/32"></textarea>
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            DID numbers (one per line)
-                            <textarea rows="6" x-model="form.did_numbers"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="+85258001234&#10;+85258004567"></textarea>
-                        </label>
-                    </div>
-                </section>
-
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-1">
                         <h2 class="text-sm font-semibold text-slate-900">Inbound identity filters</h2>
                         <p class="text-sm text-slate-500">Drop inbound calls whose SIP From/To users don't match these
@@ -321,33 +285,21 @@ default('RustPBX') }}{% endblock %}
                         </label>
                     </div>
                 </section>
-            </div>
 
-            <div class="space-y-6" x-show="activeTab === 'metadata'" x-transition.opacity x-cloak
-                id="sip-trunk-tab-metadata" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-sm font-semibold text-slate-900">Metadata (optional)</h2>
+                    <h2 class="text-sm font-semibold text-slate-900">Access lists</h2>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Billing snapshot (JSON)
-                            <textarea rows="5" x-model="form.billing_snapshot"
+                            Allowed IPs (one per line)
+                            <textarea rows="6" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Leave blank to keep unchanged"></textarea>
+                                placeholder="203.0.113.10/32&#10;198.51.100.5/32"></textarea>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Analytics payload (JSON)
-                            <textarea rows="5" x-model="form.analytics"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Tags (JSON)
-                            <textarea rows="4" x-model="form.tags"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Metadata (JSON)
-                            <textarea rows="4" x-model="form.metadata"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"></textarea>
+                            DID numbers (one per line)
+                            <textarea rows="6" x-model="form.did_numbers"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="+85258001234&#10;+85258004567"></textarea>
                         </label>
                     </div>
                 </section>

@@ -57,7 +57,7 @@ pub struct SipServerInner {
     pub data_context: Arc<ProxyDataContext>,
     pub database: Option<DatabaseConnection>,
     pub user_backend: Box<dyn UserBackend>,
-    pub auth_backend: Option<Box<dyn AuthBackend>>,
+    pub auth_backend: Vec<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
     pub dialplan_inspector: Option<Box<dyn DialplanInspector>>,
     pub proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
@@ -87,7 +87,7 @@ pub struct SipServerBuilder {
     config: Arc<ProxyConfig>,
     cancel_token: Option<CancellationToken>,
     user_backend: Option<Box<dyn UserBackend>>,
-    auth_backend: Option<Box<dyn AuthBackend>>,
+    auth_backend: Vec<Box<dyn AuthBackend>>,
     call_router: Option<Box<dyn CallRouter>>,
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
@@ -111,7 +111,7 @@ impl SipServerBuilder {
             rtp_config: None,
             cancel_token: None,
             user_backend: None,
-            auth_backend: None,
+            auth_backend: Vec::new(),
             call_router: None,
             proxycall_inspector: None,
             module_fns: HashMap::new(),
@@ -140,7 +140,7 @@ impl SipServerBuilder {
     }
 
     pub fn with_auth_backend(mut self, auth_backend: Box<dyn AuthBackend>) -> Self {
-        self.auth_backend = Some(auth_backend);
+        self.auth_backend.push(auth_backend);
         self
     }
 

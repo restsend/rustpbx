@@ -6,7 +6,7 @@ use crate::call::{
 use crate::callrecord::{
     CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordPersistArgs,
     apply_record_file_extras, extract_sip_username, extras_map_to_metadata, extras_map_to_option,
-    persist_and_dispatch_record, sipflow::SipMessageItem,
+    sipflow::SipMessageItem,
 };
 use crate::config::{ProxyConfig, RouteResult};
 use crate::proxy::data::ProxyDataContext;
@@ -233,8 +233,8 @@ impl DefaultRouteInvite {
         Vec<RouteRule>,
         Option<SourceTrunk>,
     ) {
-        let trunks_snapshot = self.data_context.trunks_snapshot().await;
-        let routes_snapshot = self.data_context.routes_snapshot().await;
+        let trunks_snapshot = self.data_context.trunks_snapshot();
+        let routes_snapshot = self.data_context.routes_snapshot();
         let source_trunk = self
             .resolve_source_trunk(&trunks_snapshot, origin, direction)
             .await;
@@ -913,6 +913,32 @@ impl CallModule {
         let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
         sip_leg_roles.insert(leg_call_id.clone(), "primary".to_string());
 
+        let direction = if cookie.is_from_trunk() {
+            "inbound".to_string()
+        } else {
+            "internal".to_string()
+        };
+
+        let trunk_name = cookie.get_source_trunk();
+        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
+            let trunks = self.inner.server.data_context.trunks_snapshot();
+            let trunk_id = trunks.get(name).and_then(|config| config.id);
+            (Some(name.clone()), trunk_id)
+        } else {
+            (None, None)
+        };
+
+        let metadata_value = extras_map_to_metadata(&extras_map);
+
+        let mut persist_args = CallRecordPersistArgs::default();
+        persist_args.direction = direction;
+        persist_args.status = "failed".to_string();
+        persist_args.from_number = extract_sip_username(&caller);
+        persist_args.to_number = extract_sip_username(&callee);
+        persist_args.sip_trunk_id = sip_trunk_id;
+        persist_args.sip_gateway = sip_gateway;
+        persist_args.metadata = metadata_value;
+
         let mut record = CallRecord {
             call_type: crate::call::ActiveCallType::Sip,
             option: None,
@@ -934,50 +960,16 @@ impl CallModule {
             refer_callrecord: None,
             sip_flows,
             sip_leg_roles,
+            persist_args: Some(persist_args),
         };
 
         apply_record_file_extras(&record, &mut extras_map);
         record.extras = extras_map_to_option(&extras_map);
 
-        let direction = if cookie.is_from_trunk() {
-            "inbound".to_string()
-        } else {
-            "internal".to_string()
-        };
-        let trunk_name = cookie.get_source_trunk();
-        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
-            let trunks = self.inner.server.data_context.trunks_snapshot().await;
-            let trunk_id = trunks.get(name).and_then(|config| config.id);
-            (Some(name.clone()), trunk_id)
-        } else {
-            (None, None)
-        };
-
-        let metadata_value = extras_map_to_metadata(&extras_map);
-
-        let mut persist_args = CallRecordPersistArgs::default();
-        persist_args.direction = direction;
-        persist_args.status = "failed".to_string();
-        persist_args.from_number = extract_sip_username(&caller);
-        persist_args.to_number = extract_sip_username(&callee);
-        persist_args.sip_trunk_id = sip_trunk_id;
-        persist_args.sip_gateway = sip_gateway;
-        persist_args.metadata = metadata_value;
-
-        let (persist_error, send_error) = persist_and_dispatch_record(
-            self.inner.server.database.as_ref(),
-            self.inner.server.callrecord_sender.as_ref(),
-            &self.inner.server.call_record_hooks,
-            record,
-            persist_args,
-        )
-        .await;
-
-        if let Some(err) = persist_error {
-            warn!(dialog_id = %dialog_id, error = %err, "failed to persist failed call record");
-        }
-        if let Some(err) = send_error {
-            warn!(dialog_id = %dialog_id, error = %err, "failed to send call record");
+        if let Some(ref sender) = self.inner.server.callrecord_sender {
+            sender
+                .send(record)
+                .map_err(|e| anyhow!("failed to send call record: {}", e))?;
         }
         Ok(())
     }

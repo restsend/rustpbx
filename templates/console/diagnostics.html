@@ -1239,7 +1239,7 @@
                                     <div x-html="plugin.ui_form" x-show="callMode === plugin.mode" class="mb-4"></div>
                                 </template>
                             </div>
-                            <div class="flex flex-wrap items-center gap-3">
+                            <div class="flex flex-wrap items-center gap-3" x-show="callMode === 'standard'">
                                 <button type="button" @click="registerSip" :disabled="sipRegistering"
                                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
                                     <template x-if="!sipRegistering">
@@ -1650,6 +1650,9 @@
                         );
                     },
                     get canPlaceCall() {
+                        if (this.callMode !== 'standard') {
+                            return !sipSession;
+                        }
                         return Boolean(this.sipRegistered && !sipSession && !this.sipRegistering);
                     },
                     dialogs: [],
@@ -2312,6 +2315,60 @@
                                     // ignore close errors
                                 }
                             }
+                        }
+                    },
+                    bindSipUa(ua) {
+                        if (sipUa && sipUa !== ua) {
+                            try { sipUa.stop(); } catch (e) { }
+                        }
+                        sipUa = ua;
+                        this.sipUaReady = true;
+                        this.sipRegistered = false;
+                        this.sipRegistering = false;
+
+                        ua.on('connected', () => {
+                            this.appendSipEvent('WebSocket connected', 'success');
+                            this.setSipStatus('Connected', 'pending');
+                            this.ensureTransportTap();
+                            this.sipUaReady = true;
+                        });
+
+                        ua.on('disconnected', () => {
+                            this.appendSipEvent('WebSocket disconnected', 'warning');
+                            this.setSipStatus('Disconnected', 'idle');
+                            this.sipUaReady = false;
+                            this.resetSipSessionState();
+                        });
+
+                        ua.on('newRTCSession', (data) => {
+                            const session = data.session;
+                            if (sipSession && session !== sipSession) {
+                                this.appendSipEvent('Rejecting concurrent session (busy).', 'warning');
+                                session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
+                                return;
+                            }
+                            if (data.originator === 'remote') {
+                                const identity = session.remote_identity;
+                                const displayName = identity?.display_name || identity?.uri?.user || 'Unknown caller';
+                                const uriText = identity?.uri?.toString ? identity.uri.toString() : '';
+                                this.sipIncoming = { displayName, uri: uriText };
+                                this.appendSipEvent(`Incoming call from ${displayName}`, 'info');
+                                this.bindSipSession(session, 'incoming');
+                            } else {
+                                this.bindSipSession(session, 'outgoing');
+                            }
+                        });
+
+                        ua.on('newMessage', (data) => {
+                            const msg = data.message;
+                            const sender = msg.remote_identity.uri.user;
+                            const text = msg.body;
+                            this.appendSipEvent(`Message from ${sender}: ${text}`, 'info');
+                        });
+
+                        // Ensure tap immediately if already connected
+                        if (ua.isConnected && ua.isConnected()) {
+                            this.ensureTransportTap();
                         }
                     },
                     async registerSip() {

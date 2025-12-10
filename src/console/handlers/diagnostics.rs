@@ -135,7 +135,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
 
     if let Some(server) = state.sip_server() {
         let data_context = server.data_context.clone();
-        let config_trunks = data_context.trunks_snapshot().await;
+        let config_trunks = data_context.trunks_snapshot();
         let db_trunks = sip_trunk::Entity::find()
             .all(state.db())
             .await
@@ -821,7 +821,7 @@ async fn test_trunk(
     };
 
     let data_context = server.data_context.clone();
-    let trunks = data_context.trunks_snapshot().await;
+    let trunks = data_context.trunks_snapshot();
     let Some(trunk) = trunks.get(trunk_name) else {
         return (
             StatusCode::NOT_FOUND,
@@ -908,7 +908,7 @@ async fn probe_trunk_options(
     };
 
     let data_context = server.data_context.clone();
-    let trunks = data_context.trunks_snapshot().await;
+    let trunks = data_context.trunks_snapshot();
     let Some(trunk) = trunks.get(trunk_name) else {
         return (
             StatusCode::NOT_FOUND,
@@ -1162,8 +1162,8 @@ async fn route_evaluate(
 
     let (trunks_snapshot, routes_snapshot) = match dataset {
         EvaluationDataset::Runtime => {
-            let trunks = data_context.trunks_snapshot().await;
-            let routes = data_context.routes_snapshot().await;
+            let trunks = data_context.trunks_snapshot();
+            let routes = data_context.routes_snapshot();
             (trunks, routes)
         }
         EvaluationDataset::Database => {

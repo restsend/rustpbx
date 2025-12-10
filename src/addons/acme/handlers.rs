@@ -44,7 +44,8 @@ pub async fn ui_index(
                 "acme/acme_index.html",
                 serde_json::json!({
                     "certs": certs,
-                    "status": status
+                    "status": status,
+                    "nav_active": "SSL Certificates"
                 }),
             );
         }
