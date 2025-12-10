@@ -1,5 +1,22 @@
+use crate::{
+    call::{DialplanFlow, Location, QueueFallbackAction, QueuePlan},
+    proxy::proxy_call::{
+        ActionInbox, FlowFailureHandling, MAX_QUEUE_CHAIN_DEPTH, ProxyCall, session::CallSession,
+        state::SessionAction,
+    },
+};
+use anyhow::{Result, anyhow};
+use futures::{FutureExt, future::BoxFuture};
+
+use tokio::time::timeout;
+use tracing::warn;
+
 impl ProxyCall {
-    async fn transfer_to_queue(&self, session: &mut CallSession, reference: &str) -> Result<()> {
+    pub(super) async fn transfer_to_queue(
+        &self,
+        session: &mut CallSession,
+        reference: &str,
+    ) -> Result<()> {
         let queue_plan = self.load_queue_plan(reference).await?;
         let strategy = queue_plan
             .dial_strategy()
@@ -20,19 +37,14 @@ impl ProxyCall {
             return Err(anyhow!("queue reference cannot be empty"));
         }
         let label = reference.trim().to_string();
-        if let Some(config) = self
-            .server
-            .data_context
-            .resolve_queue_config(reference)
-            .await?
-        {
+        if let Some(config) = self.server.data_context.resolve_queue_config(reference)? {
             let mut plan = config.to_queue_plan()?;
             if plan.label.is_none() {
                 plan.label = Some(label.clone());
             }
             return Ok(plan);
         }
-        if let Some(config) = self.server.data_context.load_queue_file(reference).await? {
+        if let Some(config) = self.server.data_context.load_queue_file(reference)? {
             let mut plan = config.to_queue_plan()?;
             if plan.label.is_none() {
                 plan.label = Some(label);
@@ -42,7 +54,7 @@ impl ProxyCall {
         Err(anyhow!("queue reference '{}' not found", reference))
     }
 
-    async fn execute_queue_plan(
+    pub(super) async fn execute_queue_plan(
         &self,
         session: &mut CallSession,
         plan: &QueuePlan,
@@ -209,7 +221,7 @@ impl ProxyCall {
                     }
                 }
                 QueueFallbackAction::Queue { name } => {
-                    let config = match self.server.data_context.resolve_queue_config(name).await {
+                    let config = match self.server.data_context.resolve_queue_config(name) {
                         Ok(Some(cfg)) => cfg,
                         Ok(None) => {
                             warn!(

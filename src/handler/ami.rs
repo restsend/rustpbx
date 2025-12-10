@@ -295,10 +295,10 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
         Err(response) => return response,
     };
 
-    match context.reload_acl_rules(true, config_override).await {
+    match context.reload_acl_rules(true, config_override) {
         Ok(metrics) => {
             let total = metrics.total;
-            let active_rules = context.acl_rules_snapshot().await;
+            let active_rules = context.acl_rules_snapshot();
             Json(serde_json::json!({
                 "status": "ok",
                 "acl_rules_reloaded": total,

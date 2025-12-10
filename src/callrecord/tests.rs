@@ -17,22 +17,13 @@ async fn test_save_with_http_without_media() {
         option: Some(CallOption::default()),
         call_id: "test_call_123".to_string(),
         start_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         end_time: Utc::now(),
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        answer: None,
-        offer: None,
-        hangup_reason: None,
         hangup_messages: Vec::new(),
-        recorder: vec![],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     // Test without media (should not fail if no server available)
@@ -91,21 +82,13 @@ async fn test_save_with_http_with_media() {
         call_id: "test_call_with_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        answer: None,
-        offer: None,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        hangup_messages: Vec::new(),
         recorder: vec![media],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     // Test with media
@@ -152,21 +135,12 @@ async fn test_save_with_http_with_custom_headers() {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        answer: None,
-        offer: None,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        hangup_messages: Vec::new(),
-        recorder: vec![],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -211,21 +185,12 @@ async fn test_save_with_s3_like_with_custom_headers() {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        answer: None,
-        offer: None,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        hangup_messages: Vec::new(),
-        recorder: vec![],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     let url = "http://httpbin.org/post".to_string();
@@ -277,21 +242,12 @@ async fn test_save_with_s3_like_memory_store() {
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        answer: None,
-        offer: None,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        hangup_messages: Vec::new(),
-        recorder: vec![],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     // This test will only succeed if there's a local minio instance running
@@ -349,21 +305,13 @@ async fn test_save_with_s3_like_with_media() {
         call_id: "test_s3_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
-        ring_time: None,
-        answer_time: None,
         caller: "+1234567890".to_string(),
         callee: "+0987654321".to_string(),
         status_code: 200,
-        offer: None,
-        answer: None,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        hangup_messages: Vec::new(),
         recorder: vec![media],
         extras: Some(extras),
-        dump_event_file: None,
-        refer_callrecord: None,
-        sip_flows: HashMap::new(),
-        sip_leg_roles: HashMap::new(),
+        ..Default::default()
     };
 
     // Test with different S3 vendors
@@ -422,8 +370,8 @@ fn test_compute_billing_logic() {
         initial_increment_secs: 60,
         billing_increment_secs: 60,
         overage_rate_per_minute: 0.10, // /bin/bash.10 per minute
-        setup_fee: 0.05, // /bin/bash.05 setup fee
-        tax_percent: 10.0, // 10% tax
+        setup_fee: 0.05,               // /bin/bash.05 setup fee
+        tax_percent: 10.0,             // 10% tax
     };
 
     let context = BillingContext {

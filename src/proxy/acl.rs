@@ -335,7 +335,7 @@ impl ProxyModule for AclModule {
 impl AclModule {
     async fn load_rules(&self) -> Vec<AclRule> {
         if let Some(server) = &self.inner.server {
-            let snapshot = server.data_context.acl_rules_snapshot().await;
+            let snapshot = server.data_context.acl_rules_snapshot();
             return parse_rules(snapshot);
         }
         parse_rules(self.inner.fallback_rules.clone())

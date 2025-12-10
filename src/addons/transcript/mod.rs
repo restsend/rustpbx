@@ -2,7 +2,6 @@ use crate::addons::{Addon, ScriptInjection, SidebarItem};
 use crate::app::AppState;
 use async_trait::async_trait;
 use axum::{Router, routing::get};
-use tower_http::services::ServeDir;
 
 pub mod handlers;
 pub mod models;
@@ -43,12 +42,13 @@ impl Addon for TranscriptAddon {
     fn router(&self, state: AppState) -> Option<Router> {
         if let Some(console) = &state.console {
             let base = console.base_path();
+            #[allow(unused_mut)]
             let mut router = Router::new();
             #[cfg(debug_assertions)]
             {
                 router = router.nest_service(
                     "/static/transcript/",
-                    ServeDir::new("src/addons/transcript/static"),
+                    tower_http::services::ServeDir::new("src/addons/transcript/static"),
                 );
             }
 
@@ -59,7 +59,7 @@ impl Addon for TranscriptAddon {
                         .post(handlers::trigger_call_record_transcript),
                 )
                 .route(
-                    &format!("{}/transcript/settings", base),
+                    &format!("{}/transcript", base),
                     get(handlers::get_settings).post(handlers::update_settings),
                 )
                 .with_state(console.clone());
@@ -71,9 +71,9 @@ impl Addon for TranscriptAddon {
 
     fn sidebar_items(&self) -> Vec<SidebarItem> {
         vec![SidebarItem {
-            name: "Transcript".to_string(),
+            name: "Call Transcription".to_string(),
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-6"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" /></svg>"#.to_string(),
-            url: "/console/transcript/settings".to_string(),
+            url: "/console/transcript".to_string(),
             permission: None,
         }]
     }

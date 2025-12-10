@@ -655,6 +655,7 @@ pub async fn get_settings(
         "model_ready": model_ready,
         "current_user": user,
         "base_path": state.base_path(),
+        "nav_active": "Call Transcription",
     });
     state.render("settings.html", ctx)
 }

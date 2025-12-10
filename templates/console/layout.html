@@ -131,7 +131,7 @@
 
         <!-- Sidebar -->
         <aside
-            class="fixed inset-y-0 left-0 z-40 w-72 transform bg-white ring-1 ring-black/5 shadow-xl transition-all duration-300 ease-in-out lg:translate-x-0 lg:shadow-none lg:ring-0"
+            class="fixed inset-y-0 left-0 z-40 w-72 transform bg-white ring-1 ring-black/5 shadow-xl lg:translate-x-0 lg:shadow-none lg:ring-0"
             :class="{ '-translate-x-full': !sidebarOpen, 'lg:w-24': sidebarCollapsed, 'lg:w-72': !sidebarCollapsed }"
             x-transition>
             <div class="flex h-full flex-col">
@@ -154,8 +154,7 @@
                     </button>
                 </div>
                 <!-- Nav -->
-                <nav class="flex-1 overflow-y-auto px-3 py-4 text-sm transition-all duration-300"
-                    :class="{ 'px-2': sidebarCollapsed }">
+                <nav class="flex-1 overflow-y-auto px-3 py-4 text-sm" :class="{ 'px-2': sidebarCollapsed }">
                     {% set bp = base_path | default('/console') %}
                     <a href="{{ bp }}/"
                         class="group flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='dashboard' else 'text-slate-700' }}"
@@ -271,7 +270,7 @@
         </aside>
 
         <!-- Main area -->
-        <div class="transition-all duration-300 ease-in-out" x-bind:class="sidebarCollapsed ? 'lg:pl-24' : 'lg:pl-72'">
+        <div class="" x-bind:class="sidebarCollapsed ? 'lg:pl-24' : 'lg:pl-72'">
             <!-- Top bar -->
             <header
                 class="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 px-6 backdrop-blur">

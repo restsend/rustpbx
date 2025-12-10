@@ -922,19 +922,10 @@ impl ActiveCall {
     pub async fn cleanup(&self) -> Result<()> {
         self.tts_handle.lock().await.take();
         self.media_stream.cleanup().await.ok();
-        // Send call record if available
-        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
-            if let Err(e) = sender.send(self.get_callrecord().await) {
-                warn!(
-                    session_id = self.session_id,
-                    "failed to send call record: {}", e
-                );
-            }
-        }
         Ok(())
     }
 
-    pub async fn get_callrecord(&self) -> CallRecord {
+    pub fn get_callrecord(&self) -> CallRecord {
         let call_state = self.call_state.read().unwrap();
         call_state.build_callrecord(
             self.app_state.clone(),
@@ -1515,6 +1506,20 @@ impl ActiveCall {
     }
 }
 
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        info!(session_id = self.session_id, "dropping active call");
+        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
+            let record = self.get_callrecord();
+            if let Err(e) = sender.send(record) {
+                warn!(
+                    session_id = self.session_id,
+                    "failed to send call record: {}", e
+                );
+            }
+        }
+    }
+}
 impl ActiveCallState {
     pub fn build_hangup_event(
         &self,
@@ -1607,6 +1612,7 @@ impl ActiveCallState {
             refer_callrecord,
             sip_flows: HashMap::new(),
             sip_leg_roles: HashMap::new(),
+            persist_args: None,
         }
     }
 }

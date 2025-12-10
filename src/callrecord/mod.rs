@@ -2,9 +2,7 @@ use self::sipflow::SipMessageItem;
 use crate::{
     call::ActiveCallType,
     config::{CallRecordConfig, S3Vendor},
-    models::{
-        call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
-    },
+    models::call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -24,7 +22,6 @@ use std::{
     collections::HashMap, convert::TryFrom, future::Future, mem, path::Path, pin::Pin,
     str::FromStr, sync::Arc, time::Instant,
 };
-use tokio::sync::mpsc::error::SendError;
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
@@ -121,6 +118,7 @@ pub struct CallRecord {
     pub sip_flows: HashMap<String, Vec<SipMessageItem>>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub sip_leg_roles: HashMap<String, String>,
+    pub persist_args: Option<CallRecordPersistArgs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,43 +288,12 @@ pub fn extras_map_to_metadata(extras: &HashMap<String, Value>) -> Option<Value> 
 pub struct CallRecordSavedContext<'a> {
     pub db: &'a DatabaseConnection,
     pub record: &'a CallRecord,
-    pub args: &'a CallRecordPersistArgs,
     pub billing_amount_total: Option<f64>,
 }
 
 #[async_trait::async_trait]
 pub trait CallRecordHook: Send + Sync {
     async fn on_record_saved(&self, ctx: CallRecordSavedContext<'_>) -> anyhow::Result<()>;
-}
-
-pub async fn persist_and_dispatch_record(
-    db: Option<&DatabaseConnection>,
-    sender: Option<&CallRecordSender>,
-    hooks: &[Box<dyn CallRecordHook>],
-    record: CallRecord,
-    args: CallRecordPersistArgs,
-) -> (Option<anyhow::Error>, Option<SendError<CallRecord>>) {
-    let persist_error = match db {
-        Some(db_conn) => match persist_call_record(db_conn, hooks, &record, args).await {
-            Ok(_) => None,
-            Err(err) => Some(err),
-        },
-        None => {
-            let _ = args;
-            None
-        }
-    };
-
-    let send_error = if let Some(sender) = sender {
-        match sender.send(record) {
-            Ok(_) => None,
-            Err(err) => Some(err),
-        }
-    } else {
-        None
-    };
-
-    (persist_error, send_error)
 }
 
 pub trait CallRecordFormatter: Send + Sync {
@@ -456,6 +423,8 @@ pub struct CallRecordManager {
     receiver: CallRecordReceiver,
     saver_fn: FnSaveCallRecord,
     formatter: Arc<dyn CallRecordFormatter>,
+    db: Option<DatabaseConnection>,
+    hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
 pub struct CallRecordManagerBuilder {
@@ -463,6 +432,8 @@ pub struct CallRecordManagerBuilder {
     pub config: Option<CallRecordConfig>,
     saver_fn: Option<FnSaveCallRecord>,
     formatter: Option<Arc<dyn CallRecordFormatter>>,
+    db: Option<DatabaseConnection>,
+    hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
 impl CallRecordManagerBuilder {
@@ -472,6 +443,8 @@ impl CallRecordManagerBuilder {
             config: None,
             saver_fn: None,
             formatter: None,
+            db: None,
+            hooks: Vec::new(),
         }
     }
 
@@ -492,6 +465,16 @@ impl CallRecordManagerBuilder {
 
     pub fn with_formatter(mut self, formatter: Arc<dyn CallRecordFormatter>) -> Self {
         self.formatter = Some(formatter);
+        self
+    }
+
+    pub fn with_database(mut self, db: DatabaseConnection) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    pub fn with_hook(mut self, hook: Box<dyn CallRecordHook>) -> Self {
+        self.hooks.push(hook);
         self
     }
 
@@ -529,6 +512,8 @@ impl CallRecordManagerBuilder {
             config,
             saver_fn,
             formatter,
+            db: self.db,
+            hooks: self.hooks,
         }
     }
 }
@@ -933,6 +918,8 @@ impl CallRecordManager {
 
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
+        let db = self.db.clone();
+        let hooks = Arc::new(mem::take(&mut self.hooks));
         info!("CallRecordManager serving");
         select! {
             _ = self.cancel_token.cancelled() => {
@@ -944,6 +931,8 @@ impl CallRecordManager {
                 self.config.clone(),
                 self.saver_fn.clone(),
                 &mut self.receiver,
+                db,
+                hooks,
             ) => {
                 info!("CallRecordManager received done");
             }
@@ -957,13 +946,23 @@ impl CallRecordManager {
         config: Arc<CallRecordConfig>,
         saver_fn: FnSaveCallRecord,
         receiver: &mut CallRecordReceiver,
+        db: Option<DatabaseConnection>,
+        hooks: Arc<Vec<Box<dyn CallRecordHook>>>,
     ) -> Result<()> {
         while let Some(record) = receiver.recv().await {
             let cancel_token_ref = cancel_token.clone();
             let save_fn_ref = saver_fn.clone();
             let config_ref = config.clone();
             let formatter_ref = formatter.clone();
+            let db_ref = db.clone();
+            let hooks_ref = hooks.clone();
             tokio::spawn(async move {
+                let record = record;
+                if let Some(db) = db_ref {
+                    if let Err(e) = persist_call_record(&db, &hooks_ref, &record).await {
+                        warn!("Failed to persist call record: {}", e);
+                    }
+                }
                 select! {
                     _ = cancel_token_ref.cancelled() => {
                         info!("CallRecordManager cancelled");
@@ -984,7 +983,7 @@ impl CallRecordManager {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecordPersistArgs {
     pub direction: String,
     pub status: String,
@@ -1048,8 +1047,14 @@ pub async fn persist_call_record(
     db: &DatabaseConnection,
     hooks: &[Box<dyn CallRecordHook>],
     record: &CallRecord,
-    args: CallRecordPersistArgs,
 ) -> Result<()> {
+    let args = match record.persist_args.as_ref() {
+        Some(args) => args,
+        None => {
+            return Ok(());
+        }
+    };
+
     let direction = args.direction.trim().to_ascii_lowercase();
     let status = args.status.trim().to_ascii_lowercase();
     let from_number = args.from_number.clone();
@@ -1072,6 +1077,13 @@ pub async fn persist_call_record(
     let metadata_value = merge_metadata(record, args.metadata.clone());
     let signaling_value = build_signaling_payload(record);
     let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
+
+    let billable_duration_secs = if let Some(answer_time) = record.answer_time {
+        (record.end_time - answer_time).num_seconds().max(0) as i32
+    } else {
+        0
+    };
+
     let display_id = record
         .option
         .as_ref()
@@ -1080,7 +1092,7 @@ pub async fn persist_call_record(
     let caller_uri = normalize_endpoint_uri(&record.caller);
     let callee_uri = normalize_endpoint_uri(&record.callee);
     let billing_context = resolve_billing_context(db, sip_trunk_id).await?;
-    let billing_computation = compute_billing(duration_secs, &billing_context);
+    let billing_computation = compute_billing(billable_duration_secs, &billing_context);
     let billing_snapshot = billing_context.snapshot.clone();
     let billing_method = billing_computation.method.clone();
     let billing_status = Some(billing_computation.status.clone());
@@ -1091,6 +1103,18 @@ pub async fn persist_call_record(
     let billing_amount_tax = billing_computation.amount_tax;
     let billing_amount_total = billing_computation.amount_total;
     let billing_result_value = billing_computation.to_json();
+
+    let ctx = CallRecordSavedContext {
+        db,
+        record,
+        billing_amount_total,
+    };
+    for hook in hooks {
+        if let Err(e) = hook.on_record_saved(ctx).await {
+            warn!("CallRecordHook failed: {}", e);
+        }
+    }
+
     if let Some(model) = CallRecordEntity::find()
         .filter(CallRecordColumn::CallId.eq(record.call_id.clone()))
         .one(db)
@@ -1140,19 +1164,6 @@ pub async fn persist_call_record(
         active.signaling = Set(signaling_value.clone());
         active.updated_at = Set(record.end_time);
         active.update(db).await?;
-
-        let ctx = CallRecordSavedContext {
-            db,
-            record,
-            args: &args,
-            billing_amount_total,
-        };
-        for hook in hooks {
-            if let Err(e) = hook.on_record_saved(ctx).await {
-                warn!("CallRecordHook failed: {}", e);
-            }
-        }
-
         return Ok(());
     }
 
@@ -1206,18 +1217,6 @@ pub async fn persist_call_record(
     };
 
     active.insert(db).await?;
-
-    let ctx = CallRecordSavedContext {
-        db,
-        record,
-        args: &args,
-        billing_amount_total,
-    };
-    for hook in hooks {
-        if let Err(e) = hook.on_record_saved(ctx).await {
-            warn!("CallRecordHook failed: {}", e);
-        }
-    }
 
     Ok(())
 }
@@ -1423,15 +1422,12 @@ struct BillingParameters {
     tax_percent: f64,
 }
 
-
 async fn resolve_billing_context(
     _db: &DatabaseConnection,
     _sip_trunk_id: Option<i64>,
 ) -> Result<BillingContext> {
     Ok(BillingContext::default())
 }
-
-
 
 #[derive(Debug, Clone)]
 struct BillingComputation {

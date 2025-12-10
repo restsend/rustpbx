@@ -142,38 +142,47 @@
 
         <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4">
-                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div class="flex flex-wrap items-center justify-between gap-3">
                     <div class="flex flex-wrap items-center gap-4">
-                        <div class="flex items-center gap-2">
-                            <div class="inline-flex overflow-hidden rounded-full border border-slate-200 bg-white">
-                                <template x-for="(tab, idx) in statusTabs()" :key="`status-${tab.value}`">
-                                    <button type="button"
-                                        class="px-3 py-1.5 text-xs font-semibold transition focus:outline-none" :class="[
-                                            statusFilter === tab.value ? 'bg-sky-600 text-white' : 'text-slate-600 hover:bg-slate-100',
-                                            idx < statusTabs().length - 1 ? 'border-r border-slate-200' : ''
-                                        ]" @click="selectStatusTab(tab.value)">
-                                        <span x-text="tab.label"></span>
-                                    </button>
-                                </template>
-                            </div>
+                        <div
+                            class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                            <input type="date" x-model="dateFrom"
+                                class="rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-slate-600 focus:ring-2 focus:ring-sky-200"
+                                aria-label="Date from">
+                            <span class="flex items-center text-slate-400">-</span>
+                            <input type="date" x-model="dateTo"
+                                class="rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-slate-600 focus:ring-2 focus:ring-sky-200"
+                                aria-label="Date to">
                         </div>
-                        <div class="flex items-center gap-2">
-                            <div class="inline-flex overflow-hidden rounded-full border border-slate-200 bg-white">
-                                <template x-for="(tab, idx) in directionTabs()" :key="`direction-${tab.value}`">
-                                    <button type="button"
-                                        class="px-3 py-1.5 text-xs font-semibold transition focus:outline-none" :class="[
-                                            directionFilter === tab.value ? 'bg-gray-600 text-white' : 'text-slate-600 hover:bg-slate-100',
-                                            idx < directionTabs().length - 1 ? 'border-r border-slate-200' : ''
-                                        ]" @click="selectDirectionTab(tab.value)">
-                                        <span x-text="tab.label"></span>
-                                    </button>
-                                </template>
-                            </div>
+                        <div
+                            class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="statusFilter === 'any' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
+                                @click="statusFilter = 'any'">Any status</button>
+                            <template x-for="tab in statusTabs()" :key="`status-${tab.value}`">
+                                <button type="button" class="rounded-md px-3 py-1 transition"
+                                    :class="statusFilter === tab.value ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
+                                    @click="statusFilter = tab.value">
+                                    <span x-text="tab.label"></span>
+                                </button>
+                            </template>
+                        </div>
+                        <div
+                            class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="directionFilter === 'any' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="directionFilter = 'any'">Any direction</button>
+                            <template x-for="tab in directionTabs()" :key="`direction-${tab.value}`">
+                                <button type="button" class="rounded-md px-3 py-1 transition"
+                                    :class="directionFilter === tab.value ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                    @click="directionFilter = tab.value">
+                                    <span x-text="tab.label"></span>
+                                </button>
+                            </template>
                         </div>
                     </div>
-                    <div
-                        class="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center lg:justify-end lg:gap-3">
-                        <label class="relative flex-1 lg:min-w-[18rem]" aria-label="Search call records">
+                    <div class="flex flex-grow flex-wrap items-center justify-end gap-3">
+                        <label class="relative flex-1 min-w-[18rem]" aria-label="Search call records">
                             <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                                 viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                                 <path stroke-linecap="round" stroke-linejoin="round"
@@ -672,8 +681,8 @@
                 { value: 'duration_asc', label: 'Duration · Shortest first' },
             ],
             filterSelectOptions: [
-                { key: 'direction', label: 'Direction' },
-                { key: 'date_range', label: 'Date range' },
+                // { key: 'direction', label: 'Direction' },
+                // { key: 'date_range', label: 'Date range' },
                 { key: 'only_transcribed', label: 'Transcribed only' },
                 { key: 'departments', label: 'Departments' },
                 { key: 'sip_trunks', label: 'SIP trunks' },
@@ -1334,12 +1343,6 @@
                         label: this.directionLabel(value),
                     }));
             },
-            selectStatusTab(value) {
-                this.statusFilter = this.statusFilter === value ? 'any' : value;
-            },
-            selectDirectionTab(value) {
-                this.directionFilter = this.directionFilter === value ? 'any' : value;
-            },
             filterOptionLabel(key) {
                 switch (key) {
                     case 'status':
@@ -1369,7 +1372,7 @@
                     case 'direction':
                         return this.directionFilter && this.directionFilter !== 'any'
                             ? this.directionLabel(this.directionFilter)
-                            : 'Any direction';
+                            : '';
                     case 'date_range':
                         if (this.dateFrom && this.dateTo) {
                             return `${this.dateFrom} → ${this.dateTo}`;
@@ -1380,9 +1383,9 @@
                         if (this.dateTo) {
                             return `Until ${this.dateTo}`;
                         }
-                        return 'No range selected';
+                        return '';
                     case 'only_transcribed':
-                        return this.onlyTranscribed ? 'Enabled' : 'Disabled';
+                        return this.onlyTranscribed ? 'Enabled' : '';
                     case 'departments': {
                         const options = Array.isArray(this.filterOptions.departments)
                             ? this.filterOptions.departments
@@ -1391,7 +1394,7 @@
                             ? this.selectedDepartments
                             : [];
                         if (!selected.length) {
-                            return 'Any department';
+                            return '';
                         }
                         const names = selected
                             .map((id) => {
@@ -1403,7 +1406,7 @@
                                 return Number.isFinite(numeric) ? `#${numeric}` : String(id);
                             })
                             .filter(Boolean);
-                        return names.length ? names.join(', ') : 'Any department';
+                        return names.length ? names.join(', ') : '';
                     }
                     case 'sip_trunks': {
                         const options = Array.isArray(this.filterOptions.sip_trunks)
@@ -1413,7 +1416,7 @@
                             ? this.selectedSipTrunks
                             : [];
                         if (!selected.length) {
-                            return 'Any trunk';
+                            return '';
                         }
                         const names = selected
                             .map((id) => {
@@ -1425,16 +1428,16 @@
                                 return match.display_name || match.name || `#${numeric}`;
                             })
                             .filter(Boolean);
-                        return names.length ? names.join(', ') : 'Any trunk';
+                        return names.length ? names.join(', ') : '';
                     }
                     case 'tags': {
                         const selected = Array.isArray(this.selectedTags) ? this.selectedTags : [];
-                        return selected.length ? selected.join(', ') : 'Any tag';
+                        return selected.length ? selected.join(', ') : '';
                     }
                     case 'billing_status':
                         return this.billingStatusFilter && this.billingStatusFilter !== 'any'
                             ? this.billingStatusLabel(this.billingStatusFilter)
-                            : 'Any billing status';
+                            : '';
                     default:
                         return '';
                 }
@@ -1527,16 +1530,16 @@
                 (this.persistentFilters || []).forEach((key) => addUnique(key));
 
                 if (statusActive) {
-                    addUnique('status');
+                    // addUnique('status');
                 }
                 if (directionActive || this.persistentFilters.includes('direction')) {
-                    addUnique('direction');
+                    // addUnique('direction');
                 }
                 if (billingStatusActive || manualFilters.includes('billing_status')) {
                     addUnique('billing_status');
                 }
                 if (hasDate || this.persistentFilters.includes('date_range')) {
-                    addUnique('date_range');
+                    // addUnique('date_range');
                 }
                 if (this.onlyTranscribed || this.persistentFilters.includes('only_transcribed')) {
                     addUnique('only_transcribed');

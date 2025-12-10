@@ -125,20 +125,21 @@
             <div class="flex flex-col gap-4">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div class="flex flex-wrap items-center gap-2">
-                        <button type="button"
-                            class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
-                            :class="statusFilter === 'all' ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
-                            @click="selectStatusTab('all')">
-                            All statuses
-                        </button>
-                        <template x-for="tab in statusTabs()" :key="tab.value">
-                            <button type="button"
-                                class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
-                                :class="statusFilter === tab.value ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
-                                @click="selectStatusTab(tab.value)">
-                                <span x-text="tab.label"></span>
-                            </button>
-                        </template>
+                        <div
+                            class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="directionFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="setDirection('all')">All</button>
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="directionFilter === 'inbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="setDirection('inbound')">Inbound</button>
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="directionFilter === 'outbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="setDirection('outbound')">Outbound</button>
+                            <button type="button" class="rounded-md px-3 py-1 transition"
+                                :class="directionFilter === 'bidirectional' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                                @click="setDirection('bidirectional')">Bi-directional</button>
+                        </div>
                     </div>
                     <div
                         class="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center lg:justify-end lg:gap-3">
@@ -202,14 +203,16 @@
                                 </button>
                             </div>
                             <div class="mt-3 space-y-2">
-                                <template x-if="filter === 'direction'">
-                                    <select x-model="directionFilter" @change="applyFilters()"
+                                <template x-if="filter === 'status'">
+                                    <select x-model="statusFilter" @change="applyFilters()"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                        <template x-for="option in directionOptions" :key="option.value">
+                                        <template x-for="option in statusOptions" :key="option.value">
                                             <option :value="option.value" x-text="option.label"></option>
                                         </template>
                                     </select>
                                 </template>
+                                <!-- Direction filter removed from active filters -->
+
                                 <template x-if="filter === 'transport'">
                                     <select x-model="transportFilter" @change="applyFilters()"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -399,7 +402,7 @@
                 { value: 'status_desc', label: 'Status · Z → A' },
             ],
             filterOptions: [
-                { key: 'direction', label: 'Direction' },
+                { key: 'status', label: 'Status' },
                 { key: 'transport', label: 'Transport' },
                 { key: 'active', label: 'Active state' },
             ],
@@ -656,16 +659,23 @@
                 this.statusFilter = value;
                 this.applyFilters();
             },
+            setDirection(value) {
+                if (this.directionFilter === value) {
+                    return;
+                }
+                this.directionFilter = value;
+                this.applyFilters();
+            },
             filterOptionLabel(key) {
                 const found = this.filterOptions.find((item) => item.key === key);
                 return found ? found.label : key;
             },
             formatFilterValue(key) {
                 switch (key) {
-                    case 'direction':
-                        return this.directionFilter === 'all'
-                            ? 'Any direction'
-                            : this.directionLabel(this.directionFilter);
+                    case 'status':
+                        return this.statusFilter === 'all'
+                            ? 'Any status'
+                            : this.statusBadgeLabel(this.statusFilter);
                     case 'transport': {
                         if (this.transportFilter === 'all') {
                             return 'Any transport';
@@ -701,8 +711,8 @@
             removeFilter(key) {
                 this.activeFilters = this.activeFilters.filter((item) => item !== key);
                 switch (key) {
-                    case 'direction':
-                        this.directionFilter = 'all';
+                    case 'status':
+                        this.statusFilter = 'all';
                         break;
                     case 'transport':
                         this.transportFilter = 'all';
@@ -720,8 +730,8 @@
             },
             syncActiveFilters() {
                 const next = [];
-                if (this.directionFilter !== 'all') {
-                    next.push('direction');
+                if (this.statusFilter !== 'all') {
+                    next.push('status');
                 }
                 if (this.transportFilter !== 'all') {
                     next.push('transport');
@@ -732,7 +742,7 @@
                 if (this.activeOnly) {
                     next.push('active');
                 }
-                this.activeFilters = Array.from(new Set([...this.activeFilters.filter((item) => next.includes(item)), ...next]));
+                this.activeFilters = Array.from(new Set([...this.activeFilters, ...next]));
             },
             defaultSort() {
                 return 'updated_at_desc';

@@ -559,6 +559,7 @@ mod tests {
                     "call".to_string(),
                 ]),
                 media_proxy: mode,
+                ensure_user: Some(false),
                 ..Default::default()
             });
 

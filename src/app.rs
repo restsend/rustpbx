@@ -227,6 +227,7 @@ impl AppStateBuilder {
             let mut callrecord_manager = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
                 .with_config(callrecord.clone())
+                .with_database(db_conn.clone())
                 .build();
             let sender = callrecord_manager.sender.clone();
             tokio::spawn(async move {
@@ -236,7 +237,6 @@ impl AppStateBuilder {
         } else {
             None
         };
-
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
@@ -281,6 +281,18 @@ impl AppStateBuilder {
                         builder = builder.with_create_route_invite(
                             crate::addons::wholesale::route::create_wholesale_route_invite,
                         );
+                        #[allow(unused_mut)]
+                        let mut console_secret = None;
+                        #[cfg(feature = "console")]
+                        if let Some(console) = &config.console {
+                            console_secret = Some(console.session_secret.clone());
+                        }
+
+                        builder = builder.with_auth_backend(Box::new(
+                            crate::addons::wholesale::auth::WholesaleAuthBackend::new(
+                                console_secret,
+                            ),
+                        ));
                     }
 
                     match builder.build().await {

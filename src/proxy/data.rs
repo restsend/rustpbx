@@ -10,9 +10,8 @@ use std::{
     io::ErrorKind,
     net::IpAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
-use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::{
@@ -69,40 +68,40 @@ impl ProxyDataContext {
         };
         let _ = ctx.reload_trunks(false, None).await?;
         let _ = ctx.reload_routes(false, None).await?;
-        let _ = ctx.reload_acl_rules(false, None).await?;
+        let _ = ctx.reload_acl_rules(false, None)?;
         Ok(ctx)
     }
 
-    pub async fn config(&self) -> Arc<ProxyConfig> {
-        self.config.read().await.clone()
+    pub fn config(&self) -> Arc<ProxyConfig> {
+        self.config.read().unwrap().clone()
     }
 
-    pub async fn update_config(&self, config: Arc<ProxyConfig>) {
-        *self.config.write().await = config;
+    pub fn update_config(&self, config: Arc<ProxyConfig>) {
+        *self.config.write().unwrap() = config;
     }
 
-    pub async fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
-        self.trunks.read().await.clone()
+    pub fn trunks_snapshot(&self) -> HashMap<String, TrunkConfig> {
+        self.trunks.read().unwrap().clone()
     }
 
-    pub async fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
-        self.trunks.read().await.get(name).cloned()
+    pub fn get_trunk(&self, name: &str) -> Option<TrunkConfig> {
+        self.trunks.read().unwrap().get(name).cloned()
     }
 
-    pub async fn routes_snapshot(&self) -> Vec<RouteRule> {
-        self.routes.read().await.clone()
+    pub fn routes_snapshot(&self) -> Vec<RouteRule> {
+        self.routes.read().unwrap().clone()
     }
 
-    pub async fn acl_rules_snapshot(&self) -> Vec<String> {
-        self.acl_rules.read().await.clone()
+    pub fn acl_rules_snapshot(&self) -> Vec<String> {
+        self.acl_rules.read().unwrap().clone()
     }
 
-    pub async fn resolve_queue_config(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+    pub fn resolve_queue_config(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
         if reference.trim().is_empty() {
             return Ok(None);
         }
 
-        if let Some(config) = self.load_queue_file(reference).await? {
+        if let Some(config) = self.load_queue_file(reference)? {
             return Ok(Some(config));
         }
 
@@ -110,7 +109,7 @@ impl ProxyDataContext {
             return Ok(None);
         };
 
-        let config = self.config.read().await;
+        let config = self.config.read().unwrap();
         for (name, queue) in &config.queues {
             if let Some(existing) = queue_utils::canonical_queue_key(name) {
                 if existing == key {
@@ -121,37 +120,37 @@ impl ProxyDataContext {
         Ok(None)
     }
 
-    pub async fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
+    pub fn load_queue_file(&self, reference: &str) -> Result<Option<RouteQueueConfig>> {
         let trimmed = reference.trim();
         if trimmed.is_empty() {
             return Ok(None);
         }
-        let config = self.config.read().await.clone();
+        let config = self.config.read().unwrap().clone();
         let base = config.generated_queue_dir();
         let path = Self::resolve_reference_path(base.as_path(), trimmed);
         Self::read_queue_document(path)
     }
 
-    pub async fn load_ivr_file(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
+    pub fn load_ivr_file(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
         let trimmed = reference.trim();
         if trimmed.is_empty() {
             return Ok(None);
         }
-        let config = self.config.read().await.clone();
+        let config = self.config.read().unwrap().clone();
         let base = config.generated_ivr_dir();
         let path = Self::resolve_reference_path(base.as_path(), trimmed);
         Self::read_ivr_document(path)
     }
 
-    pub async fn resolve_ivr_config(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
+    pub fn resolve_ivr_config(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
         let trimmed = reference.trim();
         if trimmed.is_empty() {
             return Ok(None);
         }
-        if let Some(config) = self.load_ivr_file(trimmed).await? {
+        if let Some(config) = self.load_ivr_file(trimmed)? {
             return Ok(Some(config));
         }
-        self.find_ivr_by_plan_id(trimmed).await
+        self.find_ivr_by_plan_id(trimmed)
     }
 
     fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
@@ -192,8 +191,8 @@ impl ProxyDataContext {
         }
     }
 
-    async fn find_ivr_by_plan_id(&self, plan_id: &str) -> Result<Option<RouteIvrConfig>> {
-        let cfg = self.config.read().await.clone();
+    fn find_ivr_by_plan_id(&self, plan_id: &str) -> Result<Option<RouteIvrConfig>> {
+        let cfg = self.config.read().unwrap().clone();
         let base = cfg.generated_ivr_dir();
         let pattern = format!("{}/**/*.toml", base.display());
         for entry in glob(pattern.as_str())
@@ -234,7 +233,7 @@ impl ProxyDataContext {
     }
 
     pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {
-        let trunks = self.trunks_snapshot().await;
+        let trunks = self.trunks_snapshot();
         for (name, trunk) in trunks.iter() {
             if trunk.matches_inbound_ip(addr).await {
                 return Some(name.clone());
@@ -249,10 +248,10 @@ impl ProxyDataContext {
         config_override: Option<Arc<ProxyConfig>>,
     ) -> Result<ReloadMetrics> {
         if let Some(config) = config_override {
-            *self.config.write().await = config;
+            *self.config.write().unwrap() = config;
         }
 
-        let config = self.config.read().await.clone();
+        let config = self.config.read().unwrap().clone();
 
         let started_at = Utc::now();
         let default_dir = config.generated_trunks_dir();
@@ -295,7 +294,7 @@ impl ProxyDataContext {
         }
 
         let len = trunks.len();
-        *self.trunks.write().await = trunks;
+        *self.trunks.write().unwrap() = trunks;
         let finished_at = Utc::now();
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
@@ -321,10 +320,10 @@ impl ProxyDataContext {
         config_override: Option<Arc<ProxyConfig>>,
     ) -> Result<ReloadMetrics> {
         if let Some(config) = config_override {
-            *self.config.write().await = config;
+            *self.config.write().unwrap() = config;
         }
 
-        let config = self.config.read().await.clone();
+        let config = self.config.read().unwrap().clone();
 
         let started_at = Utc::now();
         let default_dir = config.generated_routes_dir();
@@ -372,7 +371,7 @@ impl ProxyDataContext {
 
         routes.sort_by_key(|r| r.priority);
         let len = routes.len();
-        *self.routes.write().await = routes;
+        *self.routes.write().unwrap() = routes;
         let finished_at = Utc::now();
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
@@ -392,16 +391,16 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn reload_acl_rules(
+    pub fn reload_acl_rules(
         &self,
         _generated_toml: bool,
         config_override: Option<Arc<ProxyConfig>>,
     ) -> Result<ReloadMetrics> {
         if let Some(config) = config_override {
-            *self.config.write().await = config;
+            *self.config.write().unwrap() = config;
         }
 
-        let config = self.config.read().await.clone();
+        let config = self.config.read().unwrap().clone();
 
         let started_at = Utc::now();
         let mut rules: Vec<String> = Vec::new();
@@ -447,7 +446,7 @@ impl ProxyDataContext {
         }
 
         let len = rules.len();
-        *self.acl_rules.write().await = rules;
+        *self.acl_rules.write().unwrap() = rules;
         let finished_at = Utc::now();
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
@@ -467,13 +466,13 @@ impl ProxyDataContext {
         })
     }
 
-    pub async fn set_acl_rules(&self, mut rules: Vec<String>) {
+    pub fn set_acl_rules(&self, mut rules: Vec<String>) {
         if rules.is_empty() {
             rules = vec!["allow all".to_string(), "deny all".to_string()];
         }
 
         let total = rules.len();
-        *self.acl_rules.write().await = rules;
+        *self.acl_rules.write().unwrap() = rules;
         info!(total = total, "acl rules snapshot updated at runtime");
     }
 
@@ -518,7 +517,7 @@ impl ProxyDataContext {
         };
 
         let trunk_lookup = {
-            let guard = self.trunks.read().await;
+            let guard = self.trunks.read().unwrap();
             guard
                 .iter()
                 .filter_map(|(name, trunk)| trunk.id.map(|id| (id, name.clone())))
@@ -541,11 +540,11 @@ impl ProxyDataContext {
 #[async_trait]
 impl RouteResourceLookup for ProxyDataContext {
     async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>> {
-        self.resolve_queue_config(path).await
+        self.resolve_queue_config(path)
     }
 
     async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>> {
-        self.resolve_ivr_config(path).await
+        self.resolve_ivr_config(path)
     }
 }
 

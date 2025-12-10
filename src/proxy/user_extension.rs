@@ -41,7 +41,8 @@ impl ExtensionUserBackend {
         let department_names = if departments.is_empty() {
             None
         } else {
-            Some(departments.into_iter().map(|d| d.name).collect())
+            let deps: Vec<String> = departments.iter().map(|d| d.name.clone()).collect();
+            Some(deps)
         };
 
         SipUser {
