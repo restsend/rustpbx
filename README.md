@@ -25,6 +25,50 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **WebSocket Commands**: Real-time call control via WebSocket connections
 - **Call Management**: List, monitor, and control active calls
 
+## 🐳 Docker Deployment
+
+### Quick Start with Docker
+1.  **Pull the commerce Docker image:**
+> With `wholesale` features
+```bash
+docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
+```
+
+2. **Pull the community Docker image:**
+```bash
+docker pull ghcr.io/restsend/rustpbx:latest
+```
+
+3. **Create config.toml:**
+>  copy from config.toml.example
+
+4. **Run with Docker:**
+```bash
+docker run -d \
+  --name rustpbx \
+  -p 8080:8080 \
+  -p 15060:15060/udp \
+  -p 13050:13050/udp \
+  -p 20000-30000:20000-30000/udp \
+  --env-file .env \
+  -v $(pwd)/db:/app/db \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/recorders:/tmp/recorders \
+  ghcr.io/restsend/rustpbx:latest \
+  --conf /app/config.toml
+```
+ - Create super user via cli(**optional**)
+```bash
+docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-username=YOUR --super-password=PASS
+```
+5. **Access the service:**
+- Web Interface: http://localhost:8080/console/
+  - Login via `YOUR` + `PASS`
+- SIP Proxy: localhost:15060
+- User Agent: localhost:13050
+
+
 ## 🛠 Quick Start
 
 ### Prerequisites
@@ -162,50 +206,6 @@ EOF
 ![Console route editor](./docs/screenshots/route-editor.png)
 ### webrtc phone
 ![Console webrtc phone](./docs/screenshots/web-dailer.png)
-
-## 🐳 Docker Deployment
-
-### Quick Start with Docker
-
-1. **Pull the community Docker image:**
-```bash
-docker pull ghcr.io/restsend/rustpbx:latest
-```
-2.  **Pull the commerce Docker image:**
-> With `wholesale` features
-```bash
-docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
-```
-
-2. **Create config.toml:**
->  copy from config.toml.example
-
-4. **Run with Docker:**
-```bash
-docker run -d \
-  --name rustpbx \
-  -p 8080:8080 \
-  -p 15060:15060/udp \
-  -p 13050:13050/udp \
-  -p 20000-30000:20000-30000/udp \
-  --env-file .env \
-  -v $(pwd)/db:/app/db \
-  -v $(pwd)/config.toml:/app/config.toml \
-  -v $(pwd)/config:/app/config \
-  -v $(pwd)/recorders:/tmp/recorders \
-  ghcr.io/restsend/rustpbx:latest \
-  --conf /app/config.toml
-```
- - Create super user via cli(**optional**)
-```bash
-docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-username=YOUR --super-password=PASS
-```
-
-1. **Access the service:**
-- Web Interface: http://localhost:8080/console/
-  - Login via `YOUR` + `PASS`
-- SIP Proxy: localhost:15060
-- User Agent: localhost:13050
 
 
 ## 🧪 Go Client Integration
