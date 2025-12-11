@@ -54,9 +54,11 @@ generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 addons = ["acme", "wholesale"]
+# Don't responed the request when user not existed (slience for spam scanner)
+ensure_user = true
 
-[proxy.transcript]
-command = "sensevoice-cli"
+#[proxy.transcript]
+# command = "sensevoice-cli"
 # models_path = "/var/lib/sensevoice"
 # hf_endpoint = "https://huggingface.co"
 # extra_args = ["--format", "json"]
@@ -88,7 +90,6 @@ users = [
 
 [[proxy.user_backends]]
 type = "extension"
-database_url = "sqlite://rustpbx.sqlite3"
 
 [recording]
 enabled = true
