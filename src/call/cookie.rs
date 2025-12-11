@@ -81,6 +81,14 @@ impl TransactionCookie {
             .and_then(|inner| inner.values.get(key).cloned())
     }
 
+    pub fn get_values(&self) -> HashMap<String, String> {
+        self.inner
+            .try_read()
+            .ok()
+            .map(|inner| inner.values.clone())
+            .unwrap_or_default()
+    }
+
     pub fn remove(&self, key: &str) {
         self.inner
             .try_write()

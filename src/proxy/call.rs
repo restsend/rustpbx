@@ -652,14 +652,10 @@ impl CallModule {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let root = policy.recorder_path();
         let pattern = policy.filename_pattern.as_deref().unwrap_or("{session_id}");
-        let direction = match dialplan.direction {
-            DialDirection::Inbound => "inbound",
-            DialDirection::Outbound => "outbound",
-            DialDirection::Internal => "internal",
-        };
+        let direction = dialplan.direction.to_string();
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let rendered =
-            Self::render_filename(pattern, &session_id, caller, callee, direction, &timestamp);
+            Self::render_filename(pattern, &session_id, caller, callee, &direction, &timestamp);
         let sanitized = Self::sanitize_filename_component(&rendered, &session_id);
         let mut path = PathBuf::from(root);
         if sanitized.is_empty() {

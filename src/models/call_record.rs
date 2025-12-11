@@ -6,8 +6,9 @@ use sea_orm_migration::schema::{
 };
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForeignKeyAction};
 use sea_query::Expr;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_call_records")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]

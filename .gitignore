@@ -46,3 +46,4 @@ config/trunks/*.toml
 *.bak
 *.jsonl
 config.toml.dev
+*.log
