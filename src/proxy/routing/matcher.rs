@@ -1068,6 +1068,9 @@ fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<
         addr: dest_uri.host_with_port.clone(),
     });
 
+    // Update callee host to match trunk destination
+    option.callee.host_with_port = dest_uri.host_with_port.clone();
+
     // Set authentication info
     if let (Some(username), Some(password)) = (&trunk.username, &trunk.password) {
         option.credential = Some(Credential {
