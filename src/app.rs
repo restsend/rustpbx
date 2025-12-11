@@ -224,11 +224,16 @@ impl AppStateBuilder {
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else if let Some(ref callrecord) = config.callrecord {
-            let mut callrecord_manager = CallRecordManagerBuilder::new()
+            let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
                 .with_config(callrecord.clone())
-                .with_database(db_conn.clone())
-                .build();
+                .with_database(db_conn.clone());
+
+            for hook in addon_registry.get_call_record_hooks(&config) {
+                builder = builder.with_hook(hook);
+            }
+
+            let mut callrecord_manager = builder.build();
             let sender = callrecord_manager.sender.clone();
             tokio::spawn(async move {
                 callrecord_manager.serve().await;

@@ -1,7 +1,7 @@
 use crate::call::{DialDirection, QueueHoldConfig};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::active_call_registry::{
-    ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus, normalize_direction,
+    ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -130,7 +130,7 @@ impl CallSessionShared {
             callee,
             current_target: None,
             queue_name: None,
-            direction: normalize_direction(&direction),
+            direction: direction.to_string(),
             tenant_id,
         };
         Self {

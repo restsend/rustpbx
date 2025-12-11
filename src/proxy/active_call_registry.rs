@@ -1,4 +1,3 @@
-use crate::call::DialDirection;
 use crate::proxy::proxy_call::state::CallSessionHandle;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -104,13 +103,5 @@ impl ActiveProxyCallRegistry {
             .values()
             .filter(|e| e.tenant_id == Some(tenant_id))
             .count()
-    }
-}
-
-pub fn normalize_direction(direction: &DialDirection) -> String {
-    match direction {
-        DialDirection::Inbound => "Inbound".to_string(),
-        DialDirection::Outbound => "Outbound".to_string(),
-        DialDirection::Internal => "Internal".to_string(),
     }
 }

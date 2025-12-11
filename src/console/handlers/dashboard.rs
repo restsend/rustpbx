@@ -1,8 +1,6 @@
 use crate::call::ActiveCallRef;
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use crate::models::call_record::{
-    Column as CallRecordColumn, Entity as CallRecordEntity, Model as CallRecordModel,
-};
+use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use anyhow::Result;
 use axum::{
     Json,
@@ -10,7 +8,9 @@ use axum::{
     response::Response,
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QuerySelect, sea_query,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -72,7 +72,7 @@ pub struct DashboardPayload {
 
 impl DashboardPayload {
     fn empty(range: TimeRange) -> Self {
-        let empty: Vec<CallRecordModel> = Vec::new();
+        let empty: Vec<DateTime<Utc>> = Vec::new();
         let (timeline, labels) = build_timeline(&empty, &range);
         Self {
             range: range.descriptor(),
@@ -186,27 +186,131 @@ async fn build_dashboard_payload(
 ) -> Result<DashboardPayload> {
     let db = state.db();
 
-    let recent_calls = CallRecordEntity::find()
+    #[derive(Debug, FromQueryResult)]
+    struct RecentStats {
+        total: i64,
+        answered: Option<i64>,
+        total_duration: Option<i64>,
+    }
+
+    let recent_stats = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.start))
         .filter(CallRecordColumn::StartedAt.lt(range.end))
+        .select_only()
+        .column_as(CallRecordColumn::Id.count(), "total")
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.is_in(["answered", "completed"]),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "answered",
+        )
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.is_in(["answered", "completed"]),
+                        CallRecordColumn::DurationSecs.into_expr(),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "total_duration",
+        )
+        .into_model::<RecentStats>()
+        .one(db)
+        .await?
+        .unwrap_or(RecentStats {
+            total: 0,
+            answered: None,
+            total_duration: None,
+        });
+
+    #[derive(Debug, FromQueryResult)]
+    struct TimelineItem {
+        started_at: DateTime<Utc>,
+    }
+
+    let timeline_items = CallRecordEntity::find()
+        .filter(CallRecordColumn::StartedAt.gte(range.start))
+        .filter(CallRecordColumn::StartedAt.lt(range.end))
+        .select_only()
+        .column(CallRecordColumn::StartedAt)
+        .into_model::<TimelineItem>()
         .all(db)
         .await?;
 
-    let previous_calls = CallRecordEntity::find()
+    let timeline_dates: Vec<DateTime<Utc>> =
+        timeline_items.into_iter().map(|i| i.started_at).collect();
+
+    let previous_count = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.previous_start))
         .filter(CallRecordColumn::StartedAt.lt(range.previous_end))
-        .all(db)
+        .count(db)
         .await?;
 
     let today_start = start_of_day(Utc::now());
-    let today_calls = CallRecordEntity::find()
-        .filter(CallRecordColumn::StartedAt.gte(today_start))
-        .all(db)
-        .await?;
 
-    let direction_calls = CallRecordEntity::find()
+    #[derive(Debug, FromQueryResult)]
+    struct TodayStats {
+        answered_count: Option<i64>,
+        total_duration: Option<i64>,
+    }
+
+    let today_stats = CallRecordEntity::find()
+        .filter(CallRecordColumn::StartedAt.gte(today_start))
+        .select_only()
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.is_in(["answered", "completed"]),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "answered_count",
+        )
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.is_in(["answered", "completed"]),
+                        CallRecordColumn::DurationSecs.into_expr(),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "total_duration",
+        )
+        .into_model::<TodayStats>()
+        .one(db)
+        .await?
+        .unwrap_or(TodayStats {
+            answered_count: None,
+            total_duration: None,
+        });
+
+    #[derive(Debug, FromQueryResult)]
+    struct DirectionStat {
+        direction: String,
+        count: i64,
+    }
+
+    let direction_stats = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.start))
         .filter(CallRecordColumn::StartedAt.lt(range.end))
+        .select_only()
+        .column(CallRecordColumn::Direction)
+        .column_as(CallRecordColumn::Id.count(), "count")
+        .group_by(CallRecordColumn::Direction)
+        .into_model::<DirectionStat>()
         .all(db)
         .await?;
 
@@ -218,21 +322,23 @@ async fn build_dashboard_payload(
         .and_then(|server| server.proxy_config.max_concurrency)
         .unwrap_or(0) as u32;
 
-    let total_recent = recent_calls.len() as u32;
-    let answered_recent = recent_calls
-        .iter()
-        .filter(|call| is_completed(&call.status))
-        .count() as u32;
-    let avg_recent_duration = average_duration_seconds(
-        recent_calls
-            .iter()
-            .filter(|call| is_completed(&call.status)),
-    );
-    let today_avg_duration =
-        average_duration_seconds(today_calls.iter().filter(|call| is_completed(&call.status)));
+    let total_recent = recent_stats.total as u32;
+    let answered_recent = recent_stats.answered.unwrap_or(0) as u32;
+    let avg_recent_duration = if answered_recent > 0 {
+        Some(recent_stats.total_duration.unwrap_or(0) / answered_recent as i64)
+    } else {
+        None
+    };
 
-    let (timeline, timeline_labels) = build_timeline(&recent_calls, range);
-    let trend = calc_trend_string(total_recent, previous_calls.len() as u32);
+    let today_answered = today_stats.answered_count.unwrap_or(0);
+    let today_avg_duration = if today_answered > 0 {
+        Some(today_stats.total_duration.unwrap_or(0) / today_answered)
+    } else {
+        None
+    };
+
+    let (timeline, timeline_labels) = build_timeline(&timeline_dates, range);
+    let trend = calc_trend_string(total_recent, previous_count as u32);
     let asr_string = if total_recent > 0 {
         format!(
             "{:.0}%",
@@ -264,9 +370,9 @@ async fn build_dashboard_payload(
     };
 
     let mut direction_counts: BTreeMap<String, i64> = BTreeMap::new();
-    for call in direction_calls {
-        let label = direction_label(&call.direction);
-        *direction_counts.entry(label).or_insert(0) += 1;
+    for stat in direction_stats {
+        let label = direction_label(&stat.direction);
+        *direction_counts.entry(label).or_insert(0) += stat.count;
     }
     ensure_direction_defaults(&mut direction_counts);
 
@@ -284,15 +390,15 @@ fn default_direction_map() -> BTreeMap<String, i64> {
     map
 }
 
-fn build_timeline(calls: &[CallRecordModel], range: &TimeRange) -> (Vec<i64>, Vec<String>) {
+fn build_timeline(calls: &[DateTime<Utc>], range: &TimeRange) -> (Vec<i64>, Vec<String>) {
     let bucket_count = range.bucket_count.max(1);
     let total_seconds = range.duration().num_seconds().max(60);
     let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
         .ceil()
         .max(60.0) as i64;
     let mut series = vec![0i64; bucket_count];
-    for call in calls {
-        let diff = call.started_at.signed_duration_since(range.start);
+    for started_at in calls {
+        let diff = started_at.signed_duration_since(range.start);
         if diff.num_seconds() < 0 {
             continue;
         }
@@ -440,16 +546,6 @@ fn calc_duration_util(seconds: i64) -> u32 {
         .clamp(0.0, 100.0) as u32
 }
 
-fn average_duration_seconds<'a>(calls: impl Iterator<Item = &'a CallRecordModel>) -> Option<i64> {
-    let mut total = 0i64;
-    let mut count = 0i64;
-    for call in calls {
-        total += call.duration_secs as i64;
-        count += 1;
-    }
-    if count > 0 { Some(total / count) } else { None }
-}
-
 fn format_duration(seconds: i64) -> String {
     if seconds <= 0 {
         return "0s".to_string();
@@ -472,10 +568,6 @@ fn format_duration(seconds: i64) -> String {
     } else {
         format!("{}s", secs)
     }
-}
-
-fn is_completed(status: &str) -> bool {
-    status.eq_ignore_ascii_case("completed") || status.eq_ignore_ascii_case("answered")
 }
 
 fn direction_label(direction: &str) -> String {

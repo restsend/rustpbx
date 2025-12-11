@@ -207,14 +207,14 @@ impl CallReporter {
 
         // Helper to resolve call status (copied from proxy_call.rs logic)
         let status = if snapshot.answer_time.is_some() {
-            "answered".to_string()
+            "completed".to_string()
         } else if snapshot.last_error.is_some() {
             "failed".to_string()
         } else {
             "missed".to_string()
         };
 
-        let from_number = extract_sip_username(&caller);
+        let (from_number, department_id, extension_id) = resolve_user_info(&self.cookie, &caller);
         let to_number = extract_sip_username(&callee);
 
         let trunk_name = self.cookie.get_source_trunk();
@@ -222,26 +222,6 @@ impl CallReporter {
             let trunks = self.server.data_context.trunks_snapshot();
             let trunk_id = trunks.get(name).and_then(|config| config.id);
             (Some(name.clone()), trunk_id)
-        } else {
-            (None, None)
-        };
-
-        let (department_id, extension_id) = if let Some(user) = self.cookie.get_user() {
-            let dept_id = user.departments.as_ref().and_then(|deps| {
-                deps.iter().find_map(|d| {
-                    if d.starts_with("tenant:") {
-                        d.trim_start_matches("tenant:").parse::<i64>().ok()
-                    } else {
-                        d.parse::<i64>().ok()
-                    }
-                })
-            });
-            let ext_id = if user.id > 0 {
-                Some(user.id as i64)
-            } else {
-                None
-            };
-            (dept_id, ext_id)
         } else {
             (None, None)
         };
@@ -261,6 +241,11 @@ impl CallReporter {
                     });
                 }
             }
+        }
+
+        // Copy values from cookie to extras_map
+        for (k, v) in self.cookie.get_values() {
+            extras_map.insert(k, Value::String(v));
         }
 
         let metadata_value = extras_map_to_metadata(&extras_map);
@@ -309,5 +294,97 @@ impl CallReporter {
         if let Some(ref sender) = self.call_record_sender {
             let _ = sender.send(record);
         }
+    }
+}
+
+fn resolve_user_info(
+    cookie: &TransactionCookie,
+    caller_uri: &str,
+) -> (Option<String>, Option<i64>, Option<i64>) {
+    let mut from_number = extract_sip_username(caller_uri);
+    let (department_id, extension_id) = if let Some(user) = cookie.get_user() {
+        let mut dept_id = None;
+        let mut is_wholesale = false;
+
+        if let Some(deps) = &user.departments {
+            for d in deps {
+                if d.starts_with("tenant:") {
+                    is_wholesale = true;
+                } else if let Ok(id) = d.parse::<i64>() {
+                    dept_id = Some(id);
+                }
+            }
+        }
+
+        if is_wholesale {
+            from_number = Some(user.username.clone());
+        }
+
+        let ext_id = if user.id > 0 {
+            Some(user.id as i64)
+        } else {
+            None
+        };
+        (dept_id, ext_id)
+    } else {
+        (None, None)
+    };
+
+    (from_number, department_id, extension_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::SipUser;
+
+    #[test]
+    fn test_resolve_user_info_wholesale() {
+        let cookie = TransactionCookie::default();
+        let mut user = SipUser::default();
+        user.username = "1234".to_string();
+        user.departments = Some(vec!["tenant:100".to_string()]);
+        cookie.set_user(user);
+
+        let caller = "sip:mock-uuid@1.2.3.4";
+        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+
+        assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(dept, None);
+        assert_eq!(ext, None);
+    }
+
+    #[test]
+    fn test_resolve_user_info_mixed() {
+        let cookie = TransactionCookie::default();
+        let mut user = SipUser::default();
+        user.username = "1234".to_string();
+        user.departments = Some(vec!["tenant:100".to_string(), "5".to_string()]);
+        user.id = 99;
+        cookie.set_user(user);
+
+        let caller = "sip:mock-uuid@1.2.3.4";
+        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+
+        assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(dept, Some(5));
+        assert_eq!(ext, Some(99));
+    }
+
+    #[test]
+    fn test_resolve_user_info_normal() {
+        let cookie = TransactionCookie::default();
+        let mut user = SipUser::default();
+        user.username = "1001".to_string();
+        user.departments = Some(vec!["5".to_string()]);
+        user.id = 99;
+        cookie.set_user(user);
+
+        let caller = "sip:1001@1.2.3.4";
+        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+
+        assert_eq!(from, Some("1001".to_string()));
+        assert_eq!(dept, Some(5));
+        assert_eq!(ext, Some(99));
     }
 }

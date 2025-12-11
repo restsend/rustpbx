@@ -706,6 +706,17 @@ pub enum DialDirection {
     Inbound,  // 2. Inbound call received by us, usually from a PSTN gateway
     Internal, // 3. User to user call, both sides are internal
 }
+
+impl ToString for DialDirection {
+    fn to_string(&self) -> String {
+        match self {
+            DialDirection::Outbound => "outbound".to_string(),
+            DialDirection::Inbound => "inbound".to_string(),
+            DialDirection::Internal => "internal".to_string(),
+        }
+    }
+}
+
 pub struct Dialplan {
     pub direction: DialDirection,
     pub session_id: Option<String>,
