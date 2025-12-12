@@ -34,6 +34,38 @@
                 sidebarCollapsed: 'console.sidebar.collapsed',
             };
 
+            Alpine.data('consoleNotifications', () => ({
+                notifications: [],
+                init() {
+                    const params = new URLSearchParams(window.location.search);
+                    if (params.has('success')) {
+                        this.add(params.get('success'), 'success');
+                        const url = new URL(window.location);
+                        url.searchParams.delete('success');
+                        window.history.replaceState({}, '', url);
+                    }
+                    if (params.has('error')) {
+                        this.add(params.get('error'), 'error');
+                        const url = new URL(window.location);
+                        url.searchParams.delete('error');
+                        window.history.replaceState({}, '', url);
+                    }
+                    window.addEventListener('console:notify', (event) => {
+                        this.add(event.detail.message, event.detail.type || 'info');
+                    });
+                },
+                add(message, type = 'info') {
+                    const id = Date.now();
+                    this.notifications.push({ id, message, type });
+                    setTimeout(() => {
+                        this.remove(id);
+                    }, 5000);
+                },
+                remove(id) {
+                    this.notifications = this.notifications.filter(n => n.id !== id);
+                }
+            }));
+
             Alpine.data('consoleLayoutShell', () => ({
                 sidebarOpen: false,
                 sidebarCollapsed: false,
@@ -337,6 +369,63 @@
                     @click="confirm" x-text="confirmLabel"></button>
             </div>
         </div>
+    </div>
+    <div x-data="consoleNotifications()"
+        class="fixed top-4 right-4 z-[110] flex flex-col gap-2 w-full max-w-sm pointer-events-none">
+        <template x-for="notification in notifications" :key="notification.id">
+            <div class="pointer-events-auto flex items-start gap-3 rounded-lg p-4 shadow-lg ring-1 transition-all duration-300"
+                :class="{
+                    'bg-white text-slate-700 ring-slate-200': notification.type === 'info',
+                    'bg-emerald-50 text-emerald-800 ring-emerald-200': notification.type === 'success',
+                    'bg-rose-50 text-rose-800 ring-rose-200': notification.type === 'error'
+                }" x-transition:enter="transform ease-out duration-300 transition"
+                x-transition:enter-start="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
+                x-transition:enter-end="translate-y-0 opacity-100 sm:translate-x-0"
+                x-transition:leave="transition ease-in duration-100" x-transition:leave-start="opacity-100"
+                x-transition:leave-end="opacity-0">
+
+                <div class="shrink-0">
+                    <template x-if="notification.type === 'success'">
+                        <svg class="h-5 w-5 text-emerald-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                                clip-rule="evenodd" />
+                        </svg>
+                    </template>
+                    <template x-if="notification.type === 'error'">
+                        <svg class="h-5 w-5 text-rose-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                clip-rule="evenodd" />
+                        </svg>
+                    </template>
+                    <template x-if="notification.type === 'info'">
+                        <svg class="h-5 w-5 text-sky-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                clip-rule="evenodd" />
+                        </svg>
+                    </template>
+                </div>
+                <div class="flex-1 pt-0.5">
+                    <p class="text-sm font-medium" x-text="notification.message"></p>
+                </div>
+                <button type="button" @click="remove(notification.id)"
+                    class="ml-4 inline-flex shrink-0 rounded-md p-1.5 focus:outline-none focus:ring-2 focus:ring-offset-2"
+                    :class="{
+                        'text-slate-500 hover:bg-slate-100 focus:ring-slate-500': notification.type === 'info',
+                        'text-emerald-500 hover:bg-emerald-100 focus:ring-emerald-500': notification.type === 'success',
+                        'text-rose-500 hover:bg-rose-100 focus:ring-rose-500': notification.type === 'error'
+                    }">
+                    <span class="sr-only">Close</span>
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd"
+                            d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                            clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+        </template>
     </div>
     <!-- Google tag (gtag.js) -->
     <script async src="https://www.googletagmanager.com/gtag/js?id={{ga|default('G-6YYK5T2TWT')}}"></script>
