@@ -118,9 +118,15 @@ impl ConsoleState {
             "format",
             |format_str: &str, value: minijinja::Value| -> Result<String, minijinja::Error> {
                 if let Ok(num) = f64::try_from(value.clone()) {
+                    if num == 0.0 {
+                        return Ok("0".to_string());
+                    }
                     match format_str {
+                        "%.1f" => Ok(format!("{:.1}", num)),
                         "%.2f" => Ok(format!("{:.2}", num)),
+                        "%.3f" => Ok(format!("{:.3}", num)),
                         "%.4f" => Ok(format!("{:.4}", num)),
+                        "%.5f" => Ok(format!("{:.5}", num)),
                         _ => Ok(format!("{}", num)),
                     }
                 } else {
