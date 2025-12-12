@@ -52,50 +52,41 @@ impl From<&TransactionKey> for TransactionCookie {
 
 impl TransactionCookie {
     pub fn set_user(&self, user: SipUser) {
-        self.inner
-            .try_write()
-            .map(|mut inner| {
-                inner.user = Some(user);
-            })
-            .ok();
+        if let Ok(mut inner) = self.inner.write() {
+            inner.user = Some(user);
+        }
     }
     pub fn get_user(&self) -> Option<SipUser> {
         self.inner
-            .try_read()
+            .read()
             .map(|inner| inner.user.clone())
             .ok()
             .flatten()
     }
     pub fn set(&self, key: &str, value: &str) {
-        self.inner
-            .try_write()
-            .map(|mut inner| {
-                inner.values.insert(key.to_string(), value.to_string());
-            })
-            .ok();
+        if let Ok(mut inner) = self.inner.write() {
+            inner.values.insert(key.to_string(), value.to_string());
+        }
     }
     pub fn get(&self, key: &str) -> Option<String> {
         self.inner
-            .try_read()
+            .read()
             .ok()
             .and_then(|inner| inner.values.get(key).cloned())
     }
 
     pub fn get_values(&self) -> HashMap<String, String> {
         self.inner
-            .try_read()
+            .read()
             .ok()
             .map(|inner| inner.values.clone())
             .unwrap_or_default()
     }
 
     pub fn remove(&self, key: &str) {
-        self.inner
-            .try_write()
-            .map(|mut inner| {
-                inner.values.remove(key);
-            })
-            .ok();
+        if let Ok(mut inner) = self.inner.write() {
+            inner.values.remove(key);
+        }
     }
 
     pub fn mark_as_spam(&self, r: SpamResult) {
