@@ -214,11 +214,12 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             .await?;
             Ok(Box::new(backend))
         }
-        UserBackendConfig::Extension { database_url } => {
+        UserBackendConfig::Extension { database_url, ttl } => {
             let url = database_url
                 .clone()
                 .unwrap_or_else(|| Config::default().database_url);
-            let backend = ExtensionUserBackend::connect(&url).await?;
+            let ttl_secs = ttl.unwrap_or(30);
+            let backend = ExtensionUserBackend::connect(&url, ttl_secs).await?;
             Ok(Box::new(backend))
         }
     }

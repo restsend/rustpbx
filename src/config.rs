@@ -276,6 +276,8 @@ pub enum UserBackendConfig {
     Extension {
         #[serde(default)]
         database_url: Option<String>,
+        #[serde(default)]
+        ttl: Option<u64>,
     },
 }
 

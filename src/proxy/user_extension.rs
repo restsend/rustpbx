@@ -2,22 +2,32 @@ use crate::call::user::SipUser;
 use crate::models::{department, extension};
 use anyhow::Result;
 use async_trait::async_trait;
+use lru::LruCache;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::user::UserBackend;
 
 pub struct ExtensionUserBackend {
     db: DatabaseConnection,
+    cache: Arc<Mutex<LruCache<(String, Option<String>), (Option<SipUser>, Instant)>>>,
+    ttl: Duration,
 }
 
 impl ExtensionUserBackend {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+    pub fn new(db: DatabaseConnection, ttl_secs: u64) -> Self {
+        Self {
+            db,
+            cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(10000).unwrap()))),
+            ttl: Duration::from_secs(ttl_secs),
+        }
     }
 
-    pub async fn connect(database_url: &str) -> Result<Self> {
+    pub async fn connect(database_url: &str, ttl_secs: u64) -> Result<Self> {
         let db = crate::models::create_db(database_url).await?;
-        Ok(Self::new(db))
+        Ok(Self::new(db, ttl_secs))
     }
 
     async fn fetch_extension(
@@ -75,13 +85,32 @@ impl UserBackend for ExtensionUserBackend {
             return Ok(None);
         }
 
+        let cache_key = (username.to_string(), realm.map(|r| r.to_string()));
+
+        // Check cache
+        if self.ttl.as_secs() > 0 {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some((user, timestamp)) = cache.get(&cache_key) {
+                if timestamp.elapsed() < self.ttl {
+                    return Ok(user.clone());
+                }
+            }
+        }
+
         let result = self.fetch_extension(username).await?;
-        let Some((model, departments)) = result else {
-            return Ok(None);
+        let user = if let Some((model, departments)) = result {
+            Some(Self::build_sip_user(model, departments, realm))
+        } else {
+            None
         };
 
-        let user = Self::build_sip_user(model, departments, realm);
-        Ok(Some(user))
+        // Update cache
+        if self.ttl.as_secs() > 0 {
+            let mut cache = self.cache.lock().unwrap();
+            cache.put(cache_key, (user.clone(), Instant::now()));
+        }
+
+        Ok(user)
     }
 }
 
@@ -116,7 +145,7 @@ mod tests {
         .await
         .expect("insert extension");
 
-        let backend = ExtensionUserBackend::new(db.clone());
+        let backend = ExtensionUserBackend::new(db.clone(), 30);
 
         let user = backend
             .get_user("1001", Some("rustpbx.com"))
@@ -134,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn missing_user_returns_none() {
         let db = setup_db().await;
-        let backend = ExtensionUserBackend::new(db);
+        let backend = ExtensionUserBackend::new(db, 30);
         assert!(backend.get_user("2001", None).await.unwrap().is_none());
     }
 }
