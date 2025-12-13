@@ -255,7 +255,7 @@ impl AppStateBuilder {
             None => {
                 if let Some(mut proxy_config) = config.proxy.clone() {
                     for backend in proxy_config.user_backends.iter_mut() {
-                        if let UserBackendConfig::Extension { database_url } = backend {
+                        if let UserBackendConfig::Extension { database_url, .. } = backend {
                             if database_url.is_none() {
                                 *database_url = Some(config.database_url.clone());
                             }
