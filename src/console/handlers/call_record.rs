@@ -664,16 +664,21 @@ async fn query_call_records(
 }
 
 async fn page_call_record_detail(
-    AxumPath(pk): AxumPath<i64>,
+    AxumPath(id_param): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let model = match CallRecordEntity::find()
-        .filter(CallRecordColumn::Id.eq(pk))
-        .one(db)
-        .await
-    {
+    let model_result = if let Ok(pk) = id_param.parse::<i64>() {
+        CallRecordEntity::find_by_id(pk).one(db).await
+    } else {
+        CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq(&id_param))
+            .one(db)
+            .await
+    };
+
+    let model = match model_result {
         Ok(Some(model)) => model,
         Ok(None) => {
             return (
@@ -683,7 +688,7 @@ async fn page_call_record_detail(
                 .into_response();
         }
         Err(err) => {
-            warn!("failed to load call record '{}': {}", pk, err);
+            warn!("failed to load call record '{}': {}", id_param, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "message": err.to_string() })),
@@ -697,7 +702,7 @@ async fn page_call_record_detail(
         Err(err) => {
             warn!(
                 "failed to load related data for call record '{}': {}",
-                pk, err
+                id_param, err
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -770,11 +775,11 @@ async fn page_call_record_detail(
         "console/call_record_detail.html",
         json!({
             "nav_active": "call-records",
-            "page_title": format!("Call record · {}", pk),
+            "page_title": format!("Call record · {}", model.id),
             "call_id": model.call_id,
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
 
-            "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", pk)),
+            "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", model.id)),
         }),
     )
 }
