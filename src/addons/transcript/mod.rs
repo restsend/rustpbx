@@ -30,8 +30,8 @@ impl Addon for TranscriptAddon {
 
     fn screenshots(&self) -> Vec<&'static str> {
         vec![
-            "static/transcript/transcript_callrecord.png",
-            "static/transcript/transcript_download.png",
+            "/static/transcript/transcript_callrecord.png",
+            "/static/transcript/transcript_download.png",
         ]
     }
 
