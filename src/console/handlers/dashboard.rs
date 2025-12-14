@@ -342,8 +342,7 @@ async fn build_dashboard_payload(
         .all(db)
         .await?;
 
-    let active_preview = active_call_stats(state, 10).await;
-    let active_total = active_preview.len() as u32;
+    let (active_total, active_preview) = active_call_stats(state, 10).await;
 
     let capacity = state
         .sip_server()
@@ -393,9 +392,9 @@ async fn build_dashboard_payload(
         today: TodayMetrics {
             acd: format_duration(today_avg_duration.unwrap_or(0)),
         },
-        active: active_total,
+        active: active_total as u32,
         capacity,
-        active_util: calc_util(active_total, capacity),
+        active_util: calc_util(active_total as u32, capacity),
     };
 
     let mut direction_counts: BTreeMap<String, i64> = BTreeMap::new();
@@ -460,12 +459,13 @@ fn format_timeline_label(range: &TimeRange, timestamp: DateTime<Utc>) -> String 
     }
 }
 
-async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCallPreview> {
+async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<ActiveCallPreview>) {
     let mut previews = Vec::new();
-
+    let mut active_count = 0;
     // 1. UserAgent Calls
     if let Some(app_state) = state.app_state() {
         let call_map = app_state.active_calls.lock().unwrap();
+        active_count = call_map.len();
         for call in call_map.values() {
             if let Ok(state_guard) = call.call_state.read() {
                 let start_time = state_guard.start_time;
@@ -498,6 +498,7 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCall
     // 2. Proxy Calls (including Wholesale)
     if let Ok(guard) = state.sip_server.read() {
         if let Some(server) = guard.as_ref() {
+            active_count += server.active_call_registry.count();
             let proxy_calls = server.active_call_registry.list_recent(limit);
             for call in proxy_calls {
                 let status = call.status.to_string();
@@ -521,8 +522,14 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCall
                 };
 
                 previews.push(ActiveCallPreview {
-                    caller: call.caller.unwrap_or_default(),
-                    callee: call.callee.unwrap_or_default(),
+                    caller: call
+                        .caller
+                        .clone()
+                        .unwrap_or_else(|| call.session_id.clone()),
+                    callee: call
+                        .callee
+                        .clone()
+                        .unwrap_or_else(|| call.direction.clone()),
                     status,
                     started_at,
                     duration: format_duration(duration_secs),
@@ -538,36 +545,11 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCall
         previews.truncate(limit);
     }
 
-    if let Some(server) = state.sip_server() {
-        let registry_entries = server.active_call_registry.list_recent(limit);
-        for entry in registry_entries {
-            let duration_secs = if let Some(answered_at) = entry.answered_at {
-                (Utc::now() - answered_at).num_seconds().max(0)
-            } else {
-                (Utc::now() - entry.started_at).num_seconds().max(0)
-            };
-            previews.push(ActiveCallPreview {
-                caller: entry
-                    .caller
-                    .clone()
-                    .unwrap_or_else(|| entry.session_id.clone()),
-                callee: entry
-                    .callee
-                    .clone()
-                    .unwrap_or_else(|| entry.direction.clone()),
-                status: entry.status.to_string(),
-                started_at: entry.started_at.format("%H:%M").to_string(),
-                duration: format_duration(duration_secs),
-                started_at_ts: entry.started_at,
-            });
-        }
-    }
-
     previews.sort_by(|a, b| b.started_at_ts.cmp(&a.started_at_ts));
     if previews.len() > limit {
         previews.truncate(limit);
     }
-    previews
+    (active_count, previews)
 }
 
 fn calc_trend_string(current: u32, previous: u32) -> String {

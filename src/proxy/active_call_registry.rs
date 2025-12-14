@@ -71,6 +71,10 @@ impl ActiveProxyCallRegistry {
         guard.handles.remove(session_id);
     }
 
+    pub fn count(&self) -> usize {
+        self.inner.lock().unwrap().entries.len()
+    }
+
     pub fn list_recent(&self, limit: usize) -> Vec<ActiveProxyCallEntry> {
         let mut entries: Vec<_> = self
             .inner

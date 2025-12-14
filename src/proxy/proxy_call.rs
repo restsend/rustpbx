@@ -1553,7 +1553,7 @@ impl ProxyCall {
         }
 
         let callee_uri = &invite_option.callee;
-        let callee_realm = callee_uri.host().to_string();
+        let callee_realm = callee_uri.host_with_port.to_string();
         if self.server.is_same_realm(&callee_realm).await {
             let dialplan = &self.dialplan;
             let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
@@ -1571,21 +1571,21 @@ impl ProxyCall {
                     .await
                 {
                     Ok(Some(_)) => {
-                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user offline in locator, abort now");
+                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "user offline in locator, abort now");
                         return Err((
                             rsip::StatusCode::TemporarilyUnavailable,
                             Some("User offline".to_string()),
                         ));
                     }
                     Ok(None) => {
-                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, "user not found in auth backend, reject");
+                        info!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "user not found in auth backend, reject");
                         return Err((
                             rsip::StatusCode::NotFound,
                             Some("User not found".to_string()),
                         ));
                     }
                     Err(e) => {
-                        warn!(session_id = ?dialplan.session_id, callee = %callee_uri, "failed to lookup user in auth backend: {}", e);
+                        warn!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "failed to lookup user in auth backend: {}", e);
                         return Err((rsip::StatusCode::ServerInternalError, Some(e.to_string())));
                     }
                 }
