@@ -1,4 +1,3 @@
-use crate::call::ActiveCallRef;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
 use anyhow::Result;

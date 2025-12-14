@@ -15,7 +15,7 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
 use sea_orm::sea_query::{Expr, Order};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
@@ -2392,47 +2392,108 @@ fn extract_hangup_messages(metadata: &Option<Value>) -> Vec<Value> {
 }
 
 async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
-    let total = CallRecordEntity::find()
-        .filter(condition.clone())
-        .count(db)
-        .await?;
+    use sea_orm::sea_query;
 
-    let answered = CallRecordEntity::find()
-        .filter(condition.clone())
-        .filter(CallRecordColumn::Status.eq("completed"))
-        .count(db)
-        .await?;
+    #[derive(Debug, FromQueryResult)]
+    struct Stats {
+        total: i64,
+        answered: Option<i64>,
+        missed: Option<i64>,
+        failed: Option<i64>,
+        transcribed: Option<i64>,
+        total_duration: Option<f64>,
+        unique_dids: Option<i64>,
+        total_billable_secs: Option<f64>,
+    }
 
-    let missed = CallRecordEntity::find()
+    let stats = CallRecordEntity::find()
         .filter(condition.clone())
-        .filter(CallRecordColumn::Status.eq("missed"))
-        .count(db)
-        .await?;
-
-    let failed = CallRecordEntity::find()
-        .filter(condition.clone())
-        .filter(CallRecordColumn::Status.eq("failed"))
-        .count(db)
-        .await?;
-
-    let transcribed = CallRecordEntity::find()
-        .filter(condition.clone())
-        .filter(CallRecordColumn::HasTranscript.eq(true))
-        .count(db)
-        .await?;
-
-    let total_duration_secs = CallRecordEntity::find()
         .select_only()
+        .column_as(CallRecordColumn::Id.count(), "total")
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.eq("completed"),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "answered",
+        )
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.eq("missed"),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "missed",
+        )
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Status.eq("failed"),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "failed",
+        )
+        .column_as(
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::HasTranscript.eq(true),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "transcribed",
+        )
         .column_as(
             CallRecordColumn::DurationSecs.sum().cast_as("double"),
             "total_duration",
         )
-        .filter(condition.clone())
-        .into_tuple::<Option<f64>>()
+        .column_as(
+            Expr::col(CallRecordColumn::ToNumber).count_distinct(),
+            "unique_dids",
+        )
+        .column_as(
+            CallRecordColumn::BillingBillableSecs
+                .sum()
+                .cast_as("double"),
+            "total_billable_secs",
+        )
+        .into_model::<Stats>()
         .one(db)
         .await?
-        .flatten()
-        .unwrap_or(0.0);
+        .unwrap_or(Stats {
+            total: 0,
+            answered: None,
+            missed: None,
+            failed: None,
+            transcribed: None,
+            total_duration: None,
+            unique_dids: None,
+            total_billable_secs: None,
+        });
+
+    let total = stats.total;
+    let answered = stats.answered.unwrap_or(0);
+    let missed = stats.missed.unwrap_or(0);
+    let failed = stats.failed.unwrap_or(0);
+    let transcribed = stats.transcribed.unwrap_or(0);
+    let total_duration_secs = stats.total_duration.unwrap_or(0.0);
+    let unique_dids = stats.unique_dids.unwrap_or(0);
+    let total_billable_secs = stats.total_billable_secs.unwrap_or(0.0);
 
     let total_minutes = total_duration_secs / 60.0;
     let avg_duration = if total > 0 {
@@ -2440,34 +2501,6 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
     } else {
         0.0
     };
-
-    let unique_dids = CallRecordEntity::find()
-        .select_only()
-        .column_as(
-            Expr::col(CallRecordColumn::ToNumber).count_distinct(),
-            "unique_dids",
-        )
-        .filter(condition.clone())
-        .into_tuple::<Option<i64>>()
-        .one(db)
-        .await?
-        .flatten()
-        .unwrap_or(0);
-
-    let total_billable_secs = CallRecordEntity::find()
-        .select_only()
-        .column_as(
-            CallRecordColumn::BillingBillableSecs
-                .sum()
-                .cast_as("double"),
-            "billing_billable_secs",
-        )
-        .filter(condition.clone())
-        .into_tuple::<Option<f64>>()
-        .one(db)
-        .await?
-        .flatten()
-        .unwrap_or(0.0);
 
     let billing_status_rows: Vec<(Option<String>, Option<i64>)> = CallRecordEntity::find()
         .select_only()
