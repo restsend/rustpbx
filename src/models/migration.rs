@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::call_record::Migration),
             Box::new(super::frequency_limit::Migration),
             Box::new(super::call_record_indices::Migration),
+            Box::new(super::call_record_optimization_indices::Migration),
         ]
     }
 }

@@ -6,6 +6,7 @@ use url::Url;
 
 pub mod call_record;
 pub mod call_record_indices;
+pub mod call_record_optimization_indices;
 pub mod department;
 pub mod extension;
 pub mod extension_department;
