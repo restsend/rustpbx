@@ -419,6 +419,10 @@ pub struct ProxyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<RouteRule>>,
     #[serde(default)]
+    pub session_timer: bool,
+    #[serde(default)]
+    pub session_expires: Option<u64>,
+    #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
@@ -592,6 +596,8 @@ impl Default for ProxyConfig {
             routes_files: Vec::new(),
             acl_files: Vec::new(),
             routes: None,
+            session_timer: false,
+            session_expires: None,
             queues: HashMap::new(),
             trunks: HashMap::new(),
             trunks_files: Vec::new(),

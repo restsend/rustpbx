@@ -3,6 +3,10 @@ use crate::{
     callrecord::{CallRecordHangupMessage, CallRecordHangupReason},
     proxy::proxy_call::{
         ProxyCall, SessionHangupMessage,
+        session_timer::{
+            HEADER_SESSION_EXPIRES, SessionRefresher, SessionTimerState, TIMER_TAG,
+            get_header_value, has_timer_support, parse_session_expires,
+        },
         state::{CallSessionHandle, CallSessionShared, ProxyCallEvent},
     },
 };
@@ -13,7 +17,7 @@ use rsipstack::dialog::{
 };
 use std::{
     collections::HashSet,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -60,7 +64,7 @@ pub(super) struct CallSessionRecordSnapshot {
 
 pub(super) struct CallSession {
     pub server_dialog: ServerInviteDialog,
-    pub callee_dialogs: HashSet<DialogId>,
+    pub callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub connected_callee: Option<String>,
     pub ring_time: Option<Instant>,
@@ -92,6 +96,8 @@ pub(super) struct CallSession {
     ivr_trace: Option<IvrTrace>,
     pub max_forwards: u32,
     pub reporter: Option<crate::proxy::proxy_call::reporter::CallReporter>,
+    pub server_timer: Arc<std::sync::Mutex<SessionTimerState>>,
+    pub client_timer: Arc<std::sync::Mutex<SessionTimerState>>,
 }
 
 impl CallSession {
@@ -132,7 +138,7 @@ impl CallSession {
             .map(|uri| uri.to_string());
         Self {
             server_dialog,
-            callee_dialogs: HashSet::new(),
+            callee_dialogs: Arc::new(Mutex::new(HashSet::new())),
             last_error: None,
             connected_callee: None,
             ring_time: None,
@@ -164,6 +170,72 @@ impl CallSession {
             ivr_trace: None,
             max_forwards,
             reporter,
+            server_timer: Arc::new(std::sync::Mutex::new(SessionTimerState::default())),
+            client_timer: Arc::new(std::sync::Mutex::new(SessionTimerState::default())),
+        }
+    }
+
+    pub fn init_server_timer(
+        &mut self,
+        default_expires: u64,
+    ) -> Result<(), (StatusCode, Option<String>)> {
+        let request = self.server_dialog.initial_request();
+        let headers = &request.headers;
+
+        let supported = has_timer_support(headers);
+        let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
+
+        // Default local policy
+        let local_min_se = Duration::from_secs(90);
+
+        let mut server_timer = self.server_timer.lock().unwrap();
+
+        if let Some(value) = session_expires_value {
+            if let Some((interval, refresher)) = parse_session_expires(&value) {
+                if interval < local_min_se {
+                    return Err((
+                        StatusCode::SessionIntervalTooSmall,
+                        Some(local_min_se.as_secs().to_string()),
+                    ));
+                }
+
+                server_timer.enabled = true;
+                server_timer.session_interval = interval;
+                server_timer.active = true;
+
+                if let Some(r) = refresher {
+                    server_timer.refresher = r;
+                } else {
+                    server_timer.refresher = SessionRefresher::Uac;
+                }
+            }
+        } else if supported {
+            server_timer.enabled = true;
+            server_timer.session_interval = Duration::from_secs(default_expires);
+            server_timer.active = true;
+            server_timer.refresher = SessionRefresher::Uac;
+        }
+
+        Ok(())
+    }
+
+    pub fn init_client_timer(&mut self, response: &rsip::Response) {
+        let headers = &response.headers;
+        let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
+
+        if let Some(value) = session_expires_value {
+            if let Some((interval, refresher)) = parse_session_expires(&value) {
+                let mut client_timer = self.client_timer.lock().unwrap();
+                client_timer.enabled = true;
+                client_timer.session_interval = interval;
+                client_timer.active = true;
+                client_timer.last_refresh = Instant::now();
+                if let Some(r) = refresher {
+                    client_timer.refresher = r;
+                } else {
+                    client_timer.refresher = SessionRefresher::Uac;
+                }
+            }
         }
     }
 
@@ -256,7 +328,13 @@ impl CallSession {
             ivr_trace: self.ivr_trace.clone(),
             caller_offer: self.caller_offer.clone(),
             answer: self.answer.clone(),
-            callee_dialogs: self.callee_dialogs.iter().cloned().collect(),
+            callee_dialogs: self
+                .callee_dialogs
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect(),
             server_dialog_id: self.server_dialog.id(),
         }
     }
@@ -389,10 +467,11 @@ impl CallSession {
     }
 
     pub fn add_callee_dialog(&mut self, dialog_id: DialogId) {
-        if self.callee_dialogs.contains(&dialog_id) {
+        let mut callee_dialogs = self.callee_dialogs.lock().unwrap();
+        if callee_dialogs.contains(&dialog_id) {
             return;
         }
-        self.callee_dialogs.insert(dialog_id);
+        callee_dialogs.insert(dialog_id);
     }
 
     pub async fn start_ringing(&mut self, mut answer: String, proxy_call: &ProxyCall) {
@@ -500,6 +579,27 @@ impl CallSession {
         Ok(())
     }
 
+    pub async fn handle_reinvite(&mut self) {
+        // Handle re-INVITE (empty SDP) by replying with current answer
+        if let Some(sdp) = &self.answer {
+            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+            if let Err(e) = self
+                .server_dialog
+                .accept(Some(headers), Some(sdp.clone().into_bytes()))
+            {
+                warn!("Failed to reply to re-INVITE: {}", e);
+            } else {
+                info!("Replied to re-INVITE with current SDP");
+            }
+        } else {
+            warn!("Received re-INVITE but no answer SDP available");
+            // Reply 488 Not Acceptable Here? Or 500?
+            let _ = self
+                .server_dialog
+                .reject(Some(StatusCode::NotAcceptableHere), None);
+        }
+    }
+
     pub fn has_error(&self) -> bool {
         self.last_error.is_some()
     }
@@ -595,16 +695,31 @@ impl CallSession {
             self.answer = Some(answer);
         }
 
-        let headers = if self.answer.is_some() {
-            Some(vec![rsip::Header::ContentType("application/sdp".into())])
+        let mut headers = if self.answer.is_some() {
+            vec![rsip::Header::ContentType("application/sdp".into())]
         } else {
-            None
+            vec![]
         };
 
-        if let Err(e) = self
-            .server_dialog
-            .accept(headers, self.answer.clone().map(|sdp| sdp.into_bytes()))
-        {
+        let server_timer = self.server_timer.lock().unwrap();
+        if server_timer.active {
+            headers.push(rsip::Header::Supported(
+                rsip::headers::Supported::from(TIMER_TAG).into(),
+            ));
+            headers.push(rsip::Header::Other(
+                HEADER_SESSION_EXPIRES.into(),
+                format!(
+                    "{};refresher={}",
+                    server_timer.session_interval.as_secs(),
+                    server_timer.refresher
+                ),
+            ));
+        }
+
+        if let Err(e) = self.server_dialog.accept(
+            Some(headers),
+            self.answer.clone().map(|sdp| sdp.into_bytes()),
+        ) {
             return Err(anyhow!("Failed to send 200 OK: {}", e));
         }
         self.mark_active_call_answered();
