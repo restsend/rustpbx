@@ -209,23 +209,27 @@ impl CallSession {
                     server_timer.refresher = SessionRefresher::Uac;
                 }
             }
-        } else if supported {
+        } else {
             server_timer.enabled = true;
             server_timer.session_interval = Duration::from_secs(default_expires);
             server_timer.active = true;
-            server_timer.refresher = SessionRefresher::Uac;
+            server_timer.refresher = if supported {
+                SessionRefresher::Uac
+            } else {
+                SessionRefresher::Uas
+            };
         }
 
         Ok(())
     }
 
-    pub fn init_client_timer(&mut self, response: &rsip::Response) {
+    pub fn init_client_timer(&mut self, response: &rsip::Response, default_expires: u64) {
         let headers = &response.headers;
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
 
+        let mut client_timer = self.client_timer.lock().unwrap();
         if let Some(value) = session_expires_value {
             if let Some((interval, refresher)) = parse_session_expires(&value) {
-                let mut client_timer = self.client_timer.lock().unwrap();
                 client_timer.enabled = true;
                 client_timer.session_interval = interval;
                 client_timer.active = true;
@@ -236,6 +240,12 @@ impl CallSession {
                     client_timer.refresher = SessionRefresher::Uac;
                 }
             }
+        } else {
+            client_timer.enabled = true;
+            client_timer.session_interval = Duration::from_secs(default_expires);
+            client_timer.active = true;
+            client_timer.last_refresh = Instant::now();
+            client_timer.refresher = SessionRefresher::Uac;
         }
     }
 
