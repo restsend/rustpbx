@@ -612,7 +612,7 @@ impl ProxyCall {
         server_dialog: ServerInviteDialog,
         handle: CallSessionHandle,
     ) -> Result<()> {
-        let mut refresh_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut refresh_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
                 state = state_rx.recv() => {
@@ -670,20 +670,23 @@ impl ProxyCall {
                     {
                         let server_timer = server_timer.lock().unwrap();
                         if server_timer.active {
-                            if server_timer.refresher == SessionRefresher::Uas {
+                            if Instant::now() >= server_timer.last_refresh + server_timer.session_interval {
+                                info!(session_id = %self.session_id, "Server session timer expired, terminating");
+                                should_terminate = true;
+                            } else if server_timer.refresher == SessionRefresher::Uas {
                                 let refresh_at =
                                     server_timer.last_refresh + (server_timer.session_interval / 2);
                                 next_time = Some(refresh_at);
-                            } else if Instant::now() >= server_timer.last_refresh + server_timer.session_interval {
-                                info!(session_id = %self.session_id, "Server session timer expired (no refresh received), terminating");
-                                should_terminate = true;
                             }
                         }
                     }
                     {
                         let client_timer = client_timer.lock().unwrap();
                         if client_timer.active {
-                            if client_timer.refresher == SessionRefresher::Uac {
+                            if Instant::now() >= client_timer.last_refresh + client_timer.session_interval {
+                                info!(session_id = %self.session_id, "Client session timer expired, terminating");
+                                should_terminate = true;
+                            } else if client_timer.refresher == SessionRefresher::Uac {
                                 let refresh_at =
                                     client_timer.last_refresh + (client_timer.session_interval / 2);
                                 match next_time {
@@ -694,13 +697,9 @@ impl ProxyCall {
                                     }
                                     None => next_time = Some(refresh_at),
                                 }
-                            } else if Instant::now() >= client_timer.last_refresh + client_timer.session_interval {
-                                info!(session_id = %self.session_id, "Client session timer expired (no refresh received), terminating");
-                                should_terminate = true;
                             }
                         }
                     }
-
                     if should_terminate {
                         // Terminate the call
                         self.cancel_token.cancel();
@@ -731,12 +730,16 @@ impl ProxyCall {
                                     ),
                                 ];
 
-                                // Send UPDATE
-                                if let Err(e) = server_dialog.update(Some(headers), None).await {
-                                    warn!(session_id = %self.session_id, error = %e, "Failed to send UPDATE for session refresh");
-                                } else {
-                                    let mut server_timer = server_timer.lock().unwrap();
-                                    server_timer.last_refresh = Instant::now();
+                                match server_dialog.update(Some(headers), None).await {
+                                    Err(_)|Ok(None) => {
+                                        warn!(session_id = %self.session_id,  "Failed to send UPDATE for session refresh");
+                                    }
+                                    Ok(Some(resp)) => {
+                                        if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                            let mut server_timer = server_timer.lock().unwrap();
+                                            server_timer.last_refresh = Instant::now();
+                                        }
+                                    }
                                 }
                             }
 
@@ -772,10 +775,15 @@ impl ProxyCall {
                                     if let Some(dialog) = self.dialog_layer.get_dialog(&dialog_id) {
                                         match dialog {
                                             rsipstack::dialog::dialog::Dialog::ClientInvite(invite_dialog) => {
-                                                if let Err(e) = invite_dialog.update(Some(headers.clone()), None).await {
-                                                    warn!(session_id = %self.session_id, %dialog_id, error = %e, "Failed to send UPDATE for session refresh");
-                                                } else {
-                                                    success = true;
+                                                match invite_dialog.update(Some(headers.clone()), None).await {
+                                                    Err(_)|Ok(None) => {
+                                                        warn!(session_id = %self.session_id, %dialog_id, "Failed to send UPDATE for session refresh");
+                                                    }
+                                                    Ok(Some(resp)) => {
+                                                        if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                                            success = true;
+                                                        }
+                                                    }
                                                 }
                                             }
                                             _ => {
@@ -1702,7 +1710,8 @@ impl ProxyCall {
         match r {
             Ok(Some(resp)) => {
                 if self.server.proxy_config.session_timer {
-                    session.init_client_timer(&resp);
+                    let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+                    session.init_client_timer(&resp, default_expires);
                 }
                 Ok(())
             }
