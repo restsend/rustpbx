@@ -9,6 +9,10 @@ use crate::{
     proxy::{
         proxy_call::{
             session::CallSession,
+            session_timer::{
+                HEADER_MIN_SE, HEADER_SESSION_EXPIRES, SessionRefresher, SessionTimerState,
+                TIMER_TAG, get_header_value, parse_min_se,
+            },
             state::{CallSessionHandle, CallSessionShared, SessionAction, SessionActionReceiver},
         },
         server::SipServerRef,
@@ -31,7 +35,7 @@ use rsipstack::{
     transport::SipConnection,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     net::IpAddr,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -49,6 +53,7 @@ pub(crate) mod ivr;
 pub(crate) mod queue;
 pub(crate) mod reporter;
 pub(crate) mod session;
+pub(crate) mod session_timer;
 pub(crate) mod state;
 
 pub struct ProxyCall {
@@ -547,6 +552,7 @@ impl ProxyCall {
         let media_stream = session.media_stream.clone();
         let dialog_guard = ServerDialogGuard::new(self.dialog_layer.clone(), server_dialog.id());
         let (handle, mut action_rx) = CallSessionHandle::with_shared(self.session_shared.clone());
+        let handle_for_events = handle.clone();
         session.register_active_call(handle);
         let action_inbox = SessionActionInbox::default();
         let inbox_forward = action_inbox.clone();
@@ -557,6 +563,22 @@ impl ProxyCall {
         });
 
         let (_, result) = tokio::join!(server_dialog.handle(tx), async {
+            if self.server.proxy_config.session_timer {
+                let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+                if let Err((code, _min_se)) = session.init_server_timer(default_expires) {
+                    info!("Rejecting call with 422 Session Interval Too Small");
+                    let _ = session.server_dialog.reject(Some(code), None);
+                    return Err(anyhow!(
+                        "Session Timer negotiation failed: 422 Session Interval Too Small"
+                    ));
+                }
+            }
+
+            let server_timer = session.server_timer.clone();
+            let client_timer = session.client_timer.clone();
+            let callee_dialogs = session.callee_dialogs.clone();
+            let server_dialog_clone = session.server_dialog.clone();
+
             let result = tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     let (status_code, reason_text, hangup_reason) = self.resolve_pending_hangup();
@@ -573,7 +595,7 @@ impl ProxyCall {
                 }
                 _ = media_stream.serve() => {Ok(())},
                 r = self.execute_dialplan(&mut session, Some(&action_inbox)) => r,
-                r = self.handle_server_events(state_rx) => r,
+                r = self.handle_server_events(state_rx, server_timer, client_timer, callee_dialogs, server_dialog_clone, handle_for_events) => r,
             };
             drop(dialog_guard);
             result
@@ -584,42 +606,192 @@ impl ProxyCall {
     async fn handle_server_events(
         &self,
         mut state_rx: mpsc::UnboundedReceiver<DialogState>,
+        server_timer: Arc<Mutex<SessionTimerState>>,
+        client_timer: Arc<Mutex<SessionTimerState>>,
+        callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
+        server_dialog: ServerInviteDialog,
+        handle: CallSessionHandle,
     ) -> Result<()> {
-        while let Some(state) = state_rx.recv().await {
-            match state {
-                DialogState::Terminated(dialog_id, reason) => {
-                    info!(session_id = %self.session_id, reason = ?reason, %dialog_id, "Server dialog terminated");
-                    break;
+        let mut refresh_interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                state = state_rx.recv() => {
+                    match state {
+                        Some(state) => {
+                            match state {
+                                DialogState::Terminated(dialog_id, reason) => {
+                                    info!(session_id = %self.session_id, reason = ?reason, %dialog_id, "Server dialog terminated");
+                                    break;
+                                }
+                                DialogState::Info(dialog_id, _request) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Received INFO on server dialog");
+                                }
+                                DialogState::Updated(dialog_id, request) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Received UPDATE on server dialog");
+                                    if request.method == rsip::Method::Invite {
+                                        let _ = handle.send_command(SessionAction::HandleReInvite("".to_string()));
+                                    }
+                                }
+                                DialogState::Notify(dialog_id, _request) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Received NOTIFY on server dialog");
+                                }
+                                DialogState::Calling(dialog_id) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in calling state");
+                                }
+                                DialogState::Trying(dialog_id) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in trying state");
+                                }
+                                DialogState::Early(dialog_id, _) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in early state");
+                                }
+                                DialogState::WaitAck(dialog_id, _) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in wait-ack state");
+                                }
+                                DialogState::Confirmed(dialog_id, _) => {
+                                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in confirmed state");
+                                }
+                                other_state => {
+                                    debug!(
+                                        session_id = %self.session_id,
+                                        "Received other state on server dialog: {}", other_state
+                                    );
+                                }
+                            }
+                        }
+                        None => break,
+                    }
                 }
-                DialogState::Info(dialog_id, _request) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Received INFO on server dialog");
-                }
-                DialogState::Updated(dialog_id, _request) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Received UPDATE on server dialog");
-                }
-                DialogState::Notify(dialog_id, _request) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Received NOTIFY on server dialog");
-                }
-                DialogState::Calling(dialog_id) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in calling state");
-                }
-                DialogState::Trying(dialog_id) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in trying state");
-                }
-                DialogState::Early(dialog_id, _) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in early state");
-                }
-                DialogState::WaitAck(dialog_id, _) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in wait-ack state");
-                }
-                DialogState::Confirmed(dialog_id, _) => {
-                    debug!(session_id = %self.session_id, %dialog_id, "Server dialog in confirmed state");
-                }
-                other_state => {
-                    debug!(
-                        session_id = %self.session_id,
-                        "Received other state on server dialog: {}", other_state
-                    );
+                _ = refresh_interval.tick() => {
+                    if !self.server.proxy_config.session_timer {
+                        continue;
+                    }
+                    let mut next_time = None;
+                    let mut should_terminate = false;
+                    {
+                        let server_timer = server_timer.lock().unwrap();
+                        if server_timer.active {
+                            if server_timer.refresher == SessionRefresher::Uas {
+                                let refresh_at =
+                                    server_timer.last_refresh + (server_timer.session_interval / 2);
+                                next_time = Some(refresh_at);
+                            } else if Instant::now() >= server_timer.last_refresh + server_timer.session_interval {
+                                info!(session_id = %self.session_id, "Server session timer expired (no refresh received), terminating");
+                                should_terminate = true;
+                            }
+                        }
+                    }
+                    {
+                        let client_timer = client_timer.lock().unwrap();
+                        if client_timer.active {
+                            if client_timer.refresher == SessionRefresher::Uac {
+                                let refresh_at =
+                                    client_timer.last_refresh + (client_timer.session_interval / 2);
+                                match next_time {
+                                    Some(t) => {
+                                        if refresh_at < t {
+                                            next_time = Some(refresh_at);
+                                        }
+                                    }
+                                    None => next_time = Some(refresh_at),
+                                }
+                            } else if Instant::now() >= client_timer.last_refresh + client_timer.session_interval {
+                                info!(session_id = %self.session_id, "Client session timer expired (no refresh received), terminating");
+                                should_terminate = true;
+                            }
+                        }
+                    }
+
+                    if should_terminate {
+                        // Terminate the call
+                        self.cancel_token.cancel();
+                        break;
+                    }
+
+                    if let Some(next_refresh) = next_time {
+                        if Instant::now() >= next_refresh {
+                            let should_refresh_server = {
+                                let server_timer = server_timer.lock().unwrap();
+                                server_timer.active
+                                    && server_timer.refresher == SessionRefresher::Uas
+                                    && Instant::now() >= server_timer.last_refresh + (server_timer.session_interval / 2)
+                            };
+
+                            if should_refresh_server {
+                                info!(session_id = %self.session_id, "Server session timer expired, refreshing");
+
+                                let session_interval = {
+                                    server_timer.lock().unwrap().session_interval
+                                };
+
+                                let headers = vec![
+                                    rsip::Header::Supported(rsip::headers::Supported::from(TIMER_TAG).into()),
+                                    rsip::Header::Other(
+                                        HEADER_SESSION_EXPIRES.into(),
+                                        format!("{};refresher=uas", session_interval.as_secs()),
+                                    ),
+                                ];
+
+                                // Send UPDATE
+                                if let Err(e) = server_dialog.update(Some(headers), None).await {
+                                    warn!(session_id = %self.session_id, error = %e, "Failed to send UPDATE for session refresh");
+                                } else {
+                                    let mut server_timer = server_timer.lock().unwrap();
+                                    server_timer.last_refresh = Instant::now();
+                                }
+                            }
+
+                            let should_refresh_client = {
+                                let client_timer = client_timer.lock().unwrap();
+                                client_timer.active
+                                    && client_timer.refresher == SessionRefresher::Uac
+                                    && Instant::now() >= client_timer.last_refresh + (client_timer.session_interval / 2)
+                            };
+
+                            if should_refresh_client {
+                                info!(session_id = %self.session_id, "Client session timer expired, refreshing");
+
+                                let session_interval = {
+                                    client_timer.lock().unwrap().session_interval
+                                };
+
+                                let headers = vec![
+                                    rsip::Header::Supported(rsip::headers::Supported::from(TIMER_TAG).into()),
+                                    rsip::Header::Other(
+                                        HEADER_SESSION_EXPIRES.into(),
+                                        format!("{};refresher=uac", session_interval.as_secs()),
+                                    ),
+                                ];
+
+                                let dialog_ids: Vec<DialogId> = {
+                                    let dialogs = callee_dialogs.lock().unwrap();
+                                    dialogs.iter().cloned().collect()
+                                };
+
+                                let mut success = false;
+                                for dialog_id in dialog_ids {
+                                    if let Some(dialog) = self.dialog_layer.get_dialog(&dialog_id) {
+                                        match dialog {
+                                            rsipstack::dialog::dialog::Dialog::ClientInvite(invite_dialog) => {
+                                                if let Err(e) = invite_dialog.update(Some(headers.clone()), None).await {
+                                                    warn!(session_id = %self.session_id, %dialog_id, error = %e, "Failed to send UPDATE for session refresh");
+                                                } else {
+                                                    success = true;
+                                                }
+                                            }
+                                            _ => {
+                                                warn!(session_id = %self.session_id, %dialog_id, "Dialog is not a ClientInvite dialog, cannot send UPDATE");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if success {
+                                    let mut client_timer = client_timer.lock().unwrap();
+                                    client_timer.last_refresh = Instant::now();
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -728,6 +900,10 @@ impl ProxyCall {
                     session.set_queue_name(None);
                     Ok(())
                 }
+                SessionAction::HandleReInvite(_) => {
+                    session.handle_reinvite().await;
+                    Ok(())
+                }
                 SessionAction::EnterIvr { reference } => {
                     self.transfer_to_ivr(session, &reference).await
                 }
@@ -808,6 +984,10 @@ impl ProxyCall {
             SessionAction::StartQueueHold(config) => session.start_queue_hold(config).await,
             SessionAction::StopQueueHold => {
                 session.stop_queue_hold().await;
+                Ok(())
+            }
+            SessionAction::HandleReInvite(_) => {
+                session.handle_reinvite().await;
                 Ok(())
             }
             _ => unreachable!("unsupported session control action"),
@@ -1294,6 +1474,14 @@ impl ProxyCall {
             .build_invite_headers(&target)
             .unwrap_or_default();
         headers.push(rsip::headers::MaxForwards::from(session.max_forwards).into());
+        if self.server.proxy_config.session_timer {
+            let session_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+            headers.push(rsip::headers::Supported::from(TIMER_TAG).into());
+            headers.push(rsip::Header::Other(
+                HEADER_SESSION_EXPIRES.into(),
+                session_expires.to_string(),
+            ));
+        }
 
         let invite_option = InviteOption {
             caller_display_name: caller_display_name.cloned(),
@@ -1433,31 +1621,71 @@ impl ProxyCall {
         let mut state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
 
         let invite_loop = async {
-            match dialog_layer.do_invite(invite_option, state_tx).await {
-                Ok((_, resp)) => {
-                    if let Some(resp) = resp {
-                        if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
-                            let reason = resp.reason_phrase().clone().map(Into::into);
-                            Err((resp.status_code, reason))
+            let mut current_invite_option = invite_option;
+            let mut retry_count = 0;
+            loop {
+                match dialog_layer
+                    .do_invite(current_invite_option.clone(), state_tx.clone())
+                    .await
+                {
+                    Ok((_, resp)) => {
+                        if let Some(resp) = resp {
+                            if resp.status_code == StatusCode::SessionIntervalTooSmall {
+                                if retry_count < 1 {
+                                    let min_se_value =
+                                        get_header_value(&resp.headers, HEADER_MIN_SE);
+                                    if let Some(value) = min_se_value {
+                                        if let Some(min_se) = parse_min_se(&value) {
+                                            info!(
+                                                session_id = %self.session_id,
+                                                min_se = ?min_se,
+                                                "Received 422, retrying with new Session-Expires"
+                                            );
+                                            if let Some(headers) =
+                                                &mut current_invite_option.headers
+                                            {
+                                                headers.retain(|h| match h {
+                                                    rsip::Header::Other(n, _) => !n
+                                                        .eq_ignore_ascii_case(
+                                                            HEADER_SESSION_EXPIRES,
+                                                        ),
+                                                    _ => true,
+                                                });
+                                                headers.push(rsip::Header::Other(
+                                                    HEADER_SESSION_EXPIRES.into(),
+                                                    min_se.as_secs().to_string(),
+                                                ));
+                                            }
+                                            retry_count += 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
+                                let reason = resp.reason_phrase().clone().map(Into::into);
+                                return Err((resp.status_code, reason));
+                            } else {
+                                return Ok(Some(resp));
+                            }
                         } else {
-                            Ok(())
+                            return Err((
+                                StatusCode::RequestTerminated,
+                                Some("Cancelled by callee".to_string()),
+                            ));
                         }
-                    } else {
-                        Err((
-                            StatusCode::RequestTerminated,
-                            Some("Cancelled by callee".to_string()),
-                        ))
                     }
-                }
-                Err(e) => {
-                    debug!(session_id = %self.session_id, "Invite failed: {:?}", e);
-                    Err(match e {
-                        rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
-                        _ => (
-                            StatusCode::ServerInternalError,
-                            Some("Invite failed".to_string()),
-                        ),
-                    })
+                    Err(e) => {
+                        debug!(session_id = %self.session_id, "Invite failed: {:?}", e);
+                        return Err(match e {
+                            rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
+                            _ => (
+                                StatusCode::ServerInternalError,
+                                Some("Invite failed".to_string()),
+                            ),
+                        });
+                    }
                 }
             }
         };
@@ -1470,7 +1698,17 @@ impl ProxyCall {
             target = %target,
             "INVITE process completed"
         );
-        r
+
+        match r {
+            Ok(Some(resp)) => {
+                if self.server.proxy_config.session_timer {
+                    session.init_client_timer(&resp);
+                }
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn handle_failure(&self, session: &mut CallSession) -> Result<()> {

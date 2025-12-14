@@ -9,7 +9,8 @@ use axum::{
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use sea_orm::{
-    ColumnTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QuerySelect, sea_query,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QuerySelect, sea_query,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -72,8 +73,12 @@ pub struct DashboardPayload {
 
 impl DashboardPayload {
     fn empty(range: TimeRange) -> Self {
-        let empty: Vec<DateTime<Utc>> = Vec::new();
-        let (timeline, labels) = build_timeline(&empty, &range);
+        let bucket_count = range.bucket_count.max(1);
+        let total_seconds = range.duration().num_seconds().max(60);
+        let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
+            .ceil()
+            .max(60.0) as i64;
+        let (timeline, labels) = build_timeline_from_buckets(Vec::new(), &range, bucket_seconds);
         Self {
             range: range.descriptor(),
             metrics: DashboardMetrics {
@@ -180,6 +185,12 @@ impl TimeRange {
     }
 }
 
+#[derive(Debug, FromQueryResult)]
+pub struct TimelineBucket {
+    bucket: i64,
+    count: i64,
+}
+
 async fn build_dashboard_payload(
     state: &ConsoleState,
     range: &TimeRange,
@@ -231,22 +242,40 @@ async fn build_dashboard_payload(
             total_duration: None,
         });
 
-    #[derive(Debug, FromQueryResult)]
-    struct TimelineItem {
-        started_at: DateTime<Utc>,
-    }
+    let bucket_count = range.bucket_count.max(1);
+    let total_seconds = range.duration().num_seconds().max(60);
+    let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
+        .ceil()
+        .max(60.0) as i64;
 
-    let timeline_items = CallRecordEntity::find()
+    let backend = db.get_database_backend();
+    let start_timestamp = range.start.timestamp();
+
+    let time_expr = match backend {
+        DatabaseBackend::Sqlite => sea_query::Expr::cust(format!(
+            "CAST((strftime('%s', started_at) - {}) / {} AS INTEGER)",
+            start_timestamp, bucket_seconds
+        )),
+        DatabaseBackend::MySql => sea_query::Expr::cust(format!(
+            "FLOOR((UNIX_TIMESTAMP(started_at) - {}) / {})",
+            start_timestamp, bucket_seconds
+        )),
+        DatabaseBackend::Postgres => sea_query::Expr::cust(format!(
+            "FLOOR((EXTRACT(EPOCH FROM started_at) - {}) / {})",
+            start_timestamp, bucket_seconds
+        )),
+    };
+
+    let timeline_buckets = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.start))
         .filter(CallRecordColumn::StartedAt.lt(range.end))
         .select_only()
-        .column(CallRecordColumn::StartedAt)
-        .into_model::<TimelineItem>()
+        .column_as(time_expr, "bucket")
+        .column_as(CallRecordColumn::Id.count(), "count")
+        .group_by(sea_query::Expr::col(sea_query::Alias::new("bucket")))
+        .into_model::<TimelineBucket>()
         .all(db)
         .await?;
-
-    let timeline_dates: Vec<DateTime<Utc>> =
-        timeline_items.into_iter().map(|i| i.started_at).collect();
 
     let previous_count = CallRecordEntity::find()
         .filter(CallRecordColumn::StartedAt.gte(range.previous_start))
@@ -337,7 +366,8 @@ async fn build_dashboard_payload(
         None
     };
 
-    let (timeline, timeline_labels) = build_timeline(&timeline_dates, range);
+    let (timeline, timeline_labels) =
+        build_timeline_from_buckets(timeline_buckets, range, bucket_seconds);
     let trend = calc_trend_string(total_recent, previous_count as u32);
     let asr_string = if total_recent > 0 {
         format!(
@@ -390,23 +420,19 @@ fn default_direction_map() -> BTreeMap<String, i64> {
     map
 }
 
-fn build_timeline(calls: &[DateTime<Utc>], range: &TimeRange) -> (Vec<i64>, Vec<String>) {
+fn build_timeline_from_buckets(
+    buckets: Vec<TimelineBucket>,
+    range: &TimeRange,
+    bucket_seconds: i64,
+) -> (Vec<i64>, Vec<String>) {
     let bucket_count = range.bucket_count.max(1);
-    let total_seconds = range.duration().num_seconds().max(60);
-    let bucket_seconds = (total_seconds as f64 / bucket_count as f64)
-        .ceil()
-        .max(60.0) as i64;
     let mut series = vec![0i64; bucket_count];
-    for started_at in calls {
-        let diff = started_at.signed_duration_since(range.start);
-        if diff.num_seconds() < 0 {
-            continue;
-        }
-        let idx = (diff.num_seconds() / bucket_seconds) as usize;
-        if idx < bucket_count {
-            series[idx] += 1;
-        } else if bucket_count > 0 {
-            *series.last_mut().unwrap() += 1;
+
+    for b in buckets {
+        if b.bucket >= 0 && (b.bucket as usize) < bucket_count {
+            series[b.bucket as usize] = b.count;
+        } else if bucket_count > 0 && b.bucket >= 0 {
+            *series.last_mut().unwrap() += b.count;
         }
     }
 
@@ -438,42 +464,79 @@ fn format_timeline_label(range: &TimeRange, timestamp: DateTime<Utc>) -> String 
 async fn active_call_stats(state: &ConsoleState, limit: usize) -> Vec<ActiveCallPreview> {
     let mut previews = Vec::new();
 
+    // 1. UserAgent Calls
     if let Some(app_state) = state.app_state() {
         let call_map = app_state.active_calls.lock().unwrap();
-        let mut entries: Vec<(DateTime<Utc>, ActiveCallRef)> = Vec::with_capacity(call_map.len());
         for call in call_map.values() {
             if let Ok(state_guard) = call.call_state.read() {
-                entries.push((state_guard.start_time, call.clone()));
+                let start_time = state_guard.start_time;
+                let answer_time = state_guard.answer_time;
+
+                let status = if answer_time.is_some() {
+                    "Talking"
+                } else {
+                    "Ringing"
+                };
+                let started_at = start_time.format("%H:%M").to_string();
+                let duration_secs = if let Some(answered_at) = answer_time {
+                    (Utc::now() - answered_at).num_seconds().max(0)
+                } else {
+                    (Utc::now() - start_time).num_seconds().max(0)
+                };
+
+                previews.push(ActiveCallPreview {
+                    caller: call.session_id.clone(),
+                    callee: format!("{:?}", call.call_type),
+                    status: status.to_string(),
+                    started_at,
+                    duration: format_duration(duration_secs),
+                    started_at_ts: start_time,
+                });
             }
         }
-        drop(call_map);
+    }
 
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, call) in entries.into_iter().take(limit) {
-            let (start_time, answer_time) = match call.call_state.read() {
-                Ok(guard) => (guard.start_time, guard.answer_time),
-                Err(_) => continue,
-            };
-            let status = if answer_time.is_some() {
-                "Talking"
-            } else {
-                "Ringing"
-            };
-            let started_at = start_time.format("%H:%M").to_string();
-            let duration_secs = if let Some(answered_at) = answer_time {
-                (Utc::now() - answered_at).num_seconds().max(0)
-            } else {
-                (Utc::now() - start_time).num_seconds().max(0)
-            };
-            previews.push(ActiveCallPreview {
-                caller: call.session_id.clone(),
-                callee: format!("{:?}", call.call_type),
-                status: status.to_string(),
-                started_at,
-                duration: format_duration(duration_secs),
-                started_at_ts: start_time,
-            });
+    // 2. Proxy Calls (including Wholesale)
+    if let Ok(guard) = state.sip_server.read() {
+        if let Some(server) = guard.as_ref() {
+            let proxy_calls = server.active_call_registry.list_recent(limit);
+            for call in proxy_calls {
+                let status = call.status.to_string();
+                // Capitalize status
+                let status = if !status.is_empty() {
+                    let mut c = status.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    }
+                } else {
+                    status
+                };
+
+                let start_time = call.started_at;
+                let started_at = start_time.format("%H:%M").to_string();
+                let duration_secs = if let Some(answered_at) = call.answered_at {
+                    (Utc::now() - answered_at).num_seconds().max(0)
+                } else {
+                    (Utc::now() - start_time).num_seconds().max(0)
+                };
+
+                previews.push(ActiveCallPreview {
+                    caller: call.caller.unwrap_or_default(),
+                    callee: call.callee.unwrap_or_default(),
+                    status,
+                    started_at,
+                    duration: format_duration(duration_secs),
+                    started_at_ts: start_time,
+                });
+            }
         }
+    }
+
+    // Sort and limit
+    previews.sort_by(|a, b| b.started_at_ts.cmp(&a.started_at_ts));
+    if previews.len() > limit {
+        previews.truncate(limit);
     }
 
     if let Some(server) = state.sip_server() {

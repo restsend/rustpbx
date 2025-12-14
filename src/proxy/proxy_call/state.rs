@@ -43,6 +43,7 @@ pub enum SessionAction {
         code: Option<u16>,
         initiator: Option<String>,
     },
+    HandleReInvite(String), // Stores the request method or body if needed, but here we just signal
 }
 
 impl SessionAction {
