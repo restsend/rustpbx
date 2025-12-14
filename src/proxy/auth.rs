@@ -182,10 +182,6 @@ impl ProxyModule for AuthModule {
         }
 
         let tx_user = SipUser::try_from(&*tx)?;
-        if cookie.is_from_trunk() {
-            cookie.set_user(tx_user.clone());
-            return Ok(ProxyAction::Continue);
-        }
         let source = tx_user
             .destination
             .as_ref()
@@ -204,6 +200,11 @@ impl ProxyModule for AuthModule {
                 }
                 _ => {}
             }
+        }
+
+        if cookie.is_from_trunk() {
+            cookie.set_user(tx_user.clone());
+            return Ok(ProxyAction::Continue);
         }
 
         match self.authenticate_request(tx).await {
