@@ -10,18 +10,6 @@ impl MigrationTrait for Migration {
         let col_started_at = crate::models::call_record::Column::StartedAt;
         let col_trunk = crate::models::call_record::Column::SipTrunkId;
 
-        // Index on started_at
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_started_at")
-                    .table(table)
-                    .col(col_started_at)
-                    .to_owned(),
-            )
-            .await?;
-
         // Composite index on sip_trunk_id + started_at
         manager
             .create_index(
@@ -43,15 +31,6 @@ impl MigrationTrait for Migration {
             .drop_index(
                 Index::drop()
                     .name("idx_rustpbx_call_records_trunk_started")
-                    .table(table)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .drop_index(
-                Index::drop()
-                    .name("idx_rustpbx_call_records_started_at")
                     .table(table)
                     .to_owned(),
             )
