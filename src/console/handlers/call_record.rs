@@ -15,7 +15,7 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
 use sea_orm::sea_query::Order;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
-    EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value, json};
@@ -994,14 +994,12 @@ async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
         })
         .collect();
 
-    let tags = load_distinct_tags(db).await?;
-
     Ok(json!({
         "status": ["any", "completed", "missed", "failed"],
         "direction": ["any", "inbound", "outbound", "internal"],
         "departments": departments,
         "sip_trunks": sip_trunks,
-        "tags": tags,
+        "tags": [],
         "billing_status": [
             "any",
             BILLING_STATUS_CHARGED,
@@ -1010,34 +1008,6 @@ async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
             BILLING_STATUS_UNRATED,
         ],
     }))
-}
-
-async fn load_distinct_tags(db: &DatabaseConnection) -> Result<Vec<String>, DbErr> {
-    let rows: Vec<Option<Value>> = CallRecordEntity::find()
-        .select_only()
-        .column(CallRecordColumn::Tags)
-        .filter(CallRecordColumn::Tags.is_not_null())
-        .into_tuple::<Option<Value>>()
-        .all(db)
-        .await?;
-
-    let mut tags: HashSet<String> = HashSet::new();
-    for value in rows.into_iter().flatten() {
-        if let Some(array) = value.as_array() {
-            for tag in array {
-                if let Some(tag_str) = tag.as_str() {
-                    let trimmed = tag_str.trim();
-                    if !trimmed.is_empty() {
-                        tags.insert(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    let mut list: Vec<String> = tags.into_iter().collect();
-    list.sort();
-    Ok(list)
 }
 
 fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
@@ -2391,132 +2361,17 @@ fn extract_hangup_messages(metadata: &Option<Value>) -> Vec<Value> {
         .collect()
 }
 
-async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<Value, DbErr> {
-    use sea_orm::sea_query;
-
-    #[derive(Debug, FromQueryResult)]
-    struct Stats {
-        total: i64,
-        answered: Option<i64>,
-        missed: Option<i64>,
-        failed: Option<i64>,
-        total_duration: Option<f64>,
-        inbound: Option<i64>,
-        outbound: Option<i64>,
-    }
-
-    let stats = CallRecordEntity::find()
-        .filter(condition.clone())
-        .select_only()
-        .column_as(CallRecordColumn::Id.count(), "total")
-        .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.eq("completed"),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
-            "answered",
-        )
-        .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.eq("missed"),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
-            "missed",
-        )
-        .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.eq("failed"),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
-            "failed",
-        )
-        .column_as(
-            CallRecordColumn::DurationSecs.sum().cast_as("double"),
-            "total_duration",
-        )
-        .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Direction.eq("inbound"),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
-            "inbound",
-        )
-        .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Direction.eq("outbound"),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
-            "outbound",
-        )
-        .into_model::<Stats>()
-        .one(db)
-        .await?
-        .unwrap_or(Stats {
-            total: 0,
-            answered: None,
-            missed: None,
-            failed: None,
-            total_duration: None,
-            inbound: None,
-            outbound: None,
-        });
-
-    let total = stats.total;
-    let answered = stats.answered.unwrap_or(0);
-    let missed = stats.missed.unwrap_or(0);
-    let failed = stats.failed.unwrap_or(0);
-    let total_duration_secs = stats.total_duration.unwrap_or(0.0);
-    let inbound = stats.inbound.unwrap_or(0);
-    let outbound = stats.outbound.unwrap_or(0);
-
-    let total_minutes = total_duration_secs / 60.0;
-    let avg_duration = if total > 0 {
-        total_duration_secs / total as f64
-    } else {
-        0.0
-    };
-
-    let asr = if total > 0 {
-        (answered as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
-
+async fn build_summary(_db: &DatabaseConnection, _condition: Condition) -> Result<Value, DbErr> {
     Ok(json!({
-        "total": total,
-        "answered": answered,
-        "missed": missed,
-        "failed": failed,
-        "avg_duration": (avg_duration * 10.0).round() / 10.0,
-        "total_minutes": (total_minutes * 10.0).round() / 10.0,
-        "inbound": inbound,
-        "outbound": outbound,
-        "asr": (asr * 100.0).round() / 100.0,
+        "total": 0,
+        "answered": 0,
+        "missed": 0,
+        "failed": 0,
+        "avg_duration": 0.0,
+        "total_minutes": 0.0,
+        "inbound": 0,
+        "outbound": 0,
+        "asr": 0.0,
     }))
 }
 

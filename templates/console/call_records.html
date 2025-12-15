@@ -26,48 +26,6 @@
             </div>
         </header>
 
-        <div class="flex flex-wrap items-center gap-6 rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Total Calls</dt>
-                <dd class="text-lg font-semibold text-slate-900" x-text="summary.total"></dd>
-            </div>
-            <div class="h-8 w-px bg-slate-200"></div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Answered</dt>
-                <dd class="text-lg font-semibold text-emerald-600" x-text="summary.answered"></dd>
-            </div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Missed</dt>
-                <dd class="text-lg font-semibold text-amber-600" x-text="summary.missed"></dd>
-            </div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Failed</dt>
-                <dd class="text-lg font-semibold text-rose-600" x-text="summary.failed"></dd>
-            </div>
-            <div class="h-8 w-px bg-slate-200"></div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">ASR</dt>
-                <dd class="text-lg font-semibold text-slate-900"><span x-text="summary.asr"></span>%</dd>
-            </div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Avg Duration</dt>
-                <dd class="text-lg font-semibold text-slate-900" x-text="formatAvgDuration(summary.avg_duration)"></dd>
-            </div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Total Minutes</dt>
-                <dd class="text-lg font-semibold text-slate-900" x-text="formatNumber(summary.total_minutes)"></dd>
-            </div>
-            <div class="h-8 w-px bg-slate-200"></div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Inbound</dt>
-                <dd class="text-lg font-semibold text-slate-900" x-text="summary.inbound"></dd>
-            </div>
-            <div class="flex flex-col">
-                <dt class="text-xs font-medium text-slate-500">Outbound</dt>
-                <dd class="text-lg font-semibold text-slate-900" x-text="summary.outbound"></dd>
-            </div>
-        </div>
-
         <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4">
                 <div class="flex flex-wrap items-center justify-between gap-3">
@@ -266,24 +224,6 @@
                                                     class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                                     :value="String(trunk.id)" x-model="selectedSipTrunks">
                                                 <span x-text="trunk.display_name || trunk.name"></span>
-                                            </label>
-                                        </template>
-                                    </div>
-                                </template>
-                                <template x-if="filter === 'tags'">
-                                    <div class="flex flex-wrap gap-2">
-                                        <template x-if="!filterOptions.tags.length">
-                                            <span
-                                                class="rounded-full border border-dashed border-slate-200 px-3 py-1 text-xs text-slate-400">No
-                                                tags</span>
-                                        </template>
-                                        <template x-for="tag in filterOptions.tags" :key="tag">
-                                            <label
-                                                class="inline-flex items-center gap-2 rounded border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
-                                                <input type="checkbox"
-                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                                                    :value="tag" x-model="selectedTags">
-                                                <span x-text="tag"></span>
                                             </label>
                                         </template>
                                     </div>
@@ -624,7 +564,6 @@
             onlyTranscribed: false,
             selectedDepartments: [],
             selectedSipTrunks: [],
-            selectedTags: [],
             billingStatusFilter: 'any',
             exportedAt: null,
             loading: false,
@@ -657,7 +596,6 @@
                 { key: 'only_transcribed', label: 'Transcribed only' },
                 { key: 'departments', label: 'Departments' },
                 { key: 'sip_trunks', label: 'SIP trunks' },
-                { key: 'tags', label: 'Tags' },
                 { key: 'billing_status', label: 'Billing status' },
             ],
             activeFilters: [],
@@ -1409,8 +1347,6 @@
                         return 'Departments';
                     case 'sip_trunks':
                         return 'SIP trunks';
-                    case 'tags':
-                        return 'Tags';
                     case 'billing_status':
                         return 'Billing status';
                     default:
@@ -1482,10 +1418,6 @@
                             .filter(Boolean);
                         return names.length ? names.join(', ') : '';
                     }
-                    case 'tags': {
-                        const selected = Array.isArray(this.selectedTags) ? this.selectedTags : [];
-                        return selected.length ? selected.join(', ') : '';
-                    }
                     case 'billing_status':
                         return this.billingStatusFilter && this.billingStatusFilter !== 'any'
                             ? this.billingStatusLabel(this.billingStatusFilter)
@@ -1539,9 +1471,6 @@
                     case 'sip_trunks':
                         this.selectedSipTrunks = [];
                         break;
-                    case 'tags':
-                        this.selectedTags = [];
-                        break;
                     case 'billing_status':
                         this.billingStatusFilter = 'any';
                         break;
@@ -1559,7 +1488,7 @@
                 });
             },
             shouldPersistFilter(key) {
-                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks', 'tags'].includes(key);
+                return ['direction', 'date_range', 'only_transcribed', 'departments', 'sip_trunks'].includes(key);
             },
             syncActiveFilters() {
                 const manualFilters = Array.isArray(this.activeFilters)
@@ -1571,7 +1500,6 @@
                 const hasDate = Boolean(this.dateFrom) || Boolean(this.dateTo);
                 const departmentsSelected = Array.isArray(this.selectedDepartments) && this.selectedDepartments.length;
                 const sipSelected = Array.isArray(this.selectedSipTrunks) && this.selectedSipTrunks.length;
-                const tagsSelected = Array.isArray(this.selectedTags) && this.selectedTags.length;
                 const next = [];
                 const addUnique = (key) => {
                     if (!next.includes(key)) {
@@ -1601,9 +1529,6 @@
                 }
                 if (sipSelected || this.persistentFilters.includes('sip_trunks')) {
                     addUnique('sip_trunks');
-                }
-                if (tagsSelected || this.persistentFilters.includes('tags')) {
-                    addUnique('tags');
                 }
 
                 this.activeFilters = next;
