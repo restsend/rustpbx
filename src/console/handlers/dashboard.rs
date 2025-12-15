@@ -256,11 +256,11 @@ async fn build_dashboard_payload(
             start_timestamp, bucket_seconds
         )),
         DatabaseBackend::MySql => sea_query::Expr::cust(format!(
-            "FLOOR((UNIX_TIMESTAMP(started_at) - {}) / {})",
+            "CAST(FLOOR((UNIX_TIMESTAMP(started_at) - {}) / {}) AS SIGNED)",
             start_timestamp, bucket_seconds
         )),
         DatabaseBackend::Postgres => sea_query::Expr::cust(format!(
-            "FLOOR((EXTRACT(EPOCH FROM started_at) - {}) / {})",
+            "CAST(FLOOR((EXTRACT(EPOCH FROM started_at) - {}) / {}) AS BIGINT)",
             start_timestamp, bucket_seconds
         )),
     };
