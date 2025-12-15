@@ -810,9 +810,9 @@ impl CallRecordManager {
 
         // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
-
         // Upload call log JSON
         let filename = formatter.format_file_name(root, record);
+        let mut local_files = vec![filename.clone()];
         let json_path = ObjectPath::from(filename);
         match object_store.put(&json_path, call_log_json.into()).await {
             Ok(_) => {
@@ -835,8 +835,10 @@ impl CallRecordManager {
                     continue;
                 }
                 let start_time = Instant::now();
-                let flow_path =
-                    ObjectPath::from(formatter.format_sip_flow_path(root, record, &leg));
+                let file_name = formatter.format_sip_flow_path(root, record, &leg);
+                local_files.push(file_name.clone());
+
+                let flow_path = ObjectPath::from(file_name);
                 let mut buffer = Vec::new();
                 for entry in entries {
                     let line = serde_json::to_vec(&entry)?;
@@ -901,9 +903,15 @@ impl CallRecordManager {
             }
         }
         // Optionally delete local media files if keep_media_copy is false
-        if keep_media_copy.unwrap_or(false) {
+        if !keep_media_copy.unwrap_or(false) {
             for media in &record.recorder {
                 let p = Path::new(&media.path);
+                if p.exists() {
+                    tokio::fs::remove_file(p).await.ok();
+                }
+            }
+            for file_name in &local_files {
+                let p = Path::new(file_name);
                 if p.exists() {
                     tokio::fs::remove_file(p).await.ok();
                 }
