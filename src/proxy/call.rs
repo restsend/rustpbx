@@ -403,7 +403,10 @@ impl CallModule {
 
         if callee_is_same_realm {
             if let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
-                loc.supports_webrtc |= results.iter().any(|item| item.supports_webrtc);
+                loc.supports_webrtc |= results
+                    .first()
+                    .map(|item| item.supports_webrtc)
+                    .unwrap_or_default();
             }
         }
 
