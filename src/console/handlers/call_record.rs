@@ -12,7 +12,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
-use sea_orm::sea_query::{Expr, Order};
+use sea_orm::sea_query::Order;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
     EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
@@ -2400,10 +2400,9 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         answered: Option<i64>,
         missed: Option<i64>,
         failed: Option<i64>,
-        transcribed: Option<i64>,
         total_duration: Option<f64>,
-        unique_dids: Option<i64>,
-        total_billable_secs: Option<f64>,
+        inbound: Option<i64>,
+        outbound: Option<i64>,
     }
 
     let stats = CallRecordEntity::find()
@@ -2447,30 +2446,32 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
             "failed",
         )
         .column_as(
+            CallRecordColumn::DurationSecs.sum().cast_as("double"),
+            "total_duration",
+        )
+        .column_as(
             sea_query::SimpleExpr::from(sea_query::Func::sum(
                 sea_query::CaseStatement::new()
                     .case(
-                        CallRecordColumn::HasTranscript.eq(true),
+                        CallRecordColumn::Direction.eq("inbound"),
                         sea_query::Expr::val(1),
                     )
                     .finally(sea_query::Expr::val(0)),
             ))
             .cast_as(sea_query::Alias::new("SIGNED")),
-            "transcribed",
+            "inbound",
         )
         .column_as(
-            CallRecordColumn::DurationSecs.sum().cast_as("double"),
-            "total_duration",
-        )
-        .column_as(
-            Expr::col(CallRecordColumn::ToNumber).count_distinct(),
-            "unique_dids",
-        )
-        .column_as(
-            CallRecordColumn::BillingBillableSecs
-                .sum()
-                .cast_as("double"),
-            "total_billable_secs",
+            sea_query::SimpleExpr::from(sea_query::Func::sum(
+                sea_query::CaseStatement::new()
+                    .case(
+                        CallRecordColumn::Direction.eq("outbound"),
+                        sea_query::Expr::val(1),
+                    )
+                    .finally(sea_query::Expr::val(0)),
+            ))
+            .cast_as(sea_query::Alias::new("SIGNED")),
+            "outbound",
         )
         .into_model::<Stats>()
         .one(db)
@@ -2480,20 +2481,18 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
             answered: None,
             missed: None,
             failed: None,
-            transcribed: None,
             total_duration: None,
-            unique_dids: None,
-            total_billable_secs: None,
+            inbound: None,
+            outbound: None,
         });
 
     let total = stats.total;
     let answered = stats.answered.unwrap_or(0);
     let missed = stats.missed.unwrap_or(0);
     let failed = stats.failed.unwrap_or(0);
-    let transcribed = stats.transcribed.unwrap_or(0);
     let total_duration_secs = stats.total_duration.unwrap_or(0.0);
-    let unique_dids = stats.unique_dids.unwrap_or(0);
-    let total_billable_secs = stats.total_billable_secs.unwrap_or(0.0);
+    let inbound = stats.inbound.unwrap_or(0);
+    let outbound = stats.outbound.unwrap_or(0);
 
     let total_minutes = total_duration_secs / 60.0;
     let avg_duration = if total > 0 {
@@ -2502,82 +2501,22 @@ async fn build_summary(db: &DatabaseConnection, condition: Condition) -> Result<
         0.0
     };
 
-    let billing_status_rows: Vec<(Option<String>, Option<i64>)> = CallRecordEntity::find()
-        .select_only()
-        .column(CallRecordColumn::BillingStatus)
-        .column_as(
-            Expr::col(CallRecordColumn::BillingStatus).count(),
-            "status_count",
-        )
-        .filter(condition.clone())
-        .group_by(CallRecordColumn::BillingStatus)
-        .into_tuple::<(Option<String>, Option<i64>)>()
-        .all(db)
-        .await?;
-
-    let mut billing_charged_calls = 0;
-    let mut billing_included_calls = 0;
-    let mut billing_zero_duration_calls = 0;
-    let mut billing_unrated_calls = 0;
-
-    for (status_opt, count_opt) in billing_status_rows {
-        let count = count_opt.unwrap_or(0);
-        match status_opt.as_deref() {
-            Some(BILLING_STATUS_CHARGED) => billing_charged_calls = count,
-            Some(BILLING_STATUS_INCLUDED) => billing_included_calls = count,
-            Some(BILLING_STATUS_ZERO_DURATION) => billing_zero_duration_calls = count,
-            Some(BILLING_STATUS_UNRATED) | None => billing_unrated_calls = count,
-            _ => {}
-        }
-    }
-
-    let revenue_rows: Vec<(Option<String>, Option<f64>)> = CallRecordEntity::find()
-        .select_only()
-        .column(CallRecordColumn::BillingCurrency)
-        .column_as(
-            CallRecordColumn::BillingAmountTotal.sum().cast_as("double"),
-            "billing_amount_total",
-        )
-        .filter(condition.clone())
-        .group_by(CallRecordColumn::BillingCurrency)
-        .into_tuple::<(Option<String>, Option<f64>)>()
-        .all(db)
-        .await?;
-
-    let mut billing_revenue: Vec<Value> = Vec::new();
-    for (currency_opt, amount_opt) in revenue_rows {
-        if let Some(amount) = amount_opt {
-            let mut currency = currency_opt.unwrap_or_default();
-            if currency.trim().is_empty() {
-                currency = "USD".to_string();
-            }
-            let rounded = (amount * 100.0).round() / 100.0;
-            billing_revenue.push(json!({
-                "currency": currency,
-                "total": rounded,
-            }));
-        }
-    }
-
-    let billing_billable_minutes = (total_billable_secs / 60.0 * 100.0).round() / 100.0;
-    let billing_rated_calls = billing_charged_calls + billing_included_calls;
+    let asr = if total > 0 {
+        (answered as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
 
     Ok(json!({
         "total": total,
         "answered": answered,
         "missed": missed,
         "failed": failed,
-        "transcribed": transcribed,
         "avg_duration": (avg_duration * 10.0).round() / 10.0,
         "total_minutes": (total_minutes * 10.0).round() / 10.0,
-        "unique_dids": unique_dids,
-        "billing_billable_minutes": billing_billable_minutes,
-        "billing_rated_calls": billing_rated_calls,
-        "billing_charged_calls": billing_charged_calls,
-        "billing_included_calls": billing_included_calls,
-        "billing_zero_duration_calls": billing_zero_duration_calls,
-        "billing_unrated_calls": billing_unrated_calls,
-        "billing_revenue": billing_revenue,
+        "inbound": inbound,
+        "outbound": outbound,
+        "asr": (asr * 100.0).round() / 100.0,
     }))
 }
 
