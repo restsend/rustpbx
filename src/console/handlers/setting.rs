@@ -1542,32 +1542,6 @@ pub(crate) async fn update_storage_settings(
         modified = true;
     }
 
-    if let Some(format_opt) = payload.recorder_format {
-        {
-            let table = ensure_table_mut(&mut doc, "recording");
-            match format_opt {
-                Some(format_value) => {
-                    let normalized = format_value.trim().to_ascii_lowercase();
-                    if normalized.is_empty() {
-                        table.remove("format");
-                    } else if normalized == "wav" || normalized == "ogg" {
-                        table["format"] = value(normalized);
-                    } else {
-                        return json_error(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "recorder_format must be either 'wav' or 'ogg'",
-                        );
-                    }
-                }
-                None => {
-                    table.remove("format");
-                }
-            }
-        }
-        doc.remove("recorder_format");
-        modified = true;
-    }
-
     if let Some(callrecord_opt) = payload.callrecord {
         match callrecord_opt {
             Some(CallRecordStoragePayload::Disabled) | None => {
@@ -1709,6 +1683,32 @@ pub(crate) async fn update_storage_settings(
                 doc.remove("recording");
             }
         }
+        modified = true;
+    }
+
+    if let Some(format_opt) = payload.recorder_format {
+        {
+            let table = ensure_table_mut(&mut doc, "recording");
+            match format_opt {
+                Some(format_value) => {
+                    let normalized = format_value.trim().to_ascii_lowercase();
+                    if normalized.is_empty() {
+                        table.remove("format");
+                    } else if normalized == "wav" || normalized == "ogg" {
+                        table["format"] = value(normalized);
+                    } else {
+                        return json_error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "recorder_format must be either 'wav' or 'ogg'",
+                        );
+                    }
+                }
+                None => {
+                    table.remove("format");
+                }
+            }
+        }
+        doc.remove("recorder_format");
         modified = true;
     }
 
