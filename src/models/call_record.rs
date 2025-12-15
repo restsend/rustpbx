@@ -215,6 +215,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_call_records_started_at")
                     .table(Entity)
                     .col(Column::StartedAt)
@@ -226,6 +227,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_call_records_status")
                     .table(Entity)
                     .col(Column::Status)
@@ -236,6 +238,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_call_records_extension")
                     .table(Entity)
                     .col(Column::ExtensionId)
