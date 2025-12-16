@@ -980,6 +980,17 @@
                     monitorIceGatheringJs(session, data.peerconnection, label);
                 } catch (e) { }
             });
+
+            if (session.connection) {
+                log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
+                attachMedia(session.connection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, session.connection, label);
+                } catch (e) { }
+            }
+
             session.on('icecandidate', (event) => {
                 try {
                     handleSessionIceCandidate(session, event ? event.candidate : null);

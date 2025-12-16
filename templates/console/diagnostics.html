@@ -2694,60 +2694,72 @@
                             }
                         });
                         session.on('peerconnection', (event) => {
-                            const pc = event?.peerconnection || session.connection;
-                            if (!pc) {
+                            this.handlePeerConnection(event?.peerconnection || session.connection);
+                        });
+
+                        if (session.connection) {
+                            this.handlePeerConnection(session.connection);
+                        }
+                    },
+                    handlePeerConnection(pc) {
+                        if (!pc) {
+                            return;
+                        }
+                        // Check if we've already attached listeners to this PC to avoid duplicates
+                        if (pc.__rustpbxAttached) {
+                            return;
+                        }
+                        pc.__rustpbxAttached = true;
+
+                        pc.addEventListener('track', (ev) => {
+                            const track = ev?.track;
+                            if (!track || (track.kind && track.kind !== 'audio')) {
                                 return;
                             }
-                            pc.addEventListener('track', (ev) => {
-                                const track = ev?.track;
-                                if (!track || (track.kind && track.kind !== 'audio')) {
-                                    return;
-                                }
-                                const localTracks = this.sipLocalStream?.getTracks?.() || [];
-                                const isLocalTrack = localTracks.some((item) => item.id === track.id);
-                                if (isLocalTrack) {
-                                    // Skip attaching the local microphone to the remote monitor.
-                                    return;
-                                }
-                                if (typeof MediaStream === 'undefined') {
-                                    const fallbackStream = ev.streams?.[0];
-                                    if (fallbackStream && this.$refs.sipRemoteAudio) {
-                                        if (!this.sipLocalStream || fallbackStream.id !== this.sipLocalStream.id) {
-                                            this.$refs.sipRemoteAudio.srcObject = fallbackStream;
-                                        }
+                            const localTracks = this.sipLocalStream?.getTracks?.() || [];
+                            const isLocalTrack = localTracks.some((item) => item.id === track.id);
+                            if (isLocalTrack) {
+                                // Skip attaching the local microphone to the remote monitor.
+                                return;
+                            }
+                            if (typeof MediaStream === 'undefined') {
+                                const fallbackStream = ev.streams?.[0];
+                                if (fallbackStream && this.$refs.sipRemoteAudio) {
+                                    if (!this.sipLocalStream || fallbackStream.id !== this.sipLocalStream.id) {
+                                        this.$refs.sipRemoteAudio.srcObject = fallbackStream;
                                     }
-                                    return;
                                 }
+                                return;
+                            }
+                            if (!this.sipRemoteStream) {
+                                this.sipRemoteStream = new MediaStream();
+                            }
+                            const remoteStream = this.sipRemoteStream;
+                            if (!remoteStream.getTracks().some((item) => item.id === track.id)) {
+                                remoteStream.addTrack(track);
+                            }
+                            if (this.$refs.sipRemoteAudio && this.$refs.sipRemoteAudio.srcObject !== remoteStream) {
+                                this.$refs.sipRemoteAudio.srcObject = remoteStream;
+                            }
+                            const handleEnded = () => {
                                 if (!this.sipRemoteStream) {
-                                    this.sipRemoteStream = new MediaStream();
-                                }
-                                const remoteStream = this.sipRemoteStream;
-                                if (!remoteStream.getTracks().some((item) => item.id === track.id)) {
-                                    remoteStream.addTrack(track);
-                                }
-                                if (this.$refs.sipRemoteAudio && this.$refs.sipRemoteAudio.srcObject !== remoteStream) {
-                                    this.$refs.sipRemoteAudio.srcObject = remoteStream;
-                                }
-                                const handleEnded = () => {
-                                    if (!this.sipRemoteStream) {
-                                        track.removeEventListener('ended', handleEnded);
-                                        return;
-                                    }
-                                    try {
-                                        this.sipRemoteStream.removeTrack(track);
-                                    } catch (err) {
-                                        // ignore removal errors
-                                    }
-                                    if (!this.sipRemoteStream.getTracks().length) {
-                                        this.sipRemoteStream = null;
-                                        if (this.$refs.sipRemoteAudio) {
-                                            this.$refs.sipRemoteAudio.srcObject = null;
-                                        }
-                                    }
                                     track.removeEventListener('ended', handleEnded);
-                                };
-                                track.addEventListener('ended', handleEnded);
-                            });
+                                    return;
+                                }
+                                try {
+                                    this.sipRemoteStream.removeTrack(track);
+                                } catch (err) {
+                                    // ignore removal errors
+                                }
+                                if (!this.sipRemoteStream.getTracks().length) {
+                                    this.sipRemoteStream = null;
+                                    if (this.$refs.sipRemoteAudio) {
+                                        this.$refs.sipRemoteAudio.srcObject = null;
+                                    }
+                                }
+                                track.removeEventListener('ended', handleEnded);
+                            };
+                            track.addEventListener('ended', handleEnded);
                         });
                     },
                     resetSipSessionState() {
