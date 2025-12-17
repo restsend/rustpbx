@@ -886,9 +886,13 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        ConsoleState::initialize(db, ConsoleConfig::default())
-            .await
-            .expect("initialize console state")
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
     }
 
     async fn insert_extension(db: &sea_orm::DatabaseConnection, extension: &str) -> ExtensionModel {

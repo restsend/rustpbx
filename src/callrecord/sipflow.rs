@@ -34,6 +34,13 @@ pub struct SipFlow {
 }
 
 impl SipFlow {
+    pub fn count(&self) -> usize {
+        match self.inner.messages.lock() {
+            Ok(messages) => messages.len(),
+            Err(_) => 0,
+        }
+    }
+
     pub fn take(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
         match self.inner.messages.lock() {
             Ok(mut messages) => messages.pop(call_id),

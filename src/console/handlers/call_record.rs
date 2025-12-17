@@ -25,7 +25,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 use urlencoding::encode;
@@ -1563,74 +1563,44 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
 
 pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
     let storage = resolve_cdr_storage(state);
+    let callrecord: CallRecord = record.clone().into();
+    let candidate = state.callrecord_formatter.format_file_name(&callrecord);
+    let mut content: Option<String> = None;
 
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(path) = extract_cdr_path_from_metadata(&record.metadata) {
-        candidates.push(path);
-    }
-
-    if candidates.is_empty() {
-        candidates.push(default_cdr_file_name_for_model(record));
-    }
-
-    for candidate in candidates {
-        let mut content: Option<String> = None;
-
-        if let Some(ref storage_ref) = storage {
-            match storage_ref.read_to_string(&candidate).await {
-                Ok(value) => content = Some(value),
-                Err(err) => {
-                    warn!(call_id = %record.call_id, path = %candidate, "failed to load CDR from storage: {}", err);
-                }
+    if let Some(ref storage_ref) = storage {
+        match storage_ref.read_to_string(&candidate).await {
+            Ok(value) => content = Some(value),
+            Err(err) => {
+                warn!(call_id = %record.call_id, path = %candidate, "failed to load CDR from storage: {}", err);
             }
         }
-
-        if content.is_none() {
-            match tokio::fs::read_to_string(&candidate).await {
-                Ok(value) => content = Some(value),
-                Err(err) => {
-                    warn!(call_id = %record.call_id, path = %candidate, "failed to read CDR file: {}", err);
+    }
+    if let Some(raw) = content {
+        match serde_json::from_str::<CallRecord>(&raw) {
+            Ok(parsed) => {
+                let mut sip_flow_paths = extract_sip_flow_paths_from_cdr(&parsed);
+                for flow in &mut sip_flow_paths {
+                    if let Some(leg) = flow.leg.as_deref() {
+                        flow.path = state
+                            .callrecord_formatter
+                            .format_sip_flow_path(&parsed, leg);
+                    }
                 }
+                return Some(CdrData {
+                    record: parsed,
+                    raw_content: raw,
+                    sip_flow_paths,
+                    cdr_path: candidate,
+                    storage: storage.clone(),
+                });
             }
-        }
-
-        if let Some(raw) = content {
-            match serde_json::from_str::<CallRecord>(&raw) {
-                Ok(parsed) => {
-                    let sip_flow_paths = extract_sip_flow_paths_from_cdr(&parsed);
-                    return Some(CdrData {
-                        record: parsed,
-                        raw_content: raw,
-                        sip_flow_paths,
-                        cdr_path: candidate,
-                        storage: storage.clone(),
-                    });
-                }
-                Err(err) => {
-                    warn!(call_id = %record.call_id, path = %candidate, "failed to parse CDR file: {}", err);
-                }
+            Err(err) => {
+                warn!(call_id = %record.call_id, path = %candidate, "failed to parse CDR file: {}", err);
             }
         }
     }
 
     None
-}
-
-fn extract_cdr_path_from_metadata(metadata: &Option<Value>) -> Option<String> {
-    metadata
-        .as_ref()
-        .and_then(|value| value.get("cdr_file"))
-        .and_then(|value| value.as_str())
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty())
-}
-
-fn default_cdr_file_name_for_model(record: &CallRecordModel) -> String {
-    format!(
-        "{}_{}.json",
-        record.started_at.format("%Y%m%d-%H%M%S"),
-        record.call_id
-    )
 }
 
 fn extract_sip_flow_paths_from_cdr(record: &CallRecord) -> Vec<SipFlowFileRef> {
@@ -1960,31 +1930,7 @@ async fn read_sip_flow_file(storage: Option<&CdrStorage>, path: &str) -> Vec<Sip
             return parse_sip_flow_bytes(path, &bytes);
         }
     }
-
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(err) => {
-            warn!("failed to open sip flow file '{}': {}", path, err);
-            return Vec::new();
-        }
-    };
-
-    let mut items = Vec::new();
-    let mut reader = BufReader::new(file).lines();
-    while let Ok(Some(line)) = reader.next_line().await {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<SipMessageItem>(trimmed) {
-            Ok(item) => items.push(item),
-            Err(err) => {
-                warn!("failed to parse sip flow entry from '{}': {}", path, err);
-            }
-        }
-    }
-
-    items
+    vec![]
 }
 
 fn parse_sip_flow_bytes(path: &str, bytes: &[u8]) -> Vec<SipMessageItem> {
@@ -2399,6 +2345,7 @@ mod tests {
 
     async fn create_console_state(db: DatabaseConnection) -> Arc<ConsoleState> {
         ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
             db,
             ConsoleConfig {
                 session_secret: "secret".into(),

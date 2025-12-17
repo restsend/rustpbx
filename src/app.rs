@@ -1,6 +1,8 @@
 use crate::{
     call::ActiveCallRef,
-    callrecord::{CallRecordManagerBuilder, CallRecordSender},
+    callrecord::{
+        CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender, DefaultCallRecordFormatter,
+    },
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     proxy::{
@@ -67,6 +69,7 @@ pub struct AppStateBuilder {
     pub useragent: Option<Arc<UserAgent>>,
     pub stream_engine: Option<Arc<StreamEngine>>,
     pub callrecord_sender: Option<CallRecordSender>,
+    pub callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
     pub cancel_token: Option<CancellationToken>,
     pub proxy_builder: Option<SipServerBuilder>,
     pub create_invitation_handler: Option<FnCreateInvitationHandler>,
@@ -138,6 +141,7 @@ impl AppStateBuilder {
             useragent: None,
             stream_engine: None,
             callrecord_sender: None,
+            callrecord_formatter: None,
             cancel_token: None,
             proxy_builder: None,
             create_invitation_handler: None,
@@ -221,12 +225,24 @@ impl AppStateBuilder {
         };
         let stream_engine = self.stream_engine.unwrap_or_default();
 
+        let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
+            formatter
+        } else {
+            let formatter = if let Some(ref callrecord) = config.callrecord {
+                DefaultCallRecordFormatter::new_with_config(callrecord)
+            } else {
+                DefaultCallRecordFormatter::default()
+            };
+            Arc::new(formatter)
+        };
+
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else if let Some(ref callrecord) = config.callrecord {
             let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
                 .with_config(callrecord.clone())
+                .with_formatter(callrecord_formatter.clone())
                 .with_database(db_conn.clone());
 
             for hook in addon_registry.get_call_record_hooks(&config) {
@@ -242,10 +258,16 @@ impl AppStateBuilder {
         } else {
             None
         };
+
         #[cfg(feature = "console")]
         let console_state = match config.console.clone() {
             Some(console_config) => Some(
-                crate::console::ConsoleState::initialize(db_conn.clone(), console_config).await?,
+                crate::console::ConsoleState::initialize(
+                    callrecord_formatter,
+                    db_conn.clone(),
+                    console_config,
+                )
+                .await?,
             ),
             None => None,
         };
