@@ -1908,8 +1908,6 @@ fn signaling_leg_payload(role: &str, record: &CallRecord) -> Value {
         "ring_time": record.ring_time,
         "answer_time": record.answer_time,
         "end_time": record.end_time,
-        "offer": record.offer,
-        "answer": record.answer,
     })
 }
 

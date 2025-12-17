@@ -56,8 +56,6 @@ pub(super) struct CallSessionRecordSnapshot {
     pub routed_destination: Option<String>,
     pub last_queue_name: Option<String>,
     pub ivr_trace: Option<IvrTrace>,
-    pub caller_offer: Option<String>,
-    pub answer: Option<String>,
     pub callee_dialogs: Vec<DialogId>,
     pub server_dialog_id: DialogId,
 }
@@ -336,8 +334,6 @@ impl CallSession {
             routed_destination: self.routed_destination.clone(),
             last_queue_name: self.last_queue_name(),
             ivr_trace: self.ivr_trace.clone(),
-            caller_offer: self.caller_offer.clone(),
-            answer: self.answer.clone(),
             callee_dialogs: self
                 .callee_dialogs
                 .lock()

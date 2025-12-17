@@ -275,8 +275,6 @@ impl CallReporter {
             caller: caller.clone(),
             callee: callee.clone(),
             status_code,
-            offer: snapshot.caller_offer.clone(),
-            answer: snapshot.answer.clone(),
             hangup_reason: hangup_reason.clone(),
             hangup_messages: hangup_messages.clone(),
             recorder,

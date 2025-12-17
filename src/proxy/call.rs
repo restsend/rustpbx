@@ -880,7 +880,6 @@ impl CallModule {
         let now = Utc::now();
         let caller = tx.original.from_header()?.uri()?.to_string();
         let callee = tx.original.to_header()?.uri()?.to_string();
-        let offer = Some(String::from_utf8_lossy(&tx.original.body).to_string());
 
         let mut extras_map: HashMap<String, Value> = HashMap::new();
         extras_map.insert(
@@ -946,8 +945,6 @@ impl CallModule {
             caller: caller.clone(),
             callee: callee.clone(),
             status_code: status_code.into(),
-            offer,
-            answer: None,
             hangup_reason: Some(CallRecordHangupReason::BySystem),
             hangup_messages,
             recorder: Vec::new(),
