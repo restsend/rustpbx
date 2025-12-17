@@ -333,6 +333,7 @@ mod tests {
             .expect("connect in-memory sqlite");
         Migrator::up(&db, None).await.expect("apply migrations");
         ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
             db,
             ConsoleConfig {
                 session_secret: "secret".into(),

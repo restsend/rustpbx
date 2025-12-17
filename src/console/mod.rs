@@ -1,7 +1,7 @@
-use crate::app::AppStateInner;
 use crate::config::ConsoleConfig;
 use crate::console::middleware::RenderTemplate;
 use crate::proxy::server::SipServerRef;
+use crate::{app::AppStateInner, callrecord::CallRecordFormatter};
 use anyhow::Result;
 use axum::response::{IntoResponse, Response};
 use minijinja::Environment;
@@ -23,10 +23,15 @@ pub struct ConsoleState {
     secure_cookie: bool,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
+    callrecord_formatter: Arc<dyn CallRecordFormatter>,
 }
 
 impl ConsoleState {
-    pub async fn initialize(db: DatabaseConnection, config: ConsoleConfig) -> Result<Arc<Self>> {
+    pub async fn initialize(
+        callrecord_formatter: Arc<dyn CallRecordFormatter>,
+        db: DatabaseConnection,
+        config: ConsoleConfig,
+    ) -> Result<Arc<Self>> {
         let ConsoleConfig {
             session_secret,
             base_path,
@@ -46,6 +51,7 @@ impl ConsoleState {
             secure_cookie,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
+            callrecord_formatter,
         }))
     }
 

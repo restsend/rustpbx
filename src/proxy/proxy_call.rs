@@ -556,8 +556,20 @@ impl ProxyCall {
         session.register_active_call(handle);
         let action_inbox = SessionActionInbox::default();
         let inbox_forward = action_inbox.clone();
+        let cancel_token_clone = self.cancel_token.clone();
+
         tokio::spawn(async move {
-            while let Some(action) = action_rx.recv().await {
+            loop {
+                tokio::select! {
+                    _ = cancel_token_clone.cancelled() => {
+                        break;
+                    }
+                    Some(action) = action_rx.recv() => {
+                        inbox_forward.push(action);
+                    }
+                }
+            }
+            while let Ok(action) = action_rx.try_recv() {
                 inbox_forward.push(action);
             }
         });

@@ -74,7 +74,9 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
                     "finished": tx_stats.finished_transactions,
                     "waiting_ack": tx_stats.waiting_ack,
                 }),
-                "dialogs": server.inner.dialog_layer.len()
+                "dialogs": server.inner.dialog_layer.len(),
+                "flows": server.inner.sip_flow.as_ref().map(|sf| sf.count()).unwrap_or(0),
+                "calls": server.inner.active_call_registry.count()
             })
         }
         None => {

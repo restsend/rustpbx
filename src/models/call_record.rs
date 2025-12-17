@@ -8,6 +8,8 @@ use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForei
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
+use crate::callrecord::CallRecord;
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_call_records")]
 pub struct Model {
@@ -251,5 +253,31 @@ impl MigrationTrait for Migration {
         manager
             .drop_table(Table::drop().table(Entity).to_owned())
             .await
+    }
+}
+
+impl Into<CallRecord> for Model {
+    fn into(self) -> CallRecord {
+        CallRecord {
+            call_type: crate::call::ActiveCallType::B2bua, // Default type
+            option: None,                                  // No CallOption in Model
+            call_id: self.call_id,
+            start_time: self.started_at,
+            ring_time: None,   // No ring_time in Model
+            answer_time: None, // No answer_time in Model
+            end_time: self.ended_at.unwrap_or(self.started_at),
+            caller: self.from_number.unwrap_or_default(),
+            callee: self.to_number.unwrap_or_default(),
+            status_code: 0,                                  // No status_code in Model
+            hangup_reason: None,                             // No hangup_reason in Model
+            hangup_messages: Vec::new(),                     // No hangup_messages in Model
+            recorder: Vec::new(),                            // No recorder list in Model
+            extras: None,                                    // No extras in Model
+            dump_event_file: None,                           // No dump_event_file in Model
+            refer_callrecord: None,                          // No refer_callrecord in Model
+            sip_flows: std::collections::HashMap::new(),     // No sip_flows in Model
+            sip_leg_roles: std::collections::HashMap::new(), // No sip_leg_roles in Model
+            persist_args: None,                              // No persist_args in Model
+        }
     }
 }

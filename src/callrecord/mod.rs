@@ -297,8 +297,42 @@ pub trait CallRecordHook: Send + Sync {
 }
 
 pub trait CallRecordFormatter: Send + Sync {
-    fn format_file_name(&self, root: &str, record: &CallRecord) -> String {
-        let trimmed_root = root.trim_end_matches('/');
+    fn format(&self, record: &CallRecord) -> Result<String> {
+        Ok(serde_json::to_string(record)?)
+    }
+    fn format_file_name(&self, record: &CallRecord) -> String;
+    fn format_dump_events_path(&self, record: &CallRecord) -> String;
+    fn format_sip_flow_path(&self, record: &CallRecord, leg: &str) -> String;
+    fn format_transcript_path(&self, record: &CallRecord) -> String;
+    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String;
+}
+
+pub struct DefaultCallRecordFormatter {
+    pub root: String,
+}
+
+impl Default for DefaultCallRecordFormatter {
+    fn default() -> Self {
+        Self {
+            root: "./config/cdr".to_string(),
+        }
+    }
+}
+
+impl DefaultCallRecordFormatter {
+    pub fn new_with_config(config: &CallRecordConfig) -> Self {
+        let root = match config {
+            CallRecordConfig::Local { root } => root.clone(),
+            CallRecordConfig::S3 { root, .. } => root.clone(),
+            _ => "./config/cdr".to_string(),
+        };
+        Self { root }
+    }
+}
+
+impl CallRecordFormatter for DefaultCallRecordFormatter {
+    fn format_file_name(&self, record: &CallRecord) -> String {
+        let trimmed_root = self.root.trim_end_matches('/');
         let file_name = default_cdr_file_name(record);
         if trimmed_root.is_empty() {
             file_name
@@ -312,20 +346,16 @@ pub trait CallRecordFormatter: Send + Sync {
         }
     }
 
-    fn format(&self, record: &CallRecord) -> Result<String> {
-        Ok(serde_json::to_string(record)?)
-    }
-
-    fn format_dump_events_path(&self, root: &str, record: &CallRecord) -> String {
+    fn format_dump_events_path(&self, record: &CallRecord) -> String {
         format!(
             "{}/{}/{}.jsonl",
-            root.trim_end_matches('/'),
+            self.root.trim_end_matches('/'),
             record.start_time.format("%Y%m%d"),
             record.call_id
         )
     }
-    fn format_sip_flow_path(&self, root: &str, record: &CallRecord, leg: &str) -> String {
-        let trimmed_root = root.trim_end_matches('/');
+    fn format_sip_flow_path(&self, record: &CallRecord, leg: &str) -> String {
+        let trimmed_root = self.root.trim_end_matches('/');
         let file_name = default_sip_flow_file_name(record, leg);
         if trimmed_root.is_empty() {
             file_name
@@ -338,8 +368,8 @@ pub trait CallRecordFormatter: Send + Sync {
             )
         }
     }
-    fn format_transcript_path(&self, root: &str, record: &CallRecord) -> String {
-        let trimmed_root = root.trim_end_matches('/');
+    fn format_transcript_path(&self, record: &CallRecord) -> String {
+        let trimmed_root = self.root.trim_end_matches('/');
         let file_name = default_transcript_file_name(record);
         if trimmed_root.is_empty() {
             file_name
@@ -352,12 +382,7 @@ pub trait CallRecordFormatter: Send + Sync {
             )
         }
     }
-    fn format_media_path(
-        &self,
-        root: &str,
-        record: &CallRecord,
-        media: &CallRecordMedia,
-    ) -> String {
+    fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String {
         let file_name = Path::new(&media.path)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
@@ -366,7 +391,7 @@ pub trait CallRecordFormatter: Send + Sync {
 
         format!(
             "{}/{}/{}_{}_{}",
-            root.trim_end_matches('/'),
+            self.root.trim_end_matches('/'),
             record.start_time.format("%Y%m%d"),
             record.call_id,
             media.track_id,
@@ -374,9 +399,6 @@ pub trait CallRecordFormatter: Send + Sync {
         )
     }
 }
-
-pub struct DefaultCallRecordFormatter;
-impl CallRecordFormatter for DefaultCallRecordFormatter {}
 
 pub fn build_object_store_from_s3(
     vendor: &S3Vendor,
@@ -503,7 +525,7 @@ impl CallRecordManagerBuilder {
             .unwrap_or_else(|| Arc::new(Box::new(CallRecordManager::default_saver)));
         let formatter = self
             .formatter
-            .unwrap_or_else(|| Arc::new(DefaultCallRecordFormatter));
+            .unwrap_or_else(|| Arc::new(DefaultCallRecordFormatter::default()));
 
         match config.as_ref() {
             CallRecordConfig::Local { root } => {
@@ -546,8 +568,8 @@ impl CallRecordManager {
             let sip_flows = mem::take(&mut record.sip_flows);
             let start_time = Instant::now();
             let result = match config.as_ref() {
-                CallRecordConfig::Local { root } => {
-                    Self::save_local_record(formatter.clone(), root, &mut record, sip_flows).await
+                CallRecordConfig::Local { .. } => {
+                    Self::save_local_record(formatter.clone(), &mut record, sip_flows).await
                 }
                 CallRecordConfig::S3 {
                     vendor,
@@ -556,9 +578,9 @@ impl CallRecordManager {
                     access_key,
                     secret_key,
                     endpoint,
-                    root,
                     with_media,
                     keep_media_copy,
+                    ..
                 } => {
                     Self::save_with_s3_like(
                         formatter.clone(),
@@ -568,7 +590,6 @@ impl CallRecordManager {
                         access_key,
                         secret_key,
                         endpoint,
-                        root,
                         with_media,
                         keep_media_copy,
                         &record,
@@ -614,7 +635,6 @@ impl CallRecordManager {
 
     async fn save_local_record(
         formatter: Arc<dyn CallRecordFormatter>,
-        root: &String,
         record: &mut CallRecord,
         sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
@@ -624,7 +644,7 @@ impl CallRecordManager {
             if entries.is_empty() {
                 continue;
             }
-            let file_path = formatter.format_sip_flow_path(root, record, &leg);
+            let file_path = formatter.format_sip_flow_path(record, &leg);
             if let Some(parent) = Path::new(&file_path).parent() {
                 fs::create_dir_all(parent).await?;
             }
@@ -647,7 +667,7 @@ impl CallRecordManager {
         }
 
         let file_content = formatter.format(record)?;
-        let file_name = formatter.format_file_name(root, record);
+        let file_name = formatter.format_file_name(record);
         let mut file = File::create(&file_name).await.map_err(|e| {
             anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
         })?;
@@ -813,7 +833,6 @@ impl CallRecordManager {
         access_key: &String,
         secret_key: &String,
         endpoint: &String,
-        root: &String,
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
@@ -826,14 +845,16 @@ impl CallRecordManager {
         // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
         // Upload call log JSON
-        let filename = formatter.format_file_name(root, record);
+        let filename = formatter.format_file_name(record);
         let mut local_files = vec![filename.clone()];
         let json_path = ObjectPath::from(filename);
+        let buf_size = call_log_json.len();
         match object_store.put(&json_path, call_log_json.into()).await {
             Ok(_) => {
                 info!(
                     elapsed = start_time.elapsed().as_secs_f64(),
                     %json_path,
+                    buf_size,
                     "upload call record"
                 );
             }
@@ -850,7 +871,7 @@ impl CallRecordManager {
                     continue;
                 }
                 let start_time = Instant::now();
-                let file_name = formatter.format_sip_flow_path(root, record, &leg);
+                let file_name = formatter.format_sip_flow_path(record, &leg);
                 local_files.push(file_name.clone());
 
                 let flow_path = ObjectPath::from(file_name);
@@ -860,11 +881,13 @@ impl CallRecordManager {
                     buffer.extend_from_slice(&line);
                     buffer.push(b'\n');
                 }
+                let buf_size = buffer.len();
                 match object_store.put(&flow_path, buffer.into()).await {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
                             %flow_path,
+                            buf_size,
                             "upload sip flow file"
                         );
                     }
@@ -882,15 +905,14 @@ impl CallRecordManager {
             let mut media_files = vec![];
             for media in &record.recorder {
                 if Path::new(&media.path).exists() {
-                    let media_path =
-                        ObjectPath::from(formatter.format_media_path(root, record, media));
+                    let media_path = ObjectPath::from(formatter.format_media_path(record, media));
                     media_files.push((media.path.clone(), media_path));
                 }
             }
             if let Some(dump_events_file) = &record.dump_event_file {
                 if Path::new(&dump_events_file).exists() {
                     let dump_events_path =
-                        ObjectPath::from(formatter.format_dump_events_path(root, record));
+                        ObjectPath::from(formatter.format_dump_events_path(record));
                     media_files.push((dump_events_file.clone(), dump_events_path));
                 }
             }
@@ -903,11 +925,13 @@ impl CallRecordManager {
                         continue;
                     }
                 };
+                let buf_size = file_content.len();
                 match object_store.put(media_path, file_content.into()).await {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
                             %media_path,
+                            buf_size,
                             "upload media file"
                         );
                     }
