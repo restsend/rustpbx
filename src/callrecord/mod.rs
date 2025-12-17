@@ -103,8 +103,6 @@ pub struct CallRecord {
     pub caller: String,
     pub callee: String,
     pub status_code: u16,
-    pub offer: Option<String>,
-    pub answer: Option<String>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
@@ -119,6 +117,7 @@ pub struct CallRecord {
     pub sip_flows: HashMap<String, Vec<SipMessageItem>>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub sip_leg_roles: HashMap<String, String>,
+    #[serde(skip_serializing, skip_deserializing, default)]
     pub persist_args: Option<CallRecordPersistArgs>,
 }
 
@@ -304,7 +303,12 @@ pub trait CallRecordFormatter: Send + Sync {
         if trimmed_root.is_empty() {
             file_name
         } else {
-            format!("{}/{}", trimmed_root, file_name)
+            format!(
+                "{}/{}/{}",
+                trimmed_root,
+                record.start_time.format("%Y%m%d"),
+                file_name
+            )
         }
     }
 
@@ -314,7 +318,7 @@ pub trait CallRecordFormatter: Send + Sync {
 
     fn format_dump_events_path(&self, root: &str, record: &CallRecord) -> String {
         format!(
-            "{}/{}_{}.events.jsonl",
+            "{}/{}/{}.jsonl",
             root.trim_end_matches('/'),
             record.start_time.format("%Y%m%d"),
             record.call_id
@@ -326,7 +330,12 @@ pub trait CallRecordFormatter: Send + Sync {
         if trimmed_root.is_empty() {
             file_name
         } else {
-            format!("{}/{}", trimmed_root, file_name)
+            format!(
+                "{}/{}/{}",
+                trimmed_root,
+                record.start_time.format("%Y%m%d"),
+                file_name
+            )
         }
     }
     fn format_transcript_path(&self, root: &str, record: &CallRecord) -> String {
@@ -335,7 +344,12 @@ pub trait CallRecordFormatter: Send + Sync {
         if trimmed_root.is_empty() {
             file_name
         } else {
-            format!("{}/{}", trimmed_root, file_name)
+            format!(
+                "{}/{}/{}",
+                trimmed_root,
+                record.start_time.format("%Y%m%d"),
+                file_name
+            )
         }
     }
     fn format_media_path(
@@ -351,8 +365,9 @@ pub trait CallRecordFormatter: Send + Sync {
             .to_string();
 
         format!(
-            "{}/{}_{}_{}",
+            "{}/{}/{}_{}_{}",
             root.trim_end_matches('/'),
+            record.start_time.format("%Y%m%d"),
             record.call_id,
             media.track_id,
             file_name

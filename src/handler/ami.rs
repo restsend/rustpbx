@@ -22,6 +22,7 @@ pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/lists", get(list_calls))
         .route("/dialogs", get(list_dialogs))
+        .route("/transactions", get(list_transactions))
         .route("/kill/{id}", post(kill_call))
         .route("/shutdown", post(shutdown_handler))
         .route("/reload/trunks", post(reload_trunks_handler))
@@ -160,6 +161,28 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
             }
         }
     }
+    Json(result).into_response()
+}
+
+async fn list_transactions(State(state): State<AppState>) -> Response {
+    let mut result = Vec::new();
+    if let Some(ref sip_server) = state.sip_server {
+        sip_server
+            .inner
+            .endpoint
+            .inner
+            .get_running_transactions()
+            .map(|ids| result.extend(ids));
+    }
+    if let Some(ref useragent) = state.useragent {
+        useragent
+            .endpoint
+            .inner
+            .get_running_transactions()
+            .map(|ids| result.extend(ids));
+    }
+
+    let result: Vec<String> = result.iter().map(|key| key.to_string()).collect();
     Json(result).into_response()
 }
 

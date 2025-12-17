@@ -1587,7 +1587,6 @@ impl ActiveCallState {
             )))
         });
 
-        let offer = option.offer.clone();
         let caller = option.caller.clone().unwrap_or_default();
         let callee = option.callee.clone().unwrap_or_default();
 
@@ -1604,8 +1603,6 @@ impl ActiveCallState {
             hangup_reason: self.hangup_reason.clone(),
             hangup_messages: Vec::new(),
             status_code: self.last_status_code,
-            answer: self.answer.clone(),
-            offer,
             extras: self.extras.clone(),
             dump_event_file,
             recorder,
