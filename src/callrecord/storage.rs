@@ -1,15 +1,9 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
+use super::build_object_store_from_s3;
+use crate::config::CallRecordConfig;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use object_store::{ObjectStore, path::Path as ObjectPath};
-
-use crate::config::CallRecordConfig;
-
-use super::build_object_store_from_s3;
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone)]
 pub enum CdrStorage {
@@ -24,37 +18,11 @@ pub enum CdrStorage {
 
 impl CdrStorage {
     fn resolve_local_path(&self, path: &str) -> PathBuf {
-        match self {
-            CdrStorage::Local { root } => {
-                let candidate = Path::new(path);
-                if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    let trimmed = path.trim_start_matches('/');
-                    root.join(trimmed)
-                }
-            }
-            _ => PathBuf::from(path),
-        }
+        PathBuf::from(path)
     }
 
     fn normalize_s3_key(&self, path: &str) -> String {
-        match self {
-            CdrStorage::S3 { root, .. } => {
-                let trimmed_root = root.trim_matches('/');
-                let trimmed_path = path.trim_matches('/');
-                if trimmed_root.is_empty() {
-                    trimmed_path.to_string()
-                } else if trimmed_path.is_empty() {
-                    trimmed_root.to_string()
-                } else if trimmed_path.starts_with(trimmed_root) {
-                    trimmed_path.to_string()
-                } else {
-                    format!("{}/{}", trimmed_root, trimmed_path)
-                }
-            }
-            _ => path.to_string(),
-        }
+        path.to_string()
     }
 
     fn object_path(&self, path: &str) -> ObjectPath {
@@ -112,10 +80,9 @@ impl CdrStorage {
     pub async fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
         match self {
             CdrStorage::Local { .. } => {
-                let full_path = self.resolve_local_path(path);
-                let data = tokio::fs::read(&full_path)
+                let data = tokio::fs::read(path)
                     .await
-                    .with_context(|| format!("read call record asset {}", full_path.display()))?;
+                    .with_context(|| format!("read call record asset {}", path))?;
                 Ok(data)
             }
             CdrStorage::S3 { store, .. } => {

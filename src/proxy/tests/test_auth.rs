@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicUsize;
 use std::{sync::Arc, time::Duration};
 
 use super::common::{
@@ -465,6 +466,7 @@ async fn test_guest_call_allowed_extension() {
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),
+        runnings_tx: Arc::new(AtomicUsize::new(0)),
     });
 
     let module = AuthModule::new(server_inner);

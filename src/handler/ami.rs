@@ -76,7 +76,8 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
                 }),
                 "dialogs": server.inner.dialog_layer.len(),
                 "flows": server.inner.sip_flow.as_ref().map(|sf| sf.count()).unwrap_or(0),
-                "calls": server.inner.active_call_registry.count()
+                "calls": server.inner.active_call_registry.count(),
+                "running_tx": server.inner.runnings_tx.load(Ordering::Relaxed)
             })
         }
         None => {

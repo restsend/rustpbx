@@ -467,7 +467,7 @@ impl ProxyCall {
         };
 
         if let Some(dialog) = self.dialog_layer.get_dialog(dialog_id) {
-            info!(
+            debug!(
                 session_id = %self.session_id,
                 dialog_id = %dialog_id,
                 remote_uri = %uri,
@@ -1891,7 +1891,7 @@ impl ProxyCallDialogStateReceiverGuard for DialogStateReceiverGuard {
                 DialogState::Early(dialog_id, response) => {
                     proxy_call.update_remote_target_from_response(&dialog_id, &response);
                     let answer = String::from_utf8_lossy(response.body()).to_string();
-                    info!(
+                    debug!(
                         session_id = proxy_call.session_id,
                         %dialog_id,
                         status = ?response.status_code,

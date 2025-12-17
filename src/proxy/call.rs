@@ -1007,7 +1007,7 @@ impl ProxyModule for CallModule {
         let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
         info!(
             %dialog_id,
-            method = %tx.original.method,
+            tx = %tx.key,
             uri = %tx.original.uri,
             caller = %cookie.get_user().as_ref().map(|u|u.to_string()).unwrap_or_default(),
             "call transaction begin",
