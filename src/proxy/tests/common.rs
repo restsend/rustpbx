@@ -19,6 +19,7 @@ use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::channel::ChannelConnection;
 use rsipstack::transport::{SipAddr, TransportLayer};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -76,6 +77,7 @@ pub async fn create_test_server_with_config(
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),
+        runnings_tx: Arc::new(AtomicUsize::new(0)),
     });
 
     // Add test users

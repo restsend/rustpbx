@@ -72,6 +72,7 @@ pub struct SipServerInner {
     pub active_call_registry: Arc<ActiveProxyCallRegistry>,
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     pub call_record_hooks: Arc<Vec<Box<dyn crate::callrecord::CallRecordHook>>>,
+    pub runnings_tx: Arc<AtomicUsize>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -476,6 +477,7 @@ impl SipServerBuilder {
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
             call_record_hooks: Arc::new(self.call_record_hooks),
+            runnings_tx: Arc::new(AtomicUsize::new(0)),
         });
 
         let mut allow_methods = Vec::new();
@@ -594,9 +596,7 @@ impl SipServer {
     }
 
     async fn handle_incoming(&self, mut incoming: TransactionReceiver) -> Result<()> {
-        let runnings_tx = Arc::new(AtomicUsize::new(0));
         while let Some(mut tx) = incoming.recv().await {
-            debug!(key = %tx.key, "received transaction");
             let modules = self.modules.clone();
 
             let token = tx
@@ -607,7 +607,7 @@ impl SipServer {
                 .unwrap_or_else(|| self.inner.cancel_token.clone())
                 .child_token();
 
-            let runnings_tx = runnings_tx.clone();
+            let runnings_tx = self.inner.runnings_tx.clone();
 
             if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency {
                 if runnings_tx.load(Ordering::Relaxed) >= max_concurrency {
