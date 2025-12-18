@@ -232,6 +232,9 @@ impl ProxyModule for AuthModule {
                                 "Allowing guest call without authentication"
                             );
                             cookie.set_user(tx_user.clone());
+                            if let Some(display_name) = callee_profile.display_name {
+                                cookie.set("callee_display_name", &display_name);
+                            }
                             return Ok(ProxyAction::Continue);
                         }
                         Ok(_) => {}

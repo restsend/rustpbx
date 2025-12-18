@@ -214,9 +214,10 @@ impl CallReporter {
             "missed".to_string()
         };
 
-        let (from_number, department_id, extension_id) = resolve_user_info(&self.cookie, &caller);
+        let (from_number, from_name, department_id, extension_id) =
+            resolve_user_info(&self.cookie, &caller);
         let to_number = extract_sip_username(&callee);
-
+        let to_name = self.cookie.get("callee_display_name");
         let trunk_name = self.cookie.get_source_trunk();
         let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
             let trunks = self.server.data_context.trunks_snapshot();
@@ -256,6 +257,8 @@ impl CallReporter {
         persist_args.status = status;
         persist_args.from_number = from_number;
         persist_args.to_number = to_number;
+        persist_args.caller_name = from_name;
+        persist_args.agent_name = to_name;
         persist_args.queue = snapshot.last_queue_name.clone();
         persist_args.department_id = department_id;
         persist_args.extension_id = extension_id;
@@ -298,9 +301,9 @@ impl CallReporter {
 fn resolve_user_info(
     cookie: &TransactionCookie,
     caller_uri: &str,
-) -> (Option<String>, Option<i64>, Option<i64>) {
+) -> (Option<String>, Option<String>, Option<i64>, Option<i64>) {
     let mut from_number = extract_sip_username(caller_uri);
-    let (department_id, extension_id) = if let Some(user) = cookie.get_user() {
+    let (from_display_name, department_id, extension_id) = if let Some(user) = cookie.get_user() {
         let mut dept_id = None;
         let mut is_wholesale = false;
 
@@ -323,12 +326,12 @@ fn resolve_user_info(
         } else {
             None
         };
-        (dept_id, ext_id)
+        (user.display_name, dept_id, ext_id)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
-    (from_number, department_id, extension_id)
+    (from_number, from_display_name, department_id, extension_id)
 }
 
 #[cfg(test)]
@@ -341,13 +344,15 @@ mod tests {
         let cookie = TransactionCookie::default();
         let mut user = SipUser::default();
         user.username = "1234".to_string();
+        user.display_name = Some("alice".to_string());
         user.departments = Some(vec!["tenant:100".to_string()]);
         cookie.set_user(user);
 
         let caller = "sip:mock-uuid@1.2.3.4";
-        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+        let (from, from_name, dept, ext) = resolve_user_info(&cookie, caller);
 
         assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(from_name, Some("alice".to_string()));
         assert_eq!(dept, None);
         assert_eq!(ext, None);
     }
@@ -357,14 +362,16 @@ mod tests {
         let cookie = TransactionCookie::default();
         let mut user = SipUser::default();
         user.username = "1234".to_string();
+        user.display_name = Some("alice".to_string());
         user.departments = Some(vec!["tenant:100".to_string(), "5".to_string()]);
         user.id = 99;
         cookie.set_user(user);
 
         let caller = "sip:mock-uuid@1.2.3.4";
-        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+        let (from, from_name, dept, ext) = resolve_user_info(&cookie, caller);
 
         assert_eq!(from, Some("1234".to_string()));
+        assert_eq!(from_name, Some("alice".to_string()));
         assert_eq!(dept, Some(5));
         assert_eq!(ext, Some(99));
     }
@@ -374,14 +381,16 @@ mod tests {
         let cookie = TransactionCookie::default();
         let mut user = SipUser::default();
         user.username = "1001".to_string();
+        user.display_name = Some("alice".to_string());
         user.departments = Some(vec!["5".to_string()]);
         user.id = 99;
         cookie.set_user(user);
 
         let caller = "sip:1001@1.2.3.4";
-        let (from, dept, ext) = resolve_user_info(&cookie, caller);
+        let (from, from_name, dept, ext) = resolve_user_info(&cookie, caller);
 
         assert_eq!(from, Some("1001".to_string()));
+        assert_eq!(from_name, Some("alice".to_string()));
         assert_eq!(dept, Some(5));
         assert_eq!(ext, Some(99));
     }
