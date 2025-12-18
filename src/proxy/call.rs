@@ -382,7 +382,13 @@ impl CallModule {
                     .await
                 {
                     Ok(None) => DialDirection::Outbound,
-                    _ => DialDirection::Internal,
+                    res => {
+                        res.ok()
+                            .flatten()
+                            .and_then(|user| user.display_name)
+                            .map(|display_name| cookie.set("callee_display_name", &display_name));
+                        DialDirection::Internal
+                    }
                 }
             }
             (true, false) => DialDirection::Outbound,
