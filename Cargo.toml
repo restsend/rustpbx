@@ -54,7 +54,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.2.98"
 #voice-engine = { path = "../voice-engine", default-features = false }
-voice-engine = { version = "0.3.22", default-features = false }
+voice-engine = { version = "0.3.23", default-features = false }
 rsip = "0.4.0"
 reqwest = { version = "0.12.25", features = [
     "json",
