@@ -247,7 +247,12 @@ impl TryFrom<&Transaction> for SipUser {
             _ => {
                 let username = from_uri.user().unwrap_or_default().to_string();
                 let realm = from_uri.host().to_string();
-                (username, Some(realm))
+                let realm = if let Some(port) = from_uri.port() {
+                    Some(format!("{}:{}", realm, port))
+                } else {
+                    Some(realm)
+                };
+                (username, realm)
             }
         };
 

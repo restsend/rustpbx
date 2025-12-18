@@ -140,4 +140,23 @@ impl AddonRegistry {
             .filter_map(|a| a.call_record_hook())
             .collect()
     }
+
+    pub fn get_addon(&self, id: &str) -> Option<&dyn Addon> {
+        self.addons.iter().find(|a| a.id() == id).map(|a| a.as_ref())
+    }
+
+    pub fn apply_proxy_server_hooks(
+        &self,
+        mut builder: crate::proxy::server::SipServerBuilder,
+        state: AppState,
+    ) -> crate::proxy::server::SipServerBuilder {
+        let config = &state.config;
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), &config) {
+                continue;
+            }
+            builder = addon.proxy_server_hook(builder, state.clone());
+        }
+        builder
+    }
 }

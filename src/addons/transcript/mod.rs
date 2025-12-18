@@ -16,6 +16,10 @@ impl TranscriptAddon {
 
 #[async_trait]
 impl Addon for TranscriptAddon {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn id(&self) -> &'static str {
         "transcript"
     }
@@ -42,15 +46,16 @@ impl Addon for TranscriptAddon {
     fn router(&self, state: AppState) -> Option<Router> {
         if let Some(console) = &state.console {
             let base = console.base_path();
-            #[allow(unused_mut)]
-            let mut router = Router::new();
-            #[cfg(debug_assertions)]
-            {
-                router = router.nest_service(
-                    "/static/transcript/",
-                    tower_http::services::ServeDir::new("src/addons/transcript/static"),
-                );
-            }
+            let static_path = if std::path::Path::new("src/addons/transcript/static").exists() {
+                "src/addons/transcript/static"
+            } else {
+                "static/transcript"
+            };
+
+            let router = Router::new().nest_service(
+                "/static/transcript",
+                tower_http::services::ServeDir::new(static_path),
+            );
 
             let router = router
                 .route(

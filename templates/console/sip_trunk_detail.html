@@ -240,22 +240,6 @@ default('RustPBX') }}{% endblock %}
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="Encrypted storage recommended">
                         </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Default route label
-                            <input type="text" x-model.trim="form.default_route_label" maxlength="160"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Internal label for default routing">
-                        </label>
-
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Tenant
-                            <select x-model="form.tenant_id"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <template x-for="option in tenantOptions" :key="option.value">
-                                    <option :value="option.value" x-text="option.label"></option>
-                                </template>
-                            </select>
-                        </label>
                     </div>
                 </section>
 
@@ -346,7 +330,6 @@ default('RustPBX') }}{% endblock %}
                 { value: 'tcp', label: 'TCP' },
                 { value: 'tls', label: 'TLS' },
             ],
-            tenantOptions: [],
             form: {
                 name: '',
                 display_name: '',
@@ -359,8 +342,6 @@ default('RustPBX') }}{% endblock %}
                 outbound_proxy: '',
                 auth_username: '',
                 auth_password: '',
-                default_route_label: '',
-                tenant_id: 'none',
                 max_cps: '',
                 max_concurrent: '',
                 max_call_duration: '',
@@ -399,23 +380,6 @@ default('RustPBX') }}{% endblock %}
                     value: String(value).toLowerCase(),
                     label: this.directionLabel(value),
                 }));
-
-                const mappedTenants = this.tenantsRaw.map((t) => ({
-                    value: String(t.id),
-                    label: t.name || `Tenant #${t.id}`,
-                }));
-                this.tenantOptions = [{ value: 'none', label: 'No tenant' }].concat(mappedTenants);
-
-                if (!this.model && this.mode === 'create') {
-                    this.form.tenant_id = 'none';
-
-                    // Check for tenant_id in URL query params
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const tenantIdParam = urlParams.get('tenant_id');
-                    if (tenantIdParam) {
-                        this.form.tenant_id = tenantIdParam;
-                    }
-                }
             },
             populateFromModel() {
                 const model = this.model || {};
@@ -430,8 +394,6 @@ default('RustPBX') }}{% endblock %}
                 this.form.outbound_proxy = model.outbound_proxy || '';
                 this.form.auth_username = model.auth_username || '';
                 this.form.auth_password = model.auth_password || '';
-                this.form.default_route_label = model.default_route_label || '';
-                this.form.tenant_id = model.tenant_id != null ? String(model.tenant_id) : 'none';
                 this.form.max_cps = model.max_cps != null ? String(model.max_cps) : '';
                 this.form.max_concurrent = model.max_concurrent != null ? String(model.max_concurrent) : '';
                 this.form.max_call_duration = model.max_call_duration != null ? String(model.max_call_duration) : '';
@@ -591,15 +553,6 @@ default('RustPBX') }}{% endblock %}
                 if (this.form.outbound_proxy.trim()) params.set('outbound_proxy', this.form.outbound_proxy.trim());
                 if (this.form.auth_username.trim()) params.set('auth_username', this.form.auth_username.trim());
                 if (this.form.auth_password.trim()) params.set('auth_password', this.form.auth_password.trim());
-                if (this.form.default_route_label.trim()) params.set('default_route_label', this.form.default_route_label.trim());
-
-                if (this.form.tenant_id === 'none') {
-                    if (this.mode === 'edit') {
-                        params.set('clear_tenant', 'true');
-                    }
-                } else if (this.form.tenant_id) {
-                    params.set('tenant_id', this.form.tenant_id);
-                }
 
                 const numericFields = [
                     ['max_cps', this.form.max_cps],

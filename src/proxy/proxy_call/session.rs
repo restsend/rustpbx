@@ -1,5 +1,5 @@
 use crate::{
-    call::{MediaConfig, QueueHoldConfig, ivr::IvrExit},
+    call::{MediaConfig, QueueHoldConfig},
     callrecord::{CallRecordHangupMessage, CallRecordHangupReason},
     proxy::proxy_call::{
         ProxyCall, SessionHangupMessage,
@@ -32,14 +32,6 @@ use voice_engine::{
     },
 };
 
-#[derive(Clone, Default)]
-pub(super) struct IvrTrace {
-    pub reference: Option<String>,
-    pub plan_id: Option<String>,
-    pub exit: Option<String>,
-    pub detail: Option<String>,
-}
-
 #[derive(Clone)]
 pub(super) struct CallSessionRecordSnapshot {
     pub ring_time: Option<Instant>,
@@ -55,7 +47,6 @@ pub(super) struct CallSessionRecordSnapshot {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub last_queue_name: Option<String>,
-    pub ivr_trace: Option<IvrTrace>,
     pub callee_dialogs: Vec<DialogId>,
     pub server_dialog_id: DialogId,
 }
@@ -91,7 +82,6 @@ pub(super) struct CallSession {
     pub queue_hold_loop_cancel: Option<CancellationToken>,
     pub queue_hold_loop_handle: Option<JoinHandle<()>>,
     pub last_queue_name: Option<String>,
-    ivr_trace: Option<IvrTrace>,
     pub max_forwards: u32,
     pub reporter: Option<crate::proxy::proxy_call::reporter::CallReporter>,
     pub server_timer: Arc<std::sync::Mutex<SessionTimerState>>,
@@ -101,7 +91,6 @@ pub(super) struct CallSession {
 impl CallSession {
     pub const QUEUE_HOLD_TRACK_ID: &'static str = "queue-hold-track";
     pub const QUEUE_HOLD_PLAY_ID: &'static str = "queue-hold";
-    pub const IVR_PROMPT_TRACK_ID: &'static str = "ivr-prompt-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
 
     pub fn new(
@@ -165,7 +154,6 @@ impl CallSession {
             queue_hold_loop_cancel: None,
             queue_hold_loop_handle: None,
             last_queue_name: None,
-            ivr_trace: None,
             max_forwards,
             reporter,
             server_timer: Arc::new(std::sync::Mutex::new(SessionTimerState::default())),
@@ -296,28 +284,6 @@ impl CallSession {
         self.last_queue_name.clone()
     }
 
-    pub fn note_ivr_reference(&mut self, reference: Option<String>, plan_id: Option<String>) {
-        let mut trace = self.ivr_trace.clone().unwrap_or_default();
-        trace.reference = reference;
-        trace.plan_id = plan_id;
-        self.ivr_trace = Some(trace);
-    }
-
-    pub fn note_ivr_exit(&mut self, exit: &IvrExit) {
-        let mut trace = self.ivr_trace.clone().unwrap_or_default();
-        let (exit_label, detail) = match exit {
-            IvrExit::Completed => ("completed".to_string(), None),
-            IvrExit::Transfer(action) => ("transfer".to_string(), Some(action.target.clone())),
-            IvrExit::Queue(action) => ("queue".to_string(), Some(action.queue.clone())),
-            IvrExit::Webhook(action) => ("webhook".to_string(), Some(action.url.clone())),
-            IvrExit::Playback(_) => ("playback".to_string(), None),
-            IvrExit::Hangup(action) => ("hangup".to_string(), action.reason.clone()),
-        };
-        trace.exit = Some(exit_label);
-        trace.detail = detail;
-        self.ivr_trace = Some(trace);
-    }
-
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
         CallSessionRecordSnapshot {
             ring_time: self.ring_time,
@@ -333,7 +299,6 @@ impl CallSession {
             routed_contact: self.routed_contact.clone(),
             routed_destination: self.routed_destination.clone(),
             last_queue_name: self.last_queue_name(),
-            ivr_trace: self.ivr_trace.clone(),
             callee_dialogs: self
                 .callee_dialogs
                 .lock()

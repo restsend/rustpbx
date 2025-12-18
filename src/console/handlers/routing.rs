@@ -105,7 +105,6 @@ impl Default for RouteDocument {
 pub(crate) enum RouteTargetKind {
     SipTrunk,
     Queue,
-    Ivr,
 }
 
 impl Default for RouteTargetKind {
@@ -125,8 +124,6 @@ pub(crate) struct RouteActionDocument {
     target_type: RouteTargetKind,
     #[serde(default)]
     queue_file: Option<String>,
-    #[serde(default)]
-    ivr_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +171,6 @@ impl Default for RouteActionDocument {
             trunks: Vec::new(),
             target_type: RouteTargetKind::SipTrunk,
             queue_file: None,
-            ivr_file: None,
         }
     }
 }
@@ -266,18 +262,6 @@ impl RouteDocument {
                     ));
                 }
             }
-            RouteTargetKind::Ivr => {
-                let has_ivr_file = self
-                    .action
-                    .ivr_file
-                    .as_ref()
-                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
-                if has_ivr_file.is_none() {
-                    return Err(RouteError::new(
-                        "IVR destination requires an ivr file reference",
-                    ));
-                }
-            }
         }
         Ok(())
     }
@@ -288,21 +272,12 @@ impl RouteDocument {
         }
 
         self.action.queue_file = sanitize_optional_string(self.action.queue_file.take());
-        self.action.ivr_file = sanitize_optional_string(self.action.ivr_file.take());
 
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {
                 self.action.queue_file = None;
-                self.action.ivr_file = None;
             }
             RouteTargetKind::Queue => {
-                self.action.ivr_file = None;
-                self.action.trunks.clear();
-                self.action.select = DEFAULT_SELECTION;
-                self.action.hash_key = None;
-            }
-            RouteTargetKind::Ivr => {
-                self.action.queue_file = None;
                 self.action.trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
@@ -603,7 +578,6 @@ fn build_route_console_payload(
             "trunks": doc.action.trunks.clone(),
             "target_type": doc.action.target_type,
             "queue_file": doc.action.queue_file.clone(),
-            "ivr_file": doc.action.ivr_file.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),

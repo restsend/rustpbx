@@ -1,13 +1,12 @@
-use crate::call::ivr::{IvrPlan, IvrStep, PromptFile, PromptMedia, PromptSource, PromptStep};
 use crate::call::{DialDirection, DialStrategy, RoutingState};
 use crate::call::{FailureAction, QueueFallbackAction};
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
     DestConfig, MatchConditions, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
-    RouteDirection, RouteIvrConfig, RouteQueueConfig, RouteQueueFallbackConfig,
-    RouteQueueHoldConfig, RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule, SourceTrunk,
-    TrunkConfig, TrunkDirection,
+    RouteDirection, RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig,
+    RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig,
+    TrunkDirection,
 };
 use async_trait::async_trait;
 use rsip::StatusCode;
@@ -42,8 +41,8 @@ async fn test_match_invite_no_routes() {
     match result {
         RouteResult::Forward(_) | RouteResult::NotHandled(_) => {} // Expected
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("Unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("Unexpected queue result")
         }
     }
 }
@@ -174,8 +173,8 @@ async fn test_match_invite_inbound_respects_source_trunk() {
         RouteResult::NotHandled(_) | RouteResult::Abort(_, _) => {
             panic!("expected inbound invite to forward")
         }
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -231,8 +230,8 @@ async fn test_match_invite_inbound_without_source_trunk() {
         RouteResult::Forward(_) | RouteResult::Abort(_, _) => {
             panic!("expected invite to be left unhandled when source trunk is missing")
         }
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -305,8 +304,8 @@ async fn test_match_invite_exact_match() {
             assert_eq!(cred.password, "testpass");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -376,8 +375,8 @@ async fn test_match_invite_regex_match() {
             // Expected
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -476,7 +475,6 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
         }
         RouteResult::Forward(_) => panic!("route forwarded instead of enqueuing"),
         RouteResult::NotHandled(_) => panic!("route was not handled"),
-        RouteResult::Ivr { .. } => panic!("unexpected ivr result"),
         RouteResult::Abort(..) => panic!("queue route aborted"),
     }
 }
@@ -569,92 +567,6 @@ fn test_queue_strategy_builds_dial_targets() {
 }
 
 #[tokio::test]
-async fn test_match_invite_ivr_action_returns_inline_plan() {
-    let routing_state = Arc::new(RoutingState::new());
-    let trunks = HashMap::new();
-
-    let mut steps = HashMap::new();
-    steps.insert(
-        "welcome".to_string(),
-        IvrStep::Prompt(PromptStep {
-            prompts: vec![PromptMedia {
-                source: PromptSource::File {
-                    file: PromptFile {
-                        path: "prompts/welcome.wav".to_string(),
-                    },
-                },
-                locale: None,
-                loop_count: None,
-            }],
-            allow_barge_in: true,
-            next: None,
-            availability: None,
-        }),
-    );
-    let plan = IvrPlan {
-        id: "main-menu".to_string(),
-        version: 1,
-        entry_step: "welcome".to_string(),
-        steps,
-        calendars: HashMap::new(),
-    };
-
-    let ivr_path = "ivr/main-menu.toml";
-    let mut lookup = TestResourceLookup::default();
-    lookup.add_ivr(
-        ivr_path,
-        RouteIvrConfig {
-            plan_id: None,
-            variables: HashMap::new(),
-            availability_override: false,
-            plan: Some(plan.clone()),
-        },
-    );
-
-    let routes = vec![RouteRule {
-        name: "ivr-route".to_string(),
-        priority: 5,
-        direction: RouteDirection::Inbound,
-        match_conditions: MatchConditions {
-            to_user: Some("1001".to_string()),
-            ..Default::default()
-        },
-        action: RouteAction {
-            action: Some("ivr".to_string()),
-            ivr: Some(ivr_path.to_string()),
-            ..Default::default()
-        },
-        ..Default::default()
-    }];
-
-    let option = create_test_invite_option();
-    let origin = create_test_request();
-
-    let result = match_invite(
-        Some(&trunks),
-        Some(&routes),
-        Some(&lookup),
-        option,
-        &origin,
-        None,
-        routing_state,
-        &DialDirection::Inbound,
-    )
-    .await
-    .expect("ivr route should resolve");
-
-    match result {
-        RouteResult::Ivr { ivr, .. } => {
-            let stored = ivr.plan.expect("inline plan missing");
-            assert_eq!(stored.id, "main-menu");
-            assert_eq!(stored.entry_step, "welcome");
-            assert!(stored.steps.contains_key("welcome"));
-        }
-        _ => panic!("expected ivr result"),
-    }
-}
-
-#[tokio::test]
 async fn test_match_invite_reject_rule() {
     let routing_state = Arc::new(RoutingState::new());
     let routes = vec![RouteRule {
@@ -711,8 +623,8 @@ async fn test_match_invite_reject_rule() {
         }
         RouteResult::Forward(_) => panic!("Expected abort, got forward"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -779,8 +691,8 @@ async fn test_match_invite_rewrite_rules() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -868,8 +780,8 @@ async fn test_match_invite_load_balancing() {
             }
             RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
             RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-            RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-                panic!("unexpected queue/ivr result")
+            RouteResult::Queue { .. } => {
+                panic!("unexpected queue result")
             }
         }
     }
@@ -949,8 +861,8 @@ async fn test_match_invite_header_matching() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -1015,8 +927,8 @@ async fn test_match_invite_default_route() {
         RouteResult::NotHandled(_) => {
             // acceptable in current behavior
         }
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -1088,8 +1000,8 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 
@@ -1147,8 +1059,8 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -1224,8 +1136,8 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
-        RouteResult::Queue { .. } | RouteResult::Ivr { .. } => {
-            panic!("unexpected queue/ivr result")
+        RouteResult::Queue { .. } => {
+            panic!("unexpected queue result")
         }
     }
 }
@@ -1233,16 +1145,11 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
 #[derive(Default)]
 struct TestResourceLookup {
     queues: HashMap<String, RouteQueueConfig>,
-    ivrs: HashMap<String, RouteIvrConfig>,
 }
 
 impl TestResourceLookup {
     fn add_queue(&mut self, path: &str, config: RouteQueueConfig) {
         self.queues.insert(path.to_string(), config);
-    }
-
-    fn add_ivr(&mut self, path: &str, config: RouteIvrConfig) {
-        self.ivrs.insert(path.to_string(), config);
     }
 }
 
@@ -1250,10 +1157,6 @@ impl TestResourceLookup {
 impl RouteResourceLookup for TestResourceLookup {
     async fn load_queue(&self, path: &str) -> anyhow::Result<Option<RouteQueueConfig>> {
         Ok(self.queues.get(path).cloned())
-    }
-
-    async fn load_ivr(&self, path: &str) -> anyhow::Result<Option<RouteIvrConfig>> {
-        Ok(self.ivrs.get(path).cloned())
     }
 }
 

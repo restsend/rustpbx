@@ -1270,9 +1270,6 @@
                 if (targetType === 'queue') {
                     return 'Queue handoff';
                 }
-                if (targetType === 'ivr') {
-                    return 'IVR transfer';
-                }
                 const select = (route?.action?.select || 'rr').toLowerCase();
                 const map = {
                     rr: 'Round robin balancing',
@@ -1311,10 +1308,6 @@
                 if (targetType === 'queue') {
                     const queueRef = (route?.action?.queue_ref || '').trim();
                     return queueRef.length ? `Queue · ${queueRef}` : 'Queue destination';
-                }
-                if (targetType === 'ivr') {
-                    const plan = (route?.action?.ivr?.plan_id || '').trim();
-                    return plan.length ? `IVR · ${plan}` : 'IVR destination';
                 }
                 const targets = Array.isArray(route?.target_trunks)
                     ? route.target_trunks.filter((item) => typeof item === 'string' && item.trim().length)

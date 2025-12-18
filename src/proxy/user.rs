@@ -290,3 +290,37 @@ pub async fn build_user_backend(config: &ProxyConfig) -> Result<Box<dyn UserBack
     }
     Ok(Box::new(ChainedUserBackend::new(instances)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_user_backend_realm() {
+        let backend = MemoryUserBackend::new(None);
+        let user = SipUser {
+            username: "alice".to_string(),
+            realm: Some("example.com".to_string()),
+            ..Default::default()
+        };
+        backend.create_user(user).await.unwrap();
+
+        // Test with exact realm
+        let found = backend
+            .get_user("alice", Some("example.com"))
+            .await
+            .unwrap();
+        assert!(found.is_some());
+
+        // Test with realm including port
+        let found = backend
+            .get_user("alice", Some("example.com:5060"))
+            .await
+            .unwrap();
+        assert!(found.is_some());
+
+        // Test with different realm
+        let found = backend.get_user("alice", Some("other.com")).await.unwrap();
+        assert!(found.is_none());
+    }
+}

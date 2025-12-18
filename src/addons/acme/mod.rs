@@ -42,6 +42,10 @@ impl AcmeAddon {
 
 #[async_trait]
 impl Addon for AcmeAddon {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn id(&self) -> &'static str {
         "acme"
     }
@@ -61,15 +65,17 @@ impl Addon for AcmeAddon {
     }
 
     fn router(&self, state: AppState) -> Option<Router> {
-        let mut protected = Router::new();
+        let static_path = if std::path::Path::new("src/addons/acme/static").exists() {
+            "src/addons/acme/static"
+        } else {
+            "static/acme"
+        };
 
-        #[cfg(debug_assertions)]
-        {
-            use tower_http::services::ServeDir;
-            protected =
-                protected.nest_service("/static/acme/", ServeDir::new("src/addons/acme/static"));
-        }
-        protected = protected
+        let mut protected = Router::new()
+            .nest_service(
+                "/static/acme",
+                tower_http::services::ServeDir::new(static_path),
+            )
             .route("/console/acme", get(handlers::ui_index))
             .route("/api/acme/request", post(handlers::request_cert))
             .route("/api/acme/status", get(handlers::status));

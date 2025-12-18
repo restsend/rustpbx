@@ -15,9 +15,7 @@ use tracing::info;
 use crate::{
     call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
     config::RouteResult,
-    proxy::routing::{
-        ActionType, RouteIvrConfig, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig,
-    },
+    proxy::routing::{ActionType, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };
 
 #[derive(Debug, Default, Clone)]
@@ -38,7 +36,6 @@ pub struct RouteAbortTrace {
 #[async_trait]
 pub trait RouteResourceLookup: Send + Sync {
     async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>>;
-    async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>>;
 }
 
 /// Main routing function
@@ -458,29 +455,6 @@ async fn match_invite_impl(
                     option,
                     queue: queue_plan,
                 });
-            }
-            ActionType::Ivr => {
-                let ivr_path = rule
-                    .action
-                    .ivr
-                    .as_ref()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| anyhow!("ivr action requires an 'ivr' file reference"))?;
-
-                let lookup = resource_lookup.ok_or_else(|| {
-                    anyhow!(
-                        "ivr action cannot resolve '{}' without resource lookup",
-                        ivr_path
-                    )
-                })?;
-
-                let ivr_cfg = lookup
-                    .load_ivr(ivr_path.as_str())
-                    .await?
-                    .ok_or_else(|| anyhow!("ivr file '{}' not found or unreadable", ivr_path))?;
-                let ivr = ivr_cfg.to_dialplan_config()?;
-                return Ok(RouteResult::Ivr { option, ivr });
             }
         }
     }

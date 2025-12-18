@@ -441,11 +441,9 @@ impl CallModule {
             })?;
 
         let mut pending_queue = None;
-        let mut pending_ivr = None;
 
         match preview_outcome {
             RouteResult::Queue { queue, .. } => pending_queue = Some(queue),
-            RouteResult::Ivr { ivr, .. } => pending_ivr = Some(ivr),
             RouteResult::Abort(code, reason) => {
                 let err = anyhow::anyhow!(
                     reason.unwrap_or_else(|| "route aborted during preview".to_string())
@@ -476,10 +474,6 @@ impl CallModule {
 
         if let Some(queue_plan) = pending_queue {
             dialplan = dialplan.with_queue(queue_plan);
-        }
-
-        if let Some(ivr_config) = pending_ivr {
-            dialplan = dialplan.with_ivr(ivr_config);
         }
 
         if let Some(contact_uri) = self.inner.server.default_contact_uri() {

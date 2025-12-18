@@ -1,5 +1,5 @@
 use crate::{
-    call::{CallRecordingConfig, DialDirection, DialplanIvrConfig, QueuePlan, user::SipUser},
+    call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     useragent::RegisterOption,
 };
@@ -448,10 +448,6 @@ pub enum RouteResult {
         option: InviteOption,
         queue: QueuePlan,
     },
-    Ivr {
-        option: InviteOption,
-        ivr: DialplanIvrConfig,
-    },
     NotHandled(InviteOption),
     Abort(StatusCode, Option<String>),
 }
@@ -479,6 +475,11 @@ impl Default for AmiConfig {
 
 impl ProxyConfig {
     pub fn normalize_realm(realm: &str) -> &str {
+        let realm = if let Some(pos) = realm.find(':') {
+            &realm[..pos]
+        } else {
+            realm
+        };
         if realm.is_empty() || realm == "*" || realm == "127.0.0.1" || realm == "::1" {
             "localhost"
         } else {
@@ -537,10 +538,6 @@ impl ProxyConfig {
         } else {
             self.generated_root_dir().join("queue")
         }
-    }
-
-    pub fn generated_ivr_dir(&self) -> PathBuf {
-        self.generated_root_dir().join("ivr")
     }
 
     pub fn generated_acl_dir(&self) -> PathBuf {
@@ -739,6 +736,13 @@ impl Config {
 
         fallback
     }
+
+    pub fn config_dir(&self) -> std::path::PathBuf {
+        self.proxy
+            .as_ref()
+            .map(|p| p.generated_root_dir())
+            .unwrap_or_else(|| std::path::PathBuf::from("./config"))
+    }
 }
 
 #[cfg(test)]
@@ -811,5 +815,37 @@ mod tests {
         config.ice_servers = Some(ice_servers);
         let config_str = toml::to_string(&config).unwrap();
         println!("{}", config_str);
+    }
+
+    #[test]
+    fn test_normalize_realm() {
+        assert_eq!(ProxyConfig::normalize_realm("localhost"), "localhost");
+        assert_eq!(ProxyConfig::normalize_realm("127.0.0.1"), "localhost");
+        assert_eq!(ProxyConfig::normalize_realm("::1"), "localhost");
+        assert_eq!(ProxyConfig::normalize_realm(""), "localhost");
+        assert_eq!(ProxyConfig::normalize_realm("*"), "localhost");
+        assert_eq!(ProxyConfig::normalize_realm("example.com"), "example.com");
+        assert_eq!(
+            ProxyConfig::normalize_realm("example.com:5060"),
+            "example.com"
+        );
+        assert_eq!(ProxyConfig::normalize_realm("127.0.0.1:5060"), "localhost");
+    }
+
+    #[test]
+    fn test_select_realm() {
+        let mut config = ProxyConfig::default();
+        config.realms = Some(vec!["example.com".to_string(), "test.com".to_string()]);
+
+        // Exact match
+        assert_eq!(config.select_realm("example.com"), "example.com");
+        // Match with port (should return normalized/existing realm)
+        assert_eq!(config.select_realm("example.com:5060"), "example.com");
+        // Match with different port
+        assert_eq!(config.select_realm("test.com:8888"), "test.com");
+        // No match, return first realm if configured
+        assert_eq!(config.select_realm("other.com"), "example.com");
+        // No match with port, return first realm if configured
+        assert_eq!(config.select_realm("other.com:5060"), "example.com");
     }
 }

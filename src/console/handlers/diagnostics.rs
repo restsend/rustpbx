@@ -1323,16 +1323,6 @@ async fn route_evaluate(
                 rewrites,
             )
         }
-        RouteResult::Ivr { option, ivr } => {
-            let rewrites = collect_rewrite_diff(&original_option, &option);
-            (
-                RouteOutcomeView::Ivr(RouteIvrOutcome::from(&ivr)),
-                option.caller.to_string(),
-                option.callee.to_string(),
-                request.uri.to_string(),
-                rewrites,
-            )
-        }
         RouteResult::NotHandled(option) => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (
@@ -1573,7 +1563,6 @@ async fn detect_trunk_by_ip(
 enum RouteOutcomeView {
     Forward(RouteForwardOutcome),
     Queue(RouteQueueOutcome),
-    Ivr(RouteIvrOutcome),
     NotHandled,
     Abort(RouteAbortOutcome),
 }
@@ -1635,29 +1624,6 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
             hold_audio,
             loop_playback,
             fallback,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct RouteIvrOutcome {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    plan_id: Option<String>,
-    inline_plan: bool,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    variables: HashMap<String, String>,
-}
-
-impl From<&crate::call::DialplanIvrConfig> for RouteIvrOutcome {
-    fn from(config: &crate::call::DialplanIvrConfig) -> Self {
-        let plan_id = config
-            .plan_id
-            .clone()
-            .or_else(|| config.plan.as_ref().map(|plan| plan.id.clone()));
-        Self {
-            plan_id,
-            inline_plan: config.plan.is_some(),
-            variables: config.variables.clone(),
         }
     }
 }

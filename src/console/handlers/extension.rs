@@ -11,7 +11,7 @@ use crate::models::{
     },
     queue::{Column as QueueColumn, Entity as QueueEntity},
 };
-use crate::proxy::{routing::RouteIvrConfig, server::SipServerRef};
+use crate::proxy::server::SipServerRef;
 use crate::services::queue_utils;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -30,8 +30,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, io::ErrorKind, sync::Arc};
-use tokio::fs;
+use std::{collections::HashMap, sync::Arc};
 use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -59,15 +58,11 @@ struct QueryExtensionsFilters {
 #[derive(Debug, Clone, Serialize)]
 struct ForwardingCatalog {
     queues: Vec<ForwardingQueue>,
-    ivrs: Vec<ForwardingIvrRef>,
 }
 
 impl ForwardingCatalog {
     fn empty() -> Self {
-        Self {
-            queues: Vec::new(),
-            ivrs: Vec::new(),
-        }
+        Self { queues: Vec::new() }
     }
 }
 
@@ -79,12 +74,6 @@ struct ForwardingQueue {
     description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ForwardingIvrRef {
-    reference: String,
-    file: String,
-    plan_id: Option<String>,
-}
 #[derive(Debug, Clone, Serialize, Default)]
 struct ExtensionLocatorRecord {
     binding_key: String,
@@ -342,97 +331,7 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
             }
         })
         .collect();
-    catalog.ivrs = load_forwarding_ivrs(state).await;
     catalog
-}
-
-async fn load_forwarding_ivrs(state: Arc<ConsoleState>) -> Vec<ForwardingIvrRef> {
-    let Some(app_state) = state.app_state() else {
-        return Vec::new();
-    };
-    let Some(proxy_config) = app_state.config.proxy.as_ref() else {
-        return Vec::new();
-    };
-    let base_dir = proxy_config.generated_ivr_dir();
-    let mut entries = match fs::read_dir(&base_dir).await {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Vec::new();
-        }
-        Err(err) => {
-            warn!(
-                "failed to read ivr directory {}: {}",
-                base_dir.display(),
-                err
-            );
-            return Vec::new();
-        }
-    };
-
-    let mut ivrs = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if extension != "toml" {
-            continue;
-        }
-        let reference = path
-            .strip_prefix(&base_dir)
-            .ok()
-            .map(|rel| rel.to_string_lossy().trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                let fallback = entry.file_name().to_string_lossy().trim().to_string();
-                if fallback.is_empty() {
-                    None
-                } else {
-                    Some(fallback)
-                }
-            });
-        let Some(reference) = reference else {
-            continue;
-        };
-        let contents = match fs::read_to_string(&path).await {
-            Ok(contents) => contents,
-            Err(err) => {
-                warn!("failed to read ivr file {}: {}", path.display(), err);
-                continue;
-            }
-        };
-        let config: RouteIvrConfig = match toml::from_str(&contents) {
-            Ok(config) => config,
-            Err(err) => {
-                warn!("failed to parse ivr file {}: {}", path.display(), err);
-                continue;
-            }
-        };
-        let plan_id = config.plan_id.clone().and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-        ivrs.push(ForwardingIvrRef {
-            reference,
-            file: path.display().to_string(),
-            plan_id,
-        });
-    }
-
-    ivrs.sort_by(|a, b| a.reference.cmp(&b.reference));
-    ivrs
 }
 
 async fn page_extensions(

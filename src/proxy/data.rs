@@ -20,7 +20,7 @@ use crate::{
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
-        RouteIvrConfig, RouteQueueConfig, RouteRule, TrunkConfig,
+        RouteQueueConfig, RouteRule, TrunkConfig,
     },
     services::queue_utils::{self},
 };
@@ -131,28 +131,6 @@ impl ProxyDataContext {
         Self::read_queue_document(path)
     }
 
-    pub fn load_ivr_file(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
-        let trimmed = reference.trim();
-        if trimmed.is_empty() {
-            return Ok(None);
-        }
-        let config = self.config.read().unwrap().clone();
-        let base = config.generated_ivr_dir();
-        let path = Self::resolve_reference_path(base.as_path(), trimmed);
-        Self::read_ivr_document(path)
-    }
-
-    pub fn resolve_ivr_config(&self, reference: &str) -> Result<Option<RouteIvrConfig>> {
-        let trimmed = reference.trim();
-        if trimmed.is_empty() {
-            return Ok(None);
-        }
-        if let Some(config) = self.load_ivr_file(trimmed)? {
-            return Ok(Some(config));
-        }
-        self.find_ivr_by_plan_id(trimmed)
-    }
-
     fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
         let candidate = Path::new(reference);
         if candidate.is_absolute() {
@@ -174,62 +152,6 @@ impl ProxyDataContext {
                 Err(err).with_context(|| format!("failed to read queue file {}", path.display()))
             }
         }
-    }
-
-    fn read_ivr_document(path: PathBuf) -> Result<Option<RouteIvrConfig>> {
-        match fs::read_to_string(&path) {
-            Ok(contents) => {
-                let mut config: RouteIvrConfig = toml::from_str(&contents)
-                    .with_context(|| format!("failed to parse ivr file {}", path.display()))?;
-                config.plan_id = sanitize_metadata_string(config.plan_id.take());
-                Ok(Some(config))
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => {
-                Err(err).with_context(|| format!("failed to read ivr file {}", path.display()))
-            }
-        }
-    }
-
-    fn find_ivr_by_plan_id(&self, plan_id: &str) -> Result<Option<RouteIvrConfig>> {
-        let cfg = self.config.read().unwrap().clone();
-        let base = cfg.generated_ivr_dir();
-        let pattern = format!("{}/**/*.toml", base.display());
-        for entry in glob(pattern.as_str())
-            .map_err(|err| anyhow!("invalid ivr search pattern {}: {}", pattern, err))?
-        {
-            let path = match entry {
-                Ok(path) => path,
-                Err(err) => return Err(anyhow!("failed to read ivr include entry: {}", err)),
-            };
-            let contents = match fs::read_to_string(&path) {
-                Ok(contents) => contents,
-                Err(err) => {
-                    if err.kind() == ErrorKind::NotFound {
-                        continue;
-                    }
-                    return Err(err)
-                        .with_context(|| format!("failed to read ivr file {}", path.display()));
-                }
-            };
-            let mut config: RouteIvrConfig = match toml::from_str(&contents) {
-                Ok(config) => config,
-                Err(err) => {
-                    return Err(err)
-                        .with_context(|| format!("failed to parse ivr file {}", path.display()));
-                }
-            };
-            config.plan_id = sanitize_metadata_string(config.plan_id.take());
-            if config
-                .plan_id
-                .as_deref()
-                .map(|value| value.eq_ignore_ascii_case(plan_id))
-                .unwrap_or(false)
-            {
-                return Ok(Some(config));
-            }
-        }
-        Ok(None)
     }
 
     pub async fn find_trunk_by_ip(&self, addr: &IpAddr) -> Option<String> {
@@ -541,10 +463,6 @@ impl ProxyDataContext {
 impl RouteResourceLookup for ProxyDataContext {
     async fn load_queue(&self, path: &str) -> Result<Option<RouteQueueConfig>> {
         self.resolve_queue_config(path)
-    }
-
-    async fn load_ivr(&self, path: &str) -> Result<Option<RouteIvrConfig>> {
-        self.resolve_ivr_config(path)
     }
 }
 
@@ -869,8 +787,6 @@ struct RouteMetadataAction {
     target_type: Option<String>,
     #[serde(default)]
     queue_file: Option<String>,
-    #[serde(default)]
-    ivr_file: Option<String>,
 }
 
 fn convert_route(
@@ -986,11 +902,6 @@ fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
                 action.queue = Some(queue_path);
             }
         }
-        "ivr" => {
-            if let Some(ivr_path) = sanitize_metadata_string(meta.ivr_file) {
-                action.ivr = Some(ivr_path);
-            }
-        }
         _ => {}
     }
 }
@@ -1015,22 +926,9 @@ mod tests {
         let meta = RouteMetadataAction {
             target_type: Some("queue".to_string()),
             queue_file: Some("queues/support.toml".to_string()),
-            ivr_file: None,
         };
         apply_route_metadata(&mut action, meta);
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
-    }
-
-    #[test]
-    fn route_metadata_sets_ivr_fields() {
-        let mut action = RouteAction::default();
-        let meta = RouteMetadataAction {
-            target_type: Some("ivr".to_string()),
-            queue_file: None,
-            ivr_file: Some("ivr/main_menu.toml".to_string()),
-        };
-        apply_route_metadata(&mut action, meta);
-        assert_eq!(action.ivr.as_deref(), Some("ivr/main_menu.toml"));
     }
 }
 
