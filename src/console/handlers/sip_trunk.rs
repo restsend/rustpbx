@@ -490,22 +490,24 @@ async fn handle_tenant_update(
 ) -> Result<(), sea_orm::DbErr> {
     #[cfg(feature = "addon-wholesale")]
     {
-        // Always clear existing links to ensure 1-to-1 relationship (Trunk -> Tenant)
-        // This also handles the case where multiple links might have been created accidentally
-        TenantTrunkEntity::delete_many()
-            .filter(TenantTrunkColumn::SipTrunkId.eq(trunk_id))
-            .exec(db)
-            .await?;
+        if clear_tenant {
+            TenantTrunkEntity::delete_many()
+                .filter(TenantTrunkColumn::SipTrunkId.eq(trunk_id))
+                .exec(db)
+                .await?;
+        } else if let Some(tid) = tenant_id {
+            // Always clear existing links to ensure 1-to-1 relationship (Trunk -> Tenant)
+            TenantTrunkEntity::delete_many()
+                .filter(TenantTrunkColumn::SipTrunkId.eq(trunk_id))
+                .exec(db)
+                .await?;
 
-        if !clear_tenant {
-            if let Some(tid) = tenant_id {
-                let active = TenantTrunkActiveModel {
-                    sip_trunk_id: Set(trunk_id),
-                    tenant_id: Set(tid),
-                    ..Default::default()
-                };
-                active.insert(db).await?;
-            }
+            let active = TenantTrunkActiveModel {
+                sip_trunk_id: Set(trunk_id),
+                tenant_id: Set(tid),
+                ..Default::default()
+            };
+            active.insert(db).await?;
         }
     }
     #[cfg(not(feature = "addon-wholesale"))]

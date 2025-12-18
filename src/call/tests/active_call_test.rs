@@ -41,8 +41,11 @@ fn create_test_app_state_with(mutator: impl FnOnce(&mut crate::config::Config)) 
     let mut stream_engine = StreamEngine::new();
     stream_engine.with_processor_hook(Box::new(|_, _, _, _, _| Box::pin(async { Ok(Vec::new()) })));
 
+    let db = futures::executor::block_on(sea_orm::Database::connect("sqlite::memory:")).unwrap();
+
     Arc::new(AppStateInner {
         config: Arc::new(config),
+        db,
         useragent: None,
         sip_server: None,
         token: CancellationToken::new(),

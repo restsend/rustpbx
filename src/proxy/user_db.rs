@@ -54,17 +54,24 @@ impl DbBackend {
 #[async_trait]
 impl UserBackend for DbBackend {
     async fn is_same_realm(&self, realm: &str) -> bool {
+        let host = if let Some(pos) = realm.find(':') {
+            &realm[..pos]
+        } else {
+            realm
+        };
+
         if let Some(ref realm_col) = self.config.realm_column {
             let query = format!(
-                "SELECT COUNT(*) FROM {} WHERE  {} = ?",
-                self.config.table_name, realm_col
+                "SELECT COUNT(*) FROM {} WHERE {} = ? OR {} = ?",
+                self.config.table_name, realm_col, realm_col
             );
             let count = sqlx::query(&query)
                 .bind(realm)
+                .bind(host)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| anyhow!("Database query error: {}", e))
-                .map(|row| row.get(0))
+                .map(|row| row.get::<i64, _>(0))
                 .unwrap_or(0);
             return count > 0;
         }
@@ -97,8 +104,20 @@ impl UserBackend for DbBackend {
 
         if let Some(realm) = realm {
             if let Some(ref realm_col) = self.config.realm_column {
-                where_clause.push_str(&format!(" AND {} = ?", realm_col));
-                bind_params.push(realm);
+                let host = if let Some(pos) = realm.find(':') {
+                    &realm[..pos]
+                } else {
+                    realm
+                };
+                if host != realm {
+                    where_clause
+                        .push_str(&format!(" AND ({} = ? OR {} = ?)", realm_col, realm_col));
+                    bind_params.push(realm);
+                    bind_params.push(host);
+                } else {
+                    where_clause.push_str(&format!(" AND {} = ?", realm_col));
+                    bind_params.push(realm);
+                }
             }
         }
         if let Some(ref deleted_at_col) = self.config.deleted_at_column {

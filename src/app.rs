@@ -26,6 +26,7 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use chrono::{DateTime, Utc};
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use std::{
@@ -45,6 +46,7 @@ use voice_engine::media::{cache::set_cache_dir, engine::StreamEngine};
 
 pub struct AppStateInner {
     pub config: Arc<Config>,
+    pub db: DatabaseConnection,
     pub useragent: Option<Arc<UserAgent>>,
     pub sip_server: Option<SipServer>,
     pub token: CancellationToken,
@@ -303,24 +305,28 @@ impl AppStateBuilder {
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
 
-                    #[cfg(feature = "addon-wholesale")]
-                    {
-                        builder = builder.with_create_route_invite(
-                            crate::addons::wholesale::route::create_wholesale_route_invite,
-                        );
-                        #[allow(unused_mut)]
-                        let mut console_secret = None;
+                    let app_state_for_builder = Arc::new(AppStateInner {
+                        config: config.clone(),
+                        db: db_conn.clone(),
+                        useragent: useragent.clone(),
+                        sip_server: None,
+                        token: token.clone(),
+                        active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                        stream_engine: stream_engine.clone(),
+                        callrecord_sender: callrecord_sender.clone(),
+                        total_calls: AtomicU64::new(0),
+                        total_failed_calls: AtomicU64::new(0),
+                        uptime: chrono::Utc::now(),
+                        config_loaded_at: config_loaded_at.clone(),
+                        config_path: config_path.clone(),
+                        reload_requested: AtomicBool::new(false),
+                        addon_registry: addon_registry.clone(),
                         #[cfg(feature = "console")]
-                        if let Some(console) = &config.console {
-                            console_secret = Some(console.session_secret.clone());
-                        }
+                        console: console_state.clone(),
+                    });
 
-                        builder = builder.with_auth_backend(Box::new(
-                            crate::addons::wholesale::auth::WholesaleAuthBackend::new(
-                                console_secret,
-                            ),
-                        ));
-                    }
+                    builder = addon_registry
+                        .apply_proxy_server_hooks(builder, app_state_for_builder.clone());
 
                     match builder.build().await {
                         Ok(server) => Some(server),
@@ -340,6 +346,7 @@ impl AppStateBuilder {
 
         let app_state = Arc::new(AppStateInner {
             config,
+            db: db_conn,
             useragent,
             sip_server,
             token,
@@ -593,12 +600,10 @@ fn create_router(state: AppState) -> Router {
     #[allow(unused_mut)]
     let mut router = router
         .route("/", get(index_handler))
+        .merge(state.addon_registry.get_routers(state.clone()))
         .nest_service("/static", static_files_service)
         .merge(call_routes)
         .layer(cors);
-
-    // Merge Addon Routers
-    router = router.merge(state.addon_registry.get_routers(state.clone()));
 
     #[cfg(feature = "console")]
     if let Some(console_state) = state.console.clone() {

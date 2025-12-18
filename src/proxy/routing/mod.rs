@@ -391,10 +391,6 @@ pub struct RouteAction {
     /// Queue configuration file (when action is queue)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
-
-    /// IVR configuration file (when action is ivr)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ivr: Option<String>,
 }
 
 impl Default for RouteAction {
@@ -406,7 +402,6 @@ impl Default for RouteAction {
             hash_key: None,
             reject: None,
             queue: None,
-            ivr: None,
         }
     }
 }
@@ -419,15 +414,12 @@ impl RouteAction {
                 "reject" => ActionType::Reject,
                 "busy" => ActionType::Busy,
                 "queue" => ActionType::Queue,
-                "ivr" => ActionType::Ivr,
                 _ => ActionType::Forward,
             },
             None => {
                 // If no explicit action, infer from other fields
                 if self.queue.is_some() {
                     ActionType::Queue
-                } else if self.ivr.is_some() {
-                    ActionType::Ivr
                 } else if self.reject.is_some() {
                     ActionType::Reject
                 } else {
@@ -445,7 +437,6 @@ pub enum ActionType {
     Reject,
     Busy,
     Queue,
-    Ivr,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -516,16 +507,6 @@ pub struct RouteQueueFallbackConfig {
     pub failure_reason: Option<String>,
     pub failure_prompt: Option<String>,
     pub queue_ref: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RouteIvrConfig {
-    pub plan_id: Option<String>,
-    #[serde(default)]
-    pub variables: HashMap<String, String>,
-    pub availability_override: bool,
-    #[serde(default)]
-    pub plan: Option<crate::call::ivr::IvrPlan>,
 }
 
 impl RouteQueueConfig {
@@ -632,22 +613,6 @@ impl RouteQueueFallbackConfig {
         ))
     }
 }
-
-impl RouteIvrConfig {
-    pub fn to_dialplan_config(&self) -> Result<crate::call::DialplanIvrConfig> {
-        let mut config = if let Some(plan) = &self.plan {
-            crate::call::DialplanIvrConfig::new().with_inline_plan(plan.clone())
-        } else if let Some(id) = &self.plan_id {
-            crate::call::DialplanIvrConfig::from_plan_id(id.clone())
-        } else {
-            return Err(anyhow!("IVR action requires plan_id or plan"));
-        };
-        config.variables = self.variables.clone();
-        config.availability_override = self.availability_override;
-        Ok(config)
-    }
-}
-
 /// Reject configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RejectConfig {

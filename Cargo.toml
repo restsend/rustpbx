@@ -89,7 +89,11 @@ sea-orm = { version = "1.1.19", features = [
     "sqlx-sqlite",
     "sqlx-mysql",
 ] }
-sea-orm-migration = "1.1.19"
+sea-orm-migration = { version = "1.1.19", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "sqlx-mysql",
+] }
 argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"

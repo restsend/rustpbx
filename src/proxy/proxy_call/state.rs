@@ -20,9 +20,6 @@ pub enum SessionAction {
         name: String,
     },
     ExitQueue,
-    EnterIvr {
-        reference: String,
-    },
     TransferTarget(String),
     ProvideEarlyMedia(String),
     StartRinging {
@@ -53,19 +50,10 @@ impl SessionAction {
         }
     }
 
-    pub fn enter_ivr(reference: &str) -> Self {
-        Self::EnterIvr {
-            reference: reference.trim().to_string(),
-        }
-    }
-
     pub fn from_transfer_target(target: &str) -> Self {
         let trimmed = target.trim();
         if let Some(queue) = trimmed.strip_prefix("queue:") {
             return Self::enter_queue(queue);
-        }
-        if let Some(ivr) = trimmed.strip_prefix("ivr:") {
-            return Self::enter_ivr(ivr);
         }
         Self::TransferTarget(trimmed.to_string())
     }
@@ -463,17 +451,6 @@ mod tests {
             action,
             SessionAction::EnterQueue {
                 name: "support".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn transfer_target_detects_ivr() {
-        let action = SessionAction::from_transfer_target("ivr: main_menu");
-        assert_eq!(
-            action,
-            SessionAction::EnterIvr {
-                reference: "main_menu".to_string()
             }
         );
     }

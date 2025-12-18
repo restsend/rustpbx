@@ -58,8 +58,8 @@ pub trait ProxyModule: Send + Sync {
 pub type FnCreateProxyModule =
     fn(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>>;
 
-pub type FnCreateRouteInvite = fn(
-    server: SipServerRef,
-    config: Arc<ProxyConfig>,
-    routing_state: Arc<RoutingState>,
-) -> Result<Box<dyn RouteInvite>>;
+pub type FnCreateRouteInvite = Arc<
+    dyn Fn(SipServerRef, Arc<ProxyConfig>, Arc<RoutingState>) -> Result<Box<dyn RouteInvite>>
+        + Send
+        + Sync,
+>;

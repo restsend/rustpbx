@@ -288,14 +288,6 @@
                                                 @change="setForwardingTargetType('queue')">
                                             <span>Queue</span>
                                         </label>
-                                        <label
-                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
-                                            :class="forwardingTargetType === 'ivr' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
-                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
-                                                :checked="forwardingTargetType === 'ivr'"
-                                                @change="setForwardingTargetType('ivr')">
-                                            <span>IVR</span>
-                                        </label>
                                     </div>
                                 </div>
                                 <div x-show="forwardingTargetType === 'uri'" x-cloak>
@@ -333,34 +325,6 @@
                                                 <option value="">Select queue…</option>
                                                 <template x-for="queue in queueTargets" :key="queue.reference">
                                                     <option :value="queue.reference" x-text="queue.name"></option>
-                                                </template>
-                                            </select>
-                                        </label>
-                                    </template>
-                                </div>
-                                <div x-show="forwardingTargetType === 'ivr'" x-cloak class="space-y-3">
-                                    <label class="flex flex-col gap-2">
-                                        IVR reference
-                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
-                                            @input="syncForwardingDestination()"
-                                            :disabled="form.call_forwarding_mode === 'none'"
-                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            placeholder="afterhours-menu">
-                                        <span class="text-xs font-normal text-slate-400">Saved as<br><code
-                                                class="font-mono text-[11px]">ivr:reference</code>.</span>
-                                    </label>
-                                    <template x-if="ivrTargets.length">
-                                        <label class="flex flex-col gap-1 text-xs font-medium text-slate-600">
-                                            Choose existing IVR
-                                            <select
-                                                class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                :disabled="form.call_forwarding_mode === 'none'"
-                                                @change="onCatalogSelect($event, 'ivr')">
-                                                <option value="">Select IVR…</option>
-                                                <template x-for="ivr in ivrTargets" :key="ivr.reference">
-                                                    <option :value="ivr.reference"
-                                                        x-text="ivr.plan_id || ivr.reference"></option>
                                                 </template>
                                             </select>
                                         </label>
@@ -557,7 +521,6 @@
             const normalizeForwardingCatalog = (raw) => {
                 const catalog = {
                     queues: [],
-                    ivrs: [],
                 };
                 if (raw && Array.isArray(raw.queues)) {
                     catalog.queues = raw.queues
@@ -573,22 +536,6 @@
                             };
                         })
                         .filter((queue) => queue.reference.length);
-                }
-                if (raw && Array.isArray(raw.ivrs)) {
-                    catalog.ivrs = raw.ivrs
-                        .map((ivr) => {
-                            const reference = typeof ivr.reference === 'string'
-                                ? ivr.reference.trim()
-                                : '';
-                            return {
-                                reference,
-                                file: ivr.file || '',
-                                plan_id: typeof ivr.plan_id === 'string' && ivr.plan_id.trim().length
-                                    ? ivr.plan_id.trim()
-                                    : null,
-                            };
-                        })
-                        .filter((ivr) => ivr.reference.length);
                 }
                 return catalog;
             };
@@ -643,9 +590,6 @@
                 ],
                 get queueTargets() {
                     return this.forwardingCatalog.queues;
-                },
-                get ivrTargets() {
-                    return this.forwardingCatalog.ivrs;
                 },
                 setActiveTab(tabId) {
                     const fallback = this.tabs[0]?.id || 'profile';
@@ -905,7 +849,7 @@
                     if (!trimmed) {
                         return;
                     }
-                    const normalizedKind = kind === 'ivr' ? 'ivr' : 'queue';
+                    const normalizedKind = 'queue';
                     this.forwardingTargetType = normalizedKind;
                     this.forwardingTargetValue = trimmed;
                     this.syncForwardingDestination();
@@ -934,16 +878,13 @@
                     if (lower.startsWith('queue:')) {
                         this.forwardingTargetType = 'queue';
                         this.forwardingTargetValue = destination.slice(6);
-                    } else if (lower.startsWith('ivr:')) {
-                        this.forwardingTargetType = 'ivr';
-                        this.forwardingTargetValue = destination.slice(4);
                     } else {
                         this.forwardingTargetType = 'uri';
                         this.forwardingTargetValue = destination;
                     }
                 },
                 setForwardingTargetType(type) {
-                    const allowed = ['uri', 'queue', 'ivr'];
+                    const allowed = ['uri', 'queue'];
                     const normalized = allowed.includes(type) ? type : 'uri';
                     if (this.forwardingTargetType === normalized) {
                         return;
@@ -953,9 +894,7 @@
                         this.forwardingTargetValue = '';
                     } else if (normalized === 'queue' && this.form.call_forwarding_destination.toLowerCase().startsWith('queue:')) {
                         this.forwardingTargetValue = this.form.call_forwarding_destination.slice(6);
-                    } else if (normalized === 'ivr' && this.form.call_forwarding_destination.toLowerCase().startsWith('ivr:')) {
-                        this.forwardingTargetValue = this.form.call_forwarding_destination.slice(4);
-                    } else if (normalized === 'uri' && !this.form.call_forwarding_destination.toLowerCase().startsWith('queue:') && !this.form.call_forwarding_destination.toLowerCase().startsWith('ivr:')) {
+                    } else if (normalized === 'uri' && !this.form.call_forwarding_destination.toLowerCase().startsWith('queue:')) {
                         this.forwardingTargetValue = this.form.call_forwarding_destination;
                     } else {
                         this.forwardingTargetValue = '';
@@ -970,8 +909,6 @@
                     }
                     if (this.forwardingTargetType === 'queue') {
                         this.form.call_forwarding_destination = `queue:${value}`;
-                    } else if (this.forwardingTargetType === 'ivr') {
-                        this.form.call_forwarding_destination = `ivr:${value}`;
                     } else {
                         this.form.call_forwarding_destination = value;
                     }

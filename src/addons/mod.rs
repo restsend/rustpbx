@@ -43,6 +43,8 @@ pub struct ScriptInjection {
 
 #[async_trait]
 pub trait Addon: Send + Sync {
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Unique identifier for the addon
     fn id(&self) -> &'static str;
 
@@ -102,6 +104,15 @@ pub trait Addon: Send + Sync {
     /// Return a hook for call record processing
     fn call_record_hook(&self) -> Option<Box<dyn crate::callrecord::CallRecordHook>> {
         None
+    }
+
+    /// Return a hook for proxy server builder
+    fn proxy_server_hook(
+        &self,
+        builder: crate::proxy::server::SipServerBuilder,
+        _state: AppState,
+    ) -> crate::proxy::server::SipServerBuilder {
+        builder
     }
 }
 

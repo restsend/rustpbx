@@ -756,12 +756,30 @@ impl SipServerInner {
     }
 
     pub async fn is_same_realm(&self, callee_realm: &str) -> bool {
-        match callee_realm {
-            "localhost" | "127.0.0.1" | "::1" => true,
+        let (host, port) = if let Some(pos) = callee_realm.find(':') {
+            (
+                &callee_realm[..pos],
+                callee_realm[pos + 1..].parse::<u16>().ok(),
+            )
+        } else {
+            (callee_realm, None)
+        };
+
+        let is_my_port = |p: u16| {
+            self.proxy_config.udp_port == Some(p)
+                || self.proxy_config.tcp_port == Some(p)
+                || self.proxy_config.tls_port == Some(p)
+                || self.proxy_config.ws_port == Some(p)
+        };
+
+        match host {
+            "localhost" | "127.0.0.1" | "::1" => {
+                return port.map(is_my_port).unwrap_or(true);
+            }
             _ => {
                 if let Some(external_ip) = self.rtp_config.external_ip.as_ref() {
-                    if external_ip.starts_with(callee_realm) {
-                        return true;
+                    if external_ip == host {
+                        return port.map(is_my_port).unwrap_or(true);
                     }
                 }
                 if let Some(realms) = self.proxy_config.realms.as_ref() {
@@ -769,14 +787,19 @@ impl SipServerInner {
                         if item == callee_realm {
                             return true;
                         }
+                        if item == host {
+                            return port.map(is_my_port).unwrap_or(true);
+                        }
                     }
                 }
-                if self
-                    .endpoint
-                    .get_addrs()
-                    .iter()
-                    .any(|addr| addr.addr.host.to_string() == callee_realm)
-                {
+                if self.endpoint.get_addrs().iter().any(|addr| {
+                    if addr.addr.host.to_string() == host {
+                        return port
+                            .map(|p| addr.addr.port == Some(p.into()))
+                            .unwrap_or(true);
+                    }
+                    false
+                }) {
                     return true;
                 }
                 self.user_backend.is_same_realm(callee_realm).await

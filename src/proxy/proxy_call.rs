@@ -49,7 +49,6 @@ use voice_engine::{
     net_tool::is_private_ip,
 };
 
-pub(crate) mod ivr;
 pub(crate) mod queue;
 pub(crate) mod reporter;
 pub(crate) mod session;
@@ -900,7 +899,6 @@ impl ProxyCall {
             match endpoint {
                 TransferEndpoint::Uri(uri) => self.transfer_to_uri(session, uri).await,
                 TransferEndpoint::Queue(name) => self.transfer_to_queue(session, name).await,
-                TransferEndpoint::Ivr(reference) => self.transfer_to_ivr(session, reference).await,
             }
         }
         .boxed()
@@ -923,9 +921,6 @@ impl ProxyCall {
                 SessionAction::HandleReInvite(_) => {
                     session.handle_reinvite().await;
                     Ok(())
-                }
-                SessionAction::EnterIvr { reference } => {
-                    self.transfer_to_ivr(session, &reference).await
                 }
                 SessionAction::TransferTarget(target) => {
                     self.transfer_to_uri(session, target.trim()).await
@@ -1060,7 +1055,6 @@ impl ProxyCall {
                     self.execute_queue_plan(session, plan, next, 0, propagate_failure, inbox)
                         .await
                 }
-                DialplanFlow::Ivr(config) => self.run_ivr(session, config, None).await,
             }
         }
         .boxed()
@@ -1539,9 +1533,7 @@ impl ProxyCall {
                     );
                     option
                 }
-                RouteResult::Forward(option)
-                | RouteResult::Queue { option, .. }
-                | RouteResult::Ivr { option, .. } => option,
+                RouteResult::Forward(option) | RouteResult::Queue { option, .. } => option,
                 RouteResult::Abort(code, reason) => {
                     warn!(session_id = self.session_id, %code, ?reason, "route abort");
                     return Err((code, reason));

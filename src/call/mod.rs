@@ -1,4 +1,3 @@
-use self::ivr::IvrPlan;
 use crate::config::{MediaProxyMode, RouteResult};
 use anyhow::Result;
 use rsip::{StatusCode, Transport};
@@ -19,7 +18,6 @@ use voice_engine::{
 
 pub mod active_call;
 pub mod cookie;
-pub mod ivr;
 pub mod policy;
 pub mod sip;
 pub mod user;
@@ -210,7 +208,6 @@ pub enum DialStrategy {
 pub enum TransferEndpoint {
     Uri(String),
     Queue(String),
-    Ivr(String),
 }
 
 impl TransferEndpoint {
@@ -221,7 +218,6 @@ impl TransferEndpoint {
         }
 
         const QUEUE_PREFIX: &str = "queue:";
-        const IVR_PREFIX: &str = "ivr:";
 
         if trimmed.len() >= QUEUE_PREFIX.len()
             && trimmed[..QUEUE_PREFIX.len()].eq_ignore_ascii_case(QUEUE_PREFIX)
@@ -232,17 +228,6 @@ impl TransferEndpoint {
             }
             return Some(TransferEndpoint::Queue(name.to_string()));
         }
-
-        if trimmed.len() >= IVR_PREFIX.len()
-            && trimmed[..IVR_PREFIX.len()].eq_ignore_ascii_case(IVR_PREFIX)
-        {
-            let name = trimmed[IVR_PREFIX.len()..].trim();
-            if name.is_empty() {
-                return None;
-            }
-            return Some(TransferEndpoint::Ivr(name.to_string()));
-        }
-
         Some(TransferEndpoint::Uri(trimmed.to_string()))
     }
 }
@@ -252,7 +237,6 @@ impl std::fmt::Display for TransferEndpoint {
         match self {
             TransferEndpoint::Uri(uri) => write!(f, "{}", uri),
             TransferEndpoint::Queue(name) => write!(f, "queue:{}", name),
-            TransferEndpoint::Ivr(reference) => write!(f, "ivr:{}", reference),
         }
     }
 }
@@ -394,61 +378,6 @@ pub enum QueueFallbackAction {
 }
 
 #[derive(Debug, Clone)]
-pub struct DialplanIvrConfig {
-    pub plan_id: Option<String>,
-    pub plan: Option<IvrPlan>,
-    pub variables: HashMap<String, String>,
-    pub availability_override: bool,
-}
-
-impl Default for DialplanIvrConfig {
-    fn default() -> Self {
-        Self {
-            plan_id: None,
-            plan: None,
-            variables: HashMap::new(),
-            availability_override: false,
-        }
-    }
-}
-
-impl DialplanIvrConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn from_plan_id(plan_id: impl Into<String>) -> Self {
-        Self {
-            plan_id: Some(plan_id.into()),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_inline_plan(mut self, plan: IvrPlan) -> Self {
-        if self.plan_id.is_none() {
-            self.plan_id = Some(plan.id.clone());
-        }
-        self.plan = Some(plan);
-        self
-    }
-
-    pub fn with_variables(mut self, variables: HashMap<String, String>) -> Self {
-        self.variables = variables;
-        self
-    }
-
-    pub fn insert_variable(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.variables.insert(key.into(), value.into());
-        self
-    }
-
-    pub fn set_availability_override(mut self, enabled: bool) -> Self {
-        self.availability_override = enabled;
-        self
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct QueuePlan {
     pub accept_immediately: bool,
     pub passthrough_ringback: bool,
@@ -503,7 +432,6 @@ pub enum DialplanFlow {
         plan: QueuePlan,
         next: Box<DialplanFlow>,
     },
-    Ivr(DialplanIvrConfig),
 }
 
 impl DialplanFlow {
@@ -525,7 +453,6 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { next, .. } => next.is_empty(),
-            DialplanFlow::Ivr(_) => false,
         }
     }
 
@@ -537,7 +464,6 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { next, .. } => next.all_webrtc_target(),
-            DialplanFlow::Ivr(_) => false,
         }
     }
 
@@ -549,7 +475,6 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { next, .. } => next.find_targets(),
-            DialplanFlow::Ivr(_) => None,
         }
     }
 
@@ -576,22 +501,6 @@ impl DialplanFlow {
                 hold_audio || next.has_queue_hold_audio()
             }
             _ => false,
-        }
-    }
-
-    fn has_ivr(&self) -> bool {
-        match self {
-            DialplanFlow::Ivr(_) => true,
-            DialplanFlow::Queue { next, .. } => next.has_ivr(),
-            _ => false,
-        }
-    }
-
-    fn ivr_config(&self) -> Option<&DialplanIvrConfig> {
-        match self {
-            DialplanFlow::Ivr(config) => Some(config),
-            DialplanFlow::Queue { next, .. } => next.ivr_config(),
-            _ => None,
         }
     }
 }
@@ -785,19 +694,6 @@ impl Dialplan {
     pub fn with_targets(mut self, targets: DialStrategy) -> Self {
         self.set_terminal_flow(DialplanFlow::Targets(targets));
         self
-    }
-
-    pub fn with_ivr(mut self, ivr: DialplanIvrConfig) -> Self {
-        self.set_terminal_flow(DialplanFlow::Ivr(ivr));
-        self
-    }
-
-    pub fn has_ivr(&self) -> bool {
-        self.flow.has_ivr()
-    }
-
-    pub fn ivr_config(&self) -> Option<&DialplanIvrConfig> {
-        self.flow.ivr_config()
     }
 
     pub fn with_recording(mut self, recording: CallRecordingConfig) -> Self {

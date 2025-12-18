@@ -1,6 +1,6 @@
 use super::super::{
-    DEFAULT_QUEUE_FAILURE_AUDIO, DEFAULT_QUEUE_HOLD_AUDIO, DialDirection, Dialplan, DialplanFlow,
-    DialplanIvrConfig, FailureAction, QueueFallbackAction, QueueHoldConfig, QueuePlan,
+    DEFAULT_QUEUE_FAILURE_AUDIO, DEFAULT_QUEUE_HOLD_AUDIO, DialDirection, Dialplan, FailureAction,
+    QueueFallbackAction, QueueHoldConfig, QueuePlan,
 };
 use rsip::{Headers, Method, Request, Version};
 
@@ -47,38 +47,6 @@ fn dialplan_reports_queue_presence() {
 
     let plan = plan.with_queue(queue);
     assert!(plan.has_queue());
-}
-
-#[test]
-fn queue_wraps_terminal_flow() {
-    let req = mock_request();
-    let queue = QueuePlan {
-        accept_immediately: false,
-        passthrough_ringback: false,
-        hold: None,
-        fallback: None,
-        dial_strategy: None,
-        ring_timeout: None,
-        label: None,
-    };
-
-    let plan = Dialplan::new(
-        "session-queue-flow".to_string(),
-        req,
-        DialDirection::Inbound,
-    )
-    .with_queue(queue)
-    .with_ivr(DialplanIvrConfig::from_plan_id("menu"));
-
-    match &plan.flow {
-        DialplanFlow::Queue { next, .. } => match next.as_ref() {
-            DialplanFlow::Ivr(config) => {
-                assert_eq!(config.plan_id.as_deref(), Some("menu"));
-            }
-            _ => panic!("queue next flow should be IVR"),
-        },
-        _ => panic!("dialplan flow should start with queue"),
-    }
 }
 
 #[test]

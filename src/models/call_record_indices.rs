@@ -10,39 +10,78 @@ impl MigrationTrait for Migration {
         let col_dept = crate::models::call_record::Column::DepartmentId;
         let col_trunk = crate::models::call_record::Column::SipTrunkId;
         let col_billing = crate::models::call_record::Column::BillingStatus;
+        let col_started_at = crate::models::call_record::Column::StartedAt;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_department")
-                    .table(table)
-                    .col(col_dept)
-                    .to_owned(),
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_department",
             )
-            .await?;
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_department")
+                        .table(table)
+                        .col(col_dept)
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_sip_trunk")
-                    .table(table)
-                    .col(col_trunk)
-                    .to_owned(),
-            )
-            .await?;
+        if !manager
+            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_sip_trunk")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_sip_trunk")
+                        .table(table)
+                        .col(col_trunk)
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_billing_status")
-                    .table(table)
-                    .col(col_billing)
-                    .to_owned(),
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_trunk_started",
             )
-            .await
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_trunk_started")
+                        .table(table)
+                        .col(col_trunk)
+                        .col(col_started_at)
+                        .to_owned(),
+                )
+                .await?;
+        }
+
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_billing_status",
+            )
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_billing_status")
+                        .table(table)
+                        .col(col_billing)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -52,6 +91,15 @@ impl MigrationTrait for Migration {
             .drop_index(
                 Index::drop()
                     .name("idx_rustpbx_call_records_billing_status")
+                    .table(table)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_rustpbx_call_records_trunk_started")
                     .table(table)
                     .to_owned(),
             )

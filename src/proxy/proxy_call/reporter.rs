@@ -117,25 +117,6 @@ impl CallReporter {
             extras_map.insert("last_queue".to_string(), Value::String(queue));
         }
 
-        if let Some(trace) = snapshot.ivr_trace.clone() {
-            let mut ivr_payload = JsonMap::new();
-            if let Some(reference) = trace.reference.clone() {
-                ivr_payload.insert("reference".to_string(), Value::String(reference));
-            }
-            if let Some(plan_id) = trace.plan_id.clone() {
-                ivr_payload.insert("plan_id".to_string(), Value::String(plan_id));
-            }
-            if let Some(exit) = trace.exit.clone() {
-                ivr_payload.insert("exit".to_string(), Value::String(exit));
-            }
-            if let Some(detail) = trace.detail.clone() {
-                ivr_payload.insert("detail".to_string(), Value::String(detail));
-            }
-            if !ivr_payload.is_empty() {
-                extras_map.insert("ivr".to_string(), Value::Object(ivr_payload));
-            }
-        }
-
         let mut hangup_messages = snapshot.hangup_messages.clone();
         if hangup_messages.is_empty() {
             if let Some((code, reason)) = snapshot.last_error.as_ref() {
