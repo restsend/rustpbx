@@ -1,4 +1,4 @@
-use super::locator::{Locator, is_local_realm, sort_locations_by_recency};
+use super::locator::{Locator, RealmChecker, is_local_realm, sort_locations_by_recency};
 use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -7,9 +7,11 @@ use sea_orm::{ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{boolean, integer, pk_auto, string, string_null, timestamp};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+// ... (rest of the model)
 #[sea_orm(table_name = "rustpbx_locations")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
@@ -35,6 +37,7 @@ impl Entity {}
 /// Database backed Locator implementation using SeaORM
 pub struct DbLocator {
     db: DatabaseConnection,
+    realm_checker: Mutex<Option<RealmChecker>>,
 }
 
 #[derive(DeriveMigrationName)]
@@ -109,7 +112,10 @@ impl DbLocator {
         let db = Database::connect(&url)
             .await
             .map_err(|e| anyhow::anyhow!("Database connection error: {}", e))?;
-        let db_locator = Self { db };
+        let db_locator = Self {
+            db,
+            realm_checker: Mutex::new(None),
+        };
         info!("Creating DbLocator");
         match db_locator.migrate().await {
             Ok(_) => Ok(db_locator),
@@ -130,6 +136,23 @@ impl DbLocator {
 
 #[async_trait]
 impl Locator for DbLocator {
+    async fn is_local_realm(&self, realm: &str) -> bool {
+        let checker = self.realm_checker.lock().await.clone();
+        if let Some(checker) = checker {
+            checker(realm).await
+        } else {
+            is_local_realm(realm)
+        }
+    }
+
+    fn set_realm_checker(&self, checker: RealmChecker) {
+        let mut lock = self
+            .realm_checker
+            .try_lock()
+            .expect("failed to lock realm_checker");
+        *lock = Some(checker);
+    }
+
     async fn register(
         &self,
         username: &str,
@@ -144,11 +167,17 @@ impl Locator for DbLocator {
             return Err(anyhow::anyhow!("Cannot register location without username"));
         }
 
-        let realm_key = realm
-            .map(|r| r.trim())
-            .filter(|r| !r.is_empty())
-            .map(|r| r.to_ascii_lowercase())
-            .unwrap_or_default();
+        let realm_key = match realm {
+            Some(r) if !r.trim().is_empty() => {
+                let r = r.trim();
+                if self.is_local_realm(r).await {
+                    "localhost".to_string()
+                } else {
+                    r.to_ascii_lowercase()
+                }
+            }
+            _ => String::new(),
+        };
         let destination = match &location.destination {
             Some(dest) => dest,
             None => {
@@ -308,11 +337,17 @@ impl Locator for DbLocator {
             return Ok(());
         }
 
-        let realm_key = realm
-            .map(|r| r.trim())
-            .filter(|r| !r.is_empty())
-            .map(|r| r.to_ascii_lowercase())
-            .unwrap_or_default();
+        let realm_key = match realm {
+            Some(r) if !r.trim().is_empty() => {
+                let r = r.trim();
+                if self.is_local_realm(r).await {
+                    "localhost".to_string()
+                } else {
+                    r.to_ascii_lowercase()
+                }
+            }
+            _ => String::new(),
+        };
 
         Entity::delete_many()
             .filter(Column::Username.eq(username_key))
@@ -340,7 +375,10 @@ impl Locator for DbLocator {
 
         if models.is_empty() {
             let realm_raw = uri.host().to_string();
-            let realm_key = realm_raw.trim().to_ascii_lowercase();
+            let mut realm_key = realm_raw.trim().to_ascii_lowercase();
+            if self.is_local_realm(&realm_key).await {
+                realm_key = "localhost".to_string();
+            }
             let username_raw = uri.user().unwrap_or_else(|| "");
             let username_trimmed = username_raw.trim();
             let username_key = username_trimmed.to_ascii_lowercase();
@@ -354,7 +392,9 @@ impl Locator for DbLocator {
                     .await
                     .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
 
-                if models.is_empty() && (realm_key.is_empty() || is_local_realm(&realm_key)) {
+                if models.is_empty()
+                    && (realm_key.is_empty() || self.is_local_realm(&realm_key).await)
+                {
                     models = Entity::find()
                         .filter(Column::Username.eq(&username_key))
                         .order_by_desc(Column::LastModified)
