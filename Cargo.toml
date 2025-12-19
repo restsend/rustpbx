@@ -14,7 +14,7 @@ categories = ["network-programming", "multimedia"]
 opus = ["voice-engine/opus"]
 console = ["dep:minijinja"]
 addon-acme = []
-addon-wholesale = []
+addon-wholesale = ["flate2"]
 addon-transcript = []
 commerce = ["addon-wholesale"]
 default = ["opus", "console", "addon-acme", "addon-transcript"]
@@ -98,6 +98,7 @@ argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"
 serde_with = "3.16.1"
+flate2 = { version = "1.0", optional = true }
 console-subscriber = "0.5.0"
 lru = "0.16.2"
 phonenumber = "0.3.7"

@@ -55,10 +55,7 @@ docker pull ghcr.io/restsend/rustpbx:latest
 ```bash
 docker run -d \
   --name rustpbx \
-  -p 8080:8080 \
-  -p 15060:15060/udp \
-  -p 13050:13050/udp \
-  -p 20000-30000:20000-30000/udp \
+  -net host \
   --env-file .env \
   -v $(pwd)/db:/app/db \
   -v $(pwd)/config.toml:/app/config.toml \

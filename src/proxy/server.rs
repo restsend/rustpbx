@@ -465,7 +465,7 @@ impl SipServerBuilder {
             auth_backend: auth_backend,
             call_router: call_router,
             proxycall_inspector: proxycall_inspector,
-            locator: locator,
+            locator: locator.clone(),
             callrecord_sender: self.callrecord_sender,
             endpoint,
             dialog_layer,
@@ -479,6 +479,19 @@ impl SipServerBuilder {
             call_record_hooks: Arc::new(self.call_record_hooks),
             runnings_tx: Arc::new(AtomicUsize::new(0)),
         });
+
+        let inner_weak = Arc::downgrade(&inner);
+        inner.locator.set_realm_checker(Arc::new(move |realm| {
+            let inner = inner_weak.clone();
+            let realm = realm.to_string();
+            Box::pin(async move {
+                if let Some(inner) = inner.upgrade() {
+                    inner.is_same_realm(&realm).await
+                } else {
+                    false
+                }
+            })
+        }));
 
         let mut allow_methods = Vec::new();
         let mut modules = Vec::new();

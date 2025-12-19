@@ -30,15 +30,24 @@ pub enum LocatorEvent {
 pub type LocatorEventSender = tokio::sync::broadcast::Sender<LocatorEvent>;
 pub type LocatorEventReceiver = tokio::sync::broadcast::Receiver<LocatorEvent>;
 pub type LocatorCreationFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Locator>>> + Send>>;
+pub type RealmChecker =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 #[async_trait]
 pub trait Locator: Send + Sync {
-    fn get_identifier(&self, user: &str, realm: Option<&str>) -> String {
+    async fn get_identifier(&self, user: &str, realm: Option<&str>) -> String {
         let username = user.trim().to_ascii_lowercase();
-        let realm = realm
-            .map(|r| r.trim())
-            .filter(|r| !r.is_empty())
-            .map(|r| r.to_ascii_lowercase());
+        let realm = match realm {
+            Some(r) if !r.trim().is_empty() => {
+                let r = r.trim();
+                if self.is_local_realm(r).await {
+                    Some("localhost".to_string())
+                } else {
+                    Some(r.to_ascii_lowercase())
+                }
+            }
+            _ => None,
+        };
 
         match (username.is_empty(), realm) {
             (true, _) => String::new(),
@@ -46,6 +55,10 @@ pub trait Locator: Send + Sync {
             (false, None) => username,
         }
     }
+    async fn is_local_realm(&self, realm: &str) -> bool {
+        is_local_realm(realm)
+    }
+    fn set_realm_checker(&self, _checker: RealmChecker) {}
     async fn register(&self, username: &str, realm: Option<&str>, location: Location)
     -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
@@ -129,6 +142,7 @@ impl TransportEventInspector for TransportInspectorLocator {
 
 pub struct MemoryLocator {
     locations: Mutex<HashMap<String, HashMap<String, Location>>>,
+    realm_checker: Mutex<Option<RealmChecker>>,
 }
 
 impl Default for MemoryLocator {
@@ -141,6 +155,7 @@ impl MemoryLocator {
     pub fn new() -> Self {
         Self {
             locations: Mutex::new(HashMap::new()),
+            realm_checker: Mutex::new(None),
         }
     }
     pub fn create(_config: Arc<ProxyConfig>) -> LocatorCreationFuture {
@@ -150,13 +165,30 @@ impl MemoryLocator {
 
 #[async_trait]
 impl Locator for MemoryLocator {
+    async fn is_local_realm(&self, realm: &str) -> bool {
+        let checker = self.realm_checker.lock().await.clone();
+        if let Some(checker) = checker {
+            checker(realm).await
+        } else {
+            is_local_realm(realm)
+        }
+    }
+
+    fn set_realm_checker(&self, checker: RealmChecker) {
+        let mut lock = self
+            .realm_checker
+            .try_lock()
+            .expect("failed to lock realm_checker");
+        *lock = Some(checker);
+    }
+
     async fn register(
         &self,
         username: &str,
         realm: Option<&str>,
         location: Location,
     ) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
+        let identifier = self.get_identifier(username, realm).await;
         if identifier.is_empty() {
             debug!("skip registering location with empty identifier");
             return Ok(());
@@ -183,7 +215,7 @@ impl Locator for MemoryLocator {
     }
 
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()> {
-        let identifier = self.get_identifier(username, realm);
+        let identifier = self.get_identifier(username, realm).await;
         let mut locations = self.locations.lock().await;
         locations.remove(&identifier);
         Ok(())
@@ -280,10 +312,10 @@ impl Locator for MemoryLocator {
         let mut identifiers = Vec::new();
         if !username.is_empty() {
             if !realm_trimmed.is_empty() {
-                identifiers.push(self.get_identifier(username, Some(realm_trimmed)));
+                identifiers.push(self.get_identifier(username, Some(realm_trimmed)).await);
             }
-            identifiers.push(self.get_identifier(username, Some("localhost")));
-            identifiers.push(self.get_identifier(username, None));
+            identifiers.push(self.get_identifier(username, Some("localhost")).await);
+            identifiers.push(self.get_identifier(username, None).await);
         }
 
         for id in identifiers {
@@ -308,7 +340,8 @@ impl Locator for MemoryLocator {
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
                         let realm_string = registered.host().to_string();
-                        let realm_match = realm_matches(realm_trimmed, realm_string.trim());
+                        let realm_match =
+                            realm_matches(self, realm_trimmed, realm_string.trim()).await;
 
                         if user_match && realm_match {
                             matched = true;
@@ -322,7 +355,8 @@ impl Locator for MemoryLocator {
                             .map(|u| u.trim().eq_ignore_ascii_case(&username_lower))
                             .unwrap_or(false);
                         let realm_string = loc.aor.host().to_string();
-                        let realm_match = realm_matches(realm_trimmed, realm_string.trim());
+                        let realm_match =
+                            realm_matches(self, realm_trimmed, realm_string.trim()).await;
 
                         if user_match && realm_match {
                             matched = true;
@@ -355,15 +389,18 @@ fn compare_location_recency(a: &Location, b: &Location) -> Ordering {
 
 fn host_without_port(value: &str) -> &str {
     let trimmed = value.trim();
-    if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            &rest[..end]
-        } else {
-            rest
+    if trimmed.starts_with('[') {
+        if let Some(end) = trimmed.find(']') {
+            return &trimmed[1..end];
         }
-    } else {
-        trimmed.split(':').next().unwrap_or(trimmed)
     }
+
+    // If it contains more than one colon, it's likely an IPv6 address without brackets
+    if trimmed.matches(':').count() > 1 {
+        return trimmed;
+    }
+
+    trimmed.split(':').next().unwrap_or(trimmed)
 }
 
 pub(crate) fn is_local_realm(realm: &str) -> bool {
@@ -371,23 +408,44 @@ pub(crate) fn is_local_realm(realm: &str) -> bool {
         return false;
     }
     let host = host_without_port(realm);
-    matches!(
-        host.to_ascii_lowercase().as_str(),
+    let host_lower = host.to_ascii_lowercase();
+    if matches!(
+        host_lower.as_str(),
         "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
-    )
+    ) {
+        return true;
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return true;
+        }
+        if let std::net::IpAddr::V4(v4) = ip {
+            if v4.is_private() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-fn realm_matches(requested_realm: &str, candidate_realm: &str) -> bool {
+async fn realm_matches(
+    locator: &dyn Locator,
+    requested_realm: &str,
+    candidate_realm: &str,
+) -> bool {
     let requested = requested_realm.trim();
     if requested.is_empty() {
         return true;
     }
-    if is_local_realm(requested) {
+
+    let candidate = candidate_realm.trim();
+    if locator.is_local_realm(requested).await && locator.is_local_realm(candidate).await {
         return true;
     }
 
     let requested_host = host_without_port(requested).to_ascii_lowercase();
-    let candidate_host = host_without_port(candidate_realm).to_ascii_lowercase();
+    let candidate_host = host_without_port(candidate).to_ascii_lowercase();
     requested_host == candidate_host
 }
 
@@ -504,5 +562,71 @@ mod tests {
         let locations = locator.lookup(&lookup_uri).await.unwrap();
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].aor.to_string(), registered_uri.to_string());
+    }
+
+    #[test]
+    fn test_is_local_realm_logic() {
+        assert!(is_local_realm("localhost"));
+        assert!(is_local_realm("127.0.0.1"));
+        assert!(is_local_realm("0.0.0.0"));
+        assert!(is_local_realm("::1"));
+        assert!(is_local_realm("192.168.1.1"));
+        assert!(is_local_realm("10.0.0.1"));
+        assert!(is_local_realm("172.16.0.1"));
+        assert!(is_local_realm("[::1]"));
+        assert!(is_local_realm("127.0.0.1:5060"));
+
+        assert!(!is_local_realm("rustpbx.com"));
+        assert!(!is_local_realm("8.8.8.8"));
+        assert!(!is_local_realm(""));
+    }
+
+    #[tokio::test]
+    async fn test_realm_matches_logic() {
+        let locator = MemoryLocator::new();
+        // Both local
+        assert!(realm_matches(&locator, "127.0.0.1", "localhost").await);
+        assert!(realm_matches(&locator, "192.168.1.1", "10.0.0.1").await);
+
+        // One local, one not
+        assert!(!realm_matches(&locator, "127.0.0.1", "rustpbx.com").await);
+        assert!(!realm_matches(&locator, "rustpbx.com", "127.0.0.1").await);
+
+        // Both same non-local
+        assert!(realm_matches(&locator, "rustpbx.com", "rustpbx.com").await);
+        assert!(realm_matches(&locator, "rustpbx.com:5060", "rustpbx.com").await);
+
+        // Different non-local
+        assert!(!realm_matches(&locator, "rustpbx.com", "other.com").await);
+    }
+
+    #[tokio::test]
+    async fn test_custom_realm_checker() {
+        let locator = MemoryLocator::new();
+        // Custom checker that treats "my-special-realm.com" as local
+        locator.set_realm_checker(Arc::new(|realm| {
+            let is_special = realm == "my-special-realm.com";
+            let realm = realm.to_string();
+            Box::pin(async move { is_special || is_local_realm(&realm) })
+        }));
+
+        let registered_uri: rsip::Uri = "sip:alice@my-special-realm.com".try_into().unwrap();
+        let lookup_uri: rsip::Uri = "sip:alice@localhost".try_into().unwrap();
+
+        locator
+            .register(
+                "alice",
+                Some("my-special-realm.com"),
+                Location {
+                    aor: registered_uri.clone(),
+                    expires: 3600,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let locations = locator.lookup(&lookup_uri).await.unwrap();
+        assert_eq!(locations.len(), 1);
     }
 }
