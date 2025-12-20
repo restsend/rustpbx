@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use futures::stream::{FuturesUnordered, StreamExt};
 use object_store::{
     ObjectStore, aws::AmazonS3Builder, azure::MicrosoftAzureBuilder,
     gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
@@ -26,7 +27,6 @@ use std::{
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
-    select,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -67,6 +67,26 @@ pub struct CallRecordEvent {
     pub r#type: CallRecordEventType,
     pub timestamp: u64,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRecordStats {
+    pub backlog: usize,
+    pub processed: u64,
+    pub failed: u64,
+    pub avg: f64,
+}
+
+impl CallRecordStats {
+    pub fn new() -> Self {
+        Self {
+            backlog: 0,
+            processed: 0,
+            failed: 0,
+            avg: 0.0,
+        }
+    }
 }
 
 impl CallRecordEvent {
@@ -455,7 +475,9 @@ pub fn build_object_store_from_s3(
 }
 
 pub struct CallRecordManager {
+    pub max_concurrent: usize,
     pub sender: CallRecordSender,
+    pub stats: Arc<CallRecordStats>,
     config: Arc<CallRecordConfig>,
     cancel_token: CancellationToken,
     receiver: CallRecordReceiver,
@@ -468,6 +490,7 @@ pub struct CallRecordManager {
 pub struct CallRecordManagerBuilder {
     pub cancel_token: Option<CancellationToken>,
     pub config: Option<CallRecordConfig>,
+    pub max_concurrent: Option<usize>,
     saver_fn: Option<FnSaveCallRecord>,
     formatter: Option<Arc<dyn CallRecordFormatter>>,
     db: Option<DatabaseConnection>,
@@ -479,6 +502,7 @@ impl CallRecordManagerBuilder {
         Self {
             cancel_token: None,
             config: None,
+            max_concurrent: None,
             saver_fn: None,
             formatter: None,
             db: None,
@@ -515,6 +539,10 @@ impl CallRecordManagerBuilder {
         self.hooks.push(hook);
         self
     }
+    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        self.max_concurrent = Some(max_concurrent);
+        self
+    }
 
     pub fn build(self) -> CallRecordManager {
         let cancel_token = self.cancel_token.unwrap_or_default();
@@ -526,6 +554,7 @@ impl CallRecordManagerBuilder {
         let formatter = self
             .formatter
             .unwrap_or_else(|| Arc::new(DefaultCallRecordFormatter::default()));
+        let max_concurrent = self.max_concurrent.unwrap_or(64);
 
         match config.as_ref() {
             CallRecordConfig::Local { root } => {
@@ -544,6 +573,8 @@ impl CallRecordManagerBuilder {
         }
 
         CallRecordManager {
+            max_concurrent,
+            stats: Arc::new(CallRecordStats::new()),
             cancel_token,
             sender,
             receiver,
@@ -966,66 +997,50 @@ impl CallRecordManager {
 
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
-        let db = self.db.clone();
-        let hooks = Arc::new(mem::take(&mut self.hooks));
         info!("CallRecordManager serving");
-        select! {
-            _ = self.cancel_token.cancelled() => {
-                info!("CallRecordManager cancelled");
-            }
-            _ = Self::recv_loop(
-                token,
-                self.formatter.clone(),
-                self.config.clone(),
-                self.saver_fn.clone(),
-                &mut self.receiver,
-                db,
-                hooks,
-            ) => {
-                info!("CallRecordManager received done");
-            }
+        tokio::select! {
+            _ = token.cancelled() => {}
+            _ = self.recv_loop() => {}
         }
         info!("CallRecordManager served");
     }
 
-    async fn recv_loop(
-        cancel_token: CancellationToken,
-        formatter: Arc<dyn CallRecordFormatter>,
-        config: Arc<CallRecordConfig>,
-        saver_fn: FnSaveCallRecord,
-        receiver: &mut CallRecordReceiver,
-        db: Option<DatabaseConnection>,
-        hooks: Arc<Vec<Box<dyn CallRecordHook>>>,
-    ) -> Result<()> {
-        while let Some(record) = receiver.recv().await {
-            let cancel_token_ref = cancel_token.clone();
-            let save_fn_ref = saver_fn.clone();
-            let config_ref = config.clone();
-            let formatter_ref = formatter.clone();
-            let db_ref = db.clone();
-            let hooks_ref = hooks.clone();
-            tokio::spawn(async move {
-                let record = record;
-                if let Some(db) = db_ref {
-                    if let Err(e) = persist_call_record(&db, &hooks_ref, &record).await {
-                        warn!("Failed to persist call record: {}", e);
-                    }
-                }
-                select! {
-                    _ = cancel_token_ref.cancelled() => {
-                        info!("CallRecordManager cancelled");
-                    }
-                    r = save_fn_ref(cancel_token_ref.clone(), formatter_ref, config_ref, record) => {
-                        match r {
-                            Ok(_) => {
-                            }
-                            Err(e) => {
-                                warn!("Failed to save call record: {}", e);
-                            }
+    async fn recv_loop(&mut self) -> Result<()> {
+        let mut futures = FuturesUnordered::new();
+        let hooks = Arc::new(std::mem::take(&mut self.hooks));
+        loop {
+            let limit = self.max_concurrent - futures.len();
+            if limit == 0 {
+                if let Some(_) = futures.next().await {}
+                continue;
+            }
+            let mut buffer = Vec::with_capacity(limit);
+            if self.receiver.recv_many(&mut buffer, limit).await == 0 {
+                break;
+            }
+
+            for record in buffer {
+                let cancel_token_ref = self.cancel_token.clone();
+                let save_fn_ref = self.saver_fn.clone();
+                let config_ref = self.config.clone();
+                let formatter_ref = self.formatter.clone();
+                let db_ref = self.db.clone();
+                let hooks_ref = hooks.clone();
+
+                futures.push(async move {
+                    if let Some(db) = db_ref {
+                        if let Err(e) = persist_call_record(&db, &hooks_ref, &record).await {
+                            warn!("Failed to persist call record: {}", e);
                         }
                     }
-                }
-            });
+                    if let Err(e) =
+                        save_fn_ref(cancel_token_ref, formatter_ref, config_ref, record).await
+                    {
+                        warn!("Failed to save call record: {}", e);
+                    }
+                });
+            }
+            while let Some(_) = futures.next().await {}
         }
         Ok(())
     }

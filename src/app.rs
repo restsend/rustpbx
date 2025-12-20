@@ -44,15 +44,20 @@ use tower_http::{
 use tracing::{debug, info, warn};
 use voice_engine::media::{cache::set_cache_dir, engine::StreamEngine};
 
-pub struct AppStateInner {
+pub struct CoreContext {
     pub config: Arc<Config>,
     pub db: DatabaseConnection,
-    pub useragent: Option<Arc<UserAgent>>,
-    pub sip_server: Option<SipServer>,
     pub token: CancellationToken,
-    pub active_calls: Arc<std::sync::Mutex<HashMap<String, ActiveCallRef>>>,
     pub stream_engine: Arc<StreamEngine>,
     pub callrecord_sender: Option<CallRecordSender>,
+    pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
+}
+
+pub struct AppStateInner {
+    pub core: Arc<CoreContext>,
+    pub useragent: Option<Arc<UserAgent>>,
+    pub sip_server: std::sync::OnceLock<SipServer>,
+    pub active_calls: Arc<std::sync::Mutex<HashMap<String, ActiveCallRef>>>,
     pub total_calls: AtomicU64,
     pub total_failed_calls: AtomicU64,
     pub uptime: DateTime<Utc>,
@@ -80,8 +85,28 @@ pub struct AppStateBuilder {
 }
 
 impl AppStateInner {
+    pub fn config(&self) -> &Arc<Config> {
+        &self.core.config
+    }
+
+    pub fn db(&self) -> &DatabaseConnection {
+        &self.core.db
+    }
+
+    pub fn token(&self) -> &CancellationToken {
+        &self.core.token
+    }
+
+    pub fn stream_engine(&self) -> &Arc<StreamEngine> {
+        &self.core.stream_engine
+    }
+
+    pub fn sip_server(&self) -> Option<&SipServer> {
+        self.sip_server.get()
+    }
+
     pub fn get_dump_events_file(&self, session_id: &String) -> String {
-        let recorder_root = self.config.recorder_path();
+        let recorder_root = self.config().recorder_path();
         let root = Path::new(&recorder_root);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
@@ -103,7 +128,7 @@ impl AppStateInner {
     }
 
     pub fn get_recorder_file(&self, session_id: &String) -> String {
-        let recorder_root = self.config.recorder_path();
+        let recorder_root = self.config().recorder_path();
         let root = Path::new(&recorder_root);
         if !root.exists() {
             match std::fs::create_dir_all(root) {
@@ -120,7 +145,7 @@ impl AppStateInner {
             }
         }
         let mut recorder_file = root.join(session_id);
-        let desired_ext = self.config.recorder_format().extension();
+        let desired_ext = self.config().recorder_format().extension();
         let has_desired_ext = recorder_file
             .extension()
             .and_then(|ext| ext.to_str())
@@ -238,6 +263,7 @@ impl AppStateBuilder {
             Arc::new(formatter)
         };
 
+        let mut callrecord_stats = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else if let Some(ref callrecord) = config.callrecord {
@@ -253,6 +279,7 @@ impl AppStateBuilder {
 
             let mut callrecord_manager = builder.build();
             let sender = callrecord_manager.sender.clone();
+            callrecord_stats = Some(callrecord_manager.stats.clone());
             tokio::spawn(async move {
                 callrecord_manager.serve().await;
             });
@@ -273,6 +300,31 @@ impl AppStateBuilder {
             ),
             None => None,
         };
+
+        let core = Arc::new(CoreContext {
+            config: config.clone(),
+            db: db_conn.clone(),
+            token: token.clone(),
+            stream_engine: stream_engine.clone(),
+            callrecord_sender: callrecord_sender.clone(),
+            callrecord_stats: callrecord_stats.clone(),
+        });
+
+        let app_state = Arc::new(AppStateInner {
+            core: core.clone(),
+            useragent,
+            sip_server: std::sync::OnceLock::new(),
+            active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            total_calls: AtomicU64::new(0),
+            total_failed_calls: AtomicU64::new(0),
+            uptime: chrono::Utc::now(),
+            config_loaded_at,
+            config_path,
+            reload_requested: AtomicBool::new(false),
+            addon_registry: addon_registry.clone(),
+            #[cfg(feature = "console")]
+            console: console_state,
+        });
 
         let sip_server = match self.proxy_builder {
             Some(builder) => builder.build().await.ok(),
@@ -295,38 +347,17 @@ impl AppStateBuilder {
 
                     #[allow(unused_mut)]
                     let mut builder = SipServerBuilder::new(proxy_config.clone())
-                        .with_cancel_token(token.child_token())
-                        .with_callrecord_sender(callrecord_sender.clone())
+                        .with_cancel_token(core.token.child_token())
+                        .with_callrecord_sender(core.callrecord_sender.clone())
                         .with_rtp_config(config.rtp_config())
-                        .with_database_connection(db_conn.clone())
+                        .with_database_connection(core.db.clone())
                         .with_call_record_hooks(call_record_hooks)
                         .register_module("acl", AclModule::create)
                         .register_module("auth", AuthModule::create)
                         .register_module("registrar", RegistrarModule::create)
                         .register_module("call", CallModule::create);
 
-                    let app_state_for_builder = Arc::new(AppStateInner {
-                        config: config.clone(),
-                        db: db_conn.clone(),
-                        useragent: useragent.clone(),
-                        sip_server: None,
-                        token: token.clone(),
-                        active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                        stream_engine: stream_engine.clone(),
-                        callrecord_sender: callrecord_sender.clone(),
-                        total_calls: AtomicU64::new(0),
-                        total_failed_calls: AtomicU64::new(0),
-                        uptime: chrono::Utc::now(),
-                        config_loaded_at: config_loaded_at.clone(),
-                        config_path: config_path.clone(),
-                        reload_requested: AtomicBool::new(false),
-                        addon_registry: addon_registry.clone(),
-                        #[cfg(feature = "console")]
-                        console: console_state.clone(),
-                    });
-
-                    builder = addon_registry
-                        .apply_proxy_server_hooks(builder, app_state_for_builder.clone());
+                    builder = addon_registry.apply_proxy_server_hooks(builder, core.clone());
 
                     match builder.build().await {
                         Ok(server) => Some(server),
@@ -341,28 +372,9 @@ impl AppStateBuilder {
             }
         };
 
-        #[cfg(feature = "console")]
-        let console_state_clone = console_state.clone();
-
-        let app_state = Arc::new(AppStateInner {
-            config,
-            db: db_conn,
-            useragent,
-            sip_server,
-            token,
-            active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            stream_engine,
-            callrecord_sender,
-            total_calls: AtomicU64::new(0),
-            total_failed_calls: AtomicU64::new(0),
-            uptime: chrono::Utc::now(),
-            config_loaded_at,
-            config_path,
-            reload_requested: AtomicBool::new(false),
-            addon_registry: addon_registry.clone(),
-            #[cfg(feature = "console")]
-            console: console_state,
-        });
+        if let Some(server) = sip_server {
+            let _ = app_state.sip_server.set(server);
+        }
 
         // Initialize addons
         if let Err(e) = addon_registry.initialize_all(app_state.clone()).await {
@@ -371,8 +383,8 @@ impl AppStateBuilder {
 
         #[cfg(feature = "console")]
         {
-            if let Some(console_state) = console_state_clone {
-                if let Some(ref sip_server) = app_state.sip_server {
+            if let Some(ref console_state) = app_state.console {
+                if let Some(sip_server) = app_state.sip_server() {
                     console_state.set_sip_server(Some(sip_server.get_inner()));
                 }
                 console_state.set_app_state(Some(Arc::downgrade(&app_state)));
@@ -384,9 +396,9 @@ impl AppStateBuilder {
 }
 
 pub async fn run(state: AppState) -> Result<()> {
-    let token = state.token.clone();
+    let token = state.token().clone();
     let mut router = create_router(state.clone());
-    let addr: SocketAddr = state.config.http_addr.parse()?;
+    let addr: SocketAddr = state.config().http_addr.parse()?;
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -395,7 +407,7 @@ pub async fn run(state: AppState) -> Result<()> {
         }
     };
 
-    if let Some(ref sip_server) = state.sip_server {
+    if let Some(sip_server) = state.sip_server() {
         if let Some(ref ws_handler) = sip_server.inner.proxy_config.ws_handler {
             info!(
                 "Registering WebSocket handler to sip server: {}",
@@ -419,8 +431,10 @@ pub async fn run(state: AppState) -> Result<()> {
 
     // Check for HTTPS config
     let mut ssl_config = None;
-    if let (Some(cert), Some(key)) = (&state.config.ssl_certificate, &state.config.ssl_private_key)
-    {
+    if let (Some(cert), Some(key)) = (
+        &state.config().ssl_certificate,
+        &state.config().ssl_private_key,
+    ) {
         ssl_config = Some((cert.clone(), key.clone()));
     } else {
         // Auto-detect from config/certs
@@ -457,7 +471,11 @@ pub async fn run(state: AppState) -> Result<()> {
     };
 
     let https_addr = if https_config.is_some() {
-        let addr_str = state.config.https_addr.as_deref().unwrap_or("0.0.0.0:8443");
+        let addr_str = state
+            .config()
+            .https_addr
+            .as_deref()
+            .unwrap_or("0.0.0.0:8443");
         match addr_str.parse::<SocketAddr>() {
             Ok(a) => Some(a),
             Err(e) => {
@@ -533,7 +551,7 @@ pub async fn run(state: AppState) -> Result<()> {
             }
         }
         prx_result = async {
-            if let Some(sip_server) = &state.sip_server {
+            if let Some(sip_server) = state.sip_server() {
                 sip_server.serve().await
             } else {
                 token.cancelled().await;
@@ -610,14 +628,14 @@ fn create_router(state: AppState) -> Router {
         router = router.merge(crate::console::router(console_state));
     }
 
-    let access_log_skip_paths = Arc::new(state.config.http_access_skip_paths.clone());
+    let access_log_skip_paths = Arc::new(state.config().http_access_skip_paths.clone());
 
     router = router.layer(middleware::from_fn_with_state(
         access_log_skip_paths,
         crate::handler::middleware::request_log::log_requests,
     ));
 
-    if state.config.http_gzip {
+    if state.config().http_gzip {
         router = router.layer(CompressionLayer::new().gzip(true));
     }
 

@@ -44,14 +44,17 @@ fn create_test_app_state_with(mutator: impl FnOnce(&mut crate::config::Config)) 
     let db = futures::executor::block_on(sea_orm::Database::connect("sqlite::memory:")).unwrap();
 
     Arc::new(AppStateInner {
-        config: Arc::new(config),
-        db,
+        core: Arc::new(crate::app::CoreContext {
+            config: Arc::new(config),
+            db,
+            token: CancellationToken::new(),
+            stream_engine: Arc::new(stream_engine),
+            callrecord_sender: None,
+            callrecord_stats: None,
+        }),
         useragent: None,
-        sip_server: None,
-        token: CancellationToken::new(),
+        sip_server: std::sync::OnceLock::new(),
         active_calls: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        stream_engine: Arc::new(stream_engine),
-        callrecord_sender: None,
         total_calls: std::sync::atomic::AtomicU64::new(0),
         total_failed_calls: std::sync::atomic::AtomicU64::new(0),
         uptime: chrono::Utc::now(),

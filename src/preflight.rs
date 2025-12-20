@@ -47,7 +47,7 @@ pub async fn validate_reload(state: &AppState, proposed: &Config) -> Result<(), 
 
     #[cfg(feature = "console")]
     {
-        let console_running = state.console.is_some() || state.config.console.is_some();
+        let console_running = state.console.is_some() || state.config().console.is_some();
         if console_running && proposed.console.is_none() {
             issues.push(PreflightIssue {
                 field: "console".to_string(),
@@ -56,7 +56,7 @@ pub async fn validate_reload(state: &AppState, proposed: &Config) -> Result<(), 
         }
     }
 
-    let current_config = state.config.as_ref();
+    let current_config = state.config().as_ref();
     let current_ports = current_port_keys(current_config);
 
     let (targets, mut parse_issues) = bind_targets(proposed);

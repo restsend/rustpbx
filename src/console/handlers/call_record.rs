@@ -1197,7 +1197,7 @@ struct RelatedContext {
 
 fn resolve_cdr_storage(state: &ConsoleState) -> Option<CdrStorage> {
     let app = state.app_state()?;
-    match storage::resolve_storage(app.config.callrecord.as_ref()) {
+    match storage::resolve_storage(app.config().callrecord.as_ref()) {
         Ok(storage) => storage,
         Err(err) => {
             warn!("failed to resolve call record storage: {}", err);

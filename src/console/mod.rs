@@ -216,7 +216,7 @@ impl ConsoleState {
         self.app_state().map(|app_state| {
             app_state
                 .addon_registry
-                .get_injected_scripts(path, &app_state.config)
+                .get_injected_scripts(path, app_state.config())
         })
     }
 

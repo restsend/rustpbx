@@ -65,8 +65,8 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         }
     };
 
-    let sipserver_stats = match state.sip_server {
-        Some(ref server) => {
+    let sipserver_stats = match state.sip_server() {
+        Some(server) => {
             let tx_stats = server.inner.endpoint.inner.get_stats();
             serde_json::json!({
                 "transactions": serde_json::json!({
@@ -85,6 +85,13 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         }
     };
 
+    let callrecord_stats = match state.core.callrecord_stats {
+        Some(ref stats) => serde_json::json!(stats.as_ref() as &crate::callrecord::CallRecordStats),
+        None => {
+            serde_json::json!({})
+        }
+    };
+
     let health = serde_json::json!({
         "status": "running",
         "uptime": state.uptime,
@@ -93,6 +100,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
         "useragent": ua_stats,
         "sipserver": sipserver_stats,
+        "callrecord": callrecord_stats,
         "runnings": state.active_calls.lock().unwrap().len(),
     });
     Json(health).into_response()
@@ -100,7 +108,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
 
 async fn shutdown_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     warn!(%client_ip, "Shutdown initiated via /shutdown endpoint");
-    state.token.cancel();
+    state.token().cancel();
     Json(serde_json::json!({"status": "shutdown initiated"})).into_response()
 }
 
@@ -148,7 +156,7 @@ impl DialogInfo for rsipstack::dialog::dialog::Dialog {
 
 async fn list_dialogs(State(state): State<AppState>) -> Response {
     let mut result = Vec::new();
-    if let Some(ref sip_server) = state.sip_server {
+    if let Some(sip_server) = state.sip_server() {
         let ids = sip_server.inner.dialog_layer.all_dialog_ids();
         for id in ids {
             if let Some(dialog) = sip_server.inner.dialog_layer.get_dialog(&id) {
@@ -169,7 +177,7 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
 
 async fn list_transactions(State(state): State<AppState>) -> Response {
     let mut result = Vec::new();
-    if let Some(ref sip_server) = state.sip_server {
+    if let Some(sip_server) = state.sip_server() {
         sip_server
             .inner
             .endpoint
@@ -204,7 +212,7 @@ async fn kill_call(
 async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     info!(%client_ip, "Reload SIP trunks via /reload/trunks endpoint");
 
-    let Some(sip_server) = state.sip_server.as_ref() else {
+    let Some(sip_server) = state.sip_server() else {
         warn!(%client_ip, "Trunk reload ignored: SIP server not running");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -253,7 +261,7 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
 async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     info!(%client_ip, "Reload routing rules via /reload/routes endpoint");
 
-    let Some(sip_server) = state.sip_server.as_ref() else {
+    let Some(sip_server) = state.sip_server() else {
         warn!(%client_ip, "Route reload ignored: SIP server not running");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -302,7 +310,7 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
 async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
     info!(%client_ip, "Reload ACL rules via /reload/acl endpoint");
 
-    let Some(sip_server) = state.sip_server.as_ref() else {
+    let Some(sip_server) = state.sip_server() else {
         warn!(%client_ip, "ACL reload ignored: SIP server not running");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -441,7 +449,7 @@ async fn reload_app_handler(
     }
 
     state.reload_requested.store(true, Ordering::Relaxed);
-    let cancel_token = state.token.clone();
+    let cancel_token = state.token().clone();
     tokio::spawn(async move {
         sleep(Duration::from_millis(200)).await;
         cancel_token.cancel();
@@ -466,7 +474,7 @@ async fn list_frequency_limits(
     State(state): State<AppState>,
     Query(params): Query<FrequencyLimitQuery>,
 ) -> Response {
-    let Some(sip_server) = state.sip_server.as_ref() else {
+    let Some(sip_server) = state.sip_server() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
@@ -513,7 +521,7 @@ async fn clear_frequency_limits(
     State(state): State<AppState>,
     Query(params): Query<FrequencyLimitQuery>,
 ) -> Response {
-    let Some(sip_server) = state.sip_server.as_ref() else {
+    let Some(sip_server) = state.sip_server() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({

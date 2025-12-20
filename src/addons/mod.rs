@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use std::sync::Arc;
 use async_trait::async_trait;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -110,7 +111,7 @@ pub trait Addon: Send + Sync {
     fn proxy_server_hook(
         &self,
         builder: crate::proxy::server::SipServerBuilder,
-        _state: AppState,
+        _ctx: Arc<crate::app::CoreContext>,
     ) -> crate::proxy::server::SipServerBuilder {
         builder
     }
