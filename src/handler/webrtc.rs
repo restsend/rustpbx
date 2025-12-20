@@ -14,7 +14,7 @@ pub(crate) async fn get_iceservers(
     client_ip: ClientAddr,
     State(state): State<AppState>,
 ) -> Response {
-    let default_ice_servers = state.config.ice_servers.as_ref();
+    let default_ice_servers = state.config().ice_servers.as_ref();
     if let Some(ice_servers) = default_ice_servers {
         return Json(ice_servers).into_response();
     }
@@ -22,10 +22,10 @@ pub(crate) async fn get_iceservers(
         urls: vec!["stun:stun.l.google.com:19302".to_string()],
         ..Default::default()
     }];
-    if state.config.restsend_token.is_none() {
+    if state.config().restsend_token.is_none() {
         return Json(ice_servers).into_response();
     }
-    let rs_token = state.config.restsend_token.as_deref().unwrap_or_else(|| "");
+    let rs_token = state.config().restsend_token.as_deref().unwrap_or_else(|| "");
     let start_time = Instant::now();
     let user_id = ""; // TODO: Get user ID from state if needed
     let timeout = std::time::Duration::from_secs(5);

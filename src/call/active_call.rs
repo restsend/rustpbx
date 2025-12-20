@@ -440,7 +440,7 @@ impl ActiveCall {
             };
             let requested_format = recorder_option
                 .format
-                .unwrap_or(self.app_state.config.recorder_format());
+                .unwrap_or(self.app_state.config().recorder_format());
             let format = requested_format.effective();
             if requested_format != format {
                 warn!(
@@ -691,7 +691,7 @@ impl ActiveCall {
         }
 
         let (new_handle, tts_track) = StreamEngine::create_tts_track(
-            self.app_state.stream_engine.clone(),
+            self.app_state.stream_engine().clone(),
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.server_side_track_id.clone(),
@@ -1008,14 +1008,14 @@ impl ActiveCall {
             .with_ssrc(ssrc)
             .with_cancel_token(self.cancel_token.child_token());
 
-        if let Some(rtp_start_port) = self.app_state.config.rtp_start_port {
+        if let Some(rtp_start_port) = self.app_state.config().rtp_start_port {
             rtp_track = rtp_track.with_rtp_start_port(rtp_start_port);
         }
-        if let Some(rtp_end_port) = self.app_state.config.rtp_end_port {
+        if let Some(rtp_end_port) = self.app_state.config().rtp_end_port {
             rtp_track = rtp_track.with_rtp_end_port(rtp_end_port);
         }
 
-        if let Some(ref external_ip) = self.app_state.config.external_ip {
+        if let Some(ref external_ip) = self.app_state.config().external_ip {
             rtp_track = rtp_track.with_external_addr(external_ip.parse()?);
         }
         rtp_track.build().await
@@ -1175,7 +1175,7 @@ impl ActiveCall {
         mut track: Box<dyn Track>,
     ) -> Result<()> {
         let processors = match StreamEngine::create_processors(
-            self.app_state.stream_engine.clone(),
+            self.app_state.stream_engine().clone(),
             track.as_ref(),
             self.cancel_token.child_token(),
             self.event_sender.clone(),
@@ -1261,7 +1261,7 @@ impl ActiveCall {
             self.cancel_token.child_token(),
             self.session_id.clone(),
             self.track_config.clone(),
-            self.app_state.config.ice_servers.clone(),
+            self.app_state.config().ice_servers.clone(),
         )
         .with_ssrc(ssrc);
 
@@ -1430,7 +1430,7 @@ impl ActiveCall {
                 self.cancel_token.child_token(),
                 self.session_id.clone(),
                 self.track_config.clone(),
-                self.app_state.config.ice_servers.clone(),
+                self.app_state.config().ice_servers.clone(),
             )
             .with_ssrc(ssrc);
             Box::new(webrtc_track) as Box<dyn Track>
@@ -1509,7 +1509,7 @@ impl ActiveCall {
 impl Drop for ActiveCall {
     fn drop(&mut self) {
         info!(session_id = self.session_id, "dropping active call");
-        if let Some(sender) = self.app_state.callrecord_sender.as_ref() {
+        if let Some(sender) = self.app_state.core.callrecord_sender.as_ref() {
             let record = self.get_callrecord();
             if let Err(e) = sender.send(record) {
                 warn!(

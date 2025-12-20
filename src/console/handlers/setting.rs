@@ -169,7 +169,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     let mut useragent_stats_value = JsonValue::Null;
 
     if let Some(app_state) = state.app_state() {
-        let config_arc = app_state.config.clone();
+        let config_arc = app_state.config().clone();
         let mut loaded_config: Option<Config> = None;
 
         if let Some(path) = app_state.config_path.as_ref() {
@@ -251,7 +251,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         }
         config_meta = json!({ "key_items": key_items });
 
-        if let Some(server) = app_state.sip_server.as_ref() {
+        if let Some(server) = app_state.sip_server() {
             let stats = server.inner.endpoint.inner.get_stats();
             proxy_stats_value = json!({
                 "transactions": {
@@ -277,7 +277,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
         if let Some(proxy_cfg) = config.proxy.as_ref() {
             proxy = json!({
-                "enabled": app_state.sip_server.is_some(),
+                "enabled": app_state.sip_server().is_some(),
                 "addr": proxy_cfg.addr.clone(),
                 "ports": build_port_list(proxy_cfg),
                 "modules": proxy_cfg.modules.clone().unwrap_or_default(),
@@ -331,7 +331,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "active_rules": active_rules,
             "embedded_count": embedded_count,
             "file_patterns": acl_files,
-            "reload_supported": app_state.sip_server.is_some(),
+            "reload_supported": app_state.sip_server().is_some(),
             "metrics": JsonValue::Null,
         });
 
@@ -427,7 +427,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 }
 
 async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize) {
-    if let Some(server) = app_state.sip_server.as_ref() {
+    if let Some(server) = app_state.sip_server() {
         let context = server.inner.data_context.clone();
         let snapshot = context.acl_rules_snapshot();
 
@@ -460,7 +460,7 @@ async fn resolve_acl_rules(app_state: Arc<AppStateInner>) -> (Vec<String>, usize
         };
 
         (snapshot, embedded)
-    } else if let Some(proxy_cfg) = app_state.config.proxy.as_ref() {
+    } else if let Some(proxy_cfg) = app_state.config().proxy.as_ref() {
         let rules = proxy_cfg.acl_rules.clone().unwrap_or_default();
         let embedded = rules.len();
         (rules, embedded)
@@ -1789,7 +1789,7 @@ pub(crate) async fn update_security_settings(
     };
 
     if let Some(app_state) = state.app_state() {
-        if let Some(server) = app_state.sip_server.as_ref() {
+        if let Some(server) = app_state.sip_server() {
             server.inner.data_context.set_acl_rules(acl_rules.clone());
         }
     }

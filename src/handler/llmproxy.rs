@@ -60,7 +60,7 @@ async fn forward_request(state: &AppState, req: Request<Body>) -> Result<Respons
         .unwrap_or(path);
 
     let endpoint = state
-        .config
+        .config()
         .llmproxy
         .clone()
         .unwrap_or_else(|| config.endpoint.clone());

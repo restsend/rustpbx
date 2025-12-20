@@ -748,7 +748,7 @@ async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig
     }
 
     let mut cfg = app_state
-        .config
+        .config()
         .proxy
         .as_ref()
         .and_then(|p| p.transcript.clone())

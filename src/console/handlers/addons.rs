@@ -26,11 +26,11 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
         let config = if let Some(path) = &app_state.config_path {
             match fs::read_to_string(path) {
                 Ok(content) => toml::from_str::<Config>(&content)
-                    .unwrap_or_else(|_| (*app_state.config).clone()),
-                Err(_) => (*app_state.config).clone(),
+                    .unwrap_or_else(|_| (**app_state.config()).clone()),
+                Err(_) => (**app_state.config()).clone(),
             }
         } else {
-            (*app_state.config).clone()
+            (**app_state.config()).clone()
         };
 
         let mut list = app_state.addon_registry.list_addons();
@@ -38,7 +38,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             let enabled_in_disk = app_state.addon_registry.is_enabled(&addon.id, &config);
             let enabled_in_mem = app_state
                 .addon_registry
-                .is_enabled(&addon.id, &app_state.config);
+                .is_enabled(&addon.id, app_state.config());
 
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
@@ -168,17 +168,17 @@ pub async fn detail(
             let config = if let Some(path) = &app_state.config_path {
                 match fs::read_to_string(path) {
                     Ok(content) => toml::from_str::<Config>(&content)
-                        .unwrap_or_else(|_| (*app_state.config).clone()),
-                    Err(_) => (*app_state.config).clone(),
+                        .unwrap_or_else(|_| (**app_state.config()).clone()),
+                    Err(_) => (**app_state.config()).clone(),
                 }
             } else {
-                (*app_state.config).clone()
+                (**app_state.config()).clone()
             };
 
             let enabled_in_disk = app_state.addon_registry.is_enabled(&addon.id, &config);
             let enabled_in_mem = app_state
                 .addon_registry
-                .is_enabled(&addon.id, &app_state.config);
+                .is_enabled(&addon.id, app_state.config());
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 

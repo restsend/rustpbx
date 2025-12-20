@@ -267,7 +267,7 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
     let mut expires: Option<u32> = None;
 
     if let Some(app) = state.app_state() {
-        let config = app.config.clone();
+        let config = app.config().clone();
         if let Some(proxy_cfg) = config.proxy.as_ref() {
             realm = resolve_default_realm(proxy_cfg);
             host = resolve_preferred_host(Some(config.as_ref()), proxy_cfg, &realm);

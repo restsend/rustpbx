@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
             .with_config_metadata(next_config_path.clone(), Utc::now());
         let state = state_builder.build().await.expect("Failed to build app");
 
-        info!("starting rustpbx on {}", state.config.http_addr);
+        info!("starting rustpbx on {}", state.config().http_addr);
 
         let mut app_future = Box::pin(rustpbx::app::run(state.clone()));
 
@@ -276,12 +276,12 @@ async fn main() -> Result<()> {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("received CTRL+C, shutting down");
-                    state.token.cancel();
+                    state.token().cancel();
                     let _ = app_future.await;
                 }
                 _ = sigterm_stream.recv() => {
                     info!("received SIGTERM, shutting down");
-                    state.token.cancel();
+                    state.token().cancel();
                     let _ = app_future.await;
                 }
             }
@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("received CTRL+C, shutting down");
-                    state.token.cancel();
+                    state.token().cancel();
                     let _ = app_future.await;
                 }
             }

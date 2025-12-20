@@ -1,5 +1,6 @@
 use crate::addons::Addon;
 use crate::app::AppState;
+use std::sync::Arc;
 
 pub struct AddonRegistry {
     addons: Vec<Box<dyn Addon>>,
@@ -25,7 +26,7 @@ impl AddonRegistry {
     }
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
-        let config = &state.config;
+        let config = state.config();
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), &config) {
                 tracing::info!("Addon {} is disabled", addon.name());
@@ -41,10 +42,10 @@ impl AddonRegistry {
     }
 
     pub fn get_routers(&self, state: AppState) -> axum::Router {
-        let config = &state.config;
+        let config = state.config();
         let mut router = axum::Router::new();
         for addon in &self.addons {
-            if !self.is_enabled(addon.id(), &config) {
+            if !self.is_enabled(addon.id(), config) {
                 continue;
             }
             if let Some(r) = addon.router(state.clone()) {
@@ -72,19 +73,19 @@ impl AddonRegistry {
     }
 
     pub fn get_sidebar_items(&self, state: AppState) -> Vec<super::SidebarItem> {
-        let config = &state.config;
+        let config = state.config();
         self.addons
             .iter()
-            .filter(|a| self.is_enabled(a.id(), &config))
+            .filter(|a| self.is_enabled(a.id(), config))
             .flat_map(|a| a.sidebar_items())
             .collect()
     }
 
     pub fn get_template_dirs(&self, state: AppState) -> Vec<String> {
-        let config = &state.config;
+        let config = state.config();
         self.addons
             .iter()
-            .filter(|a| self.is_enabled(a.id(), &config))
+            .filter(|a| self.is_enabled(a.id(), config))
             .flat_map(|a| {
                 [
                     format!("src/addons/{}/templates", a.id()),
@@ -148,14 +149,14 @@ impl AddonRegistry {
     pub fn apply_proxy_server_hooks(
         &self,
         mut builder: crate::proxy::server::SipServerBuilder,
-        state: AppState,
+        ctx: Arc<crate::app::CoreContext>,
     ) -> crate::proxy::server::SipServerBuilder {
-        let config = &state.config;
+        let config = &ctx.config;
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), &config) {
                 continue;
             }
-            builder = addon.proxy_server_hook(builder, state.clone());
+            builder = addon.proxy_server_hook(builder, ctx.clone());
         }
         builder
     }
