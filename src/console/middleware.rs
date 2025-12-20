@@ -21,10 +21,12 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = Arc::<ConsoleState>::from_ref(state);
         let next = Some(parts.uri.path().to_string());
-        let session_cookie = extract_session_cookie(&parts.headers)
+        let session_token = extract_session_cookie(&parts.headers);
+
+        let session_token = session_token
             .ok_or_else(|| Redirect::to(&state.login_url(next.clone())).into_response())?;
 
-        match state.current_user(Some(&session_cookie)).await {
+        match state.current_user(Some(&session_token)).await {
             Ok(user) => {
                 if let Some(user) = user {
                     Ok(AuthRequired(user))
@@ -41,6 +43,14 @@ where
 }
 
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                return Some(token.trim().to_string());
+            }
+        }
+    }
+
     for cookie_header in headers.get_all(COOKIE) {
         if let Ok(s) = cookie_header.to_str() {
             let found = s.split(';').find_map(|pair| {
