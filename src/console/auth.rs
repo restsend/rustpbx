@@ -79,7 +79,7 @@ impl ConsoleState {
         }
     }
 
-    pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
+    pub fn generate_session_token(&self, user_id: i64) -> Option<String> {
         let expires_at = Utc::now() + Duration::from_secs(SESSION_TTL_HOURS * 3600);
         let payload = format!("{}:{}", user_id, expires_at.timestamp());
         let signature = match self.sign(&payload) {
@@ -89,7 +89,11 @@ impl ConsoleState {
                 return None;
             }
         };
-        let value = format!("{}:{}", payload, signature);
+        Some(format!("{}:{}", payload, signature))
+    }
+
+    pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
+        let value = self.generate_session_token(user_id)?;
         let _is_secure = self.secure_cookie || request_secure;
         let secure_attr = "";
         let cookie = format!(
