@@ -3,7 +3,6 @@ use crate::addons::transcript::models::{
     TranscriptRequest, TranscriptSettingsUpdate,
 };
 use crate::callrecord::{CallRecord, storage::CdrStorage};
-use crate::config::{Config, TranscriptConfig};
 use crate::console::ConsoleState;
 use crate::console::handlers::call_record::{CdrData, load_cdr_data, select_recording_path};
 use crate::console::handlers::utils::{
@@ -22,6 +21,7 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::path::PathBuf;
@@ -31,6 +31,22 @@ use tokio::time::timeout;
 use toml_edit::{DocumentMut, Item, Table, value};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+pub struct TranscriptConfig {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub models_path: Option<String>,
+    #[serde(default)]
+    pub hf_endpoint: Option<String>,
+    #[serde(default)]
+    pub samplerate: Option<u32>,
+    #[serde(default)]
+    pub default_language: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
 
 pub async fn get_call_record_transcript(
     AxumPath(pk): AxumPath<i64>,
@@ -734,30 +750,28 @@ async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig
     // Try to read from file first to get latest changes
     if let Some(path) = &app_state.config_path {
         if let Ok(content) = tokio::fs::read_to_string(path).await {
-            if let Ok(config) = toml::from_str::<Config>(&content) {
-                if let Some(proxy) = config.proxy {
-                    if let Some(mut transcript) = proxy.transcript {
-                        if transcript.models_path.is_none() {
-                            transcript.models_path = Some("./config/models".to_string());
+            if let Ok(config) = toml::from_str::<Value>(&content) {
+                if let Some(proxy) = config.get("proxy") {
+                    if let Some(transcript_val) = proxy.get("transcript") {
+                        if let Ok(mut transcript) =
+                            serde_json::from_value::<TranscriptConfig>(transcript_val.clone())
+                        {
+                            if transcript.models_path.is_none() {
+                                transcript.models_path = Some("./config/models".to_string());
+                            }
+                            return transcript;
                         }
-                        return transcript;
                     }
                 }
             }
         }
     }
 
-    let mut cfg = app_state
-        .config()
-        .proxy
-        .as_ref()
-        .and_then(|p| p.transcript.clone())
-        .unwrap_or_default();
-
+    // Fallback to default if not found in config
+    let mut cfg = TranscriptConfig::default();
     if cfg.models_path.is_none() {
         cfg.models_path = Some("./config/models".to_string());
     }
-
     cfg
 }
 

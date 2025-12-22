@@ -268,15 +268,14 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
 
     if let Some(app) = state.app_state() {
         let config = app.config().clone();
-        if let Some(proxy_cfg) = config.proxy.as_ref() {
-            realm = resolve_default_realm(proxy_cfg);
-            host = resolve_preferred_host(Some(config.as_ref()), proxy_cfg, &realm);
-            expires = proxy_cfg.registrar_expires;
-            transports = build_transport_entries(&host, &realm, proxy_cfg);
-            let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
-            accounts = account_entries;
-            notes.extend(backend_notes);
-        }
+        let proxy_cfg = &config.proxy;
+        realm = resolve_default_realm(proxy_cfg);
+        host = resolve_preferred_host(Some(config.as_ref()), proxy_cfg, &realm);
+        expires = proxy_cfg.registrar_expires;
+        transports = build_transport_entries(&host, &realm, proxy_cfg);
+        let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
+        accounts = account_entries;
+        notes.extend(backend_notes);
     } else if let Some(server) = state.sip_server() {
         let proxy_cfg = &server.proxy_config;
         realm = resolve_default_realm(proxy_cfg);

@@ -1865,7 +1865,6 @@ fn append_cdr_leg(legs: &mut Vec<Value>, role: &str, record: &CallRecord) {
 fn signaling_leg_payload(role: &str, record: &CallRecord) -> Value {
     json!({
         "role": role,
-        "call_type": record.call_type,
         "call_id": record.call_id,
         "caller": record.caller,
         "callee": record.callee,

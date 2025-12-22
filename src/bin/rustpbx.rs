@@ -3,7 +3,9 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 use rustpbx::{
-    app::AppStateBuilder, config::Config, handler::middleware::request_log::AccessLogEventFormat,
+    app::{AppStateBuilder, create_router},
+    config::Config,
+    handler::middleware::request_log::AccessLogEventFormat,
     preflight, version,
 };
 use std::net::SocketAddr;
@@ -88,6 +90,7 @@ async fn main() -> Result<()> {
         Config::default()
     };
 
+    println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
 
     if matches!(cli.command, Some(Commands::CheckConfig)) {
@@ -254,8 +257,8 @@ async fn main() -> Result<()> {
         let state = state_builder.build().await.expect("Failed to build app");
 
         info!("starting rustpbx on {}", state.config().http_addr);
-
-        let mut app_future = Box::pin(rustpbx::app::run(state.clone()));
+        let router = create_router(state.clone());
+        let mut app_future = Box::pin(rustpbx::app::run(state.clone(), router));
 
         #[cfg(unix)]
         let mut sigterm_stream = {

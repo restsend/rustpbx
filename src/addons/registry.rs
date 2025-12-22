@@ -123,10 +123,8 @@ impl AddonRegistry {
     }
 
     pub fn is_enabled(&self, id: &str, config: &crate::config::Config) -> bool {
-        if let Some(proxy) = &config.proxy {
-            if let Some(addons) = &proxy.addons {
-                return addons.iter().any(|a| a == id);
-            }
+        if let Some(addons) = &config.proxy.addons {
+            return addons.iter().any(|a| a == id);
         }
         false
     }
@@ -143,7 +141,10 @@ impl AddonRegistry {
     }
 
     pub fn get_addon(&self, id: &str) -> Option<&dyn Addon> {
-        self.addons.iter().find(|a| a.id() == id).map(|a| a.as_ref())
+        self.addons
+            .iter()
+            .find(|a| a.id() == id)
+            .map(|a| a.as_ref())
     }
 
     pub fn apply_proxy_server_hooks(

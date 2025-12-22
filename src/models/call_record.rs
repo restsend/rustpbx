@@ -259,8 +259,6 @@ impl MigrationTrait for Migration {
 impl Into<CallRecord> for Model {
     fn into(self) -> CallRecord {
         CallRecord {
-            call_type: crate::call::ActiveCallType::B2bua, // Default type
-            option: None,                                  // No CallOption in Model
             call_id: self.call_id,
             start_time: self.started_at,
             ring_time: None,   // No ring_time in Model

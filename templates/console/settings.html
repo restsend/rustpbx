@@ -295,64 +295,6 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">User agent runtime</h2>
-                            <p class="text-xs text-slate-500">Registration service state and handshake metrics.</p>
-                        </div>
-                        <span class="rounded-full px-3 py-1 text-xs font-semibold"
-                            :class="useragentConfig.enabled ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
-                            <span x-text="useragentConfig.enabled ? 'Online' : 'Offline'"></span>
-                        </span>
-                    </div>
-                    <div class="mt-4 space-y-3 text-sm text-slate-600">
-                        <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
-                            <span class="font-mono" x-text="useragentConfig.addr || '—'"></span>
-                        </div>
-                        <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">UDP port</span>
-                            <span class="font-mono" x-text="displayMetric(useragentConfig.udp_port)"></span>
-                        </div>
-                        <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">User-Agent</span>
-                            <span x-text="useragentConfig.useragent || '—'"></span>
-                        </div>
-                        <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Call-ID suffix</span>
-                            <span class="font-mono" x-text="useragentConfig.callid_suffix || '—'"></span>
-                        </div>
-                    </div>
-                    <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
-                        </div>
-                        <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
-                            <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
-                                <div class="mt-1 font-semibold text-slate-900"
-                                    x-text="displayMetric(stats.useragent?.transactions?.running)"></div>
-                            </div>
-                            <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
-                                <div class="mt-1 font-semibold text-slate-900"
-                                    x-text="displayMetric(stats.useragent?.transactions?.finished)"></div>
-                            </div>
-                            <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
-                                <div class="mt-1 font-semibold text-slate-900"
-                                    x-text="displayMetric(stats.useragent?.transactions?.waiting_ack)"></div>
-                            </div>
-                        </div>
-                        <div class="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                            Active dialogs · <span class="font-semibold text-slate-700"
-                                x-text="displayMetric(stats.useragent?.dialogs)"></span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="grid gap-6 lg:grid-cols-2">
-                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                        <div>
                             <h2 class="text-base font-semibold text-slate-900">Platform settings</h2>
                             <p class="text-xs text-slate-500">Update logging and RTP configuration. Restart required.
                             </p>
@@ -1465,7 +1407,6 @@
             activeTab: 'platform',
             platform: {},
             proxyConfig: {},
-            useragentConfig: {},
             stats: {},
             configMeta: { key_items: [] },
             acl: { active_rules: [], embedded_count: 0, file_patterns: [], reload_supported: false, metrics: null },
@@ -1595,7 +1536,6 @@
                         this.proxyConfig.realms = [];
                     }
                 }
-                this.useragentConfig = data.useragent || {};
                 this.stats = data.stats || {};
                 this.configMeta = data.config || { key_items: [] };
                 if (!Array.isArray(this.configMeta.key_items)) {

@@ -1,6 +1,5 @@
 use self::sipflow::SipMessageItem;
 use crate::{
-    call::ActiveCallType,
     config::{CallRecordConfig, S3Vendor},
     models::call_record::{self, Column as CallRecordColumn, Entity as CallRecordEntity},
     models::{department, extension, routing, sip_trunk},
@@ -30,7 +29,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use voice_engine::CallOption;
 
 pub mod sipflow;
 pub mod storage;
@@ -113,8 +111,6 @@ impl CallRecordEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CallRecord {
-    pub call_type: ActiveCallType,
-    pub option: Option<CallOption>,
     pub call_id: String,
     pub start_time: DateTime<Utc>,
     pub ring_time: Option<DateTime<Utc>>,
@@ -1208,12 +1204,6 @@ pub async fn persist_call_record(
     } else {
         0
     };
-
-    let display_id = record
-        .option
-        .as_ref()
-        .and_then(|opt| opt.extra.as_ref())
-        .and_then(|extra| extra.get("display_id").cloned());
     let caller_uri = normalize_endpoint_uri(&record.caller);
     let callee_uri = normalize_endpoint_uri(&record.callee);
     let billing_context = resolve_billing_context(db, sip_trunk_id).await?;
@@ -1246,7 +1236,7 @@ pub async fn persist_call_record(
         .await?
     {
         let mut active: call_record::ActiveModel = model.into();
-        active.display_id = Set(display_id.clone());
+        active.display_id = Set(None);
         active.direction = Set(direction.clone());
         active.status = Set(status.clone());
         active.started_at = Set(record.start_time);
@@ -1294,7 +1284,7 @@ pub async fn persist_call_record(
 
     let active = call_record::ActiveModel {
         call_id: Set(record.call_id.clone()),
-        display_id: Set(display_id.clone()),
+        display_id: Set(None),
         direction: Set(direction.clone()),
         status: Set(status.clone()),
         started_at: Set(record.start_time),
@@ -1448,7 +1438,6 @@ fn call_leg_payload(role: &str, record: &CallRecord, sip_call_id: Option<&String
 
     json!({
         "role": role,
-        "call_type": record.call_type.clone(),
         "call_id": call_id,
         "session_id": record.call_id.clone(),
         "caller": record.caller.clone(),
@@ -1488,15 +1477,6 @@ fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<
     if !record.hangup_messages.is_empty() {
         if let Ok(value) = serde_json::to_value(&record.hangup_messages) {
             map.insert("hangup_messages".to_string(), value);
-        }
-    }
-
-    if let Some(option) = &record.option {
-        if let Some(extra) = &option.extra {
-            for (key, value) in extra {
-                map.entry(key.clone())
-                    .or_insert_with(|| Value::String(value.clone()));
-            }
         }
     }
 

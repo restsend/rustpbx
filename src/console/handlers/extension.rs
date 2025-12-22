@@ -122,9 +122,7 @@ fn parse_datetime_filter(value: &str) -> Option<DateTime<Utc>> {
 
 fn resolve_default_realm(state: &ConsoleState) -> String {
     if let Some(app) = state.app_state() {
-        if let Some(proxy) = app.config().proxy.as_ref() {
-            return proxy.select_realm("");
-        }
+        return app.config().proxy.select_realm("");
     }
     "localhost".to_string()
 }
