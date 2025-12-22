@@ -1,7 +1,6 @@
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
-    useragent::RegisterOption,
 };
 use anyhow::{Error, Result};
 use clap::Parser;
@@ -23,13 +22,6 @@ pub(crate) fn default_config_recorder_path() -> String {
     return "./config/recorders".to_string();
     #[cfg(not(target_os = "windows"))]
     return "./config/recorders".to_string();
-}
-
-fn default_config_media_cache_path() -> String {
-    #[cfg(target_os = "windows")]
-    return "./config/mediacache".to_string();
-    #[cfg(not(target_os = "windows"))]
-    return "./config/mediacache".to_string();
 }
 
 fn default_config_http_addr() -> String {
@@ -171,8 +163,7 @@ pub struct Config {
     pub log_file: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_access_skip_paths: Vec<String>,
-    pub ua: Option<UseragentConfig>,
-    pub proxy: Option<ProxyConfig>,
+    pub proxy: ProxyConfig,
 
     pub external_ip: Option<String>,
     #[serde(default = "default_config_rtp_start_port")]
@@ -181,10 +172,6 @@ pub struct Config {
     pub rtp_end_port: Option<u16>,
 
     pub callrecord: Option<CallRecordConfig>,
-    #[serde(default = "default_config_media_cache_path")]
-    pub media_cache_path: String,
-    pub llmproxy: Option<String>,
-    pub restsend_token: Option<String>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub ami: Option<AmiConfig>,
     #[cfg(feature = "console")]
@@ -218,33 +205,6 @@ impl Default for ConsoleConfig {
             secure_cookie: false,
         }
     }
-}
-
-#[derive(Debug, Deserialize, Clone, Serialize)]
-pub struct UseragentConfig {
-    pub addr: String,
-    pub udp_port: u16,
-    #[serde(default = "default_useragent")]
-    pub useragent: Option<String>,
-    #[serde(default = "default_callid_suffix")]
-    pub callid_suffix: Option<String>,
-    pub register_users: Option<Vec<RegisterOption>>,
-    pub graceful_shutdown: Option<bool>,
-    pub handler: Option<InviteHandlerConfig>,
-    pub accept_timeout: Option<String>,
-    pub external_ip: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type")]
-pub enum InviteHandlerConfig {
-    Webhook {
-        url: Option<String>,
-        urls: Option<Vec<String>>,
-        method: Option<String>,
-        headers: Option<Vec<(String, String)>>,
-    },
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -337,22 +297,6 @@ pub enum CallRecordConfig {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
-pub struct TranscriptConfig {
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub models_path: Option<String>,
-    #[serde(default)]
-    pub hf_endpoint: Option<String>,
-    #[serde(default)]
-    pub samplerate: Option<u32>,
-    #[serde(default)]
-    pub default_language: Option<String>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-}
-
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
@@ -437,9 +381,6 @@ pub struct ProxyConfig {
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub transcript: Option<TranscriptConfig>,
 }
 
 pub enum RouteResult {
@@ -603,7 +544,6 @@ impl Default for ProxyConfig {
             generated_dir: default_generated_config_dir(),
             sip_flow_max_items: None,
             addons: None,
-            transcript: None,
         }
     }
 }
@@ -617,22 +557,6 @@ impl Default for UserBackendConfig {
 impl Default for LocatorConfig {
     fn default() -> Self {
         Self::Memory
-    }
-}
-
-impl Default for UseragentConfig {
-    fn default() -> Self {
-        Self {
-            addr: "0.0.0.0".to_string(),
-            udp_port: 25060,
-            useragent: default_useragent(),
-            callid_suffix: default_callid_suffix(),
-            register_users: None,
-            graceful_shutdown: Some(true),
-            handler: None,
-            accept_timeout: Some("50s".to_string()),
-            external_ip: None,
-        }
     }
 }
 
@@ -658,12 +582,8 @@ impl Default for Config {
             log_level: None,
             log_file: None,
             http_access_skip_paths: Vec::new(),
-            ua: Some(UseragentConfig::default()),
-            proxy: None,
-            media_cache_path: default_config_media_cache_path(),
+            proxy: ProxyConfig::default(),
             callrecord: None,
-            llmproxy: None,
-            restsend_token: None,
             ice_servers: None,
             ami: Some(AmiConfig::default()),
             external_ip: None,
@@ -730,18 +650,13 @@ impl Config {
             fallback |= policy.ensure_defaults();
         }
 
-        if let Some(proxy) = self.proxy.as_mut() {
-            fallback |= proxy.ensure_recording_defaults();
-        }
+        fallback |= self.proxy.ensure_recording_defaults();
 
         fallback
     }
 
     pub fn config_dir(&self) -> std::path::PathBuf {
-        self.proxy
-            .as_ref()
-            .map(|p| p.generated_root_dir())
-            .unwrap_or_else(|| std::path::PathBuf::from("./config"))
+        self.proxy.generated_root_dir()
     }
 }
 
@@ -811,7 +726,7 @@ mod tests {
             },
         );
         prxconfig.trunks = trunks;
-        config.proxy = Some(prxconfig);
+        config.proxy = prxconfig;
         config.ice_servers = Some(ice_servers);
         let config_str = toml::to_string(&config).unwrap();
         println!("{}", config_str);

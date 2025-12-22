@@ -1,8 +1,10 @@
-# RustPBX - AI-Powered Software-Defined PBX
+# RustPBX - Secure Software-Defined PBX
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/restsend/rustpbx)
 
 RustPBX is a high-performance, secure software-defined PBX (Private Branch Exchange) system implemented in Rust, designed to support AI-powered communication pipelines and modern voice applications.
+
+> **Note**: The Voice Agent functionality has been moved to a separate repository: [Active Call](https://github.com/restsend/active-call). This repository now focuses on the SIP Proxy and PBX features.
 
 ## 🚀 Key Features
 
@@ -14,19 +16,6 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Call Recording**: Built-in call recording with multiple storage backends
 - **User Management**: Flexible user authentication and registration system
 
-### AI Voice Agent Services
-
-- **Speech-to-Text (ASR)**: Real-time speech recognition with multiple providers (Tencent Cloud, Aliyun, Deepgram)
-- **Text-to-Speech (TTS)**: High-quality speech synthesis with emotion and speaker control
-- **LLM Integration**: OpenAI-compatible LLM proxy for intelligent conversation handling
-- **Voice Activity Detection**: WebRTC and Silero VAD and Ten VAD support for optimal speech processing
-- **Noise Suppression**: Real-time audio denoising(rnnoise) for crystal-clear conversations
-
-### RESTful API & WebSocket
-
-- **RESTful Endpoints**: Complete REST API for call management and control
-- **WebSocket Commands**: Real-time call control via WebSocket connections
-- **Call Management**: List, monitor, and control active calls
 
 ## 🐳 Docker Deployment
 
@@ -76,7 +65,6 @@ docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-username=YOUR -
 - Web Interface: <http://localhost:8080/console/>
   - Login via `YOUR` + `PASS`
 - SIP Proxy: localhost:15060
-- User Agent: localhost:13050
 
 ## 🛠 Quick Start
 
@@ -109,28 +97,6 @@ cargo build --release
 > For a minimal footprint you can disable heavy features:
 > `cargo build -r --no-default-features --features vad_webrtc,console`
 
-### UserAgent Quick Start (Browser LLM voice demo)
-
-1. Create a lightweight UA configuration (`config.ua.toml`) that exposes the WebRTC console and proxies LLM traffic:
-
-  ```bash
-  cat > config.ua.toml <<'EOF'
-  http_addr = "0.0.0.0:8080"
-  log_level = "info"
-  [ua]
-  addr = "0.0.0.0"
-  udp_port = 13050
-  EOF
-  ```
-
-2. Start RustPBX in UA mode and serve the console assets:
-
-  ```bash
-  cargo run --bin rustpbx -- --conf config.ua.toml
-  ```
-
-3. Open `http://localhost:8080` → **WebRTC Interface**. Under **LLM** select your model, toggle streaming if needed, and click **Start Session**. You can now hold a full duplex voice conversation with the LLM through your browser.
-
 ### PBX Quick Start (SQLite + console admin)
 
 1. Create a PBX configuration (`config.pbx.toml`) pointing to SQLite and enabling call records:
@@ -143,17 +109,6 @@ log_level = "debug"
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 
-# external IP address for SIP signaling and media
-# if server is behind NAT, set your public IP here (without port)
-# external_ip = "1.2.3.4"
-
-[console]
-#session_secret = "please_change_me_to_a_random_secret"
-base_path = "/console"
-# allow self-service administrator signup after the first account
-allow_registration = false
-
-[proxy]
 modules = ["acl", "auth", "registrar", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
@@ -165,7 +120,17 @@ generated_dir = "./config"
 routes_files = ["config/routes/*.toml"]
 trunks_files = ["config/trunks/*.toml"]
 
-[proxy.transcript]
+# external IP address for SIP signaling and media
+# if server is behind NAT, set your public IP here (without port)
+# external_ip = "1.2.3.4"
+
+[console]
+#session_secret = "please_change_me_to_a_random_secret"
+base_path = "/console"
+# allow self-service administrator signup after the first account
+allow_registration = false
+
+[transcript]
 command = "sensevoice-cli"
 
 # ACL rules
@@ -175,14 +140,14 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
-[[proxy.user_backends]]
+[[user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
 
-[[proxy.user_backends]]
+[[user_backends]]
 type = "extension"
 database_url = "sqlite://rustpbx.sqlite3"
 
@@ -246,28 +211,6 @@ EOF
 
 ![Console webrtc phone](./docs/screenshots/web-dailer.png)
 
-## 🧪 Go Client Integration
-
-### Using rustpbxgo Client Library
-
-See `https://github.com/restsend/rustpbxgo`
-
-### API Documentation
-
-#### SIP Workflow
-
-![Sip](./docs/sip.png)
-
-The SIP workflow demonstrates how external applications can initiate calls through RustPBX, leveraging the full SIP protocol stack for reliable voice communications.
-
-#### WebRTC Workflow
-
-![Webrtc](./docs/webrtc.png)
-
-The WebRTC workflow shows how web applications can establish direct peer-to-peer connections via RustPBX, enabling modern browser-based voice applications.
-
-For detailed API documentation, see [API Documentation](./docs/api.md).
-
 ## 🔧 Configuration Features
 
 ### SIP Proxy
@@ -283,20 +226,6 @@ For detailed API documentation, see [API Documentation](./docs/api.md).
 - Configurable RTP port ranges
 - Support for multiple codecs
 - Real-time media relay
-
-### AI Services
-
-- Multiple ASR/TTS provider support
-- Configurable LLM endpoints
-- Voice activity detection
-- Audio preprocessing and enhancement
-
-## 📚 Documentation
-
-- [API Reference](./docs/api.md) - Complete REST API documentation
-- [Architecture Diagrams](docs/) - System architecture and workflows
-- [VoiceAgent Integration with Telephony Networks](./docs/how%20webrtc%20work%20with%20sip(en).md)
-- [VoiceAgent 与电话网络互通的技术实现](./docs/how%20webrtc%20work%20with%20sip(zh).md)
 
 ## 🤝 Contributing
 

@@ -3,7 +3,6 @@ use serde::Serialize;
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
-    str::FromStr,
 };
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -138,17 +137,10 @@ fn current_port_keys(config: &Config) -> HashSet<PortKey> {
         });
     }
 
-    if let Some(proxy) = config.proxy.as_ref() {
-        insert_optional_port(&mut set, SocketKind::Udp, proxy.udp_port);
-        insert_optional_port(&mut set, SocketKind::Tcp, proxy.tcp_port);
-        insert_optional_port(&mut set, SocketKind::Tcp, proxy.tls_port);
-        insert_optional_port(&mut set, SocketKind::Tcp, proxy.ws_port);
-    }
-
-    if let Some(ua) = config.ua.as_ref() {
-        insert_optional_port(&mut set, SocketKind::Udp, Some(ua.udp_port));
-    }
-
+    insert_optional_port(&mut set, SocketKind::Udp, config.proxy.udp_port);
+    insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.tcp_port);
+    insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.tls_port);
+    insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.ws_port);
     set
 }
 
@@ -171,53 +163,38 @@ fn bind_targets(config: &Config) -> (Vec<BindTarget>, Vec<PreflightIssue>) {
         Err(issue) => issues.push(issue),
     }
 
-    if let Some(proxy) = config.proxy.as_ref() {
-        match value_as_ip_addr("proxy.addr", &proxy.addr) {
-            Ok(ip) => {
-                push_target(
-                    &mut targets,
-                    "proxy.udp_port",
-                    ip,
-                    proxy.udp_port,
-                    SocketKind::Udp,
-                );
-                push_target(
-                    &mut targets,
-                    "proxy.tcp_port",
-                    ip,
-                    proxy.tcp_port,
-                    SocketKind::Tcp,
-                );
-                push_target(
-                    &mut targets,
-                    "proxy.tls_port",
-                    ip,
-                    proxy.tls_port,
-                    SocketKind::Tcp,
-                );
-                push_target(
-                    &mut targets,
-                    "proxy.ws_port",
-                    ip,
-                    proxy.ws_port,
-                    SocketKind::Tcp,
-                );
-            }
-            Err(issue) => issues.push(issue),
+    match value_as_ip_addr("proxy.addr", &config.proxy.addr) {
+        Ok(ip) => {
+            push_target(
+                &mut targets,
+                "proxy.udp_port",
+                ip,
+                config.proxy.udp_port,
+                SocketKind::Udp,
+            );
+            push_target(
+                &mut targets,
+                "proxy.tcp_port",
+                ip,
+                config.proxy.tcp_port,
+                SocketKind::Tcp,
+            );
+            push_target(
+                &mut targets,
+                "proxy.tls_port",
+                ip,
+                config.proxy.tls_port,
+                SocketKind::Tcp,
+            );
+            push_target(
+                &mut targets,
+                "proxy.ws_port",
+                ip,
+                config.proxy.ws_port,
+                SocketKind::Tcp,
+            );
         }
-    }
-
-    if let Some(ua) = config.ua.as_ref() {
-        match parse_useragent_ip(&ua.addr) {
-            Ok(ip) => {
-                targets.push(BindTarget {
-                    field: "ua.udp_port".to_string(),
-                    addr: SocketAddr::new(ip, ua.udp_port),
-                    kind: SocketKind::Udp,
-                });
-            }
-            Err(issue) => issues.push(issue),
-        }
+        Err(issue) => issues.push(issue),
     }
 
     (targets, issues)
@@ -251,15 +228,4 @@ fn value_as_ip_addr(field: &str, value: &str) -> Result<IpAddr, PreflightIssue> 
         field: field.to_string(),
         message: format!("Invalid {} `{}` ({})", field, value, err),
     })
-}
-
-fn parse_useragent_ip(value: &str) -> Result<IpAddr, PreflightIssue> {
-    if value.trim().is_empty() {
-        return IpAddr::from_str("0.0.0.0").map_err(|err| PreflightIssue {
-            field: "ua.addr".to_string(),
-            message: format!("Failed to default UA bind address ({})", err),
-        });
-    }
-
-    value_as_ip_addr("ua.addr", value)
 }

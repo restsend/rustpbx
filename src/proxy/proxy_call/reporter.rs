@@ -249,8 +249,6 @@ impl CallReporter {
         persist_args.recording_url = recording_path_for_db;
 
         let mut record = CallRecord {
-            call_type: crate::call::ActiveCallType::Sip,
-            option: None,
             call_id: self.session_id.clone(),
             start_time,
             ring_time,

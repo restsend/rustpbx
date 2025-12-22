@@ -462,39 +462,6 @@ fn format_timeline_label(range: &TimeRange, timestamp: DateTime<Utc>) -> String 
 async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<ActiveCallPreview>) {
     let mut previews = Vec::new();
     let mut active_count = 0;
-    // 1. UserAgent Calls
-    if let Some(app_state) = state.app_state() {
-        let call_map = app_state.active_calls.lock().unwrap();
-        active_count = call_map.len();
-        for call in call_map.values() {
-            if let Ok(state_guard) = call.call_state.read() {
-                let start_time = state_guard.start_time;
-                let answer_time = state_guard.answer_time;
-
-                let status = if answer_time.is_some() {
-                    "Talking"
-                } else {
-                    "Ringing"
-                };
-                let started_at = start_time.format("%H:%M").to_string();
-                let duration_secs = if let Some(answered_at) = answer_time {
-                    (Utc::now() - answered_at).num_seconds().max(0)
-                } else {
-                    (Utc::now() - start_time).num_seconds().max(0)
-                };
-
-                previews.push(ActiveCallPreview {
-                    caller: call.session_id.clone(),
-                    callee: format!("{:?}", call.call_type),
-                    status: status.to_string(),
-                    started_at,
-                    duration: format_duration(duration_secs),
-                    started_at_ts: start_time,
-                });
-            }
-        }
-    }
-
     // 2. Proxy Calls (including Wholesale)
     if let Ok(guard) = state.sip_server.read() {
         if let Some(server) = guard.as_ref() {

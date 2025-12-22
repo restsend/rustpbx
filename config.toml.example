@@ -38,10 +38,6 @@ allow_registration = false
 # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
 secure_cookie = false
 
-[ua]
-addr="0.0.0.0"
-udp_port=13050 # don't use 5060
-
 [proxy]
 modules = ["acl", "auth", "registrar", "call"]
 addr = "0.0.0.0"
@@ -57,16 +53,6 @@ addons = ["acme", "wholesale"]
 # Don't responed the request when user not existed (slience for spam scanner)
 ensure_user = true
 
-#[proxy.transcript]
-# command = "sensevoice-cli"
-# models_path = "/var/lib/sensevoice"
-# hf_endpoint = "https://huggingface.co"
-# extra_args = ["--format", "json"]
-# model = "medium"
-# samplerate = 16000
-# default_language = "zh"
-# timeout_secs = 60
-
 # ACL rules
 acl_rules = [
     # "allow 10.0.0.0/8",
@@ -76,19 +62,14 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
-[ua.handler]
-type = "webhook"
-url = "http://localhost:8090/webhook"
-method = "POST"
-
-[[proxy.user_backends]]
+[[user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
 
-[[proxy.user_backends]]
+[[user_backends]]
 type = "extension"
 
 [recording]
@@ -100,18 +81,18 @@ type = "local"
 root = "./config/cdr"
 
 
-# [proxy.trunks.wuhoo]
+# [trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
 
-# [[proxy.routes]]
+# [[routes]]
 # name = "default"
 # priority = 1
 # dest = "wuhoo"
 
-# [proxy.routes.match]
+# [routes.match]
 # "to.user" = "^\\+.*"
 
-# [proxy.routes.rewrite]
+# [routes.rewrite]
 # "to.user" = "+{1}"
 # "to.host" = "123.456.789.00:1234"
 # "from.user" = "12345"

@@ -12,5 +12,4 @@ pub mod models;
 pub mod preflight;
 pub mod proxy;
 pub mod services;
-pub mod useragent;
 pub mod version; // Admin console

@@ -935,8 +935,6 @@ impl CallModule {
         persist_args.metadata = metadata_value;
 
         let mut record = CallRecord {
-            call_type: crate::call::ActiveCallType::Sip,
-            option: None,
             call_id: dialog_id.to_string(),
             start_time: now.clone(),
             ring_time: None,

@@ -572,7 +572,9 @@ fn format_metadata_text(metadata: &Option<Value>) -> String {
 }
 
 fn proxy_config_optional(state: &ConsoleState) -> Option<ProxyConfig> {
-    state.app_state().and_then(|app| app.config().proxy.clone())
+    state
+        .app_state()
+        .and_then(|app| Some(app.config().proxy.clone()))
 }
 
 fn proxy_config_required(state: &ConsoleState) -> Result<ProxyConfig, Response> {
