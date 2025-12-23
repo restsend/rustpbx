@@ -672,7 +672,7 @@ pub async fn list_dialogs(
     let mut has_more = false;
 
     for id in dialog_layer.all_dialog_ids() {
-        if let Some(dialog) = dialog_layer.get_dialog(&id) {
+        if let Some(dialog) = dialog_layer.get_dialog_with(&id) {
             if let Some(summary) = summarize_dialog(&dialog) {
                 if let Some(ref call_id) = call_id_filter {
                     if summary.call_id != *call_id {

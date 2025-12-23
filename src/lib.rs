@@ -7,7 +7,6 @@ pub mod config;
 pub mod console;
 pub mod handler;
 pub mod license;
-pub mod llm;
 pub mod models;
 pub mod preflight;
 pub mod proxy;
