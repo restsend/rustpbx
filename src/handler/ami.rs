@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
@@ -20,6 +20,7 @@ use tracing::{info, warn};
 pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/dialogs", get(list_dialogs))
+        .route("/hangup/{id}", get(hangup_dialog))
         .route("/transactions", get(list_transactions))
         .route("/shutdown", post(shutdown_handler))
         .route("/reload/trunks", post(reload_trunks_handler))
@@ -76,21 +77,19 @@ async fn shutdown_handler(State(state): State<AppState>, client_ip: ClientAddr) 
 }
 
 trait DialogInfo {
-    fn to_json(&self, source: &str) -> serde_json::Value;
+    fn to_json(&self) -> serde_json::Value;
 }
 
 impl DialogInfo for rsipstack::dialog::dialog::Dialog {
-    fn to_json(&self, source: &str) -> serde_json::Value {
+    fn to_json(&self) -> serde_json::Value {
         let state = match &self {
             rsipstack::dialog::dialog::Dialog::ClientInvite(dlg) => dlg.state(),
             rsipstack::dialog::dialog::Dialog::ServerInvite(dlg) => dlg.state(),
         };
         serde_json::json!({
-            "id": self.id().to_string(),
-            "from": self.from().to_string(),
-            "to": self.to().to_string(),
             "state": state.to_string(),
-            "source": source,
+            "from": self.from().to_string(),
+            "to": self.to().to_string()
         })
     }
 }
@@ -99,11 +98,44 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
     let mut result = Vec::new();
     let ids = state.sip_server().inner.dialog_layer.all_dialog_ids();
     for id in ids {
-        if let Some(dialog) = state.sip_server().inner.dialog_layer.get_dialog(&id) {
-            result.push(dialog.to_json("sipserver"));
+        if let Some(dialog) = state.sip_server().inner.dialog_layer.get_dialog_with(&id) {
+            result.push(dialog.to_json());
         }
     }
     Json(result).into_response()
+}
+
+async fn hangup_dialog(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+    match state.sip_server.inner.dialog_layer.get_dialog_with(&id) {
+        Some(dlg) => match dlg.hangup().await {
+            Ok(()) => {
+                return Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!("Dialog with id '{}' hangup initiated", id),
+                }))
+                .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to hangup dialog with id '{}': {}", id, err),
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => {}
+    }
+    return (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Dialog with id '{}' not found", id),
+        })),
+    )
+        .into_response();
 }
 
 async fn list_transactions(State(state): State<AppState>) -> Response {
