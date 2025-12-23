@@ -62,14 +62,14 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
-[[user_backends]]
+[[proxy.user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
 
-[[user_backends]]
+[[proxy.user_backends]]
 type = "extension"
 
 [recording]
@@ -81,18 +81,18 @@ type = "local"
 root = "./config/cdr"
 
 
-# [trunks.wuhoo]
+# [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
 
-# [[routes]]
+# [[proxy.routes]]
 # name = "default"
 # priority = 1
 # dest = "wuhoo"
 
-# [routes.match]
+# [proxy.routes.match]
 # "to.user" = "^\\+.*"
 
-# [routes.rewrite]
+# [proxy.routes.rewrite]
 # "to.user" = "+{1}"
 # "to.host" = "123.456.789.00:1234"
 # "from.user" = "12345"
