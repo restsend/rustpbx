@@ -118,8 +118,8 @@ impl TransportInspectorLocator {
 
 #[async_trait]
 impl TransportEventInspector for TransportInspectorLocator {
-    async fn handle(&self, event: &TransportEvent) {
-        match event {
+    async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
+        match &event {
             TransportEvent::Closed(conn) => {
                 match self.locator.unregister_with_address(conn.get_addr()).await {
                     Ok(Some(removed)) => {
@@ -137,6 +137,7 @@ impl TransportEventInspector for TransportInspectorLocator {
             }
             _ => {}
         }
+        Some(event)
     }
 }
 
