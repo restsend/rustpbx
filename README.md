@@ -140,14 +140,14 @@ acl_rules = [
 ]
 acl_files = ["config/acl/*.toml"]
 
-[[user_backends]]
+[[proxy.user_backends]]
 type = "memory"
 users = [
     { username = "bob", password = "123456" },
     { username = "alice", password = "123456" },
 ]
 
-[[user_backends]]
+[[proxy.user_backends]]
 type = "extension"
 database_url = "sqlite://rustpbx.sqlite3"
 
