@@ -89,7 +89,6 @@ impl TargetLocator for DialogTargetLocator {
             }
             Err(_) => {}
         }
-
         SipAddr::try_from(uri).map_err(|e| {
             rsipstack::Error::Error(format!(
                 "failed to convert uri to sip addr: {}, error: {}",
@@ -268,7 +267,7 @@ impl Locator for MemoryLocator {
 
     async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
         let mut locations = self.locations.lock().await;
-        let now = Instant::now();
+        let now: Instant = Instant::now();
         let uri_string = uri.to_string();
         let mut direct_hits = Vec::new();
 
@@ -277,21 +276,20 @@ impl Locator for MemoryLocator {
             map.retain(|_, loc| !loc.is_expired_at(now));
             !map.is_empty()
         });
-
         for map in locations.values() {
             for loc in map.values() {
-                if &loc.aor == uri {
+                if &loc.aor == uri || uri_matches(&loc.aor, uri) {
                     direct_hits.push(loc.clone());
                     continue;
                 }
                 if let Some(registered) = &loc.registered_aor {
-                    if registered == uri {
+                    if registered == uri || uri_matches(registered, uri) {
                         direct_hits.push(loc.clone());
                         continue;
                     }
                 }
                 if let Some(gruu) = &loc.gruu {
-                    if gruu == &uri_string {
+                    if gruu == &uri_string || gruu.eq_ignore_ascii_case(&uri_string) {
                         direct_hits.push(loc.clone());
                         continue;
                     }
@@ -448,6 +446,26 @@ async fn realm_matches(
     let requested_host = host_without_port(requested).to_ascii_lowercase();
     let candidate_host = host_without_port(candidate).to_ascii_lowercase();
     requested_host == candidate_host
+}
+
+pub fn uri_matches(a: &rsip::Uri, b: &rsip::Uri) -> bool {
+    if a == b {
+        return true;
+    }
+
+    let a_host = a.host().to_string();
+    let b_host = b.host().to_string();
+
+    // Special handling for .invalid domains often used in WebRTC
+    if a_host.ends_with(".invalid") || b_host.ends_with(".invalid") {
+        if a.user() == b.user() && a_host.eq_ignore_ascii_case(&b_host) {
+            return true;
+        }
+    }
+
+    // Fallback to case-insensitive string comparison for the whole URI
+    // This handles transport=ws vs transport=WS
+    a.to_string().eq_ignore_ascii_case(&b.to_string())
 }
 
 pub(crate) fn sort_locations_by_recency(mut locations: Vec<Location>) -> Vec<Location> {
@@ -628,6 +646,37 @@ mod tests {
             .unwrap();
 
         let locations = locator.lookup(&lookup_uri).await.unwrap();
+        assert_eq!(locations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_uri_matches_relaxed() {
+        let locator = MemoryLocator::new();
+        let registered_uri: rsip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
+        let lookup_uri: rsip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid;transport=ws"
+            .try_into()
+            .unwrap();
+
+        locator
+            .register(
+                "test_user",
+                Some("localhost"),
+                Location {
+                    aor: registered_uri.clone(),
+                    expires: 3600,
+                    transport: Some(Transport::Ws),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let locations = locator.lookup(&lookup_uri).await.unwrap();
+        assert_eq!(locations.len(), 1);
+
+        let lookup_uri_no_transport: rsip::Uri =
+            "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
+        let locations = locator.lookup(&lookup_uri_no_transport).await.unwrap();
         assert_eq!(locations.len(), 1);
     }
 }

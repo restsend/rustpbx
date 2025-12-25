@@ -540,6 +540,7 @@ impl ToString for DialDirection {
 
 pub struct Dialplan {
     pub direction: DialDirection,
+    pub call_id: Option<String>,
     pub session_id: Option<String>,
     pub caller_contact: Option<rsip::typed::Contact>,
     pub caller_display_name: Option<String>,
@@ -580,6 +581,7 @@ impl Dialplan {
         Self {
             direction,
             session_id: Some(session_id),
+            call_id: None,
             original,
             caller_display_name: None,
             caller: None,
