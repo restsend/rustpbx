@@ -1507,6 +1507,7 @@ impl ProxyCall {
             contact: enforced_contact.clone().unwrap_or_else(|| caller.clone()),
             credential: target.credential.clone(),
             headers: Some(headers),
+            call_id: self.dialplan.call_id.clone(),
             ..Default::default()
         };
 

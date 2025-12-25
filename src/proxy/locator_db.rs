@@ -1,4 +1,6 @@
-use super::locator::{Locator, RealmChecker, is_local_realm, sort_locations_by_recency};
+use super::locator::{
+    Locator, RealmChecker, is_local_realm, sort_locations_by_recency, uri_matches,
+};
 use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -373,6 +375,15 @@ impl Locator for DbLocator {
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
 
+        if models.is_empty() && uri.host().to_string().ends_with(".invalid") {
+            models = Entity::find()
+                .filter(Column::Aor.contains(uri.host().to_string().as_str()))
+                .order_by_desc(Column::LastModified)
+                .all(&self.db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Database error on lookup by invalid host: {}", e))?;
+        }
+
         if models.is_empty() {
             let realm_raw = uri.host().to_string();
             let mut realm_key = realm_raw.trim().to_ascii_lowercase();
@@ -420,6 +431,11 @@ impl Locator for DbLocator {
             }
             let aor = rsip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
+
+            if !uri_matches(&aor, uri) {
+                continue;
+            }
+
             let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
