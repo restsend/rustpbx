@@ -17,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::call_record_indices::Migration),
             Box::new(super::call_record_optimization_indices::Migration),
             Box::new(super::call_record_dashboard_index::Migration),
+            Box::new(super::call_record_from_number_index::Migration),
         ]
     }
 }

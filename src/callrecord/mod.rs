@@ -1467,6 +1467,18 @@ fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<
         "status_code".to_string(),
         Value::Number(JsonNumber::from(record.status_code)),
     );
+    if let Some(ring_time) = record.ring_time {
+        map.insert(
+            "ring_time".to_string(),
+            Value::String(ring_time.to_rfc3339()),
+        );
+    }
+    if let Some(answer_time) = record.answer_time {
+        map.insert(
+            "answer_time".to_string(),
+            Value::String(answer_time.to_rfc3339()),
+        );
+    }
     if let Some(reason) = record
         .hangup_reason
         .as_ref()

@@ -477,6 +477,14 @@ impl ProxyCall {
     }
 
     pub async fn process(&self, tx: &mut Transaction) -> Result<()> {
+        if tx.original.body.is_empty() {
+            info!(
+                session_id = %self.session_id,
+                "Rejecting call with 488 Not Acceptable Here due to missing SDP"
+            );
+            tx.reply(StatusCode::NotAcceptableHere).await?;
+            return Ok(());
+        }
         let (state_tx, state_rx) = mpsc::unbounded_channel();
         let local_contact = self.local_contact_uri();
         let mut server_dialog = self.dialog_layer.get_or_create_server_invite(
@@ -1528,13 +1536,13 @@ impl ProxyCall {
                     )
                 })?;
             match route_result {
-                RouteResult::NotHandled(option) => {
+                RouteResult::NotHandled(option, _) => {
                     info!(session_id = self.session_id, %target,
                         "Routing function returned NotHandled"
                     );
                     option
                 }
-                RouteResult::Forward(option) | RouteResult::Queue { option, .. } => option,
+                RouteResult::Forward(option, _) | RouteResult::Queue { option, .. } => option,
                 RouteResult::Abort(code, reason) => {
                     warn!(session_id = self.session_id, %code, ?reason, "route abort");
                     return Err((code, reason));
@@ -1544,7 +1552,7 @@ impl ProxyCall {
             invite_option
         };
 
-        if let Some(duration) = self.cookie.get_max_duration() {
+        if let Some(duration) = self.dialplan.max_call_duration.or_else(|| self.cookie.get_max_duration()) {
             let cancel_token = self.cancel_token.clone();
             let session_id = self.session_id.clone();
             info!(session_id = %session_id, ?duration, "Setting max duration timer");

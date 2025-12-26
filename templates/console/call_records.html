@@ -109,7 +109,7 @@
                             </svg>
                             <input type="search" x-model.trim="search" @input.debounce.400ms="scheduleFetch()"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Search number, agent, tag...">
+                                placeholder="Search call-id, number...">
                         </label>
                         <div class="flex flex-wrap items-center gap-2">
                             <select aria-label="Add filter"
@@ -284,7 +284,6 @@
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Status</th>
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Tags</th>
                             <th scope="col" class="whitespace-nowrap px-4 py-2">Transcript</th>
-                            <th scope="col" class="whitespace-nowrap px-4 py-2">Billing</th>
                             <th scope="col"
                                 class="sticky right-0 z-10 whitespace-nowrap border-l border-slate-200 bg-gradient-to-l from-white via-white to-slate-50 px-4 py-2 text-right shadow-[-8px_0_12px_-6px_rgba(15,23,42,0.12)]">
                                 Actions
@@ -428,14 +427,6 @@
                                                 x-text="transcriptStatusLabel(record.transcript_status, record.has_transcript)"></span>
                                         </div>
                                     </template>
-                                </td>
-                                <td class="whitespace-nowrap px-4 py-2">
-                                    <div class="flex flex-col gap-1 text-xs">
-                                        <span class="text-sm font-semibold text-slate-900"
-                                            x-text="formatBillingAmount(record.billing)"></span>
-                                        <span class="text-[11px] text-slate-400"
-                                            x-text="formatBillingMinutes(record.billing)"></span>
-                                    </div>
                                 </td>
                                 <td
                                     class="sticky right-0 z-[1] whitespace-nowrap border-l border-slate-200 bg-gradient-to-l from-white via-white to-slate-50 px-4 py-2 text-right text-xs font-semibold shadow-[-8px_0_12px_-6px_rgba(15,23,42,0.08)] group-hover:from-slate-50 group-hover:via-slate-50 group-hover:to-slate-100">
@@ -595,7 +586,6 @@
                 { key: 'only_transcribed', label: 'Transcribed only' },
                 { key: 'departments', label: 'Departments' },
                 { key: 'sip_trunks', label: 'SIP trunks' },
-                { key: 'billing_status', label: 'Billing status' },
             ],
             activeFilters: [],
             persistentFilters: [],

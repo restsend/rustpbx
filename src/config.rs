@@ -383,13 +383,21 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DialplanHints {
+    pub enable_recording: Option<bool>,
+    pub bypass_media: Option<bool>,
+    pub max_duration: Option<std::time::Duration>,
+}
+
 pub enum RouteResult {
-    Forward(InviteOption),
+    Forward(InviteOption, Option<DialplanHints>),
     Queue {
         option: InviteOption,
         queue: QueuePlan,
+        hints: Option<DialplanHints>,
     },
-    NotHandled(InviteOption),
+    NotHandled(InviteOption, Option<DialplanHints>),
     Abort(StatusCode, Option<String>),
 }
 

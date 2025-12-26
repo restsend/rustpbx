@@ -30,11 +30,6 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 use urlencoding::encode;
 
-const BILLING_STATUS_CHARGED: &str = "charged";
-const BILLING_STATUS_INCLUDED: &str = "included";
-const BILLING_STATUS_ZERO_DURATION: &str = "zero-duration";
-const BILLING_STATUS_UNRATED: &str = "unrated";
-
 use crate::models::{
     call_record::{
         ActiveModel as CallRecordActiveModel, Column as CallRecordColumn,
@@ -1000,13 +995,6 @@ async fn load_filters(db: &DatabaseConnection) -> Result<Value, DbErr> {
         "departments": departments,
         "sip_trunks": sip_trunks,
         "tags": [],
-        "billing_status": [
-            "any",
-            BILLING_STATUS_CHARGED,
-            BILLING_STATUS_INCLUDED,
-            BILLING_STATUS_ZERO_DURATION,
-            BILLING_STATUS_UNRATED,
-        ],
     }))
 }
 
@@ -1017,16 +1005,11 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
         if let Some(q_raw) = filters.q.as_ref() {
             let trimmed = q_raw.trim();
             if !trimmed.is_empty() {
-                let mut any_match = Condition::any();
-                any_match = any_match.add(CallRecordColumn::CallId.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::DisplayId.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::FromNumber.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::ToNumber.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::CallerName.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::AgentName.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::Queue.contains(trimmed));
-                any_match = any_match.add(CallRecordColumn::SipGateway.contains(trimmed));
-                condition = condition.add(any_match);
+                let mut q_condition = Condition::any();
+                q_condition = q_condition.add(CallRecordColumn::CallId.eq(trimmed));
+                q_condition = q_condition.add(CallRecordColumn::ToNumber.eq(trimmed));
+                q_condition = q_condition.add(CallRecordColumn::FromNumber.eq(trimmed));
+                condition = condition.add(q_condition);
             }
         }
 
@@ -1045,10 +1028,18 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
             }
         }
 
-        if let Some(from) = parse_date(filters.date_from.as_ref(), false) {
+        let date_from = parse_date(filters.date_from.as_ref(), false);
+        let date_to = parse_date(filters.date_to.as_ref(), true);
+
+        if let Some(from) = date_from {
             condition = condition.add(CallRecordColumn::StartedAt.gte(from));
+        } else if filters.q.is_some() {
+            // Default to 30 days if searching without date range to prevent full table scan
+            let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
+            condition = condition.add(CallRecordColumn::StartedAt.gte(thirty_days_ago));
         }
-        if let Some(to) = parse_date(filters.date_to.as_ref(), true) {
+
+        if let Some(to) = date_to {
             condition = condition.add(CallRecordColumn::StartedAt.lte(to));
         }
 
@@ -1469,6 +1460,8 @@ fn build_record_payload(
     let rewrite_destination = json_lookup_nested_str(&record.metadata, &["rewrite", "destination"]);
     let billing = build_billing_payload(record);
     let status_code = json_lookup_u16(&record.metadata, "status_code");
+    let ring_time = json_lookup_str(&record.metadata, "ring_time");
+    let answer_time = json_lookup_str(&record.metadata, "answer_time");
     let hangup_reason = json_lookup_str(&record.metadata, "hangup_reason");
     let hangup_messages = extract_hangup_messages(&record.metadata);
 
@@ -1497,6 +1490,8 @@ fn build_record_payload(
         "recording": recording,
         "quality": quality,
         "started_at": record.started_at.to_rfc3339(),
+        "ring_time": ring_time,
+        "answer_time": answer_time,
         "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
         "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
         "billing": billing,

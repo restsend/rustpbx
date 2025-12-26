@@ -1274,7 +1274,7 @@ async fn route_evaluate(
     };
 
     let (outcome, caller_render, callee_render, request_render, rewrites) = match result {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (
                 RouteOutcomeView::Forward(RouteForwardOutcome {
@@ -1296,7 +1296,7 @@ async fn route_evaluate(
                 rewrites,
             )
         }
-        RouteResult::Queue { option, queue } => {
+        RouteResult::Queue { option, queue, .. } => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             let forward = RouteForwardOutcome {
                 destination: option.destination.map(|d| d.addr.to_string()),
@@ -1322,7 +1322,7 @@ async fn route_evaluate(
                 rewrites,
             )
         }
-        RouteResult::NotHandled(option) => {
+        RouteResult::NotHandled(option, _) => {
             let rewrites = collect_rewrite_diff(&original_option, &option);
             (
                 RouteOutcomeView::NotHandled,

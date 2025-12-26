@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 pub fn router(app_state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/health", get(health_handler))
         .route("/dialogs", get(list_dialogs))
         .route("/hangup/{id}", get(hangup_dialog))
         .route("/transactions", get(list_transactions))

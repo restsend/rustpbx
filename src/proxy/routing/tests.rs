@@ -39,7 +39,7 @@ async fn test_match_invite_no_routes() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_) | RouteResult::NotHandled(_) => {} // Expected
+        RouteResult::Forward(_, _) | RouteResult::NotHandled(_, _) => {} // Expected
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         RouteResult::Queue { .. } => {
             panic!("Unexpected queue result")
@@ -169,8 +169,8 @@ async fn test_match_invite_inbound_respects_source_trunk() {
     .expect("invite should resolve");
 
     match result {
-        RouteResult::Forward(_) => {}
-        RouteResult::NotHandled(_) | RouteResult::Abort(_, _) => {
+        RouteResult::Forward(_, _) => {}
+        RouteResult::NotHandled(_, _) | RouteResult::Abort(_, _) => {
             panic!("expected inbound invite to forward")
         }
         RouteResult::Queue { .. } => {
@@ -226,8 +226,8 @@ async fn test_match_invite_inbound_without_source_trunk() {
     .expect("invite should resolve");
 
     match result {
-        RouteResult::NotHandled(_) => {}
-        RouteResult::Forward(_) | RouteResult::Abort(_, _) => {
+        RouteResult::NotHandled(_, _) => {}
+        RouteResult::Forward(_, _) | RouteResult::Abort(_, _) => {
             panic!("expected invite to be left unhandled when source trunk is missing")
         }
         RouteResult::Queue { .. } => {
@@ -290,8 +290,8 @@ async fn test_match_invite_exact_match() {
     .expect("Failed to match invite");
 
     match result {
-        RouteResult::NotHandled(_) => panic!("Expected forward, got not handled"),
-        RouteResult::Forward(option) => {
+        RouteResult::NotHandled(_, _) => panic!("Expected forward, got not handled"),
+        RouteResult::Forward(option, _) => {
             // Verify destination is set
             assert!(option.destination.is_some());
             let dest = option.destination.unwrap();
@@ -368,10 +368,10 @@ async fn test_match_invite_regex_match() {
     .unwrap();
 
     match result {
-        RouteResult::NotHandled(_option) => {
+        RouteResult::NotHandled(_option, _) => {
             panic!("Expected forward, got NotHandled")
         }
-        RouteResult::Forward(_option) => {
+        RouteResult::Forward(_option, _) => {
             // Expected
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
@@ -448,7 +448,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
     .expect("queue route should resolve");
 
     match result {
-        RouteResult::Queue { option, queue } => {
+        RouteResult::Queue { option, queue, .. } => {
             assert!(
                 option.destination.is_some(),
                 "queue should select trunk destination"
@@ -473,8 +473,8 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
                 other => panic!("unexpected fallback action: {:?}", other),
             }
         }
-        RouteResult::Forward(_) => panic!("route forwarded instead of enqueuing"),
-        RouteResult::NotHandled(_) => panic!("route was not handled"),
+        RouteResult::Forward(_, _) => panic!("route forwarded instead of enqueuing"),
+        RouteResult::NotHandled(_, _) => panic!("route was not handled"),
         RouteResult::Abort(..) => panic!("queue route aborted"),
     }
 }
@@ -621,8 +621,8 @@ async fn test_match_invite_reject_rule() {
             assert_eq!(code, rsip::StatusCode::Forbidden);
             assert_eq!(reason, Some("Emergency calls not allowed".to_string()));
         }
-        RouteResult::Forward(_) => panic!("Expected abort, got forward"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::Forward(_, _) => panic!("Expected abort, got forward"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
@@ -684,13 +684,13 @@ async fn test_match_invite_rewrite_rules() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             // Verify caller was rewritten
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "013812345678");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
@@ -772,14 +772,14 @@ async fn test_match_invite_load_balancing() {
         .unwrap();
 
         match result {
-            RouteResult::Forward(option) => {
+            RouteResult::Forward(option, _) => {
                 // Verify some trunk was selected
                 assert!(option.destination.is_some());
                 let dest = option.destination.unwrap();
                 selected_destinations.push(dest.addr.to_string());
             }
             RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-            RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+            RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
             RouteResult::Queue { .. } => {
                 panic!("unexpected queue result")
             }
@@ -856,11 +856,11 @@ async fn test_match_invite_header_matching() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(_option) => {
+        RouteResult::Forward(_option, _) => {
             // Expected to match VIP header
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
@@ -918,13 +918,13 @@ async fn test_match_invite_default_route() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             // Should use default trunk, but due to our simplified implementation, this just verifies there's a destination
             println!("Default route selected: {:?}", option.destination);
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
         // Accept NotHandled when no route matches and no default forwarding is applied
-        RouteResult::NotHandled(_) => {
+        RouteResult::NotHandled(_, _) => {
             // acceptable in current behavior
         }
         RouteResult::Queue { .. } => {
@@ -994,12 +994,12 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     .unwrap();
 
     match result_us {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "0015551234567");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
@@ -1053,12 +1053,12 @@ async fn test_match_invite_advanced_rewrite_patterns() {
     .unwrap();
 
     match result_digits {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "ext12345");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
@@ -1127,7 +1127,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
     .unwrap();
 
     match result {
-        RouteResult::Forward(option) => {
+        RouteResult::Forward(option, _) => {
             let caller_user = option.caller.user().unwrap_or_default();
             assert_eq!(caller_user, "0015551234567");
 
@@ -1135,7 +1135,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
             assert_eq!(caller_host, "proxy-gw-us-west.internal");
         }
         RouteResult::Abort(_, _) => panic!("Expected forward, got abort"),
-        RouteResult::NotHandled(_) => panic!("Expected abort, got NotHandled"),
+        RouteResult::NotHandled(_, _) => panic!("Expected abort, got NotHandled"),
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }

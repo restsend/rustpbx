@@ -59,7 +59,7 @@ pub struct SipServerInner {
     pub user_backend: Box<dyn UserBackend>,
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
-    pub dialplan_inspector: Option<Box<dyn DialplanInspector>>,
+    pub dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
     pub proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
@@ -94,7 +94,7 @@ pub struct SipServerBuilder {
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
     message_inspector: Option<Box<dyn MessageInspector>>,
-    dialplan_inspector: Option<Box<dyn DialplanInspector>>,
+    dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
     proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
@@ -119,7 +119,7 @@ impl SipServerBuilder {
             locator: None,
             callrecord_sender: None,
             message_inspector: None,
-            dialplan_inspector: None,
+            dialplan_inspectors: Vec::new(),
             create_route_invite: None,
             database: None,
             data_context: None,
@@ -154,7 +154,7 @@ impl SipServerBuilder {
         mut self,
         dialplan_inspector: Box<dyn DialplanInspector>,
     ) -> Self {
-        self.dialplan_inspector = Some(dialplan_inspector);
+        self.dialplan_inspectors.push(dialplan_inspector);
         self
     }
 
@@ -437,7 +437,6 @@ impl SipServerBuilder {
         let endpoint = endpoint_builder.build();
 
         let call_router = self.call_router;
-        let dialplan_inspector = self.dialplan_inspector;
         let proxycall_inspector = self.proxycall_inspector;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
@@ -469,7 +468,7 @@ impl SipServerBuilder {
             callrecord_sender: self.callrecord_sender,
             endpoint,
             dialog_layer,
-            dialplan_inspector: dialplan_inspector,
+            dialplan_inspectors: self.dialplan_inspectors,
             create_route_invite: self.create_route_invite,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),

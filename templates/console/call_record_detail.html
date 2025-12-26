@@ -39,7 +39,39 @@
                         </div>
                     </template>
                 </div>
-                <p class="text-sm text-slate-500" x-text="formatDateTime(record.started_at)"></p>
+                <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-slate-500">
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Start</span>
+                        <span x-text="formatDateTime(record.started_at)"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Ring</span>
+                        <span x-text="formatDateTime(record.ring_time)"></span>
+                    </div>
+                    <template x-if="record.ring_time && (record.answer_time || record.ended_at)">
+                        <div class="flex items-center gap-2">
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">Ring Duration</span>
+                            <span class="font-mono text-slate-900"
+                                x-text="formatDuration((new Date(record.answer_time || record.ended_at) - new Date(record.ring_time))/1000)"></span>
+                        </div>
+                    </template>
+                    <template x-if="record.answer_time">
+                        <div class="flex items-center gap-2">
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">Answer</span>
+                            <span x-text="formatDateTime(record.answer_time)"></span>
+                        </div>
+                    </template>
+                    <template x-if="record.ended_at">
+                        <div class="flex items-center gap-2">
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">End</span>
+                            <span x-text="formatDateTime(record.ended_at)"></span>
+                        </div>
+                    </template>
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Duration</span>
+                        <span class="font-mono text-slate-900" x-text="formatDuration(record.duration_secs)"></span>
+                    </div>
+                </div>
                 <div class="flex flex-wrap items-center gap-2 text-xs font-semibold">
                     <span class="inline-flex items-center gap-1 rounded-full px-3 py-1"
                         :class="statusClasses(record.status)">
@@ -104,43 +136,6 @@
             </div>
         </header>
 
-        <section class="grid gap-3 sm:grid-cols-4">
-            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Duration</div>
-                <div class="mt-1 text-xl font-semibold text-slate-900" x-text="formatDuration(record.duration_secs)">
-                </div>
-                <p class="mt-1 text-xs text-slate-500" x-text="durationHint"></p>
-            </div>
-            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Quality (MOS)</div>
-                <div class="mt-1 text-xl font-semibold" :class="qualityTone(record.quality?.mos)"
-                    x-text="formatNumber(record.quality?.mos)"></div>
-                <p class="mt-1 text-xs text-slate-500">Packet loss <span class="font-semibold"
-                        x-text="formatNumber(record.quality?.packet_loss) + '%'"></span> · Jitter <span
-                        class="font-semibold" x-text="formatNumber(record.quality?.jitter_ms) + ' ms'"></span></p>
-            </div>
-
-            <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Billing</div>
-                <div class="mt-1 flex items-center justify-between gap-1.5">
-                    <span class="text-xl font-semibold text-slate-900"
-                        x-text="formatBillingAmount(record.billing)"></span>
-                    <span class="text-xs font-semibold uppercase text-slate-400"
-                        x-text="(record.billing && record.billing.currency) ? record.billing.currency : ''"></span>
-                </div>
-                <div class="mt-1 inline-flex items-center gap-1.5">
-                    <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                        :class="billingStatusClasses(record.billing?.status)">
-                        <span x-text="billingStatusLabel(record.billing?.status)"></span>
-                    </span>
-                    <span class="text-[11px] text-slate-500" x-text="formatBillingMinutes(record.billing)"></span>
-                </div>
-                <p class="mt-1 text-xs text-slate-500"
-                    x-text="billing?.summary?.rate_per_minute !== undefined ? ('Rate ' + formatCurrency(billing.summary.rate_per_minute, billing.summary.currency)) : 'Real-time charge capture.'">
-                </p>
-            </div>
-        </section>
-
         <section class="space-y-4">
             <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
                 <nav class="inline-flex w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
@@ -168,8 +163,8 @@
                         :aria-selected="detailTab === 'notes'" aria-controls="call-record-tab-notes"
                         @click="detailTab = 'notes'">
                         <div class="flex flex-col">
-                            <span class="text-[13px]">Notes &amp; Billing</span>
-                            <span class="text-[11px] font-normal text-slate-400">Tags, notes, billing</span>
+                            <span class="text-[13px]">Notes</span>
+                            <span class="text-[11px] font-normal text-slate-400">Tags, notes</span>
                         </div>
                     </button>
                 </nav>
@@ -568,88 +563,6 @@
                             Last updated <span x-text="formatDateTime(notes.updated_at)"></span>
                             <span x-show="notes.updated_by">&middot; by <span x-text="notes.updated_by"></span></span>
                         </p>
-                    </div>
-
-                    <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 lg:col-span-2">
-                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                                <h2 class="text-base font-semibold text-slate-900">Billing details</h2>
-                                <p class="text-xs text-slate-500">Snapshot of increments, rate, and totals at hangup.
-                                </p>
-                            </div>
-                        </div>
-                        <div class="mt-4 grid gap-4 sm:grid-cols-2">
-                            <dl class="space-y-2 text-sm text-slate-600">
-                                <div class="flex items-center justify-between">
-                                    <dt>Status</dt>
-                                    <dd>
-                                        <span
-                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                            :class="billingStatusClasses(billing.summary?.status || record.billing?.status)">
-                                            <span
-                                                x-text="billingStatusLabel(billing.summary?.status || record.billing?.status)"></span>
-                                        </span>
-                                    </dd>
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <dt>Billable seconds</dt>
-                                    <dd x-text="billing.summary?.billable_secs ?? record.billing?.billable_secs ?? '—'">
-                                    </dd>
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <dt>Billable minutes</dt>
-                                    <dd x-text="formatBillingMinutes(billing.summary || record.billing)"></dd>
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <dt>Rate / min</dt>
-                                    <dd
-                                        x-text="billing.summary?.rate_per_minute !== undefined ? formatCurrency(billing.summary.rate_per_minute, billing.summary?.currency || record.billing?.currency) : '—'">
-                                    </dd>
-                                </div>
-                            </dl>
-                            <dl class="space-y-2 text-sm text-slate-600">
-                                <div class="flex items-center justify-between">
-                                    <dt>Subtotal</dt>
-                                    <dd
-                                        x-text="billing.summary?.amount?.subtotal !== undefined ? formatCurrency(billing.summary.amount.subtotal, billing.summary?.currency || record.billing?.currency) : '—'">
-                                    </dd>
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <dt>Tax</dt>
-                                    <dd
-                                        x-text="billing.summary?.amount?.tax !== undefined ? formatCurrency(billing.summary.amount.tax, billing.summary?.currency || record.billing?.currency) : '—'">
-                                    </dd>
-                                </div>
-                                <div class="flex items-center justify-between font-semibold">
-                                    <dt>Total</dt>
-                                    <dd x-text="formatBillingAmount(billing.summary || record.billing)"></dd>
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <dt>Increments</dt>
-                                    <dd
-                                        x-text="billing.summary?.increments ? (billing.summary.increments.initial_secs + ' / ' + billing.summary.increments.billing_secs + ' s') : '—'">
-                                    </dd>
-                                </div>
-                            </dl>
-                        </div>
-                        <template x-if="billing.result">
-                            <details
-                                class="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600">
-                                <summary class="cursor-pointer text-xs font-semibold text-slate-500">Computation trace
-                                </summary>
-                                <pre class="max-h-48 overflow-auto rounded bg-white/70 p-3"
-                                    x-text="formatJson(billing.result)"></pre>
-                            </details>
-                        </template>
-                        <template x-if="billing.snapshot">
-                            <details
-                                class="mt-2 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600">
-                                <summary class="cursor-pointer text-xs font-semibold text-slate-500">Template snapshot
-                                </summary>
-                                <pre class="max-h-48 overflow-auto rounded bg-white/70 p-3"
-                                    x-text="formatJson(billing.snapshot)"></pre>
-                            </details>
-                        </template>
                     </div>
                 </div>
             </div>
