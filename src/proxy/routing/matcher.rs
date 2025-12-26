@@ -142,7 +142,7 @@ async fn match_invite_impl(
     let mut option = option;
     let routes = match routes {
         Some(routes) => routes,
-        None => return Ok(RouteResult::NotHandled(option)),
+        None => return Ok(RouteResult::NotHandled(option, None)),
     };
 
     // Extract URI information early to avoid borrowing conflicts
@@ -362,7 +362,7 @@ async fn match_invite_impl(
                         }
                     }
                 }
-                return Ok(RouteResult::Forward(option));
+                return Ok(RouteResult::Forward(option, None));
             }
             ActionType::Queue => {
                 let queue_path = rule
@@ -454,12 +454,13 @@ async fn match_invite_impl(
                 return Ok(RouteResult::Queue {
                     option,
                     queue: queue_plan,
+                    hints: None,
                 });
             }
         }
     }
 
-    return Ok(RouteResult::NotHandled(option));
+    return Ok(RouteResult::NotHandled(option, None));
 }
 
 /// Context for rule matching to reduce function arguments

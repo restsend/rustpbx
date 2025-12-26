@@ -440,18 +440,17 @@ impl CallModule {
                 )
             })?;
 
-        let mut pending_queue = None;
-
-        match preview_outcome {
-            RouteResult::Queue { queue, .. } => pending_queue = Some(queue),
+        let (pending_queue, dialplan_hints) = match preview_outcome {
+            RouteResult::Queue { queue, hints, .. } => (Some(queue), hints),
+            RouteResult::Forward(_, hints) => (None, hints),
+            RouteResult::NotHandled(_, hints) => (None, hints),
             RouteResult::Abort(code, reason) => {
                 let err = anyhow::anyhow!(
                     reason.unwrap_or_else(|| "route aborted during preview".to_string())
                 );
                 return Err((err, Some(code)));
             }
-            _ => {}
-        }
+        };
 
         let queue_targets = pending_queue
             .as_ref()
@@ -471,6 +470,20 @@ impl CallModule {
             .with_recording(recording)
             .with_route_invite(route_invite)
             .with_targets(targets);
+
+        if let Some(hints) = dialplan_hints {
+            if let Some(enabled) = hints.enable_recording {
+                dialplan.recording.enabled = enabled;
+            }
+            if let Some(bypass) = hints.bypass_media {
+                if bypass {
+                    dialplan.media.proxy_mode = crate::config::MediaProxyMode::None;
+                }
+            }
+            if let Some(max_duration) = hints.max_duration {
+                dialplan.max_call_duration = Some(max_duration);
+            }
+        }
 
         if let Some(queue_plan) = pending_queue {
             dialplan = dialplan.with_queue(queue_plan);
@@ -756,13 +769,12 @@ impl CallModule {
                 .await
         }?;
 
-        let mut dialplan = if let Some(inspector) = self.inner.server.dialplan_inspector.as_ref() {
-            inspector
+        let mut dialplan = dialplan;
+        for inspector in &self.inner.server.dialplan_inspectors {
+            dialplan = inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
                 .await?
-        } else {
-            dialplan
-        };
+        }
 
         if dialplan.call_forwarding.is_none() {
             match self.resolve_callee_forwarding(&tx.original).await {

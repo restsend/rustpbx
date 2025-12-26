@@ -68,7 +68,7 @@ pub async fn create_test_server_with_config(
         callrecord_sender: None,
         endpoint,
         dialog_layer,
-        dialplan_inspector: None,
+        dialplan_inspectors: Vec::new(),
         create_route_invite: None,
         proxycall_inspector: None,
         ignore_out_of_dialog_request: true,

@@ -164,6 +164,17 @@ impl ProxyDataContext {
         None
     }
 
+    pub async fn find_trunks_by_ip(&self, addr: &IpAddr) -> Vec<String> {
+        let trunks = self.trunks_snapshot();
+        let mut matches = Vec::new();
+        for (name, trunk) in trunks.iter() {
+            if trunk.matches_inbound_ip(addr).await {
+                matches.push(name.clone());
+            }
+        }
+        matches
+    }
+
     pub async fn reload_trunks(
         &self,
         generated_toml: bool,
