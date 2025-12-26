@@ -1,3 +1,3 @@
 pub mod ami;
 pub mod middleware;
-pub use ami::router;
+pub use ami::ami_router;
