@@ -17,8 +17,8 @@ use std::sync::{Arc, atomic::Ordering};
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
-pub fn router(app_state: AppState) -> Router<AppState> {
-    Router::new()
+pub fn ami_router(app_state: AppState) -> Router<AppState> {
+    let r = Router::new()
         .route("/health", get(health_handler))
         .route("/dialogs", get(list_dialogs))
         .route("/hangup/{id}", get(hangup_dialog))
@@ -35,7 +35,8 @@ pub fn router(app_state: AppState) -> Router<AppState> {
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
-        ))
+        ));
+    Router::new().nest("/ami/v1", r).with_state(app_state)
 }
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
