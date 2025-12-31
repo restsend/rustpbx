@@ -28,7 +28,7 @@ cdr/
 *.generated.toml
 *.bak
 /.idea/
-.vscode/settings.json
+.vscode/
 
 
 #
